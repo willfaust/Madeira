@@ -1,6 +1,6 @@
 # Madeira
 
-Run Windows PC games on a non-jailbroken iPhone.
+Run Windows PC games on a non-jailbroken iPhone or iPad.
 
 Madeira combines [Wine](https://www.winehq.org/) (ARM64EC),
 [FEX-Emu](https://github.com/FEX-Emu/FEX) for x86-64 → ARM64 translation, and
@@ -17,7 +17,7 @@ breaking changes.
 
 ## Requirements
 
-- A non-jailbroken iPhone. Development has been on an A15 (iPhone 13 Pro).
+- A non-jailbroken iPhone or iPad. Development has been on an A15 (iPhone 13 Pro).
 - JIT, which on iOS requires a debugger to attach —
   [StikDebug](https://github.com/0-Blu/StikJIT) is what this project uses.
 - An Apple ID for signing. A free account works; its provisioning profiles
