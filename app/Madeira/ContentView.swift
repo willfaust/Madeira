@@ -844,12 +844,64 @@ struct MadeiraMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MetalBackedView, context: Context) {}
 }
 
+enum ResolutionPreset: String, CaseIterable, Identifiable {
+    case automatic
+    case balanced
+    case high
+    case native
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .balanced: return "Balanced · 960×540"
+        case .high: return "High · 1920×1080"
+        case .native:
+            let size = dimensions(defaultWidth: 0, defaultHeight: 0)
+            return "Native · \(size.width)×\(size.height)"
+        }
+    }
+
+    func dimensions(defaultWidth: Int, defaultHeight: Int) -> (width: Int, height: Int) {
+        switch self {
+        case .automatic:
+            return (defaultWidth, defaultHeight)
+        case .balanced:
+            return (960, 540)
+        case .high:
+            return (1920, 1080)
+        case .native:
+            let bounds = UIScreen.main.nativeBounds
+            let wide = Int(max(bounds.width, bounds.height))
+            let tall = Int(min(bounds.width, bounds.height))
+            // Several Windows display paths require even dimensions.
+            return (wide - wide % 2, tall - tall % 2)
+        }
+    }
+}
+
+final class ResolutionSettings: ObservableObject {
+    static let shared = ResolutionSettings()
+    private static let defaultsKey = "madeira-resolution-preset"
+
+    @Published var preset: ResolutionPreset {
+        didSet { UserDefaults.standard.set(preset.rawValue, forKey: Self.defaultsKey) }
+    }
+
+    private init() {
+        let saved = UserDefaults.standard.string(forKey: Self.defaultsKey)
+        preset = ResolutionPreset(rawValue: saved ?? "") ?? .automatic
+    }
+}
+
 struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
+    @ObservedObject private var resolution = ResolutionSettings.shared
     @State private var pointerPanel = false
     @Namespace private var pointerNS
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
@@ -1139,6 +1191,24 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
+                Menu {
+                    ForEach(ResolutionPreset.allCases) { preset in
+                        Button {
+                            resolution.preset = preset
+                            logStore.log("Display resolution: \(preset.title)", level: .info)
+                        } label: {
+                            if resolution.preset == preset {
+                                Label(preset.title, systemImage: "checkmark")
+                            } else {
+                                Text(preset.title)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(resolution.preset.title, systemImage: "display")
+                }
+                .buttonStyle(.bordered)
+
                 Button("Steam Testing") {
                     // Steam S3 first boot: virtual desktop (Steam needs a
                     // window manager) + services.exe (SCM → rpcss for Steam's
@@ -1154,7 +1224,8 @@ struct ContentView: View {
                     // render), -console (Steam's own log → our stderr). Steam
                     // WILL try to self-update through our GnuTLS stack — that
                     // attempt is itself an informative S0 re-test.
-                    let deskW = 1024, deskH = 768
+                    let (deskW, deskH) = resolution.preset.dimensions(
+                        defaultWidth: 1024, defaultHeight: 768)
                     // ml589: find Steam and (re)write the launch batch. Returns
                     // false — having logged why — when there is nothing to run.
                     guard prepareSteamLaunch() else { return }
@@ -1426,7 +1497,8 @@ struct ContentView: View {
                     // Known risk: if shellwindows_init beats services.exe's
                     // RPC_Init, OpenSCManager fails → watch whether that
                     // fails fast or hits the RaiseException→CS wedge again.
-                    let deskW = 960, deskH = 540
+                    let (deskW, deskH) = resolution.preset.dimensions(
+                        defaultWidth: 960, defaultHeight: 540)
                     setenv("MADEIRA_EXE", "explorer.exe", 1)
                     setenv("MADEIRA_ARGS",
                            "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
