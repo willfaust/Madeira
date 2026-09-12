@@ -1617,12 +1617,13 @@ void ios_fd_cache_release( void *peb )
         union fd_cache_entry *block = c->blocks[i];
         if (!block) continue;
         for (j = 0; j < FD_CACHE_BLOCK_SIZE; j++)
-            if (block[j].s.fd > 0)
+            if (block[j].s.type != FD_TYPE_INVALID && block[j].s.fd > 0)
             {
-                /* ml586: the prime suspect close — a stale cache entry whose fd
-                 * number was recycled into another thread's comm pipe */
-                ios_fdt_note_close( block[j].s.fd, "fd-cache-release", peb );
-                close( block[j].s.fd );
+                /* Cache entries store fd + 1 so zero can mean unused. Invalid
+                 * entries hold an NTSTATUS value instead of a descriptor. */
+                int fd = block[j].s.fd - 1;
+                ios_fdt_note_close( fd, "fd-cache-release", peb );
+                close( fd );
                 closed++;
             }
         if (block != c->initial_block) free( block );
