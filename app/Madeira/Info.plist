@@ -38,6 +38,12 @@
 	<array>
 		<string>arm64</string>
 	</array>
+	<!-- ml790: iPad is a shipping target and the layout now has an explicit
+	     fullscreen mode. Opting out of Slide Over / Split View keeps the size
+	     classes regular there, so the app is never handed a window too small
+	     for its tooling rows — and never a pane the game surface cannot fill. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

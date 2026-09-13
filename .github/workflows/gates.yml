@@ -1,0 +1,38 @@
+name: gates
+
+# The pre-release gates already existed as tools/*.sh; nothing ran them.
+# AGENTS.md named that as the reason the stale-embedded-script and
+# prefix-symlink bugs reached users. This runs them on every push.
+#
+# macos-15 because two of the six gates need swiftc: test-device-capabilities
+# and check-swift-syntax, plus the type-checked tables in test-app-ui. Linux
+# runners have no Swift toolchain by default, and installing one to then parse
+# SwiftUI-free files is worse than just using the runner that has Xcode.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: release gates
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swiftc --version
+          python3 --version
+
+      - name: Run gates
+        run: tools/check-all.sh

@@ -349,6 +349,23 @@ static os_log_t winios_log(void) {
 
 #define WLOG(fmt, ...) os_log(winios_log(), "[winios] " fmt, ##__VA_ARGS__)
 
+/* ml803: the diagnostics gate the launch sequence already sets.
+ *
+ * `MADEIRA_QUIET=1` is exported for every production run (WineProcessBridge)
+ * and its comment claims it disables "per-present log lines (100+/s at RAW
+ * rates)" — but the compositor and the input bridge never consulted it, so the
+ * hot paths kept logging anyway: one 4096-probe surface census plus an
+ * fprintf+fflush on every present of every window ≥400x400 for its first 2000
+ * presents, one fprintf+fflush per drained input event, and one per posted
+ * touch/key. Those are synchronous writes on the present and input paths, so
+ * the cost is not only CPU — it is latency added to the frame and to every
+ * mouse sample in a mouse-look. Resolved once; a run cannot flip it. */
+static int winios_quiet(void) {
+    static int quiet = -1;
+    if (quiet < 0) quiet = getenv("MADEIRA_QUIET") != NULL;
+    return quiet;
+}
+
 /* ============================================================ *
  * window lifecycle
  * ============================================================ */
@@ -496,42 +513,53 @@ static void winios_q_push_ev(unsigned int type, int x, int y, unsigned int flags
  * 1024×768 logical surface inside winios_pProcessEvents to match
  * what DXMT swapchains use. */
 void winios_post_touch_down(int x, int y) {
-    fprintf(stderr, "[winios] post_touch_down x=%d y=%d\n", x, y); fflush(stderr);
+    if (!winios_quiet()) {
+        fprintf(stderr, "[winios] post_touch_down x=%d y=%d\n", x, y);
+        fflush(stderr);
+    }
     winios_q_push_ev(WINIOS_EV_MOUSE, x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE, 0);
 }
 
 void winios_post_touch_move(int x, int y) {
     static unsigned cnt;
-    if ((cnt++ % 30) == 0) {
-        fprintf(stderr, "[winios] post_touch_move x=%d y=%d (n=%u)\n", x, y, cnt); fflush(stderr);
+    if (!winios_quiet() && (cnt % 30) == 0) {
+        fprintf(stderr, "[winios] post_touch_move x=%d y=%d (n=%u)\n", x, y, cnt + 1);
+        fflush(stderr);
     }
+    cnt++;
     winios_q_push_ev(WINIOS_EV_MOUSE, x, y, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0);
 }
 
 void winios_post_touch_up(int x, int y) {
-    fprintf(stderr, "[winios] post_touch_up x=%d y=%d\n", x, y); fflush(stderr);
+    if (!winios_quiet()) {
+        fprintf(stderr, "[winios] post_touch_up x=%d y=%d\n", x, y);
+        fflush(stderr);
+    }
     winios_q_push_ev(WINIOS_EV_MOUSE, x, y, MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE, 0);
 }
 
 /* Key press bridge. vk = Windows virtual-key code, down = 1 for press,
  * 0 for release. Queued like mouse events; drained in pProcessEvents. */
 void winios_post_key(int vk, int down) {
-    fprintf(stderr, "[winios] post_key vk=0x%x down=%d\n", vk, down); fflush(stderr);
+    if (!winios_quiet()) {
+        fprintf(stderr, "[winios] post_key vk=0x%x down=%d\n", vk, down);
+        fflush(stderr);
+    }
     winios_q_push_ev(WINIOS_EV_KEY, vk, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
 }
 
 BOOL winios_pProcessEvents(DWORD mask) {
     static unsigned int cnt;
-    static int quiet = -1;
-    if (quiet < 0) quiet = getenv("MADEIRA_QUIET") != NULL;
-    if ((cnt++ % 240) == 0 && !quiet) {
+    if ((cnt++ % 240) == 0 && !winios_quiet()) {
         fprintf(stderr, "[winios] pProcessEvents called n=%u\n", cnt); fflush(stderr);
     }
     /* Desktop debugging: dump the full window tree every ~5s. Runs on
-     * this wine thread (valid TEB — the dump walks win32u internals). */
+     * this wine thread (valid TEB — the dump walks win32u internals).
+     * ml803: gated — it walks win32u internals and prints, every 5s, for
+     * the whole session, which is a diagnostic and not a heartbeat. */
     static int desk = -1;
     if (desk < 0) desk = ({ const char *d = getenv("MADEIRA_DESKTOP"); d && *d == '1'; });
-    if (desk) {
+    if (desk && !winios_quiet()) {
         static double next_tree_dump;
         double now = CACurrentMediaTime();
         if (now >= next_tree_dump) {
@@ -551,7 +579,14 @@ BOOL winios_pProcessEvents(DWORD mask) {
         g_input_q.tail = (g_input_q.tail + 1) % WINIOS_RING_SIZE;
         pthread_mutex_unlock(&g_input_q.lock);
 
-        fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
+        /* ml803: this is the input path, and the log write was synchronous
+         * (fprintf + fflush) on every single event. A mouse-look posts one
+         * relative move per tick, so the write landed between the sample and
+         * the game seeing it. */
+        if (!winios_quiet()) {
+            fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags);
+            fflush(stderr);
+        }
         if (e.type == WINIOS_EV_KEY)
             winios_drv_post_key((unsigned short)e.x, e.flags);
         else
@@ -957,8 +992,9 @@ void winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
                             int sw, int sh, int stride, const void *bits) {
     if (sw <= 0 || sh <= 0 || !bits) return;
     NSData *data = [NSData dataWithBytes:bits length:(size_t)stride * sh];
+    const int quiet = winios_quiet();
     static int dumpSurf = -1;
-    if (dumpSurf < 0) dumpSurf = getenv("MADEIRA_DUMP_SURFACES") != NULL;
+    if (dumpSurf < 0) dumpSurf = getenv("MADEIRA_DUMP_SURFACES") != NULL && !quiet;
     /* ml537: complete an armed src/surface pair with the FIRST present after the
      * blit, so the two PNGs are as close to the same frame as these call sites
      * allow. Named identically apart from SRC/SURF. */
@@ -1012,7 +1048,7 @@ void winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
     if (s < 0 && seq_used < WINIOS_SEQ_SLOTS) { s = seq_used++; seq[s].hwnd = hwnd; }
     if (s >= 0) {
         mycnt = ++seq[s].n;
-        if (seqFrames > 0 && sw >= seqMinDim && sh >= seqMinDim) {
+        if (seqFrames > 0 && !quiet && sw >= seqMinDim && sh >= seqMinDim) {
             double now = CACurrentMediaTime();
             if (seq[s].burst_left == 0 && seq[s].bursts_done < (unsigned)seqBursts
                 && now >= seq[s].next_burst) {
@@ -1095,7 +1131,7 @@ void winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
      * Writes go to our own DIB while wine holds the surface lock, and only
      * ever to pixels that are currently invisible black. */
     static int sentinelMode = -1;
-    if (sentinelMode < 0) sentinelMode = getenv("MADEIRA_SURF_SENTINEL") != NULL;
+    if (sentinelMode < 0) sentinelMode = getenv("MADEIRA_SURF_SENTINEL") != NULL && !quiet;
     if (sentinelMode && s >= 0 && sw >= 400 && sh >= 400 && seq[s].sent_rounds < 10) {
         const uint32_t SENT = 0x01FF00FFu;      /* B=FF G=00 R=FF A=01 */
         uint32_t *px = (uint32_t *)(uintptr_t)bits;
@@ -1120,8 +1156,8 @@ void winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
         fflush(stderr);
     }
 
-    if (mycnt <= 16 || (mycnt % 200) == 0 ||
-        (sw >= 400 && sh >= 400 && mycnt <= 2000)) {
+    if (!quiet && (mycnt <= 16 || (mycnt % 200) == 0 ||
+        (sw >= 400 && sh >= 400 && mycnt <= 2000))) {
         /* ml504: bits pointer + content signature per present.
          *
          * ml503 showed ~200k pixels changing across the WHOLE window while

@@ -1,0 +1,138 @@
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index 51de3c0..191c24d 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -2952,13 +2952,18 @@ public:
+     IMPLEMENT_ME
+   };
+ 
+-  WINBOOL STDMETHODCALLTYPE IsAnnotationEnabled() override { IMPLEMENT_ME };
++  /* Annotation is not captured here, which is exactly what the D3D11.0 path
++   * already reports: D3D11UserDefinedAnnotation returns -1 from BeginEvent and
++   * EndEvent, does nothing in SetMarker, and answers FALSE to GetStatus.
++   * Aborting instead of answering would only make a title that emits markers
++   * (or asks whether it should) take the process down with it. */
++  WINBOOL STDMETHODCALLTYPE IsAnnotationEnabled() override { return FALSE; };
+ 
+-  void STDMETHODCALLTYPE SetMarkerInt(const WCHAR *label, int data) override { IMPLEMENT_ME };
++  void STDMETHODCALLTYPE SetMarkerInt(const WCHAR *label, int data) override {};
+ 
+-  void STDMETHODCALLTYPE BeginEventInt(const WCHAR *label, int data) override { IMPLEMENT_ME };
++  void STDMETHODCALLTYPE BeginEventInt(const WCHAR *label, int data) override {};
+ 
+-  void STDMETHODCALLTYPE EndEvent() override { IMPLEMENT_ME };
++  void STDMETHODCALLTYPE EndEvent() override {};
+ 
+ #pragma endregion
+ 
+diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
+index 2ab6e11..16c361f 100644
+--- a/src/d3d11/d3d11_swapchain.cpp
++++ b/src/d3d11/d3d11_swapchain.cpp
+@@ -965,31 +965,85 @@ public:
+ 
+   HRESULT
+   STDMETHODCALLTYPE
+-  GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) final { IMPLEMENT_ME; };
++  GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) final {
++    if (ppRestrictToOutput == nullptr)
++      return E_INVALIDARG;
++    /* The swap chain presents into the application's view, so it is never
++     * restricted to one output. NULL is the documented answer for that. */
++    *ppRestrictToOutput = nullptr;
++    return S_OK;
++  };
+ 
+   HRESULT
+   STDMETHODCALLTYPE
+-  SetBackgroundColor(const DXGI_RGBA *pColor) final { IMPLEMENT_ME; };
++  SetBackgroundColor(const DXGI_RGBA *pColor) final {
++    if (pColor == nullptr)
++      return E_INVALIDARG;
++    background_color_ = *pColor;
++    return S_OK;
++  };
+ 
+   HRESULT
+   STDMETHODCALLTYPE
+-  GetBackgroundColor(DXGI_RGBA *pColor) final { IMPLEMENT_ME; };
++  GetBackgroundColor(DXGI_RGBA *pColor) final {
++    if (pColor == nullptr)
++      return E_INVALIDARG;
++    *pColor = background_color_;
++    return S_OK;
++  };
+ 
+   HRESULT
+   STDMETHODCALLTYPE
+-  SetRotation(DXGI_MODE_ROTATION Rotation) final { IMPLEMENT_ME; };
++  SetRotation(DXGI_MODE_ROTATION Rotation) final {
++    switch (Rotation) {
++    case DXGI_MODE_ROTATION_UNSPECIFIED:
++    case DXGI_MODE_ROTATION_IDENTITY:
++      rotation_ = DXGI_MODE_ROTATION_IDENTITY;
++      return S_OK;
++    case DXGI_MODE_ROTATION_ROTATE90:
++    case DXGI_MODE_ROTATION_ROTATE180:
++    case DXGI_MODE_ROTATION_ROTATE270:
++      /* DXMT has no rotation stage: it composites the back buffer into the
++       * view as-is. Reporting success here would turn into a sideways frame
++       * that nothing in the log explains, so refuse the rotations instead of
++       * accepting them to no effect. GetRotation keeps returning IDENTITY. */
++      WARN("SetRotation: rotating the presented image is not supported");
++      return E_NOTIMPL;
++    }
++    return E_INVALIDARG;
++  };
+ 
+   HRESULT
+   STDMETHODCALLTYPE
+-  GetRotation(DXGI_MODE_ROTATION *pRotation) final { IMPLEMENT_ME; };
++  GetRotation(DXGI_MODE_ROTATION *pRotation) final {
++    if (pRotation == nullptr)
++      return E_INVALIDARG;
++    *pRotation = rotation_;
++    return S_OK;
++  };
+ 
+   HRESULT STDMETHODCALLTYPE SetSourceSize(UINT width, UINT height) override {
+-    IMPLEMENT_ME
+-    return S_OK;
++    if (width == 0 || height == 0)
++      return E_INVALIDARG;
++    /* Source size is the sub-rectangle of the back buffer that gets scaled up to
++     * the output -- the API a title uses for dynamic resolution. DXMT presents
++     * the whole back buffer, so accepting a smaller one would have the title
++     * render its frame into the top-left corner of a backdrop it believes is
++     * being scaled, which reads as a badly framed, broken image. Refusing keeps
++     * the title at native resolution, where its output is correct. */
++    if (width == backbuffer_desc_.Width && height == backbuffer_desc_.Height)
++      return S_OK;
++    WARN("SetSourceSize: dynamic resolution scaling is not supported");
++    return E_NOTIMPL;
+   };
+ 
+   HRESULT STDMETHODCALLTYPE GetSourceSize(UINT *width, UINT *height) override {
+-    IMPLEMENT_ME
++    if (width == nullptr || height == nullptr)
++      return E_INVALIDARG;
++    /* True by construction: with no scaling stage the whole back buffer is the
++     * source. Consistent with SetSourceSize, which only accepts that size. */
++    *width = backbuffer_desc_.Width;
++    *height = backbuffer_desc_.Height;
+     return S_OK;
+   };
+ 
+@@ -1131,6 +1185,12 @@ private:
+   std::conditional<EnableMetalFX, WMT::Reference<WMT::FXSpatialScaler>, std::monostate>::type metalfx_scaler;
+   std::conditional<EnableMetalFX, Com<D3D11ResourceCommon>, std::monostate>::type upscaled_backbuffer_;
+   float scale_factor = 1.0;
++
++  /* IDXGISwapChain1/2 state. DXMT presents through the application's own Metal
++   * view rather than to a DXGI output, so none of this changes what is on
++   * screen; the getters and setters below say so where that matters. */
++  DXGI_RGBA background_color_ = {0.0f, 0.0f, 0.0f, 1.0f};
++  DXGI_MODE_ROTATION rotation_ = DXGI_MODE_ROTATION_IDENTITY;
+ };
+ 
+ HRESULT

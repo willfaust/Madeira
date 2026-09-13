@@ -44,6 +44,9 @@ build/dxmt-ios/obj/
 build/dxmt-ios/shader-headers/
 build/dxmt-ios/libdxmt_unix.a
 build/dxmt-ios/libdxmt_combined.a
+# The aarch64-windows PE tree, built by build-pe.sh on macOS and by the same
+# sources with a Linux mingw + wine tree (see AGENTS.md).
+build/dxmt-ios/pe-linux/
 
 # D3D11 triangle test — compiled DXBC shaders + host-side HLSL compiler
 build/d3d11-triangle/vs.dxbc
@@ -126,3 +129,7 @@ research/remote-metal/guest/rmreplay
 research/remote-metal/guest/rmres
 research/remote-metal/guest/rmclient_test
 research/remote-metal/host/rmetald
+
+# Python bytecode from importing the tools/ modules directly.
+__pycache__/
+*.pyc

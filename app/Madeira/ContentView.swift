@@ -805,6 +805,12 @@ final class InputSettings: ObservableObject {
     /// ml649: heavy diagnostics. Default OFF so the shipped default is the fast
     /// path; flip it on only when a run needs to be explainable.
     @Published var diagnostics = false { didSet { madeira_set_diag_enabled(diagnostics ? 1 : 0); save() } }
+    /// ml790: fullscreen game layout, i.e. `LayoutPolicy`'s user toggle.
+    /// Persisted like the rest because it is a preference, not a transient: an
+    /// iPad has no rotation to discover fullscreen with, so re-tapping it every
+    /// launch would be the only chore standing between the user and playing.
+    /// Ignored where immersion is forced (an iPhone in landscape).
+    @Published var immersive = false { didSet { save() } }
 
     /// didSet fires for assignments made in init() because the properties are
     /// already initialised by then; without this the first launch would write
@@ -824,6 +830,7 @@ final class InputSettings: ObservableObject {
             sensAbs  = j["sensAbs"]  as? Double ?? 2.0
             sensRel  = j["sensRel"]  as? Double ?? 2.0
             diagnostics = j["diagnostics"] as? Bool ?? false
+            immersive   = j["immersive"]   as? Bool ?? false
         }
         loading = false
         madeira_set_diag_enabled(diagnostics ? 1 : 0)   // push the restored value down
@@ -831,7 +838,7 @@ final class InputSettings: ObservableObject {
 
     private func save() {
         guard !loading else { return }
-        let j: [String: Any] = ["relative": relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics]
+        let j: [String: Any] = ["relative": relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics, "immersive": immersive]
         guard let d = try? JSONSerialization.data(withJSONObject: j) else { return }
         try? d.write(to: Self.url, options: .atomic)
     }
@@ -848,9 +855,9 @@ struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
-    @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
+    @State private var showSettings = false
     @Namespace private var pointerNS
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
     @Environment(\.verticalSizeClass) private var vSizeClass
@@ -863,6 +870,37 @@ struct ContentView: View {
         case unavailable
     }
 
+    /// iPad is a shipping target (TARGETED_DEVICE_FAMILY is "1,2") and is the
+    /// only reason LayoutPolicy needs the idiom: an iPad reports a REGULAR
+    /// vertical size class in both orientations, so before ml790 every iPad was
+    /// pinned to `toolingBody` and the game could not be enlarged past its
+    /// 240pt strip. See AppLayout.swift.
+    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
+    private var layout: AppLayout {
+        LayoutPolicy.resolve(verticalCompact: vSizeClass == .compact,
+                             isPad: isPad,
+                             userWantsImmersive: input.immersive)
+    }
+
+    /// Whether the immersive layout reserves a strip for its own exit control.
+    ///
+    /// False for an iPhone in landscape, where immersion is forced: there is
+    /// nowhere to return to and the surface stays full-bleed, exactly as it
+    /// always has there. True everywhere else, which is the case an iPad could
+    /// never reach before ml790.
+    private var showImmersiveBar: Bool {
+        layout == .immersive
+            && LayoutPolicy.needsExitAffordance(verticalCompact: vSizeClass == .compact,
+                                                isPad: isPad)
+    }
+
+    /// Mirror the layout onto the shared object the window-level overlays read.
+    private func publishChromeState() {
+        GameChromeState.shared.immersive = (layout == .immersive)
+        GameChromeState.shared.topInset = showImmersiveBar ? GameChromeState.barHeight : 0
+    }
+
     var body: some View {
         /* ml658: was NavigationView, which is deprecated and — the reason this
          * matters — defaults to a SPLIT VIEW on iPad. TARGETED_DEVICE_FAMILY is
@@ -873,10 +911,10 @@ struct ContentView: View {
          * two-column selection behaviour. */
         NavigationStack {
             Group {
-                if vSizeClass == .compact {
-                    landscapeBody
+                if layout == .immersive {
+                    immersiveBody
                 } else {
-                    portraitBody
+                    toolingBody
                 }
             }
             // Rotation destroys/recreates the UIViewRepresentable across
@@ -885,18 +923,52 @@ struct ContentView: View {
             // a fresh placeholder only re-parents the same CAMetalLayer.
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarHidden(vSizeClass == .compact)
+            .navigationBarHidden(layout == .immersive)
+            .toolbar {
+                // Always declared, never conditional: the immersive layout
+                // hides the whole bar, so this is unreachable there. Taking the
+                // expand action is the ONLY way an iPad reaches fullscreen.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        withAnimation(.easeInOut(duration: 0.25)) { input.immersive = true }
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .accessibilityLabel("Play fullscreen")
+                }
+            }
             .onAppear {
+                publishChromeState()
+                // Idempotent. Started here rather than in the app delegate so
+                // it cannot post into a Wine session that has not come up yet:
+                // this view exists before any run does, and a controller that
+                // connects early still gets picked up by the connect observer.
+                GamepadBridge.shared.start()
                 jit_install_trap_handler()
+                // Owns the JIT chip's state: CS_DEBUGGED for "JIT works" and
+                // P_TRACED for "the debugger is still here". Polling both is the
+                // point — StikDebug attaches from another process, so there is no
+                // in-app event for it.
+                JITState.shared.start()
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
             }
+            // The window-level touch-controls overlay cannot read this state,
+            // so it is mirrored onto a shared object every time it changes.
+            .onChange(of: layout) { _, _ in publishChromeState() }
+            .onChange(of: showImmersiveBar) { _, _ in publishChromeState() }
+            .sheet(isPresented: $showSettings) { SettingsView() }
         }
     }
 
-    /// Portrait: classic tooling layout — header, badges, 240pt game strip,
-    /// key row, action buttons, log console.
-    private var portraitBody: some View {
+    /// Tooling layout: the home screen, a game strip, the key row, the tools
+    /// strip and the log console.
+    ///
+    /// Used on an iPhone in portrait and on an iPad in BOTH orientations — the
+    /// latter only until the expand button is tapped. Whenever the space is too
+    /// small for these rows, `immersiveBody` takes over instead.
+    private var toolingBody: some View {
         VStack(spacing: 0) {
             // Readouts sit ABOVE the game strip, closest to the surface they
             // describe: entitlement indicators, then the present/FPS readout,
@@ -907,9 +979,15 @@ struct ContentView: View {
             // placeholder (MetalHostView.shared), so SwiftUI content laid "on
             // top" of the strip is covered — these rows must be siblings above
             // it, never overlays on it.
-            if let ents = entitlements {
-                entitlementBadges(ents)
-            }
+            // HomeView carries the branding, the live state chips and the two
+            // things worth starting from here; the tools strip below the
+            // surface keeps the individual test titles. The entitlement row it
+            // replaces was the fourth place the same JIT state was rendered.
+            HomeView(entitlements: entitlements,
+                     onEnableJIT: { enableJITViaStikDebug() },
+                     onLaunchDesktop: { launchWineDesktop() },
+                     onLaunchSteam: { launchSteamTesting() },
+                     onOpenSettings: { showSettings = true })
             HStack(spacing: 6) {
                 FPSOverlay()
                 Spacer()
@@ -919,10 +997,10 @@ struct ContentView: View {
             MadeiraMetalView()
                 .frame(height: 240)
                 .background(Color.black)
-                .onAppear { TouchControlsHost.attach() }
+                .onAppear { InputOverlays.attach() }
                 .onReceive(NotificationCenter.default.publisher(
                     for: UIDevice.orientationDidChangeNotification)) { _ in
-                    TouchControlsHost.attach()   // re-frame to the new bounds
+                    InputOverlays.attach()   // re-frame to the new bounds
                 }
             HStack(spacing: 6) {
                 if pointerPanel {
@@ -956,38 +1034,91 @@ struct ContentView: View {
             // later VStack siblings (action buttons, log) would draw over it.
             .zIndex(10)
             Divider()
-            actionButtons
+            toolsStrip
             Divider()
             logConsole
         }
     }
 
-    /// Landscape: game mode. Full-height 4:3 surface centered (aspect-fit
-    /// happens in MetalBackedView); ALL controls live in the pillarbox
-    /// bars left/right of the game — the window-level surface would cover
-    /// anything drawn over the game area itself. No header/log/nav chrome.
-    private var landscapeBody: some View {
-        GeometryReader { geo in
-            let gameW = min(geo.size.width, geo.size.height * 4.0 / 3.0)
-            let barW = max((geo.size.width - gameW) / 2.0, 44)
-            ZStack {
-                Color.black
-                MadeiraMetalView()
-                // Controls removed for now (ml586): game-only landscape.
-                // The FPS readout stays, pinned in the right pillarbox bar —
-                // the window-level surface covers anything drawn over the
-                // game area itself, so it cannot ride on the game view.
-                HStack(spacing: 0) {
-                    Spacer(minLength: 0)
-                    VStack {
-                        FPSOverlay(compact: true)
-                        Spacer()
+    /// Fullscreen game. The 4:3 surface is aspect-fit and centred (the fit
+    /// happens in MetalBackedView); no header, log or nav chrome.
+    ///
+    /// Reached two ways: an iPhone in landscape, where the tooling rows simply
+    /// do not fit, and any device that turned the expand toggle on — the only
+    /// route an iPad has, since it is never compact vertically.
+    ///
+    /// The exit control lives in a reserved strip ABOVE the surface rather than
+    /// floating over it. That is not a style choice: the surface is a
+    /// window-level view inserted above this hierarchy, so SwiftUI content laid
+    /// over the game rect is invisible. On a 4:3 iPad the surface fills the
+    /// screen and there is no letterbox to hide a button in, so an overlaid
+    /// button would be dead there — exactly the device this is for.
+    private var immersiveBody: some View {
+        VStack(spacing: 0) {
+            if showImmersiveBar { immersiveBar }
+            GeometryReader { geo in
+                let gameW = min(geo.size.width, geo.size.height * 4.0 / 3.0)
+                let barW = max((geo.size.width - gameW) / 2.0, 44)
+                ZStack {
+                    Color.black
+                    MadeiraMetalView()
+                        // Frames measured before the window exists are the
+                        // placeholder's; attaching here re-frames the overlays
+                        // to the real bounds. Rotation re-attaches for the
+                        // same reason.
+                        .onAppear { InputOverlays.attach() }
+                        .onReceive(NotificationCenter.default.publisher(
+                            for: UIDevice.orientationDidChangeNotification)) { _ in
+                            InputOverlays.attach()
+                        }
+                    if !showImmersiveBar {
+                        // Controls removed for now (ml586): game-only
+                        // landscape. The FPS readout stays, pinned in the right
+                        // pillarbox bar. With a chrome bar present the readout
+                        // moves up into that instead, because a 4:3 device
+                        // leaves no pillarbox to pin it in.
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            VStack {
+                                FPSOverlay(compact: true)
+                                Spacer()
+                            }
+                            .frame(width: barW)
+                        }
                     }
-                    .frame(width: barW)
                 }
             }
         }
-        .ignoresSafeArea()
+        // Forced immersion keeps the old full-bleed behaviour. With a bar, the
+        // top safe area stays respected so the bar is not laid under the
+        // Dynamic Island; only the bottom inset is reclaimed for the game.
+        .ignoresSafeArea(edges: showImmersiveBar ? .bottom : .all)
+        .background(Color.black)
+    }
+
+    /// Chrome strip for the immersive layout: a way out on the left, the live
+    /// readout on the right. Kept to 44pt — enough to hit without a letterbox
+    /// to hide in, small enough that "fullscreen" still means it.
+    private var immersiveBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.easeInOut(duration: 0.25)) { input.immersive = false }
+            } label: {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 32)
+                    .background(Color.secondary.opacity(0.3))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Leave fullscreen")
+            Spacer()
+            FPSOverlay(compact: true)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: GameChromeState.barHeight)
         .background(Color.black)
     }
 
@@ -1076,50 +1207,6 @@ struct ContentView: View {
         }
     }
 
-    private func entitlementBadges(_ ents: EntitlementStatus) -> some View {
-        HStack(spacing: 8) {
-            // Live debugger/JIT state, not the (macOS-only, never granted on
-            // iOS) allow-jit entitlement the old badge checked.
-            entitlementBadge("JIT", granted: debuggerAttached)
-            entitlementBadge("Memory+", granted: ents.increasedMemory)
-            entitlementBadge("64-bit VA", granted: ents.extendedVA)
-            Spacer()
-            // Device model rides in this row (the old standalone statusHeader
-            // row above it spent ~50pt of vertical space on nothing else).
-            VStack(alignment: .trailing, spacing: 0) {
-                Text("Device")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                Text(deviceInfo)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(.horizontal)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            debuggerAttached = isDebuggerAttached()
-        }
-    }
-
-    private func entitlementBadge(_ label: String, granted: Bool) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundColor(granted ? .green : .orange)
-                .font(.caption2)
-            Text(label)
-                .font(.caption2)
-                .foregroundColor(granted ? .primary : .secondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(granted ? Color.green.opacity(0.1) : Color.orange.opacity(0.1))
-        )
-    }
-
     private func logEntitlementStatus() {
         guard let ents = entitlements else { return }
         logStore.log("Checking entitlements...")
@@ -1131,312 +1218,370 @@ struct ContentView: View {
         }
     }
 
-    private var actionButtons: some View {
+    /// ml803: are the investigation probes armed?
+    ///
+    /// Several probes were added to answer one question each and then left on
+    /// the production launch path. Each one costs time in the run it measures,
+    /// and the cost is largest exactly when a game is starting:
+    /// `MADEIRA_SURF_SEQ` PNG-encodes ten consecutive window surfaces every six
+    /// seconds for the first ~84s of a session, `MADEIRA_IRCAP_*` hooks the
+    /// translator's compile path, and both are pure measurement. They are now
+    /// opt-in: `MADEIRA_DIAGNOSTICS=1` (from Xcode, or a Settings-owned file
+    /// later) restores all of them for a deliberate run.
+    ///
+    /// The launch sequence does not persist this: the value must be in the
+    /// app's environment before the process starts, which is where Xcode puts
+    /// it. A probe is never what a player wants.
+    private var diagnosticsArmed: Bool {
+        guard let v = getenv("MADEIRA_DIAGNOSTICS") else { return false }
+        return v.pointee != 0 && v.pointee != 48   /* not NUL, not "0" */
+    }
+
+    /// Start Steam through its launcher batch.
+    ///
+    /// Moved out of the button strip when the home screen took over the two
+    /// primary launch actions: the body is unchanged, it simply has a name now.
+    private func launchSteamTesting() {
+        // Steam S3 first boot: virtual desktop (Steam needs a
+        // window manager) + services.exe (SCM → rpcss for Steam's
+        // COM, the chain proven in the rpcss milestone) + steam.exe
+        // itself, all launched by C:\steam-launch.bat (pushed to
+        // the prefix). Batch avoids quote-escaping hell; combase's
+        // 5s OpenSCManager retry covers the services-vs-steam race.
+        // Steam install = CrossOver copy at C:\Program Files (x86)\
+        // Steam (all boot binaries verified x86-64; steamwebhelper
+        // /libcef = 209MB → watch pool: first webhelper may fit,
+        // multiples need .text sharing). Flags: -no-cef-sandbox
+        // (sandbox can't work in Wine), -cef-disable-gpu (software
+        // render), -console (Steam's own log → our stderr). Steam
+        // WILL try to self-update through our GnuTLS stack — that
+        // attempt is itself an informative S0 re-test.
+        // ml787: override channel; defaults unchanged (see
+        // DeviceCapabilities.desktopResolution).
+        let (deskW, deskH) = DeviceCapabilities.desktopResolution(fallback: (1024, 768))
+        // ml589: find Steam and (re)write the launch batch. Returns
+        // false — having logged why — when there is nothing to run.
+        guard prepareSteamLaunch() else { return }
+        // ml590 STEP 1 (one-run phase check, NOT a timing measurement):
+        // arm the ml578 sock-wire probe. It answers exactly one
+        // question — does today's ~1s CM failure reach the same TLS
+        // phase ml578 did (ServerHello -> client Finished -> server
+        // encrypted records), or does it die earlier?
+        //
+        // Its numbers are NOT trustworthy as timings: no monotonic
+        // clock, a getpeername() before EVERY send/recv even after the
+        // 12-line budget is spent, and synchronous dprintf() on a path
+        // whose whole ping budget is 1000ms — it perturbs what it
+        // measures, which is why ml579 gated it off. Step 2 replaces it
+        // with a per-socket timeline (cached peer, generation counter,
+        // one line at close) that can be trusted for timing.
+        //
+        // COLD LAUNCH REQUIRED: ios_sock_wire() latches this env into a
+        // static on its FIRST call (socket.c:842), so if any earlier
+        // Wine session in this app process already touched a socket the
+        // flag is stuck off. Force-quit, launch, press this first.
+        // ml591: the phase question is ANSWERED, so the per-event
+        // probe goes back off — it distorts the very budget step 2
+        // measures. [sock-tl] replaces it and needs no env var.
+        unsetenv("MADEIRA_SOCK_WIRE")
+        // ml594 A/B: post-login hang = FEX optimizer NONTERMINATION.
+        // Chrome_InProcRendererThread (wtid 0208) sampled 9x at
+        // 97-100% CPU (cpu=277 -> 918, run=1) inside
+        // DeadFlagCalculationEliminination::ProcessBlock while EVERY
+        // other thread sat at cpu=0 and Steam presented ZERO further
+        // frames. One CompileBlock entered that pass and never came
+        // back, and the thread holds a fexlock read ref, so it can
+        // stall other FEX threads too. NOT a network/cryptnet/wineserver
+        // wait — our new guards never fired.
+        //
+        // FEX_O0 disables the default x87 + dead-flag passes
+        // (FEXCore/Source/Interface/IR/PassManager.cpp:70). Slower, but
+        // if the hang disappears the pass is convicted and the next step
+        // is disabling ONLY CreateDeadFlagCalculationEliminination().
+        // ml596: FEX_O0 has NEVER ACTUALLY BEEN TESTED, and my earlier
+        // comment here blaming it for an execute fault was WRONG.
+        // ml595 died because the JIT pool never existed: all three
+        // placement attempts returned 0x7000000000 (the forbidden guest
+        // 64G window), we logged "continuing without it", and Wine then
+        // ran with `pool not initialised` -- so LdrInitializeThunk stayed
+        // at its PE address 0x71ffd77654 instead of being redirected into
+        // the pool (a healthy run logs `redirected PC 0x71ffd77654 ->
+        // 0x12078f654`). The execute fault was the guaranteed consequence
+        // of launching without the execution substrate, and pool placement
+        // happens HERE in Swift before FEX reads any env var -- FEX_O0
+        // cannot influence it. (Caught by Sol.)
+        //
+        // Convict the dead-flag pass with a targeted FEX build that
+        // disables ONLY CreateDeadFlagCalculationEliminination(); broad O0
+        // also drops the x87 pass and proves less. unsetenv keeps a stale
+        // value from a previous launch out of play.
+        unsetenv("FEX_O0")
+        // ml597 A/B: remove ONLY DeadFlagCalculationEliminination, the pass
+        // the renderer thread was pinned inside during the ml594 hang.
+        // Everything else in the pipeline (incl. x87) stays exactly as in a
+        // known-good run, so a result here implicates or clears this one pass.
+        // The [dfe-guard] bounds ship active in BOTH arms — if the pass is
+        // exonerated and the hang recurs, they still name the failure mode.
+        // ml598 ISOLATION RUN: gate OFF, same rebuilt FEX.
+        // ml597 crashed with c000001d (ILLEGAL INSTRUCTION) after the
+        // desktop came up, but that run changed TWO things at once: my
+        // DFE gate AND ~107 lines of FEX source committed today that had
+        // never been built — the shipped xtajit64.dll dated Aug 6 while
+        // Core.cpp/IosJitAlias.cpp/TSOHandlerConfig.h and a net rewrite of
+        // WinAPI/IO.cpp were newer. Any of those can produce a
+        // miscompilation-shaped fault, so ml597 convicts nothing.
+        //   crashes again -> the REBUILD is at fault, DFE still untested
+        //   runs fine     -> disabling DFE is what breaks it
+        unsetenv("MADEIRA_NO_DFE")
+        // ml599: name the pass that corrupts the IR list.
+        //
+        // ml598 settled the mechanism: FEX hangs walking a block
+        // BACKWARDS because the intrusive Previous chain never reaches
+        // CodeBegin. Two passes make that assumption —
+        // DeadFlagCalculationEliminination::ProcessBlock and
+        // ConstrainedRAPass::Run — and the store-page freeze was the
+        // second one (PC pinned inside libarm64ecfex.dll RVA
+        // 0x100b0c-0x100cdc, all within ConstrainedRAPass::Run, for
+        // minutes at ~100% CPU while frames stayed at 4,114).
+        //
+        // Both now validate the block BEFORE touching it and repair the
+        // Previous chain from the forward chain when that is intact, so
+        // the hang should be gone either way. This var adds the sweep
+        // that reports WHICH pass first breaks the list, so the run also
+        // produces the root cause and not just the containment.
+        // ml601: SWEEP OFF. Two runs checked 118M and 47M blocks and found
+        // corruption exactly once (block 260, ml599b) — the after-every-pass
+        // sweep is not earning its cost, and it taxes every large compile.
+        // The unconditional parts STAY ON regardless of this variable: the
+        // cheap backward check at DFE and RA entry, the repair, and the
+        // bounded-walk guards. Only the attribution sweep is disabled.
+        // Set it again for a run that is specifically hunting the corrupter.
+        unsetenv("MADEIRA_IR_TOPO")
+        // ml623: TARGETED IR/RA CAPTURE for the ULTRAKILL Mono wall.
+        //
+        // FEX miscompiles ONE instruction in Mono's x86-64 emitter:
+        //   mono-2.0-bdwgc.dll+0x4db25b   mov byte ptr [rcx+2], al
+        // With RCX=0x7040140010 (valid, a fresh RWX code buffer) and AL=0x4c,
+        // it emitted `movz w6,#0x44 ; orr x8,x8,x6 ; dmb ish ; strb w8,[x6,xzr]`
+        // -- the address register still held the IMMEDIATE because the
+        // `add x6, x0, #2` that BOTH sibling branches emit was never generated,
+        // so the store landed on 0x44.
+        //
+        // This prints that instruction's IR after the frontend and after every
+        // pass, plus the emitted host bytes. The last stage at which the address
+        // computation still exists names the culprit: frontend/decoder, a named
+        // pass, RA liveness, or the ARM emitter.
+        //
+        // Compile-time only, capped at 4 captures. Unset it for a normal run.
+        //
+        // ml803: "a normal run" is now the only run this path produces. The
+        // capture was left armed after its question was answered, and it is not
+        // free: the hook sits on the translator's compile path and every block
+        // compiled while a probe is armed is compared against it. Diagnostics
+        // are opt-in through MADEIRA_DIAGNOSTICS; the unsetenv keeps a probe
+        // armed by an earlier launch out of this one.
+        if diagnosticsArmed {
+            setenv("MADEIRA_IRCAP_RVA", "0x4db25b", 1)
+            setenv("MADEIRA_IRCAP_MODULE", "mono-2.0-bdwgc.dll", 1)
+        } else {
+            unsetenv("MADEIRA_IRCAP_RVA")
+            unsetenv("MADEIRA_IRCAP_MODULE")
+        }
+        setenv("MADEIRA_EXE", "explorer.exe", 1)
+        setenv("MADEIRA_ARGS",
+               "/desktop=shell,\(deskW)x\(deskH) cmd /c C:\\steam-launch.bat", 1)
+        setenv("MADEIRA_DESKTOP", "1", 1)
+        setenv("MADEIRA_SCREEN_W", String(deskW), 1)
+        setenv("MADEIRA_SCREEN_H", String(deskH), 1)
+        // ml371: surfdump ground truth — the "frozen desktop"
+        // question (fresh pixels never presented vs nothing
+        // painting upstream) is undecidable from the log alone
+        // because the [winios] present line caps at 12.
+        // ml556: surface PNG dumping also off for the clean baseline —
+        // it encodes a PNG on the present path. Restore "1" to re-enable.
+        unsetenv("MADEIRA_DUMP_SURFACES")
+        // ml493: bursts of N CONSECUTIVE frames per window. The
+        // login window's black regions change every frame, which
+        // the 2s-throttled first/latest dump can never show —
+        // adjacent frames are the only way to measure what moves.
+        //
+        // ml803: ML556 ALREADY CALLED THIS OFF and it was still on. The
+        // unsetenv above disables the throttled dump; this arm kept a second,
+        // far more expensive dump alive — every burst PNG-encodes ten
+        // consecutive full window surfaces, 14 bursts per window, on a
+        // background queue, for the first ~84s of every session — and PNG
+        // encoding a 1024x768 surface is tens of milliseconds. So the
+        // clean-baseline run was never clean, and the cost landed exactly when
+        // a game is starting up. Opt-in with the rest of the diagnostics.
+        if diagnosticsArmed {
+            setenv("MADEIRA_SURF_SEQ", "10", 1)
+        } else {
+            unsetenv("MADEIRA_SURF_SEQ")
+        }
+        // ml515: SRCWATCH RE-ENABLED, now hooked in the MACH
+        // exception handler (where guest faults are actually
+        // delivered) instead of segv_handler. It consumes its own
+        // faults BEFORE every other classification and marks them
+        // handled via the canonical thread_set_state path, so a
+        // protection fault can no longer reach the guest as an AV.
+        // ml514 hooked the wrong path: 0 faults, black window 2/2.
+        /* ml530 (#78): srcwatch subject = the assembled steamui JS buffer, not the
+         // render bitmap. "1" would mean the legacy render subject, and the
+         // watch arms only ONCE — so with both call sites live, whichever ran
+         // first would silently win and the other would never arm at all.
+         //
+         // Target: V8 reports `SyntaxError: Invalid or unexpected token` on
+         // steamui JS that our file reads deliver byte-perfect (ml489: 73/73
+         // MATCH, the failing file 100% verified through NtReadFile). That is
+         // the DOMINANT Steam variance — 27 of 45 attempts stall right after
+         // BrowserReady because the UI script never parses — and the same
+         // corrupter family as the render glitch, so it buys both. */
+        /* ml533: back to the RENDER subject — the js subject is structurally
+        // blocked (the failing steamui files are read through a reused 64KB
+        // chunk buffer, so no assembled buffer exists in our view). The render
+        // watch now names the CALLER via the guest return address at [RSP],
+        // which is what the block-granular RIP could never do. */
+        // ml556 CLEAN-BASELINE TEST: srcwatch OFF.
+        //
+        // It write-protects the render bitmap and takes a Mach fault
+        // per page ON THE RENDER HOT PATH, and the correlation across
+        // this session is stark:
+        //     attributions 1824/2370/426/2721 -> run dies at 36-52 s
+        //     attributions 0/0/0              -> run reaches 94-106 s
+        // Runs carrying our instrumentation die in roughly half the
+        // time. Before attributing the crash to Steam or to FEX we owe
+        // ourselves the one-variable control: does it still crash with
+        // the probe off? Re-enable by restoring "render".
+        // ml574: arm the dead-release detector in wineserver.
+        // O(n) walk of object_list on every release_object — slow by
+        // design, diagnostic only. Set to "0" to disarm.
+        // ml579: DISABLED. It walks the global wineserver object list on
+        // EVERY release_object() — O(n) in the single-threaded server. It
+        // already caught the free_async_queue over-release (ml574) and that
+        // fix is shipped; leaving the detector armed just starves the server,
+        // and Steam allows each CM ping only 1000 ms. Set to "1" to re-arm.
+        setenv("MADEIRA_DEAD_RELEASE", "0", 1)
+        setenv("MADEIRA_SRCWATCH", "off", 1)
+        // ml803: only meaningful while srcwatch is armed; off in production,
+        // and the row band is re-derived by hand when a probe is re-armed.
+        if diagnosticsArmed {
+            setenv("MADEIRA_SRCWATCH_ROWS", "0,400", 1)
+        } else {
+            unsetenv("MADEIRA_SRCWATCH_ROWS")
+        }
+        // ml548: restrict srcwatch to the row band where displacement
+        // was actually MEASURED, so the 400-attribution budget is not
+        // spent on the full-frame clear (which touches every page
+        // first and made the content painters invisible in ml517).
+        // Band from ml543 frame 009: the Steam logo core landed at
+        // (96,188) instead of (350,188) — exactly -254 px, one tile
+        // pitch — so rows 150..230 bracket the displaced element.
+        // ml550: was "150,230" — chosen for the SPLASH logo. On a
+        // login-window run that band produced ZERO attributions
+        // (426 on the splash run), because nothing painted there.
+        // Widen to most of the surface so the watch follows whatever
+        // the frame actually draws; the per-page budget still bounds
+        // the fault cost.
+        setenv("MADEIRA_SRCWATCH_ROWS", "0,400", 1)
+        // ml527 (#82 RETEST, ONE VARIABLE): run V8 with its JIT on.
+        //
+        // ml526's phase timeline made the case concrete — of ~39s to
+        // the login window, the single biggest block is 13.0s of
+        // BrowserReady -> GetDesiredSteamUIWindows, i.e. Steam's UI
+        // JavaScript booting, and interpreted V8 costs 5-20x there.
+        //
+        // #82 convicted jitless-off because both trial runs parked
+        // CrBrowserMain shortly after BrowserReady (ml474b +104s,
+        // ml475 +4s). ⚠️ Both ran with StikDebug attached and
+        // spinning, when every trap was a round-trip to a starved
+        // debugger — the overhead that made webhelper bring-up 89s
+        // instead of 9s (b439be6). V8's JIT emits runtime x86, the
+        // heaviest trap/compile workload in the process, so it is
+        // exactly what that overhead punished worst. The verdict may
+        // not survive early detach.
+        //
+        // ⛔ VERDICT (ml527, 2 runs): #82 SURVIVES early detach — jitless
+        // stays ON. Both jitless-off runs died in the SAME window ml474b
+        // and ml475 died in: right after BrowserReady, before
+        // GetDesiredSteamUIWindows was ever reached (13:20:19 and
+        // 13:22:45), so 4/4 across two completely different debugger
+        // regimes. The failure MODE changed — a c0000005 ->
+        // chrome_elf.dll+0xd4153 -> ffff7001 Crashpad termination rather
+        // than #82's park in NtWaitForAlertByThreadId — but the window is
+        // identical, and jitless-ON reaches the login window repeatedly
+        // through that same window.
+        //
+        // No consolation prize either: BrowserReady took 12s and 10s with
+        // the JIT on vs 8-11s (median 9s) with it off, because V8's JIT
+        // emits runtime x86 that FEX must then compile. So the debugger
+        // overhead was NOT what convicted jitless-off, and the 13s of
+        // Steam UI JavaScript stays unmeasured — neither run survived to
+        // reach it.
+        //
+        // Flip to "0" only alongside a fix for the post-BrowserReady death.
+        setenv("MADEIRA_JITLESS", "1", 1)
+        // ml514 note (kept for the record): The ml514 watch
+        // armed correctly (76 pages protected) but logged ZERO
+        // faults and produced an all-black window on two runs: the
+        // hook went in the BSD segv_handler, while guest faults in
+        // this port are handled IN-MACH by the exception server, so
+        // the protection fault was delivered to the guest as an AV
+        // and killed Chromium's paint. A probe must never break the
+        // path it measures. To revive it, hook the Mach exception
+        // server (where ios_emulate_unaligned_guest_access already
+        // runs), not segv_handler, and re-enable this env var.
+        // ml502 sentinel: DELIBERATELY NOT ENABLED. It stamps
+        // magenta into currently-black pixels, and on windows
+        // Chromium does not fully rewrite it SURVIVES and reaches
+        // the screen (console 0x200bc hit untouched=177891 in one
+        // round). It answered its question in ml503/ml504 —
+        // untouched=0 on the login window proved Chromium writes
+        // every pixel — so it must not ship enabled. Re-enable
+        // with MADEIRA_SURF_SENTINEL=1 if the question returns.
+        runWineFullSequence()
+    }
+
+    /// Start a Wine virtual desktop: explorer hosting a shell desktop with the
+    /// service control manager as its child, because a raw rpcss.exe cannot run
+    /// standalone.
+    private func launchWineDesktop() {
+        // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
+        // its wmain unconditionally StartServiceCtrlDispatcherW's
+        // (rpcss_main.c:282), which RPCs back to the SCM; without
+        // services.exe it raised + wedged in
+        // service_run_main_thread, and explorer's
+        // CoRegisterClassObject wedged behind it (seq-3680 run).
+        // Proper bootstrap: explorer's cmdline child = services.exe
+        // (SCM host, windows-subsystem = no console). It creates
+        // \pipe\svcctl early, runs auto-start services (MountMgr/
+        // Eventlog/NDIS/nsiproxy/PlugPlay — winedevice/plugplay
+        // are bundled; failures tolerated), and combase's
+        // start_rpcss then demand-starts RpcSs through the SCM
+        // with a 30s start-pending wait → rpcss runs as services'
+        // child (3-deep tree, proven depth) with a proper
+        // dispatcher connection → epmapper up → real COM.
+        // Known risk: if shellwindows_init beats services.exe's
+        // RPC_Init, OpenSCManager fails → watch whether that
+        // fails fast or hits the RaiseException→CS wedge again.
+        let (deskW, deskH) = DeviceCapabilities.desktopResolution(fallback: (960, 540))
+        setenv("MADEIRA_EXE", "explorer.exe", 1)
+        setenv("MADEIRA_ARGS",
+               "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
+        setenv("MADEIRA_DESKTOP", "1", 1)
+        setenv("MADEIRA_SCREEN_W", String(deskW), 1)
+        setenv("MADEIRA_SCREEN_H", String(deskH), 1)
+        runWineFullSequence()
+    }
+
+    /// The individual test titles, and the log.
+    ///
+    /// The two things a user actually wants — starting the Windows desktop or
+    /// Steam — moved to the home screen. What is left here is the per-title
+    /// launch tests, which are for reproducing a specific result rather than
+    /// for getting into a game.
+    private var toolsStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                Button("Enable JIT") {
-                    enableJITViaStikDebug()
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("Steam Testing") {
-                    // Steam S3 first boot: virtual desktop (Steam needs a
-                    // window manager) + services.exe (SCM → rpcss for Steam's
-                    // COM, the chain proven in the rpcss milestone) + steam.exe
-                    // itself, all launched by C:\steam-launch.bat (pushed to
-                    // the prefix). Batch avoids quote-escaping hell; combase's
-                    // 5s OpenSCManager retry covers the services-vs-steam race.
-                    // Steam install = CrossOver copy at C:\Program Files (x86)\
-                    // Steam (all boot binaries verified x86-64; steamwebhelper
-                    // /libcef = 209MB → watch pool: first webhelper may fit,
-                    // multiples need .text sharing). Flags: -no-cef-sandbox
-                    // (sandbox can't work in Wine), -cef-disable-gpu (software
-                    // render), -console (Steam's own log → our stderr). Steam
-                    // WILL try to self-update through our GnuTLS stack — that
-                    // attempt is itself an informative S0 re-test.
-                    let deskW = 1024, deskH = 768
-                    // ml589: find Steam and (re)write the launch batch. Returns
-                    // false — having logged why — when there is nothing to run.
-                    guard prepareSteamLaunch() else { return }
-                    // ml590 STEP 1 (one-run phase check, NOT a timing measurement):
-                    // arm the ml578 sock-wire probe. It answers exactly one
-                    // question — does today's ~1s CM failure reach the same TLS
-                    // phase ml578 did (ServerHello -> client Finished -> server
-                    // encrypted records), or does it die earlier?
-                    //
-                    // Its numbers are NOT trustworthy as timings: no monotonic
-                    // clock, a getpeername() before EVERY send/recv even after the
-                    // 12-line budget is spent, and synchronous dprintf() on a path
-                    // whose whole ping budget is 1000ms — it perturbs what it
-                    // measures, which is why ml579 gated it off. Step 2 replaces it
-                    // with a per-socket timeline (cached peer, generation counter,
-                    // one line at close) that can be trusted for timing.
-                    //
-                    // COLD LAUNCH REQUIRED: ios_sock_wire() latches this env into a
-                    // static on its FIRST call (socket.c:842), so if any earlier
-                    // Wine session in this app process already touched a socket the
-                    // flag is stuck off. Force-quit, launch, press this first.
-                    // ml591: the phase question is ANSWERED, so the per-event
-                    // probe goes back off — it distorts the very budget step 2
-                    // measures. [sock-tl] replaces it and needs no env var.
-                    unsetenv("MADEIRA_SOCK_WIRE")
-                    // ml594 A/B: post-login hang = FEX optimizer NONTERMINATION.
-                    // Chrome_InProcRendererThread (wtid 0208) sampled 9x at
-                    // 97-100% CPU (cpu=277 -> 918, run=1) inside
-                    // DeadFlagCalculationEliminination::ProcessBlock while EVERY
-                    // other thread sat at cpu=0 and Steam presented ZERO further
-                    // frames. One CompileBlock entered that pass and never came
-                    // back, and the thread holds a fexlock read ref, so it can
-                    // stall other FEX threads too. NOT a network/cryptnet/wineserver
-                    // wait — our new guards never fired.
-                    //
-                    // FEX_O0 disables the default x87 + dead-flag passes
-                    // (FEXCore/Source/Interface/IR/PassManager.cpp:70). Slower, but
-                    // if the hang disappears the pass is convicted and the next step
-                    // is disabling ONLY CreateDeadFlagCalculationEliminination().
-                    // ml596: FEX_O0 has NEVER ACTUALLY BEEN TESTED, and my earlier
-                    // comment here blaming it for an execute fault was WRONG.
-                    // ml595 died because the JIT pool never existed: all three
-                    // placement attempts returned 0x7000000000 (the forbidden guest
-                    // 64G window), we logged "continuing without it", and Wine then
-                    // ran with `pool not initialised` -- so LdrInitializeThunk stayed
-                    // at its PE address 0x71ffd77654 instead of being redirected into
-                    // the pool (a healthy run logs `redirected PC 0x71ffd77654 ->
-                    // 0x12078f654`). The execute fault was the guaranteed consequence
-                    // of launching without the execution substrate, and pool placement
-                    // happens HERE in Swift before FEX reads any env var -- FEX_O0
-                    // cannot influence it. (Caught by Sol.)
-                    //
-                    // Convict the dead-flag pass with a targeted FEX build that
-                    // disables ONLY CreateDeadFlagCalculationEliminination(); broad O0
-                    // also drops the x87 pass and proves less. unsetenv keeps a stale
-                    // value from a previous launch out of play.
-                    unsetenv("FEX_O0")
-                    // ml597 A/B: remove ONLY DeadFlagCalculationEliminination, the pass
-                    // the renderer thread was pinned inside during the ml594 hang.
-                    // Everything else in the pipeline (incl. x87) stays exactly as in a
-                    // known-good run, so a result here implicates or clears this one pass.
-                    // The [dfe-guard] bounds ship active in BOTH arms — if the pass is
-                    // exonerated and the hang recurs, they still name the failure mode.
-                    // ml598 ISOLATION RUN: gate OFF, same rebuilt FEX.
-                    // ml597 crashed with c000001d (ILLEGAL INSTRUCTION) after the
-                    // desktop came up, but that run changed TWO things at once: my
-                    // DFE gate AND ~107 lines of FEX source committed today that had
-                    // never been built — the shipped xtajit64.dll dated Aug 6 while
-                    // Core.cpp/IosJitAlias.cpp/TSOHandlerConfig.h and a net rewrite of
-                    // WinAPI/IO.cpp were newer. Any of those can produce a
-                    // miscompilation-shaped fault, so ml597 convicts nothing.
-                    //   crashes again -> the REBUILD is at fault, DFE still untested
-                    //   runs fine     -> disabling DFE is what breaks it
-                    unsetenv("MADEIRA_NO_DFE")
-                    // ml599: name the pass that corrupts the IR list.
-                    //
-                    // ml598 settled the mechanism: FEX hangs walking a block
-                    // BACKWARDS because the intrusive Previous chain never reaches
-                    // CodeBegin. Two passes make that assumption —
-                    // DeadFlagCalculationEliminination::ProcessBlock and
-                    // ConstrainedRAPass::Run — and the store-page freeze was the
-                    // second one (PC pinned inside libarm64ecfex.dll RVA
-                    // 0x100b0c-0x100cdc, all within ConstrainedRAPass::Run, for
-                    // minutes at ~100% CPU while frames stayed at 4,114).
-                    //
-                    // Both now validate the block BEFORE touching it and repair the
-                    // Previous chain from the forward chain when that is intact, so
-                    // the hang should be gone either way. This var adds the sweep
-                    // that reports WHICH pass first breaks the list, so the run also
-                    // produces the root cause and not just the containment.
-                    // ml601: SWEEP OFF. Two runs checked 118M and 47M blocks and found
-                    // corruption exactly once (block 260, ml599b) — the after-every-pass
-                    // sweep is not earning its cost, and it taxes every large compile.
-                    // The unconditional parts STAY ON regardless of this variable: the
-                    // cheap backward check at DFE and RA entry, the repair, and the
-                    // bounded-walk guards. Only the attribution sweep is disabled.
-                    // Set it again for a run that is specifically hunting the corrupter.
-                    unsetenv("MADEIRA_IR_TOPO")
-                    // ml623: TARGETED IR/RA CAPTURE for the ULTRAKILL Mono wall.
-                    //
-                    // FEX miscompiles ONE instruction in Mono's x86-64 emitter:
-                    //   mono-2.0-bdwgc.dll+0x4db25b   mov byte ptr [rcx+2], al
-                    // With RCX=0x7040140010 (valid, a fresh RWX code buffer) and AL=0x4c,
-                    // it emitted `movz w6,#0x44 ; orr x8,x8,x6 ; dmb ish ; strb w8,[x6,xzr]`
-                    // -- the address register still held the IMMEDIATE because the
-                    // `add x6, x0, #2` that BOTH sibling branches emit was never generated,
-                    // so the store landed on 0x44.
-                    //
-                    // This prints that instruction's IR after the frontend and after every
-                    // pass, plus the emitted host bytes. The last stage at which the address
-                    // computation still exists names the culprit: frontend/decoder, a named
-                    // pass, RA liveness, or the ARM emitter.
-                    //
-                    // Compile-time only, capped at 4 captures. Unset it for a normal run.
-                    setenv("MADEIRA_IRCAP_RVA", "0x4db25b", 1)
-                    setenv("MADEIRA_IRCAP_MODULE", "mono-2.0-bdwgc.dll", 1)
-                    setenv("MADEIRA_EXE", "explorer.exe", 1)
-                    setenv("MADEIRA_ARGS",
-                           "/desktop=shell,\(deskW)x\(deskH) cmd /c C:\\steam-launch.bat", 1)
-                    setenv("MADEIRA_DESKTOP", "1", 1)
-                    setenv("MADEIRA_SCREEN_W", String(deskW), 1)
-                    setenv("MADEIRA_SCREEN_H", String(deskH), 1)
-                    // ml371: surfdump ground truth — the "frozen desktop"
-                    // question (fresh pixels never presented vs nothing
-                    // painting upstream) is undecidable from the log alone
-                    // because the [winios] present line caps at 12.
-                    // ml556: surface PNG dumping also off for the clean baseline —
-                    // it encodes a PNG on the present path. Restore "1" to re-enable.
-                    unsetenv("MADEIRA_DUMP_SURFACES")
-                    // ml493: bursts of N CONSECUTIVE frames per window. The
-                    // login window's black regions change every frame, which
-                    // the 2s-throttled first/latest dump can never show —
-                    // adjacent frames are the only way to measure what moves.
-                    setenv("MADEIRA_SURF_SEQ", "10", 1)
-                    // ml515: SRCWATCH RE-ENABLED, now hooked in the MACH
-                    // exception handler (where guest faults are actually
-                    // delivered) instead of segv_handler. It consumes its own
-                    // faults BEFORE every other classification and marks them
-                    // handled via the canonical thread_set_state path, so a
-                    // protection fault can no longer reach the guest as an AV.
-                    // ml514 hooked the wrong path: 0 faults, black window 2/2.
-                    /* ml530 (#78): srcwatch subject = the assembled steamui JS buffer, not the
-                     // render bitmap. "1" would mean the legacy render subject, and the
-                     // watch arms only ONCE — so with both call sites live, whichever ran
-                     // first would silently win and the other would never arm at all.
-                     //
-                     // Target: V8 reports `SyntaxError: Invalid or unexpected token` on
-                     // steamui JS that our file reads deliver byte-perfect (ml489: 73/73
-                     // MATCH, the failing file 100% verified through NtReadFile). That is
-                     // the DOMINANT Steam variance — 27 of 45 attempts stall right after
-                     // BrowserReady because the UI script never parses — and the same
-                     // corrupter family as the render glitch, so it buys both. */
-                    /* ml533: back to the RENDER subject — the js subject is structurally
-                    // blocked (the failing steamui files are read through a reused 64KB
-                    // chunk buffer, so no assembled buffer exists in our view). The render
-                    // watch now names the CALLER via the guest return address at [RSP],
-                    // which is what the block-granular RIP could never do. */
-                    // ml556 CLEAN-BASELINE TEST: srcwatch OFF.
-                    //
-                    // It write-protects the render bitmap and takes a Mach fault
-                    // per page ON THE RENDER HOT PATH, and the correlation across
-                    // this session is stark:
-                    //     attributions 1824/2370/426/2721 -> run dies at 36-52 s
-                    //     attributions 0/0/0              -> run reaches 94-106 s
-                    // Runs carrying our instrumentation die in roughly half the
-                    // time. Before attributing the crash to Steam or to FEX we owe
-                    // ourselves the one-variable control: does it still crash with
-                    // the probe off? Re-enable by restoring "render".
-                    // ml574: arm the dead-release detector in wineserver.
-                    // O(n) walk of object_list on every release_object — slow by
-                    // design, diagnostic only. Set to "0" to disarm.
-                    // ml579: DISABLED. It walks the global wineserver object list on
-                    // EVERY release_object() — O(n) in the single-threaded server. It
-                    // already caught the free_async_queue over-release (ml574) and that
-                    // fix is shipped; leaving the detector armed just starves the server,
-                    // and Steam allows each CM ping only 1000 ms. Set to "1" to re-arm.
-                    setenv("MADEIRA_DEAD_RELEASE", "0", 1)
-                    setenv("MADEIRA_SRCWATCH", "off", 1)
-                    // ml548: restrict srcwatch to the row band where displacement
-                    // was actually MEASURED, so the 400-attribution budget is not
-                    // spent on the full-frame clear (which touches every page
-                    // first and made the content painters invisible in ml517).
-                    // Band from ml543 frame 009: the Steam logo core landed at
-                    // (96,188) instead of (350,188) — exactly -254 px, one tile
-                    // pitch — so rows 150..230 bracket the displaced element.
-                    // ml550: was "150,230" — chosen for the SPLASH logo. On a
-                    // login-window run that band produced ZERO attributions
-                    // (426 on the splash run), because nothing painted there.
-                    // Widen to most of the surface so the watch follows whatever
-                    // the frame actually draws; the per-page budget still bounds
-                    // the fault cost.
-                    setenv("MADEIRA_SRCWATCH_ROWS", "0,400", 1)
-                    // ml527 (#82 RETEST, ONE VARIABLE): run V8 with its JIT on.
-                    //
-                    // ml526's phase timeline made the case concrete — of ~39s to
-                    // the login window, the single biggest block is 13.0s of
-                    // BrowserReady -> GetDesiredSteamUIWindows, i.e. Steam's UI
-                    // JavaScript booting, and interpreted V8 costs 5-20x there.
-                    //
-                    // #82 convicted jitless-off because both trial runs parked
-                    // CrBrowserMain shortly after BrowserReady (ml474b +104s,
-                    // ml475 +4s). ⚠️ Both ran with StikDebug attached and
-                    // spinning, when every trap was a round-trip to a starved
-                    // debugger — the overhead that made webhelper bring-up 89s
-                    // instead of 9s (b439be6). V8's JIT emits runtime x86, the
-                    // heaviest trap/compile workload in the process, so it is
-                    // exactly what that overhead punished worst. The verdict may
-                    // not survive early detach.
-                    //
-                    // ⛔ VERDICT (ml527, 2 runs): #82 SURVIVES early detach — jitless
-                    // stays ON. Both jitless-off runs died in the SAME window ml474b
-                    // and ml475 died in: right after BrowserReady, before
-                    // GetDesiredSteamUIWindows was ever reached (13:20:19 and
-                    // 13:22:45), so 4/4 across two completely different debugger
-                    // regimes. The failure MODE changed — a c0000005 ->
-                    // chrome_elf.dll+0xd4153 -> ffff7001 Crashpad termination rather
-                    // than #82's park in NtWaitForAlertByThreadId — but the window is
-                    // identical, and jitless-ON reaches the login window repeatedly
-                    // through that same window.
-                    //
-                    // No consolation prize either: BrowserReady took 12s and 10s with
-                    // the JIT on vs 8-11s (median 9s) with it off, because V8's JIT
-                    // emits runtime x86 that FEX must then compile. So the debugger
-                    // overhead was NOT what convicted jitless-off, and the 13s of
-                    // Steam UI JavaScript stays unmeasured — neither run survived to
-                    // reach it.
-                    //
-                    // Flip to "0" only alongside a fix for the post-BrowserReady death.
-                    setenv("MADEIRA_JITLESS", "1", 1)
-                    // ml514 note (kept for the record): The ml514 watch
-                    // armed correctly (76 pages protected) but logged ZERO
-                    // faults and produced an all-black window on two runs: the
-                    // hook went in the BSD segv_handler, while guest faults in
-                    // this port are handled IN-MACH by the exception server, so
-                    // the protection fault was delivered to the guest as an AV
-                    // and killed Chromium's paint. A probe must never break the
-                    // path it measures. To revive it, hook the Mach exception
-                    // server (where ios_emulate_unaligned_guest_access already
-                    // runs), not segv_handler, and re-enable this env var.
-                    // ml502 sentinel: DELIBERATELY NOT ENABLED. It stamps
-                    // magenta into currently-black pixels, and on windows
-                    // Chromium does not fully rewrite it SURVIVES and reaches
-                    // the screen (console 0x200bc hit untouched=177891 in one
-                    // round). It answered its question in ml503/ml504 —
-                    // untouched=0 on the login window proved Chromium writes
-                    // every pixel — so it must not ship enabled. Re-enable
-                    // with MADEIRA_SURF_SENTINEL=1 if the question returns.
-                    runWineFullSequence()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-
-                Button("Wine Virtual Desktop") {
-                    // S3-pre R2v2: raw rpcss.exe CANNOT run standalone —
-                    // its wmain unconditionally StartServiceCtrlDispatcherW's
-                    // (rpcss_main.c:282), which RPCs back to the SCM; without
-                    // services.exe it raised + wedged in
-                    // service_run_main_thread, and explorer's
-                    // CoRegisterClassObject wedged behind it (seq-3680 run).
-                    // Proper bootstrap: explorer's cmdline child = services.exe
-                    // (SCM host, windows-subsystem = no console). It creates
-                    // \pipe\svcctl early, runs auto-start services (MountMgr/
-                    // Eventlog/NDIS/nsiproxy/PlugPlay — winedevice/plugplay
-                    // are bundled; failures tolerated), and combase's
-                    // start_rpcss then demand-starts RpcSs through the SCM
-                    // with a 30s start-pending wait → rpcss runs as services'
-                    // child (3-deep tree, proven depth) with a proper
-                    // dispatcher connection → epmapper up → real COM.
-                    // Known risk: if shellwindows_init beats services.exe's
-                    // RPC_Init, OpenSCManager fails → watch whether that
-                    // fails fast or hits the RaiseException→CS wedge again.
-                    let deskW = 960, deskH = 540
-                    setenv("MADEIRA_EXE", "explorer.exe", 1)
-                    setenv("MADEIRA_ARGS",
-                           "/desktop=shell,\(deskW)x\(deskH) C:\\windows\\system32\\services.exe", 1)
-                    setenv("MADEIRA_DESKTOP", "1", 1)
-                    setenv("MADEIRA_SCREEN_W", String(deskW), 1)
-                    setenv("MADEIRA_SCREEN_H", String(deskH), 1)
-                    runWineFullSequence()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.mint)
 
                 // ml741: Stray (UE4). Launch the shipping binary DIRECTLY rather
                 // than Stray.exe -- the launcher builds its child's command line
@@ -1584,37 +1729,6 @@ struct ContentView: View {
         ContentView.hhmmss.string(from: date)
     }
 
-    private var statusColor: Color {
-        switch jitStatus {
-        case .unknown: return .gray
-        case .testing: return .yellow
-        case .available: return .green
-        case .mappingOnly: return .orange
-        case .unavailable: return .red
-        }
-    }
-
-    private var statusText: String {
-        switch jitStatus {
-        case .unknown: return "Not tested"
-        case .testing: return "Testing..."
-        case .available: return "Available"
-        case .mappingOnly: return "Needs debugger"
-        case .unavailable: return "Unavailable"
-        }
-    }
-
-    private var deviceInfo: String {
-        var sysinfo = utsname()
-        uname(&sysinfo)
-        let machine = withUnsafePointer(to: &sysinfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(cString: $0)
-            }
-        }
-        return machine
-    }
-
     private func colorForLevel(_ level: LogStore.LogEntry.Level) -> Color {
         switch level {
         case .info: return .blue
@@ -1734,15 +1848,60 @@ struct ContentView: View {
     }
 
     /// Full sequence: allocate JIT pool, start wineserver, start Wine.
-    /// Debugger stays attached during PE loading so mprotect_exec can use BRK
-    /// to prepare code pages. Detach happens after Wine finishes + recovery.
-    private func runWineFullSequence() {
+    private func runWineFullSequence(reattachAttempted: Bool = false) {
+        // Two separate requirements, and only the first one is "is JIT on":
+        //
+        // - CS_DEBUGGED must be set at all.
+        // - StikDebug must be ATTACHED, because the pool is allocated with a
+        //   BRK that only a live debugger answers. Without it our own SIGTRAP
+        //   handler skips the instruction, the allocation comes back zero, and
+        //   the launch dies deep in the allocator complaining about placement —
+        //   a message that has nothing to do with the cause.
+        //
+        // After the first run the app has detached BY DESIGN, so the second
+        // requirement is the normal state of a second launch, not an error.
+        // Re-attaching here rather than asking the user to work out why it
+        // stopped working is what makes JIT feel stable across runs.
         guard jit_check_debugged() else {
-            logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
+            logStore.log("JIT is off (CS_DEBUGGED clear) — press Enable JIT first.", level: .error)
+            RunStatus.shared.fail("JIT is off. Press Enable JIT, then launch again.")
+            return
+        }
+        guard isDebuggerAttached() else {
+            guard !reattachAttempted else {
+                logStore.log("StikDebug did not re-attach — refusing to launch without a pool.", level: .error)
+                RunStatus.shared.fail("JIT is enabled but StikDebug is detached, and it would not re-attach. Open StikDebug, press Enable JIT, then launch again.")
+                return
+            }
+            logStore.log("JIT is enabled but StikDebug has detached (it does that after "
+                         + "every run) — re-attaching before this launch...", level: .info)
+            RunStatus.shared.begin(preparing: true)
+            StikJITHelper.enableJIT { ok in
+                DispatchQueue.main.async {
+                    guard ok else {
+                        RunStatus.shared.fail("JIT is enabled but StikDebug is detached, and it could not be re-attached. Open StikDebug, press Enable JIT, then launch again.")
+                        return
+                    }
+                    JITState.shared.refresh()
+                    self.runWineFullSequence(reattachAttempted: true)
+                }
+            }
             return
         }
 
         logStore.log("Running full Wine sequence...")
+
+        // Write the override files from the settings screen before anything reads
+        // them, so the two channels cannot disagree — the store also writes on
+        // every change, and this covers the case where the store was seeded from
+        // a restored preferences file after a reinstall.
+        RunStatus.shared.reset()
+        SettingsStore.shared.applyNonFileSettings()
+        let overrides = SettingsStore.shared.syncOverrideFiles()
+        logStore.log(overrides.isEmpty
+            ? "Settings: engine defaults, no overrides"
+            : "Settings: " + overrides.joined(separator: ", "))
+        RunStatus.shared.begin(preparing: true)
 
         // Start a main thread heartbeat to diagnose hang
         var heartbeatCount = 0
@@ -1849,13 +2008,41 @@ struct ContentView: View {
             // so it can be swapped between runs without a rebuild, and deleting
             // the file reverts to the proven default. Clamped to sane values --
             // a typo here would otherwise move the VA floor with it.
-            var poolSizeMB = 896
+            // ml787: that 896 is the A15's number, not necessarily this
+            // device's. Derive it from the measured jetsam budget so a device
+            // with more memory gets a proportionally larger translation cache
+            // instead of the development device's; see DeviceCapabilities for
+            // the ratio and its bounds. At or below a 4096MB budget this
+            // returns exactly 896, so the whole previously-validated device set
+            // is unchanged.
+            logStore.log("Device: \(DeviceCapabilities.summary())")
+            var poolSizeMB = DeviceCapabilities.recommendedPoolMB()
             if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
                let txt = try? String(contentsOf: d.appendingPathComponent("madeira-pool.txt"), encoding: .utf8),
                let mb = Int(txt.trimmingCharacters(in: .whitespacesAndNewlines)),
-               mb >= 256, mb <= 1152 {
+               mb >= 256, mb <= 3072 {
                 poolSizeMB = mb
                 logStore.log("JIT pool overridden to \(mb)MB via madeira-pool.txt")
+            }
+            // ml787: FEX config passthrough. Documents/madeira-fex.txt holds
+            // KEY=VALUE pairs -- one per line, or comma-separated -- each
+            // exported as FEX_<KEY>. The translator's own switches (TSO
+            // lowering, cache sizing, block JIT) are compiled-in defaults today,
+            // so A/B-ing one meant a rebuild per run, and the chip where it
+            // matters most is the one the developer may not own. Same
+            // no-rebuild channel as madeira-dxmt.txt on the renderer side.
+            // Parsing (and its rules) live in DeviceCapabilities, where they
+            // are unit-tested rather than re-derived at each call site.
+            if let txt = documentsFile("madeira-fex.txt") {
+                let config = DeviceCapabilities.fexConfigEntries(from: txt)
+                for (key, value) in config.applied {
+                    setenv(key, value, 1)
+                    logStore.log("FEX config: \(key)=\(value) via madeira-fex.txt")
+                }
+                for entry in config.rejected {
+                    logStore.log("FEX config: skipped malformed entry \"\(entry)\" "
+                                 + "in madeira-fex.txt (want KEY=VALUE)", level: .error)
+                }
             }
             // ml694: W^X A/B switch. Documents/madeira-wx.txt containing "0"
             // disables page demotion for the SAME binary, so the on/off
@@ -1901,19 +2088,71 @@ struct ContentView: View {
                 }
             }
 
-            // ml744: DXMT options passthrough. Documents/madeira-dxmt.txt is copied
-            // verbatim into DXMT_CONFIG, which the renderer's config parser reads as
-            // inline "key=value" lines, so options can be tried without a rebuild.
-            // d3d11.mipClampBC=N is the one that matters for memory: this GPU cannot
-            // sample BC, so those textures are expanded to uncompressed and cost 2-8x
-            // their shipped size.
+            // ml744: DXMT options passthrough. Documents/madeira-dxmt.txt is a
+            // one-option-per-line file that becomes DXMT_CONFIG, which the renderer's
+            // config parser reads as inline "key=value" chunks. d3d11.mipClampBC=N is
+            // the one that matters for memory: this GPU cannot sample BC, so those
+            // textures are expanded to uncompressed and cost 2-8x their shipped size.
+            //
+            // ml803: the file's line breaks are for the reader, not for DXMT. Its
+            // inline form splits on ";" and takes one option per chunk, so a
+            // multi-line body handed over verbatim applies its first line and drops
+            // the rest in silence -- invisible while this file held a single option,
+            // and wrong the moment it held two.
+            var dxmtConfig = ""
             if let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
                let txt = try? String(contentsOf: d.appendingPathComponent("madeira-dxmt.txt"), encoding: .utf8) {
-                let v = txt.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !v.isEmpty {
-                    setenv("DXMT_CONFIG", v, 1)
-                    logStore.log("DXMT config: \(v) via madeira-dxmt.txt")
+                dxmtConfig = DeviceCapabilities.dxmtConfigInline(txt)
+            }
+            if dxmtConfig.isEmpty {
+                // The environment outlives a run: this same process can start a
+                // second one, and Settings removes this file when the user turns
+                // its options back off. Without this, the previous run's renderer
+                // config would silently carry over into the next.
+                unsetenv("DXMT_CONFIG")
+                unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
+            } else {
+                setenv("DXMT_CONFIG", dxmtConfig, 1)
+                logStore.log("DXMT config: \(dxmtConfig) via madeira-dxmt.txt")
+                // MetalFX needs two channels and only one of them is the config
+                // file: the renderer gates the scaler on this variable and would
+                // ignore the factor without it. Deriving the variable from the text
+                // keeps a hand-edited file as capable as the Settings toggle --
+                // today the documented option is inert on its own.
+                if DeviceCapabilities.dxmtConfigArmsMetalFX(dxmtConfig) {
+                    setenv("DXMT_METALFX_SPATIAL_SWAPCHAIN", "1", 1)
+                    logStore.log("MetalFX spatial upscaling armed")
+                } else {
+                    unsetenv("DXMT_METALFX_SPATIAL_SWAPCHAIN")
                 }
+            }
+            // ml803: keep the compiled-shader cache where iOS will not empty it.
+            // DXMT caches every translated and compiled shader keyed by its SHA-1,
+            // but its default location is under Library/Caches, which the system is
+            // free to purge and does not restore -- so a title can recompile
+            // thousands of shaders every launch, and hitch for seconds the first
+            // time each effect appears. Application Support is not purged; the
+            // directory is excluded from backup because the database gets large.
+            // An absolute path is required for DXMT to use it at all.
+            if let cachePath = DeviceCapabilities.DXMTShaderCache.preparedPath() {
+                if let cacheDir = DeviceCapabilities.DXMTShaderCache.directoryURL() {
+                    // A cache that iOS cannot purge is also a cache nothing else
+                    // clears, so a database truncated by a kill mid-write would
+                    // cost a full recompile every launch from then on. Nothing
+                    // here is worth keeping if it cannot be read.
+                    let discarded = DeviceCapabilities.DXMTShaderCache.discardUnreadableDatabases(in: cacheDir)
+                    if !discarded.isEmpty {
+                        logStore.log("Discarded unreadable shader cache: "
+                            + discarded.joined(separator: ", "))
+                    }
+                }
+                setenv(DeviceCapabilities.DXMTShaderCache.pathVariable, cachePath, 1)
+                logStore.log("DXMT shader cache: \(cachePath)")
+            } else {
+                // Never leave a previous run's path in place: if the directory
+                // could not be prepared, DXMT must fall back to its own default
+                // rather than be handed a path that no longer exists.
+                unsetenv(DeviceCapabilities.DXMTShaderCache.pathVariable)
             }
 
             // ml734: Theorafile call tracer. Documents/madeira-tf-trace.txt == "1"
@@ -2095,17 +2334,23 @@ struct ContentView: View {
                 setenv("WINE_IOS_JIT_RX", String(format: "%lx", Int(bitPattern: pool.rx)), 1)
                 setenv("WINE_IOS_JIT_RW", String(format: "%lx", Int(bitPattern: pool.rw)), 1)
                 setenv("WINE_IOS_JIT_SIZE", String(format: "%lx", pool.size), 1)
+                RunStatus.shared.succeed(poolMB: pool.size / 1024 / 1024)
             } else {
                 // ml596: ABORT. "Continuing without it" produced ml595 — a run that
                 // looked like an ARM64EC/optimizer regression but was only Wine
                 // executing with no JIT pool, and it cost a diagnostic cycle plus a
                 // wrong conclusion I wrote into the source. A run without the pool can
                 // only manufacture misleading secondary crashes, so refuse to start one.
+                //
+                // ml794: refuse, but do not exit. The pool allocation no longer
+                // kills the process itself; it reports here so the home screen can
+                // show the failure and the launch button can be pressed again —
+                // placement depends on the memory layout at that instant, and the
+                // layout after a failed attempt is not the one that failed.
                 logStore.log("JIT pool allocation FAILED — not starting Wine.", level: .error)
-                logStore.log("  All placements landed in the forbidden guest 64G window.", level: .info)
-                logStore.log("  Force-quit and relaunch: placement is chosen by the kernel", level: .info)
-                logStore.log("  and depends on current memory layout, so a fresh process", level: .info)
-                logStore.log("  usually lands somewhere valid.", level: .info)
+                logStore.log("  No placement below the guest 64G window fitted the pool.", level: .info)
+                logStore.log("  Press launch again, or lower the JIT pool in Settings.", level: .info)
+                RunStatus.shared.fail("The JIT pool could not be placed below the guest address window. Try again, or lower the JIT pool size in Settings.")
                 logStore.uiPaused = false
                 return
             }
@@ -2590,12 +2835,18 @@ final class TouchControlsModel: ObservableObject {
     /// touch in the window. Nothing responded, and edit mode — whose branch
     /// captured everything — could never be entered to mask it.
     func hitsInteractive(_ p: CGPoint, in bounds: CGRect) -> Bool {
-        // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down.
-        // Padded generously; a few points of slop costs nothing and a missed tap
+        // Top bar: up to three 44pt buttons 10pt apart, centred. Padded
+        // generously; a few points of slop costs nothing and a missed tap
         // costs a build.
-        let barW: CGFloat = 2 * 44 + 10
-        if CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
-                  width: barW + 20, height: 68).contains(p) { return true }
+        //
+        // It starts BELOW the immersive chrome strip, never at y=0: this window
+        // is above the one drawing that strip, so claiming those points would
+        // swallow the taps meant for the exit button and strand the user.
+        let top = GameChromeState.shared.topInset + 10
+        let buttons = editing ? 3 : 2
+        let barW = CGFloat(buttons) * 44 + CGFloat(buttons - 1) * 10
+        if CGRect(x: bounds.midX - barW / 2 - 10, y: top,
+                  width: barW + 20, height: 58).contains(p) { return true }
         guard visible else { return false }
         for c in controls {
             let r = Self.baseDiameter * CGFloat(c.scale) / 2
@@ -2605,6 +2856,32 @@ final class TouchControlsModel: ObservableObject {
         }
         return false
     }
+}
+
+/// Layout state the window-level overlays share with `ContentView`.
+///
+/// `TouchControlsOverlay` and the joystick pad are hosted in their own windows
+/// so they can draw above the Metal surface, which also means they cannot read
+/// any of `ContentView`'s SwiftUI state. They used to infer "the game is on
+/// screen" from `width > height`, which is wrong in one direction that matters:
+/// a device held in portrait with the game fullscreen reported nothing, so
+/// every control vanished. This is the shared answer instead.
+final class GameChromeState: ObservableObject {
+    static let shared = GameChromeState()
+
+    /// Height of the immersive chrome strip. Shared because the touch-controls
+    /// overlay is in another window and must start below it rather than
+    /// drawing over the exit button.
+    static let barHeight: CGFloat = 44
+
+    @Published var immersive = false
+
+    /// Points the immersive layout reserves at the top, 0 when it reserves
+    /// none (tooling, or full-bleed forced immersion). Distinct from
+    /// `immersive` because the overlay's own bar has to move down for the
+    /// chrome strip but must NOT move for a full-bleed landscape, and the two
+    /// are different immersive cases on the same device.
+    @Published var topInset: CGFloat = 0
 }
 
 /// Click-through EXCEPT where a control actually is.
@@ -2619,16 +2896,36 @@ final class ControlsWindow: UIWindow {
         // Edit mode owns the whole screen: drags and the scale pinch must not
         // leak through and swing the camera while you are arranging buttons.
         if m.editing { return super.hitTest(point, with: event) }
-        // Portrait draws nothing here, so it must consume nothing.
-        guard bounds.width > bounds.height else { return nil }
+        // Tooling portrait draws nothing here, so it must consume nothing.
+        // Immersive portrait DOES draw, which is why this is not a plain
+        // orientation test any more.
+        guard GameChromeState.shared.immersive || bounds.width > bounds.height else { return nil }
         guard m.hitsInteractive(point, in: bounds) else { return nil }
+        // The on-screen pad is a HIGHER window (+102). Anything it claims is
+        // already being delivered to it, so this one has to stand down: two
+        // windows can both keep a touch, and a tap on the pad's cross would
+        // otherwise also fire whatever button the user had placed there.
+        if VirtualPadState.shared.claims(point, in: bounds) { return nil }
         return super.hitTest(point, with: event)
+    }
+}
+
+/// Attach (or re-frame) every window-level input overlay together.
+///
+/// Each of these lives in its own `UIWindow` above the game surface and frames
+/// itself from the same scene bounds, so they share one lifetime: re-framing one
+/// on rotation without the others leaves the rest at a portrait size. Called
+/// from `ContentView` where the game view appears and where the orientation
+/// changes, never from a view body.
+enum InputOverlays {
+    static func attach() {
+        TouchControlsHost.attach()
+        VirtualPadHost.attach()
     }
 }
 
 enum TouchControlsHost {
     private static var window: ControlsWindow?
-
     static func attach() {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         guard let scene = scenes.first(where: { $0.activationState == .foregroundActive })
@@ -2657,14 +2954,19 @@ enum TouchControlsHost {
 
 struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
+    /// ml790: the game is on screen in any orientation once immersive is on, so
+    /// the gate cannot be orientation alone. See GameChromeState.
+    @ObservedObject private var chrome = GameChromeState.shared
     @State private var pinchBase: Double?
 
     var body: some View {
         GeometryReader { geo in
-            // Landscape only; portrait keeps the existing key row and joystick.
-            let landscape = geo.size.width > geo.size.height
+            // Drawn wherever there is a game to control: the immersive layout on
+            // any device and orientation, or the old landscape case. Tooling
+            // portrait keeps the key row instead and needs none of this.
+            let gameZone = chrome.immersive || geo.size.width > geo.size.height
             ZStack(alignment: .top) {
-                if landscape {
+                if gameZone {
                     if m.visible || m.editing {
                         ForEach(m.controls) { c in
                             TouchControlButton(control: c, screen: geo.size)
@@ -2702,7 +3004,9 @@ struct TouchControlsOverlay: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .padding(.top, 10)
+        // Below the immersive chrome strip when there is one — it holds the
+        // exit button, and this window is above the one drawing it.
+        .padding(.top, chrome.topInset + 10)
         .animation(.easeInOut(duration: 0.22), value: m.editing)
     }
 
@@ -3028,8 +3332,15 @@ struct MappingPanel: View {
 
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("XInput isn't wired up yet. These save with your layout but do "
-                 + "nothing when pressed — controller support lands with the Wine HID stack.")
+            Text("XInput is not wired up and cannot be from this side: the guest "
+                 + "sees a gamepad only once Wine presents a HID device or an "
+                 + "XInput stub, and that stack is not in this build. So these "
+                 + "save with your layout but do nothing when pressed.\n\n"
+                 + "A PHYSICAL controller does work. It drives the keyboard and "
+                 + "pointer instead — GamepadBridge — so any game that accepts "
+                 + "keyboard and mouse will accept it. Bindings and an off "
+                 + "switch live in madeira-gamepad.txt in the app's Documents "
+                 + "folder.")
                 .font(.system(size: 11))
                 .foregroundStyle(.orange.opacity(0.95))
                 .fixedSize(horizontal: false, vertical: true)

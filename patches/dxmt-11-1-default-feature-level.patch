@@ -1,0 +1,32 @@
+diff --git a/src/d3d11/d3d11.cpp b/src/d3d11/d3d11.cpp
+index 85cbc03..8a9f358 100644
+--- a/src/d3d11/d3d11.cpp
++++ b/src/d3d11/d3d11.cpp
+@@ -26,9 +26,24 @@ D3D11CoreCreateDevice(IDXGIFactory *pFactory, IDXGIAdapter *pAdapter,
+ 
+   // Feature levels to probe if the
+   // application does not specify any.
+-  std::array<D3D_FEATURE_LEVEL, 6> defaultFeatureLevels = {
+-      D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0,
+-      D3D_FEATURE_LEVEL_9_3,  D3D_FEATURE_LEVEL_9_2,  D3D_FEATURE_LEVEL_9_1,
++  //
++  // 11_1 leads the list because this device reports it: maxFeatureLevel below is
++  // 11_1 on Apple7 and later. Leaving it out meant the loop that follows could
++  // never select it for the common case of an application that passes NULL --
++  // such a title was told 11_0 even though every 11_1 interface it might ask for
++  // (ID3D11Device1, ID3D11DeviceContext1/2, ClearView, DiscardView1) and every
++  // 11_1 option D3D11_FEATURE_D3D11_OPTIONS advertises
++  // (MapNoOverwriteOnDynamicConstantBuffer, MapNoOverwriteOnDynamicBufferSRV) is
++  // implemented here. A title that gates its faster buffer-update path or its
++  // feature set on the device's feature level therefore never saw them.
++  //
++  // Safe on older hardware: the selection loop keeps the first entry that is
++  // <= maxFeatureLevel, and 11_1 sorts above 11_0, so a device without Apple7
++  // still falls through to 11_0 exactly as before.
++  std::array<D3D_FEATURE_LEVEL, 7> defaultFeatureLevels = {
++      D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
++      D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3,  D3D_FEATURE_LEVEL_9_2,
++      D3D_FEATURE_LEVEL_9_1,
+   };
+ 
+   if (!pFeatureLevels || !FeatureLevels) {

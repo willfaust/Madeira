@@ -1,0 +1,23 @@
+diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+index 3d63fa254..9e8c99bcd 100644
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -15,6 +15,18 @@
+ #include <cstdint>
+ #include <cstdlib>
+ 
++// iOS-Madeira fix: Arm64.cpp uses Windows VirtualQuery/MEMORY_BASIC_INFORMATION
++// inside FEX_IOS_HOST but the iOS SDK has no <windows.h>. Provide minimal stubs
++// when _WIN32 is not defined so the hosted macos-15 build can compile.
++#if defined(FEX_IOS_HOST) && !defined(_WIN32)
++struct MEMORY_BASIC_INFORMATION { void* BaseAddress; void* AllocationBase; unsigned long AllocationProtect; size_t RegionSize; unsigned long State; unsigned long Protect; unsigned long Type; };
++using LPCVOID = const void*;
++#define MEM_IMAGE 0x1000000
++#define MEM_MAPPED 0x40000
++#define MEM_PRIVATE 0x20000
++inline size_t VirtualQuery(LPCVOID, MEMORY_BASIC_INFORMATION*, size_t) { return 0; }
++#endif
++
+ namespace FEXCore::ArchHelpers::Arm64 {
+ constexpr uint32_t CASPAL_MASK = 0xBF'E0'FC'00;
+ constexpr uint32_t CASPAL_INST = 0x08'60'FC'00;

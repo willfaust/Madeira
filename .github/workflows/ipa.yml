@@ -1,0 +1,313 @@
+name: Build IPA (hosted, unsigned)
+
+# Builds the 15 archives the link step needs, then the app, then the IPA —
+# entirely on a GitHub-hosted macOS runner, with no Mac of your own and no
+# pre-published release assets.
+#
+# On a clean checkout the link cannot even start: the submodules are empty and
+# every one of the 15 archives is a gitignored build product. This workflow
+# produces all of them from the pinned sources first (FEX, GnuTLS stack, Wine
+# unix libs, LLVM 15 for iOS, DXMT), validates each archive, and only then
+# runs xcodebuild. Caches make the second and later runs short.
+#
+# The first run is long: it compiles LLVM 15 and ~150 Wine sources. The job cap
+# sits under GitHub's 360-minute maximum with headroom for a cold cache.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [jit-disconnect-hardening]
+    paths:
+      - ".github/workflows/ipa.yml"
+      - "app/**"
+      - "scripts/**"
+      - "build/**"
+      - "tools/**"
+      - "patches/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_JOBS: 3
+      # The value the LLVM, DXMT and FEX recipes were proven with. FreeType,
+      # GnuTLS and the Wine unix libs hardcode 17.0 in their own scripts and
+      # ignore this, so it does not silently retarget the Wine kernel layer.
+      IOS_DEPLOYMENT_TARGET: "18.0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Select Xcode and install build tools
+        run: |
+          set -euo pipefail
+          # ContentView.swift calls glassEffect() behind #available(iOS 26.0),
+          # so the iOS 26 SDK is required to compile it at all.
+          NEWEST="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -n "$NEWEST" ]]; then
+            sudo xcode-select -s "$NEWEST/Contents/Developer"
+          fi
+          xcodebuild -version
+          SDK="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iPhoneOS SDK: $SDK"
+          if [[ "${SDK%%.*}" -lt 26 ]]; then
+            echo "ERROR: this app needs the iOS 26 SDK for glassEffect(); found $SDK." >&2
+            exit 1
+          fi
+          brew install cmake ninja meson pkg-config bison flex sevenzip llvm
+          for package in llvm bison flex; do
+            echo "$(brew --prefix "$package")/bin" >> "$GITHUB_PATH"
+          done
+
+      - name: Repository gates
+        run: tools/check-all.sh
+
+      - name: Fetch submodules (FEX, Wine, DXMT)
+        run: git submodule update --init --recursive --depth 1
+
+      - name: Record dependency revisions
+        id: revisions
+        run: |
+          echo "fex=$(git -C FEX rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "wine=$(git -C wine rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "dxmt=$(git -C research/dxmt rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "deployment=$IOS_DEPLOYMENT_TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Restore native dependency cache
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            FEX/build-ios
+            toolchains/gnutls-ios
+            build/gnutls-ios/obj
+            build/freetype-ios/build
+            wine/build-macos
+            toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: ipa-native-${{ runner.arch }}-${{ steps.revisions.outputs.fex }}-${{ steps.revisions.outputs.wine }}-${{ steps.revisions.outputs.dxmt }}-${{ hashFiles('scripts/build-fex-ios.sh', 'scripts/prepare-wine-ios.sh', 'patches/fex-ios-arm64-mbi.patch', 'build/gnutls-ios/build.sh', 'build/gnutls-ios/src/SHA256SUMS', 'build/freetype-ios/build.sh') }}
+
+      - name: Build and validate FEX
+        run: |
+          set -euo pipefail
+          libraries=(
+            FEXCore/Source/libFEXCore.a FEXCore/Source/libFEXCore_Base.a
+            FEXCore/Source/libJemallocLibs.a External/fmt/libfmt.a
+            External/cephes/libcephes_128bit.a
+            External/xxhash/cmake_unofficial/libxxhash.a
+            External/SoftFloat-3e/libsoftfloat_3e.a
+          )
+          valid=true
+          for library in "${libraries[@]}"; do
+            python3 tools/validate-ios-bundle.py --archive "FEX/build-ios/$library" || valid=false
+          done
+          if [[ "$valid" != true ]]; then
+            bash scripts/build-fex-ios.sh 2>&1 | tee fex-build.log
+          fi
+          for library in "${libraries[@]}"; do
+            python3 tools/validate-ios-bundle.py --archive "FEX/build-ios/$library"
+          done
+
+      - name: Build and stage GnuTLS stack
+        run: |
+          set -euo pipefail
+          valid=true
+          for library in gmp nettle hogweed gnutls; do
+            if [[ -f "toolchains/gnutls-ios/lib/lib$library.a" ]]; then
+              python3 tools/validate-ios-bundle.py --archive "toolchains/gnutls-ios/lib/lib$library.a" || valid=false
+            else
+              echo "No cached lib$library.a; building the GnuTLS stack from source."
+              valid=false
+            fi
+          done
+          [[ -s toolchains/gnutls-ios/include/gnutls/gnutls.h ]] || valid=false
+          if [[ "$valid" != true ]]; then
+            rm -f build/gnutls-ios/obj/{gmp,nettle,gnutls}.done
+            bash build/gnutls-ios/build.sh 2>&1 | tee gnutls-build.log
+          fi
+          for library in gmp nettle hogweed gnutls; do
+            python3 tools/validate-ios-bundle.py --archive "toolchains/gnutls-ios/lib/lib$library.a"
+            cp "toolchains/gnutls-ios/lib/lib$library.a" app/Madeira/
+          done
+
+      - name: Prepare Wine toolchain, headers and FreeType
+        run: bash scripts/prepare-wine-ios.sh 2>&1 | tee wine-prepare-build.log
+
+      - name: Save native dependency cache
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            FEX/build-ios
+            toolchains/gnutls-ios
+            build/gnutls-ios/obj
+            build/freetype-ios/build
+            wine/build-macos
+            toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+
+      - name: Restore Wine unix library cache
+        id: wine-unix-cache
+        uses: actions/cache/restore@v4
+        with:
+          # Final archives only: the build scripts recompile unconditionally
+          # from a clean tree on a miss, so object dirs buy nothing here.
+          path: |
+            app/Madeira/libwineserver.a
+            app/Madeira/libntdll_unix.a
+            app/Madeira/libwin32u_unix.a
+          key: ipa-wineunix-${{ runner.arch }}-${{ steps.revisions.outputs.wine }}-${{ hashFiles('build/wineserver/**', 'build/ntdll-unix/**', 'build/win32u-unix/**', 'build/crypto-unix/**', 'build/freetype-ios/build.sh', 'build/gnutls-ios/build.sh', 'scripts/prepare-wine-ios.sh', 'tools/validate-ios-bundle.py', 'tools/ar-macho-symbols.py') }}
+
+      - name: Build Wine server
+        if: steps.wine-unix-cache.outputs.cache-hit != 'true'
+        run: bash build/wineserver/build.sh 2>&1 | tee wineserver-build.log
+
+      - name: Build Wine ntdll and crypto/network unixlibs
+        if: steps.wine-unix-cache.outputs.cache-hit != 'true'
+        run: bash build/ntdll-unix/build.sh 2>&1 | tee ntdll-build.log
+
+      - name: Build Wine win32u
+        if: steps.wine-unix-cache.outputs.cache-hit != 'true'
+        run: bash build/win32u-unix/build.sh 2>&1 | tee win32u-build.log
+
+      - name: Validate Wine unix libraries
+        run: |
+          set -euo pipefail
+          for library in wineserver ntdll_unix win32u_unix; do
+            python3 tools/validate-ios-bundle.py --archive "app/Madeira/lib$library.a"
+          done
+
+      - name: Save Wine unix libraries
+        if: steps.wine-unix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            app/Madeira/libwineserver.a
+            app/Madeira/libntdll_unix.a
+            app/Madeira/libwin32u_unix.a
+          key: ${{ steps.wine-unix-cache.outputs.cache-primary-key }}
+
+      - name: Fetch and validate Microsoft runtime inputs
+        run: bash tools/fetch-vcruntime.sh 2>&1 | tee vcruntime-build.log
+
+      - name: Restore LLVM source and host/iOS builds
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+          key: ipa-llvm15-${{ runner.arch }}-ios${{ steps.revisions.outputs.deployment }}-${{ hashFiles('build/dxmt-ios/build-llvm.sh') }}
+
+      - name: Build LLVM for iOS
+        run: bash build/dxmt-ios/build-llvm.sh 2>&1 | tee llvm-build.log
+
+      - name: Save LLVM before compiling DXMT
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
+
+      - name: Restore DXMT builds
+        id: dxmt-cache
+        uses: actions/cache/restore@v4
+        with:
+          # Final output only: the native build consumes LLVM archives, so the
+          # LLVM recipe is a key input alongside the DXMT and Wine revisions.
+          #
+          # The four PE DLLs are deliberately NOT cached. They are committed
+          # and shipped with the app, and a cache restore would write over the
+          # checked-in copies with whatever an earlier run happened to build.
+          path: |
+            build/dxmt-ios/libdxmt_combined.a
+            app/Madeira/libdxmt_combined.a
+          key: ipa-dxmt-${{ runner.arch }}-ios${{ steps.revisions.outputs.deployment }}-${{ steps.revisions.outputs.dxmt }}-${{ steps.revisions.outputs.wine }}-${{ hashFiles('build/dxmt-ios/*.sh', 'build/dxmt-ios/*.md', 'scripts/prepare-wine-ios.sh', 'tools/validate-ios-bundle.py') }}
+
+      - name: Build the DXMT native library
+        if: steps.dxmt-cache.outputs.cache-hit != 'true'
+        run: bash build/dxmt-ios/build-all.sh 2>&1 | tee dxmt-build.log
+
+      - name: Validate DXMT output and the shipped PE modules
+        run: |
+          set -euo pipefail
+          python3 tools/validate-ios-bundle.py --archive app/Madeira/libdxmt_combined.a
+          for arch in aarch64-windows arm64ec-windows; do
+            for dll in d3d11 dxgi winemetal d3d10core; do
+              [[ -s "app/Madeira/$arch/$dll.dll" ]] || { echo "ERROR: DXMT PE module not shipped: $arch/$dll.dll" >&2; exit 1; }
+            done
+          done
+
+      - name: Save the DXMT native library
+        if: steps.dxmt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/dxmt-ios/libdxmt_combined.a
+            app/Madeira/libdxmt_combined.a
+          key: ${{ steps.dxmt-cache.outputs.cache-primary-key }}
+
+      - name: Validate every link input before Xcode runs
+        run: |
+          set -euo pipefail
+          for library in wineserver ntdll_unix win32u_unix dxmt_combined gmp nettle hogweed gnutls; do
+            python3 tools/validate-ios-bundle.py --archive "app/Madeira/lib$library.a"
+          done
+          tools/check-prefix-template.sh
+
+      - name: Build and package the unsigned IPA
+        run: scripts/make-ipa.sh
+
+      - name: Validate the packaged bundle
+        run: python3 tools/validate-ios-bundle.py --ipa Madeira-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v5
+        with:
+          name: Madeira-unsigned-ipa
+          path: Madeira-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: ipa-build-logs
+          path: |
+            *-build.log
+            ${{ runner.temp }}/madeira-derived/Logs/Build/**
+            build/**/obj/*.err
+            build/**/obj/err-*.txt
+            wine-configure.log
+            wine-configure-arm64ec.log
+            wine/build-macos/config.log
+            wine/build-macos-arm64ec/config.log
+            wine-headers-build.log
+            wine-headers-build-arm64ec.log
+            wine-dxmt-pe-build.log
+            wine-dxmt-pe-build-arm64ec.log
+            freetype-build.log
+            build/gnutls-ios/obj/*.log
+            toolchains/llvm-*/CMakeFiles/CMakeConfigureLog.yaml
+            build/dxmt-ios/pe/meson-logs/**
+            build/dxmt-ios/pe-arm64ec/meson-logs/**
+          if-no-files-found: warn
+          retention-days: 14

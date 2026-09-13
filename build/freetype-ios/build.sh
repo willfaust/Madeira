@@ -3,16 +3,38 @@
 # which compiles freetype_ios.c against these headers and merges
 # build/libfreetype.a into libwin32u_unix.a (no Xcode project changes).
 #
-# Source: shallow clone of freetype 2.13.3 in research/freetype
-#   git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git research/freetype
+# Source: pinned FreeType 2.13.3 commit in research/freetype.
 # All optional deps disabled — fonts are plain TTFs from wine/fonts/.
-set -e
+set -euo pipefail
 
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 SRC="$REPO_ROOT/research/freetype"
+FREETYPE_COMMIT=42608f77f20749dd6ddc9e0536788eaad70ea4b5
 
-[ -d "$SRC" ] || { echo "ERROR: clone freetype first (see header)"; exit 1; }
+if [[ ! -d "$SRC" ]]; then
+  mkdir -p "$REPO_ROOT/research"
+  download="$(mktemp -d "${TMPDIR:-/tmp}/freetype-fetch.XXXXXX")"
+  trap 'rm -rf "$download"' EXIT
+  git init "$download"
+  git -C "$download" fetch --depth 1 https://github.com/freetype/freetype.git "$FREETYPE_COMMIT"
+  git -C "$download" checkout --detach FETCH_HEAD
+  mv "$download" "$SRC"
+  trap - EXIT
+fi
+if [[ ! -e "$SRC/.git" ]] || [[ "$(git -C "$SRC" rev-parse HEAD)" != "$FREETYPE_COMMIT" ]]; then
+  echo "ERROR: $SRC must be a checkout of FreeType commit $FREETYPE_COMMIT." >&2
+  exit 1
+fi
+
+JOBS="${JOBS:-${BUILD_JOBS:-}}"
+if [[ -z "$JOBS" ]]; then
+    if command -v sysctl >/dev/null && sysctl -n hw.ncpu >/dev/null 2>&1; then
+        JOBS="$(sysctl -n hw.ncpu)"
+    else
+        JOBS=4
+    fi
+fi
 
 cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
   -DCMAKE_SYSTEM_NAME=iOS \
@@ -25,5 +47,6 @@ cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
   -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BROTLI=ON \
   -DCMAKE_C_FLAGS="-fno-stack-protector"
 
-cmake --build "$BUILD_DIR/build" -j8
+cmake --build "$BUILD_DIR/build" --parallel "$JOBS"
+python3 "$REPO_ROOT/tools/validate-ios-bundle.py" --archive "$BUILD_DIR/build/libfreetype.a"
 echo "Done: $BUILD_DIR/build/libfreetype.a"

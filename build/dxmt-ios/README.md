@@ -17,7 +17,10 @@ pointing at our fork [willfaust/dxmt](https://github.com/willfaust/dxmt),
   `app/Madeira/aarch64-windows/`. Aarch64 Windows PE, built via
   llvm-mingw, loaded by Wine inside Madeira.
 
-Both are gitignored — rebuild via the steps below.
+`libdxmt_combined.a` is gitignored. The four PE DLLs are **tracked**: they are
+shipped resources, and a build step that silently skipped them left the tree
+holding binaries nobody had rebuilt. Replace them when the renderer source
+changes; `build-all.sh` decides when that is (see AGENTS.md).
 
 ## Prerequisites
 

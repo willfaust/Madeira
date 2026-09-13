@@ -1,26 +1,21 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 WINE_SRC="$REPO_ROOT/wine"
+command -v xcrun >/dev/null || { echo "ERROR: Wine iOS builds require macOS with Xcode (xcrun not found)." >&2; exit 1; }
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 APP_LIB="$REPO_ROOT/app/Madeira/libwineserver.a"
 SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
+[[ -s "$WINE_SRC/build-macos/include/config.h" ]] || {
+    echo "ERROR: generated Wine config.h missing; run scripts/prepare-wine-ios.sh." >&2
+    exit 1
+}
 
 # Object files and library go in build dir
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
-
-# Copy the base library if we don't have one yet
-if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
-    if [ -f "$APP_LIB" ]; then
-        cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
-    else
-        echo "ERROR: No base libwineserver.a found"
-        exit 1
-    fi
-fi
 
 CC_FLAGS=(
     -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
@@ -65,9 +60,7 @@ PATCHED_FILES=(
     "mach_ios:mach_ios.c:mach.o"
     "unicode_ios:unicode_ios.c:unicode.o"
     "fd_ios:fd_ios.c:fd.o"
-    # ml574: object.c must appear in BOTH lists — SOURCES compiles it,
-    # REPLACEMENTS inserts it into the prebuilt base archive. An entry in
-    # only the first compiles, prints OK, and is silently discarded.
+    # Build these patched upstream files directly from the pinned submodule.
     "object:$WINE_SRC/server/object.c:object.o"
     # ml575: async.c carries the free_async_queue UAF fix.
     "async:$WINE_SRC/server/async.c:async.o"
@@ -105,80 +98,59 @@ else
     echo "FAILED"; cat "$OBJ_DIR/err-kill.txt"; exit 1
 fi
 
+# Rebuild every server translation unit. The old script only patched a prebuilt
+# archive, silently depending on objects that were not reproducible from checkout.
+# Accept the old selector names, but always perform a complete rebuild.
 case "${1:-all}" in
-    all)
-        echo "=== Building all patched wineserver files ==="
-        for entry in "${PATCHED_FILES[@]}"; do
-            IFS=: read -r name src old_obj <<< "$entry"
-            # Support absolute paths (e.g. upstream files via $WINE_SRC)
-            if [[ "$src" == /* ]]; then
-                compile_one "$src" "$name"
-            else
-                compile_one "$BUILD_DIR/$src" "$name"
-            fi
-        done
-        ;;
-    request|main|mach|unicode)
-        for entry in "${PATCHED_FILES[@]}"; do
-            IFS=: read -r name src old_obj <<< "$entry"
-            if [[ "$name" == "${1}_ios" || "$name" == "${1}" ]]; then
-                compile_one "$BUILD_DIR/$src" "$name"
-            fi
-        done
-        ;;
-    *)
-        echo "Usage: $0 [all|request|main|mach|unicode]"
-        exit 1
-        ;;
+    all|request|main|mach|unicode) ;;
+    *) echo "Usage: $0 [all|request|main|mach|unicode]" >&2; exit 1 ;;
 esac
+SOURCE_LIST="$OBJ_DIR/server-sources.txt"
+python3 - "$WINE_SRC/server/Makefile.in" > "$SOURCE_LIST" <<'PY_SOURCES'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text().replace("\\\n", " ")
+match = re.search(r"^SOURCES\s*=([^\n]+)", text, re.M)
+if not match:
+    raise SystemExit("Cannot read Wine server source list")
+sources = [name for name in match[1].split() if name.endswith(".c")]
+if not sources or any("/" in name for name in sources):
+    raise SystemExit("Unexpected Wine server source list")
+print("\n".join(sources))
+PY_SOURCES
+OBJECTS=("$OBJ_DIR/wineserver_ios_kill.o")
+while IFS= read -r source; do
+    name="${source%.c}"
+    selected="$WINE_SRC/server/$source"
+    for entry in "${PATCHED_FILES[@]}"; do
+        IFS=: read -r patched_name patched_source replaced <<< "$entry"
+        if [[ "$replaced" == "$name.o" ]]; then
+            selected="$patched_source"
+            [[ "$selected" == /* ]] || selected="$BUILD_DIR/$selected"
+            break
+        fi
+    done
+    compile_one "$selected" "$name"
+    OBJECTS+=("$OBJ_DIR/$name.o")
+done < "$SOURCE_LIST"
+compile_one "$BUILD_DIR/wine_log_ios.c" wine_log_ios
+OBJECTS+=("$OBJ_DIR/wine_log_ios.o")
+# Build into a fresh archive; stale or removed source objects must not survive.
+rm -f "$OBJ_DIR/libwineserver.a"
+xcrun --sdk iphoneos ar rcs "$OBJ_DIR/libwineserver.a" "${OBJECTS[@]}"
 
-echo ""
-echo "=== Updating libwineserver.a ==="
-
-# Map of patched .o files to the original .o names they replace
-# Pairs of "new_obj_filename:old_obj_filename_in_archive". Plain array
-# iteration to avoid bash assoc-array word-splitting issues seen in zsh-launched
-# build environments.
-REPLACEMENTS=(
-    "wine_log_ios.o:wine_log_ios.o"
-    "request_ios.o:request.o"
-    "main_ios.o:main.o"
-    "mach_ios.o:mach.o"
-    "unicode_ios.o:unicode.o"
-    "fd_ios.o:fd.o"
-    "process_ios.o:process.o"
-    "wineserver_ios_kill.o:wineserver_ios_kill.o"
-    "window.o:window.o"
-    "user.o:user.o"
-    "class.o:class.o"
-    "region.o:region.o"
-    "queue.o:queue.o"
-    "mapping.o:mapping.o"
-    "winstation.o:winstation.o"
-    "thread.o:thread.o"
-    "sock.o:sock.o"
-    "object.o:object.o"
-    "async.o:async.o"
-)
-
-for entry in "${REPLACEMENTS[@]}"; do
-    new_obj="${entry%%:*}"
-    old_obj="${entry##*:}"
-    if [ -f "$OBJ_DIR/$new_obj" ]; then
-        ar d "$OBJ_DIR/libwineserver.a" "$old_obj" 2>/dev/null || true
-        ar d "$OBJ_DIR/libwineserver.a" "$new_obj" 2>/dev/null || true
-        ar r "$OBJ_DIR/libwineserver.a" "$OBJ_DIR/$new_obj"
-    fi
-done
-
-echo ""
 echo "=== Renaming colliding symbols in every .o (objcopy sweep) ==="
 # Renames internal-to-archive: extract every .o, rename the 10 symbols
 # we know collide with win32u-unix, repackage. Affects definitions AND
 # references uniformly, so cross-file calls inside wineserver still
 # resolve. Externals (win32u, etc.) only see the ws_-prefixed names.
-OBJCOPY=$(command -v llvm-objcopy || echo /opt/homebrew/opt/llvm/bin/llvm-objcopy)
-[ -x "$OBJCOPY" ] || OBJCOPY=/opt/homebrew/Cellar/llvm/22.1.0/bin/llvm-objcopy
+OBJCOPY="${OBJCOPY:-$(command -v llvm-objcopy || true)}"
+if [ -z "$OBJCOPY" ] && command -v brew >/dev/null 2>&1; then
+    OBJCOPY="$(brew --prefix llvm)/bin/llvm-objcopy"
+fi
+if [ ! -x "$OBJCOPY" ]; then
+    echo "ERROR: llvm-objcopy is required. Install LLVM and add its bin directory to PATH, or set OBJCOPY." >&2
+    exit 1
+fi
 COLLISIONS=(
     alloc_user_handle free_user_handle get_virtual_screen_rect
     destroy_thread_windows get_window_thread is_desktop_class
@@ -211,15 +183,16 @@ for s in "${COLLISIONS[@]}"; do
 done
 TMP_RENAME_DIR="$OBJ_DIR/rename"
 rm -rf "$TMP_RENAME_DIR" && mkdir -p "$TMP_RENAME_DIR"
-(cd "$TMP_RENAME_DIR" && ar x "$OBJ_DIR/libwineserver.a")
+(cd "$TMP_RENAME_DIR" && xcrun --sdk iphoneos ar x "$OBJ_DIR/libwineserver.a")
 for f in "$TMP_RENAME_DIR"/*.o; do
     "$OBJCOPY" "${RENAME_ARGS[@]}" "$f"
 done
 rm "$OBJ_DIR/libwineserver.a"
-ar rcs "$OBJ_DIR/libwineserver.a" "$TMP_RENAME_DIR"/*.o
+xcrun --sdk iphoneos ar rcs "$OBJ_DIR/libwineserver.a" "$TMP_RENAME_DIR"/*.o
 rm -rf "$TMP_RENAME_DIR"
 echo "  symbol rename + repack OK"
 
 echo "Copying to app..."
+python3 "$REPO_ROOT/tools/validate-ios-bundle.py" --archive "$OBJ_DIR/libwineserver.a"
 cp "$OBJ_DIR/libwineserver.a" "$APP_LIB"
 echo "Done! libwineserver.a: $(wc -c < "$APP_LIB" | tr -d ' ') bytes"

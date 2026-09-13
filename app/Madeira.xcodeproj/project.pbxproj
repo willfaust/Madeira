@@ -31,11 +31,22 @@
 		A1000033 /* wine_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000034 /* wine_stubs.c */; };
 		A1000034 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000035 /* IOKit.framework */; };
 		A1000035 /* StikJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* StikJITHelper.swift */; };
+		A10000A0 /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A0 /* DeviceCapabilities.swift */; };
+		A10000A1 /* AppLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A1 /* AppLayout.swift */; };
+		A10000A2 /* GamepadMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A2 /* GamepadMap.swift */; };
+		A10000A3 /* GamepadBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A3 /* GamepadBridge.swift */; };
+		A10000A4 /* SettingsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A4 /* SettingsModel.swift */; };
+		A10000A5 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A5 /* SettingsStore.swift */; };
+		A10000A6 /* MadeiraUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A6 /* MadeiraUI.swift */; };
+		A10000A7 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A7 /* SettingsView.swift */; };
+		A10000A9 /* VirtualPadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A9 /* VirtualPadView.swift */; };
+		A10000A8 /* VirtualPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000A8 /* VirtualPad.swift */; };
 		A1000040 /* prefix-template.tar.gz in Resources */ = {isa = PBXBuildFile; fileRef = A2000040 /* prefix-template.tar.gz */; };
 		A1000041 /* PrefixExtractor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000041 /* PrefixExtractor.c */; };
 		A1000042 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000042 /* libz.tbd */; };
 		A1000050 /* IOSDisplayShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000050 /* IOSDisplayShim.m */; };
 		A1000051 /* libdxmt_combined.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000051 /* libdxmt_combined.a */; };
+		A1000038 /* GameController.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000038 /* GameController.framework */; };
 		A1000052 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000052 /* Metal.framework */; };
 		A1000053 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000053 /* QuartzCore.framework */; };
 		A1000054 /* MetalFX.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000054 /* MetalFX.framework */; };
@@ -87,12 +98,23 @@
 		A2000034 /* wine_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = wine_stubs.c; sourceTree = "<group>"; };
 		A2000035 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
 		A2000036 /* StikJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StikJITHelper.swift; sourceTree = "<group>"; };
+		A20000A0 /* DeviceCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCapabilities.swift; sourceTree = "<group>"; };
+		A20000A1 /* AppLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLayout.swift; sourceTree = "<group>"; };
+		A20000A2 /* GamepadMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamepadMap.swift; sourceTree = "<group>"; };
+		A20000A3 /* GamepadBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamepadBridge.swift; sourceTree = "<group>"; };
+		A20000A4 /* SettingsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsModel.swift; sourceTree = "<group>"; };
+		A20000A5 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
+		A20000A6 /* MadeiraUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraUI.swift; sourceTree = "<group>"; };
+		A20000A7 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A20000A9 /* VirtualPadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualPadView.swift; sourceTree = "<group>"; };
+		A20000A8 /* VirtualPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualPad.swift; sourceTree = "<group>"; };
 		A2000040 /* prefix-template.tar.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "prefix-template.tar.gz"; sourceTree = "<group>"; };
 		A2000041 /* PrefixExtractor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PrefixExtractor.c; sourceTree = "<group>"; };
 		A2000042 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
 		A2000043 /* PrefixExtractor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrefixExtractor.h; sourceTree = "<group>"; };
 		A2000050 /* IOSDisplayShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = IOSDisplayShim.m; sourceTree = "<group>"; };
 		A2000051 /* libdxmt_combined.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libdxmt_combined.a; sourceTree = "<group>"; };
+		A2000038 /* GameController.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameController.framework; path = System/Library/Frameworks/GameController.framework; sourceTree = SDKROOT; };
 		A2000052 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		A2000053 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		A2000054 /* MetalFX.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalFX.framework; path = System/Library/Frameworks/MetalFX.framework; sourceTree = SDKROOT; };
@@ -131,6 +153,7 @@
 				A1000034 /* IOKit.framework in Frameworks */,
 				A1000042 /* libz.tbd in Frameworks */,
 				A1000051 /* libdxmt_combined.a in Frameworks */,
+				A1000038 /* GameController.framework in Frameworks */,
 				A1000052 /* Metal.framework in Frameworks */,
 				A1000053 /* QuartzCore.framework in Frameworks */,
 				A1000054 /* MetalFX.framework in Frameworks */,
@@ -174,6 +197,16 @@
 				A2000031 /* WineProcessBridge.h */,
 				A200000A /* EntitlementChecker.swift */,
 				A2000036 /* StikJITHelper.swift */,
+				A20000A0 /* DeviceCapabilities.swift */,
+				A20000A1 /* AppLayout.swift */,
+				A20000A2 /* GamepadMap.swift */,
+				A20000A3 /* GamepadBridge.swift */,
+				A20000A4 /* SettingsModel.swift */,
+				A20000A5 /* SettingsStore.swift */,
+				A20000A6 /* MadeiraUI.swift */,
+				A20000A7 /* SettingsView.swift */,
+				A20000A9 /* VirtualPadView.swift */,
+				A20000A8 /* VirtualPad.swift */,
 				A2000021 /* nls */,
 				A2000033 /* aarch64-windows */,
 				A20000F1 /* legal */,
@@ -219,6 +252,7 @@
 				A2000035 /* IOKit.framework */,
 				A2000042 /* libz.tbd */,
 				A2000051 /* libdxmt_combined.a */,
+				A2000038 /* GameController.framework */,
 				A2000052 /* Metal.framework */,
 				A2000053 /* QuartzCore.framework */,
 				A2000054 /* MetalFX.framework */,
@@ -323,6 +357,16 @@
 				A1000050 /* IOSDisplayShim.m in Sources */,
 				A1000070 /* Winios/Winios.m in Sources */,
 				A1000035 /* StikJITHelper.swift in Sources */,
+				A10000A0 /* DeviceCapabilities.swift in Sources */,
+				A10000A1 /* AppLayout.swift in Sources */,
+				A10000A2 /* GamepadMap.swift in Sources */,
+				A10000A3 /* GamepadBridge.swift in Sources */,
+				A10000A4 /* SettingsModel.swift in Sources */,
+				A10000A5 /* SettingsStore.swift in Sources */,
+				A10000A6 /* MadeiraUI.swift in Sources */,
+				A10000A7 /* SettingsView.swift in Sources */,
+				A10000A9 /* VirtualPadView.swift in Sources */,
+				A10000A8 /* VirtualPad.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -430,7 +474,7 @@
 					"$(SRCROOT)/Madeira",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.willfaust.mythicemu;
+				PRODUCT_BUNDLE_IDENTIFIER = com.madeira.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -481,7 +525,7 @@
 					"$(SRCROOT)/Madeira",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.willfaust.mythicemu;
+				PRODUCT_BUNDLE_IDENTIFIER = com.madeira.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;

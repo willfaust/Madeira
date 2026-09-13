@@ -1,0 +1,42 @@
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 3cb10ab..54d7f59 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -1389,9 +1389,18 @@ public:
+                 IDXGISurface **surface) override{IMPLEMENT_ME}
+ 
+   HRESULT STDMETHODCALLTYPE
+-      QueryResourceResidency(IUnknown *const *resources,
+-                             DXGI_RESIDENCY *residency,
+-                             UINT resource_count) override{IMPLEMENT_ME}
++  QueryResourceResidency(IUnknown *const *resources, DXGI_RESIDENCY *residency,
++                         UINT resource_count) override {
++    /* Everything lives in unified memory, so every resource is resident; the
++     * answer falls out of the memory model and needs no look at the resource
++     * pointers themselves. This sits on the base IDXGIDevice, so it is
++     * reachable by any title that manages memory, not just D3D11.1 users. */
++    if (residency == nullptr)
++      return E_INVALIDARG;
++    for (UINT i = 0; i < resource_count; i++)
++      residency[i] = DXGI_RESIDENCY_FULLY_RESIDENT;
++    return S_OK;
++  }
+ 
+   HRESULT STDMETHODCALLTYPE SetGPUThreadPriority(INT Priority) override {
+     if (Priority < -7 || Priority > 7)
+@@ -1428,7 +1437,14 @@ public:
+   HRESULT STDMETHODCALLTYPE ReclaimResources(UINT NumResources,
+                                              IDXGIResource *const *ppResources,
+                                              WINBOOL *pDiscarded) override {
+-    // stub
++    /* OfferResources is a no-op here, so nothing was discarded while the
++     * caller held the resources and the honest answer is FALSE in every slot.
++     * pDiscarded is an array the caller reads one entry at a time; returning
++     * S_OK without touching it hands back whatever was in its buffer. */
++    if (NumResources && !pDiscarded)
++      return E_INVALIDARG;
++    for (UINT i = 0; i < NumResources; i++)
++      pDiscarded[i] = FALSE;
+     return S_OK;
+   }
+ 
