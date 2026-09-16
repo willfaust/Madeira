@@ -25,3 +25,6 @@ int madeira_get_vsync_locked(void);
 
 /* ml526: startup phase timeline (Winios.m) */
 void winios_phase(const char *name);
+
+/* Host gamepads for XInput (xinput_host_ios.c) — GamepadBridge.swift */
+#import "MadeiraPad.h"

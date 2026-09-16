@@ -1,0 +1,285 @@
+diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
+index a175e54..f7a0dd6 100644
+--- a/dlls/xinput1_3/main.c
++++ b/dlls/xinput1_3/main.c
+@@ -43,6 +43,7 @@
+ #include "xinput.h"
+ 
+ #include "wine/debug.h"
++#include "unixlib.h"
+ 
+ DEFINE_GUID(GUID_DEVINTERFACE_WINEXINPUT,0x6c53d5fd,0x6480,0x440f,0xb6,0x18,0x47,0x67,0x50,0xc5,0xe1,0xa6);
+ 
+@@ -61,6 +62,8 @@ struct xinput_controller
+     HANDLE device;
+     WCHAR device_path[MAX_PATH];
+     BOOL enabled;
++    USHORT host_vendor_id;
++    USHORT host_product_id;
+ 
+     struct
+     {
+@@ -123,6 +126,112 @@ static HMODULE xinput_instance;
+ static HANDLE start_event;
+ static HANDLE update_event;
+ 
++/* iOS-Madeira: host pad mode. When the process has an xinput unixlib that
++ * answers the probe (Madeira links one, fed by GameController.framework),
++ * pads come from the host instead of the HID stack: there is no winebus on
++ * iOS, so the HID path would never find a device. Elsewhere the probe fails
++ * and nothing below is used. */
++static BOOL host_mode;
++static const HANDLE host_device = (HANDLE)(ULONG_PTR)0x6d616465; /* never opened */
++
++static void host_init(void)
++{
++    struct xinput_host_probe_params params = {0};
++
++    if (__wine_init_unix_call()) return;
++    if (WINE_UNIX_CALL(unix_xinput_host_probe, &params)) return;
++    if (params.abi != XINPUT_HOST_ABI)
++    {
++        ERR("host pad abi %u, expected %u; using HID\n", params.abi, XINPUT_HOST_ABI);
++        return;
++    }
++    TRACE("using host pads\n");
++    host_mode = TRUE;
++}
++
++static DWORD host_set_state(struct xinput_controller *controller, XINPUT_VIBRATION *state)
++{
++    struct xinput_host_vibration_params params = {.index = controller - controllers};
++
++    if (!(controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED)) return ERROR_SUCCESS;
++
++    controller->vibration = *state;
++    if (!controller->enabled) return ERROR_SUCCESS;
++
++    params.left_motor = state->wLeftMotorSpeed;
++    params.right_motor = state->wRightMotorSpeed;
++    WINE_UNIX_CALL(unix_xinput_host_set_vibration, &params);
++    return ERROR_SUCCESS;
++}
++
++/* Called with controller->crit held. Pulls the host pad into the slot and
++ * makes controller->device reflect whether it is connected, so the rest of
++ * the file can keep treating a non-NULL device as "present". */
++static void host_sync(struct xinput_controller *controller)
++{
++    struct xinput_host_state_params params = {.index = controller - controllers};
++
++    if (WINE_UNIX_CALL(unix_xinput_host_get_state, &params) || !params.connected)
++    {
++        controller->device = NULL;
++        return;
++    }
++
++    if (!controller->device)
++    {
++        memset(&controller->caps, 0, sizeof(controller->caps));
++        controller->caps.Type = XINPUT_DEVTYPE_GAMEPAD;
++        controller->caps.SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
++        controller->caps.Gamepad.wButtons = 0xffff;
++        controller->caps.Gamepad.bLeftTrigger = 0xff;
++        controller->caps.Gamepad.bRightTrigger = 0xff;
++        controller->caps.Gamepad.sThumbLX = (SHORT)0xffc0;
++        controller->caps.Gamepad.sThumbLY = (SHORT)0xffc0;
++        controller->caps.Gamepad.sThumbRX = (SHORT)0xffc0;
++        controller->caps.Gamepad.sThumbRY = (SHORT)0xffc0;
++        memset(&controller->state, 0, sizeof(controller->state));
++        memset(&controller->last_keystroke, 0, sizeof(controller->last_keystroke));
++        memset(&controller->vibration, 0, sizeof(controller->vibration));
++        controller->enabled = TRUE;
++        controller->device = host_device;
++        TRACE("host pad %Iu connected, vid %04x pid %04x\n", (ULONG_PTR)(controller - controllers),
++              params.vendor_id, params.product_id);
++    }
++
++    controller->host_vendor_id = params.vendor_id;
++    controller->host_product_id = params.product_id;
++
++    /* Slot 0 can gain or lose rumble while connected (touch pad <-> real pad). */
++    if (params.has_rumble)
++    {
++        controller->caps.Flags |= XINPUT_CAPS_FFB_SUPPORTED;
++        controller->caps.Vibration.wLeftMotorSpeed = 0xff;
++        controller->caps.Vibration.wRightMotorSpeed = 0xff;
++    }
++    else
++    {
++        controller->caps.Flags &= ~XINPUT_CAPS_FFB_SUPPORTED;
++        controller->caps.Vibration.wLeftMotorSpeed = 0;
++        controller->caps.Vibration.wRightMotorSpeed = 0;
++    }
++
++    if (!controller->enabled)
++    {
++        /* XInputEnable(FALSE): report a neutral pad, as Windows does. */
++        memset(&controller->state.Gamepad, 0, sizeof(controller->state.Gamepad));
++        return;
++    }
++
++    controller->state.dwPacketNumber = params.packet;
++    controller->state.Gamepad.wButtons = params.buttons;
++    controller->state.Gamepad.bLeftTrigger = params.left_trigger;
++    controller->state.Gamepad.bRightTrigger = params.right_trigger;
++    controller->state.Gamepad.sThumbLX = params.thumb_lx;
++    controller->state.Gamepad.sThumbLY = params.thumb_ly;
++    controller->state.Gamepad.sThumbRX = params.thumb_rx;
++    controller->state.Gamepad.sThumbRY = params.thumb_ry;
++}
++
+ static BOOL find_opened_device(const WCHAR *device_path, int *free_slot)
+ {
+     int i;
+@@ -306,6 +415,7 @@ static DWORD HID_set_state(struct xinput_controller *controller, XINPUT_VIBRATIO
+     NTSTATUS status;
+     BYTE report_id;
+ 
++    if (host_mode) return host_set_state(controller, state);
+     if (!(controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED)) return ERROR_SUCCESS;
+ 
+     update_rumble = (controller->vibration.wLeftMotorSpeed != state->wLeftMotorSpeed);
+@@ -347,6 +457,12 @@ static void controller_enable(struct xinput_controller *controller)
+     BOOL ret;
+ 
+     if (controller->enabled) return;
++    if (host_mode)
++    {
++        controller->enabled = TRUE;
++        HID_set_state(controller, &state);
++        return;
++    }
+     if (controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED) HID_set_state(controller, &state);
+     controller->enabled = TRUE;
+ 
+@@ -362,6 +478,15 @@ static void controller_disable(struct xinput_controller *controller)
+     XINPUT_VIBRATION state = {0};
+ 
+     if (!controller->enabled) return;
++    if (host_mode)
++    {
++        struct xinput_host_vibration_params params = {.index = controller - controllers};
++        /* Stop the motors but keep the requested values for re-enable. */
++        if (controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED)
++            WINE_UNIX_CALL(unix_xinput_host_set_vibration, &params);
++        controller->enabled = FALSE;
++        return;
++    }
+     if (controller->caps.Flags & XINPUT_CAPS_FFB_SUPPORTED) HID_set_state(controller, &state);
+     controller->enabled = FALSE;
+ 
+@@ -766,11 +891,21 @@ static BOOL WINAPI start_update_thread_once( INIT_ONCE *once, void *param, void
+ static void start_update_thread(void)
+ {
+     static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
++    if (host_mode) return;
+     InitOnceExecuteOnce(&init_once, start_update_thread_once, NULL, NULL);
+ }
+ 
+ static BOOL controller_lock(struct xinput_controller *controller)
+ {
++    if (host_mode)
++    {
++        EnterCriticalSection(&controller->crit);
++        host_sync(controller);
++        if (controller->device) return TRUE;
++        LeaveCriticalSection(&controller->crit);
++        return FALSE;
++    }
++
+     if (!controller->device) return FALSE;
+ 
+     EnterCriticalSection(&controller->crit);
+@@ -798,6 +933,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+     case DLL_PROCESS_ATTACH:
+         xinput_instance = inst;
+         DisableThreadLibraryCalls(inst);
++        host_init();
+         break;
+     }
+     return TRUE;
+@@ -1142,6 +1278,13 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilitiesEx(DWORD unk, DWORD index, D
+ 
+     if (flags & XINPUT_FLAG_GAMEPAD && controllers[index].caps.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)
+         ret = ERROR_DEVICE_NOT_CONNECTED;
++    else if (host_mode)
++    {
++        caps->Capabilities = controllers[index].caps;
++        caps->VendorId = controllers[index].host_vendor_id;
++        caps->ProductId = controllers[index].host_product_id;
++        caps->VersionNumber = 0;
++    }
+     else if (!HidD_GetAttributes(controllers[index].device, &attr))
+         ret = ERROR_DEVICE_NOT_CONNECTED;
+     else
+diff --git a/dlls/xinput1_3/unixlib.h b/dlls/xinput1_3/unixlib.h
+new file mode 100644
+index 0000000..9fce674
+--- /dev/null
++++ b/dlls/xinput1_3/unixlib.h
+@@ -0,0 +1,64 @@
++/*
++ * iOS-Madeira: XInput host-pad unix interface
++ *
++ * On iOS there is no winebus / hidclass stack, so xinput can't find a HID
++ * device. Instead the host app (GameController.framework) publishes pad
++ * state into a table on the unix side, and xinput reads it through these
++ * calls. On any other platform __wine_init_unix_call fails (no unixlib is
++ * built for xinput) and the normal HID path is used unchanged.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ */
++
++#ifndef __WINE_XINPUT_UNIXLIB_H
++#define __WINE_XINPUT_UNIXLIB_H
++
++#include "windef.h"
++#include "winternl.h"
++#include "wine/unixlib.h"
++
++/* Bumped whenever the structs below change shape; the PE side refuses a
++ * host table built against a different layout. */
++#define XINPUT_HOST_ABI 1
++
++struct xinput_host_probe_params
++{
++    UINT32 abi;             /* out */
++};
++
++struct xinput_host_state_params
++{
++    UINT32 index;           /* in */
++    UINT32 connected;       /* out */
++    UINT32 packet;          /* out: changes whenever state changes */
++    UINT16 buttons;         /* out: XINPUT_GAMEPAD_* incl. 0x0400 guide */
++    BYTE   left_trigger;    /* out */
++    BYTE   right_trigger;   /* out */
++    INT16  thumb_lx;        /* out */
++    INT16  thumb_ly;        /* out */
++    INT16  thumb_rx;        /* out */
++    INT16  thumb_ry;        /* out */
++    UINT16 vendor_id;       /* out */
++    UINT16 product_id;      /* out */
++    UINT32 has_rumble;      /* out */
++};
++
++struct xinput_host_vibration_params
++{
++    UINT32 index;           /* in */
++    UINT16 left_motor;      /* in */
++    UINT16 right_motor;     /* in */
++};
++
++enum xinput_host_funcs
++{
++    unix_xinput_host_probe,
++    unix_xinput_host_get_state,
++    unix_xinput_host_set_vibration,
++    unix_xinput_host_funcs_count,
++};
++
++#endif /* __WINE_XINPUT_UNIXLIB_H */

@@ -116,6 +116,12 @@ compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" 
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
 
+# iOS-Madeira: host gamepads for xinput (GameController.framework ->
+# GamepadBridge.swift -> this table -> xinput1_3 host mode). The header
+# lives next to the xinput PE source; the Swift-facing one in the app.
+compile_unixlib "$BUILD_DIR/xinput_host_ios.c" "xinput_host_ios" "xinput" \
+    -I"$WINE_SRC/dlls/xinput1_3" -I"$REPO_ROOT/app/Madeira"
+
 for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
     name=$(basename "$src" .c)
 
@@ -163,7 +169,7 @@ ar rcs "$OBJ_DIR/libntdll_unix.a" \
     "$OBJ_DIR/audio_null_ios.o" "$OBJ_DIR/nsi_unixlib_ios.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \
     "$OBJ_DIR/bcrypt_unixlib.o" "$OBJ_DIR/secur32_unixlib.o" "$OBJ_DIR/crypt32_unixlib.o" \
-    "$OBJ_DIR/dwrite_unixlib.o" \
+    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/xinput_host_ios.o" \
     "$OBJ_DIR/cdrom.o" "$OBJ_DIR/debug.o" "$OBJ_DIR/env.o" "$OBJ_DIR/file.o" \
     "$OBJ_DIR/loader.o" "$OBJ_DIR/loadorder.o" "$OBJ_DIR/process.o" "$OBJ_DIR/registry.o" \
     "$OBJ_DIR/security.o" "$OBJ_DIR/serial.o" "$OBJ_DIR/server.o" \

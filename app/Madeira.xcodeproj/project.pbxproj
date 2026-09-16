@@ -52,6 +52,7 @@
 		A1000200 /* LogPattern.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000200 /* LogPattern.swift */; };
 		A1000201 /* LogTail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000201 /* LogTail.swift */; };
 		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
+		A1000203 /* GamepadBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000203 /* GamepadBridge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -111,6 +112,8 @@
 		A2000200 /* LogPattern.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogPattern.swift; sourceTree = "<group>"; };
 		A2000201 /* LogTail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTail.swift; sourceTree = "<group>"; };
 		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
+		A2000203 /* GamepadBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GamepadBridge.swift; sourceTree = "<group>"; };
+		A2000204 /* MadeiraPad.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MadeiraPad.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -164,6 +167,8 @@
 				A2000200 /* LogPattern.swift */,
 				A2000201 /* LogTail.swift */,
 				A2000202 /* FPSOverlay.swift */,
+				A2000203 /* GamepadBridge.swift */,
+				A2000204 /* MadeiraPad.h */,
 				A2000004 /* JITAllocator.c */,
 				A2000005 /* JITAllocator.h */,
 				A200000B /* FEXBridge.mm */,
@@ -313,6 +318,7 @@
 				A1000200 /* LogPattern.swift in Sources */,
 				A1000201 /* LogTail.swift in Sources */,
 				A1000202 /* FPSOverlay.swift in Sources */,
+				A1000203 /* GamepadBridge.swift in Sources */,
 				A1000004 /* JITAllocator.c in Sources */,
 				A1000005 /* EntitlementChecker.swift in Sources */,
 				A1000006 /* FEXBridge.mm in Sources */,

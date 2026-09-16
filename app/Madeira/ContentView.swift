@@ -2480,7 +2480,7 @@ enum ControlAction: Codable, Equatable, Hashable {
     case joystickWASD        // renders as a stick, posts W/A/S/D
     case joystickArrows      // renders as a stick, posts the arrow keys
     case keyboardToggle      // raises the iOS keyboard, as in portrait
-    case pad(String)         // ml645: Xbox button. NOT WIRED — see the panel.
+    case pad(String)         // ml645: Xbox button, fed to XInput slot 0 (GamepadBridge)
 
     /// The four keys a stick drives, up/right/down/left. nil for non-sticks.
     var stickKeys: [Int32]? {
@@ -2490,7 +2490,11 @@ enum ControlAction: Codable, Equatable, Hashable {
         default: return nil
         }
     }
-    var isPad: Bool { if case .pad = self { return true }; return false }
+    /// LS / RS: rendered as a stick, drives an analog XInput thumbstick.
+    var padStick: GamepadBridge.TouchStick? {
+        if case .pad(let n) = self { return GamepadBridge.isTouchStick(n) }
+        return nil
+    }
 
     var label: String {
         switch self {
@@ -2759,12 +2763,12 @@ struct TouchControlButton: View {
     @State private var stickDir: Int = -1
 
     private var diameter: CGFloat { TouchControlsModel.baseDiameter * CGFloat(control.scale) }
-    private var isStick: Bool { control.action.stickKeys != nil }
+    private var isStick: Bool { control.action.stickKeys != nil || control.action.padStick != nil }
     private var isSelected: Bool { m.editing && m.selected == control.id }
 
     var body: some View {
         ZStack {
-            if control.action.stickKeys != nil {
+            if isStick {
                 // Reuse the portrait pad's face so both look and animate the
                 // same; scale it to whatever size this control was pinched to.
                 JoystickFace(held: isDown, dir: stickDir, alwaysExpanded: true)
@@ -2776,8 +2780,7 @@ struct TouchControlButton: View {
                 Text(control.action.label)
                     .font(.system(size: diameter * (control.action.label.count > 2 ? 0.22 : 0.34),
                                   weight: .medium))
-                    .foregroundStyle(.white.opacity(control.action.isPad ? 0.45
-                                                    : (isDown ? 1.0 : 0.85)))
+                    .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
             }
         }
         .frame(width: diameter, height: diameter)
@@ -2821,6 +2824,9 @@ struct TouchControlButton: View {
                     } else if let q = control.action.stickKeys {
                         isDown = true
                         applyStick(snap(v.translation), q)
+                    } else if let stick = control.action.padStick {
+                        isDown = true
+                        applyPadStick(stick, v.translation)
                     } else if !isDown {
                         isDown = true
                         press(true)
@@ -2830,6 +2836,9 @@ struct TouchControlButton: View {
                     dragBase = nil
                     if let q = control.action.stickKeys {
                         applyStick(-1, q)          // release every held direction
+                        isDown = false
+                    } else if let stick = control.action.padStick {
+                        applyPadStick(stick, nil)  // spring back to centre
                         isDown = false
                     } else if isDown {
                         isDown = false
@@ -2874,6 +2883,25 @@ struct TouchControlButton: View {
         stickDir = next
     }
 
+    /// Analog thumbstick. Full deflection at the control's rim; screen y grows
+    /// downward, XInput's upward. The 8-way dir only animates the knob.
+    private func applyPadStick(_ stick: GamepadBridge.TouchStick, _ t: CGSize?) {
+        guard let t else {
+            GamepadBridge.shared.setTouchStick(stick, x: 0, y: 0)
+            stickDir = -1
+            return
+        }
+        let r = diameter / 2
+        var x = Double(t.width / r), y = Double(-t.height / r)
+        let len = (x * x + y * y).squareRoot()
+        if len > 1 { x /= len; y /= len }
+        if len < 0.12 { x = 0; y = 0 }              // same feel as the key sticks' deadzone
+        GamepadBridge.shared.setTouchStick(stick, x: x, y: y)
+        let next = snap(t)
+        if stickDir == -1, next != -1 { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        stickDir = next
+    }
+
     /// Haptic on the DOWN edge only — a held movement key would otherwise buzz
     /// continuously for as long as you walk.
     private func press(_ down: Bool) {
@@ -2889,8 +2917,8 @@ struct TouchControlButton: View {
             if down { MetalBackedView.toggleKeyboard() }
         case .none, .joystickWASD, .joystickArrows:
             break                                              // sticks drive themselves
-        case .pad:
-            break     // ml645: no XInput yet — deliberately inert, and labelled so
+        case .pad(let name):
+            GamepadBridge.shared.setTouchButton(name, down: down)   // LS/RS handled as sticks
         }
     }
 }
@@ -3028,10 +3056,10 @@ struct MappingPanel: View {
 
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("XInput isn't wired up yet. These save with your layout but do "
-                 + "nothing when pressed — controller support lands with the Wine HID stack.")
+            Text("Sends to XInput player 1, alongside any connected controller. "
+                 + "LS / RS become analog sticks. Games using DirectInput only won't see it.")
                 .font(.system(size: 11))
-                .foregroundStyle(.orange.opacity(0.95))
+                .foregroundStyle(.white.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
             section("Face", [("A", .pad("A")), ("B", .pad("B")), ("X", .pad("X")), ("Y", .pad("Y"))])
             section("D-pad", [("D↑", .pad("D↑")), ("D↓", .pad("D↓")),
@@ -3068,7 +3096,7 @@ struct MappingPanel: View {
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
                 .minimumScaleFactor(0.55)
-                .foregroundStyle(.white.opacity(action.isPad ? 0.55 : 1.0))
+                .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, minHeight: 30)
                 .background(RoundedRectangle(cornerRadius: 7)
                     .fill(.white.opacity(on ? 0.36 : 0.12)))

@@ -5512,6 +5512,10 @@ extern const void *nsi_unix_call_funcs[];
  * never called). Chromium drew no text anywhere as a result. */
 extern const void *dwrite_unix_call_funcs[];
 
+/* iOS-Madeira: host gamepads (xinput_host_ios.c). No winebus on iOS, so
+ * xinput1_3's host mode reads GameController.framework pads from here. */
+extern const void *xinput_unix_call_funcs[];
+
 /* win32u's unix init, statically linked via libwin32u_unix.a. Renamed
  * from __wine_unix_lib_init in build/win32u-unix/build.sh so future
  * statically-linked unix libs can keep their own init without colliding.
@@ -5602,6 +5606,13 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             *funcs = (const void *)dwrite_unix_call_funcs;
             dprintf(2, "[unixlib] module %p (%s) -> dwrite_unix_call_funcs (%p) rev=ml494\n",
                 module, match, (void *)dwrite_unix_call_funcs);
+            status = STATUS_SUCCESS;
+        } else if (match && strcasestr(match, "xinput")) {
+            /* xinput1_1..1_4 and xinputuap all build from xinput1_3/main.c;
+             * the PE export names vary in case (XINPUT1_4.dll etc). */
+            *funcs = (const void *)xinput_unix_call_funcs;
+            dprintf(2, "[unixlib] module %p (%s) -> xinput_unix_call_funcs (%p)\n",
+                module, match, (void *)xinput_unix_call_funcs);
             status = STATUS_SUCCESS;
         } else if (match && strstr(match, "nsi.dll")) {
             *funcs = (const void *)nsi_unix_call_funcs;
