@@ -2,8 +2,8 @@
 
 Run Windows PC games on a non-jailbroken iPhone.
 
-Madeira combines [Wine](https://www.winehq.org/) (ARM64EC),
-[FEX-Emu](https://github.com/FEX-Emu/FEX) for x86-64 → ARM64 translation, and
+Madeira combines [Wine](https://www.winehq.org/) (Aarch64),
+[FEX-Emu](https://github.com/FEX-Emu/FEX) (ARM64EC) for x86-64 → ARM64 translation, and
 [DXMT](https://github.com/3Shain/DXMT) for D3D11 → Metal, running as a single
 Mach process on iOS with wineserver as a thread rather than a separate process.
 
