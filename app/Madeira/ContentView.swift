@@ -849,12 +849,22 @@ struct MadeiraMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MetalBackedView, context: Context) {}
 }
 
+/// Session-scoped display state. Immersive mode deliberately resets on a cold
+/// launch so the tooling UI is always recoverable, even if the previous Wine
+/// session ended unexpectedly.
+final class DisplaySettings: ObservableObject {
+    static let shared = DisplaySettings()
+    @Published var immersive = false
+    private init() {}
+}
+
 struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @State private var jitStatus: JITStatus = .unknown
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
+    @ObservedObject private var display = DisplaySettings.shared
     @State private var pointerPanel = false
     @Namespace private var pointerNS
     /// .compact = iPhone landscape: game surface expands, arrow keys appear.
@@ -878,7 +888,7 @@ struct ContentView: View {
          * two-column selection behaviour. */
         NavigationStack {
             Group {
-                if vSizeClass == .compact {
+                if display.immersive || vSizeClass == .compact {
                     landscapeBody
                 } else {
                     portraitBody
@@ -890,12 +900,19 @@ struct ContentView: View {
             // a fresh placeholder only re-parents the same CAMetalLayer.
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationBarHidden(vSizeClass == .compact)
+            .navigationBarHidden(display.immersive || vSizeClass == .compact)
             .onAppear {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
             }
+        }
+        .statusBarHidden(display.immersive)
+        .persistentSystemOverlays(display.immersive ? .hidden : .automatic)
+        .onChange(of: display.immersive) { _, enabled in
+            TouchControlsHost.attach()
+            logStore.log(enabled ? "Immersive mode enabled" : "Controls restored",
+                         level: .info)
         }
     }
 
@@ -978,6 +995,11 @@ struct ContentView: View {
             ZStack {
                 Color.black
                 MadeiraMetalView()
+                    .onAppear { TouchControlsHost.attach() }
+                    .onReceive(NotificationCenter.default.publisher(
+                        for: UIDevice.orientationDidChangeNotification)) { _ in
+                        TouchControlsHost.attach()
+                    }
                 // Controls removed for now (ml586): game-only landscape.
                 // The FPS readout stays, pinned in the right pillarbox bar —
                 // the window-level surface covers anything drawn over the
@@ -1139,6 +1161,12 @@ struct ContentView: View {
                     enableJITViaStikDebug()
                 }
                 .buttonStyle(.borderedProminent)
+
+                Button("Full Screen") {
+                    display.immersive = true
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
 
                 Button("Steam Testing") {
                     // Steam S3 first boot: virtual desktop (Steam needs a
@@ -2730,13 +2758,18 @@ final class TouchControlsModel: ObservableObject {
     /// included, and ml643's "is it the root view?" test therefore rejected every
     /// touch in the window. Nothing responded, and edit mode — whose branch
     /// captured everything — could never be entered to mask it.
-    func hitsInteractive(_ p: CGPoint, in bounds: CGRect) -> Bool {
-        // Top bar: two 44pt buttons 10pt apart in play mode, centred, 10pt down.
+    func hitsTopBar(_ p: CGPoint, in bounds: CGRect) -> Bool {
+        // Two standard buttons, plus immersive-exit and edit-only add buttons.
         // Padded generously; a few points of slop costs nothing and a missed tap
         // costs a build.
-        let barW: CGFloat = 2 * 44 + 10
-        if CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
-                  width: barW + 20, height: 68).contains(p) { return true }
+        let count = 2 + (DisplaySettings.shared.immersive ? 1 : 0) + (editing ? 1 : 0)
+        let barW = CGFloat(count) * 44 + CGFloat(max(count - 1, 0)) * 10
+        return CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
+                      width: barW + 20, height: 68).contains(p)
+    }
+
+    func hitsInteractive(_ p: CGPoint, in bounds: CGRect) -> Bool {
+        if hitsTopBar(p, in: bounds) { return true }
         guard visible else { return false }
         for c in controls {
             let r = Self.baseDiameter * CGFloat(c.scale) / 2
@@ -2760,8 +2793,13 @@ final class ControlsWindow: UIWindow {
         // Edit mode owns the whole screen: drags and the scale pinch must not
         // leak through and swing the camera while you are arranging buttons.
         if m.editing { return super.hitTest(point, with: event) }
-        // Portrait draws nothing here, so it must consume nothing.
-        guard bounds.width > bounds.height else { return nil }
+        // Immersive mode can be entered while the device is portrait. In that
+        // case only the recovery bar consumes input; the rest stays click-through.
+        if bounds.width <= bounds.height {
+            guard DisplaySettings.shared.immersive,
+                  m.hitsTopBar(point, in: bounds) else { return nil }
+            return super.hitTest(point, with: event)
+        }
         guard m.hitsInteractive(point, in: bounds) else { return nil }
         return super.hitTest(point, with: event)
     }
@@ -2798,6 +2836,7 @@ enum TouchControlsHost {
 
 struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
+    @ObservedObject private var display = DisplaySettings.shared
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -2815,6 +2854,8 @@ struct TouchControlsOverlay: View {
                     if m.editing, let i = m.index(of: m.selected) {
                         MappingPanel(control: m.controls[i], screen: geo.size)
                     }
+                } else if display.immersive {
+                    topBar
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
@@ -2838,6 +2879,13 @@ struct TouchControlsOverlay: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
+            if display.immersive {
+                glassButton("arrow.down.right.and.arrow.up.left") {
+                    m.editing = false
+                    m.selected = nil
+                    display.immersive = false
+                }
+            }
             glassButton("gamecontroller", dim: !m.visible) { m.visible.toggle() }
             glassButton(m.editing ? "checkmark" : "pencil") {
                 m.editing.toggle()
