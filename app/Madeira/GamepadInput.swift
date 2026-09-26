@@ -27,6 +27,30 @@ final class GamepadInput: @unchecked Sendable {
         queue.async { [self] in touchState.configure(allowed); sample() }
     }
 
+    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT, default on).
+    ///
+    /// Some input layers enumerate XInput once at startup and only rescan on a
+    /// device-arrival broadcast, which this port does not deliver. Touch slot 0
+    /// connects only once the landscape overlay shows its controller mappings,
+    /// and a paired controller may not have reported an extended profile yet,
+    /// so such a game never sees a pad. When the session will have a controller
+    /// source (touch controller mappings shown, or a controller paired), slot 0
+    /// is connected at rest from the start; live input takes it over. The
+    /// reservation lasts until the process exits (one Wine session per run).
+    @MainActor func reserveSessionSlot(touchControls: Bool) {
+        guard Self.enabled, Self.flag("MADEIRA_PAD_EARLY_SLOT") else { return }
+        let touch = touchControls && Self.touchEnabled
+        let paired = !GCController.controllers().isEmpty
+        guard touch || paired else { return }
+        queue.async { [self] in touchState.reserved = true; sample() }
+        LogStore.shared.log("[xinput] ml1990 slot=0 reserved for the session touch=\(touch ? 1 : 0) paired=\(paired ? 1 : 0)")
+    }
+
+    /// Documents/madeira.cfg `env.NAME`, else the process environment; only "0" disables.
+    static func flag(_ name: String) -> Bool {
+        (MadeiraConfig.get("env.\(name)") ?? ProcessInfo.processInfo.environment[name]) != "0"
+    }
+
     @MainActor func touch(owner: UUID, control: UUID, value: GamepadSample?) {
         guard Self.touchEnabled else { return }
         queue.async { [self] in

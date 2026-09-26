@@ -62,7 +62,11 @@ struct TouchGamepadState {
     private struct Hold { var control: UUID; var value: GamepadSample }
     private var allowed = Set<UUID>()
     private var holds: [UUID: Hold] = [:]
-    var connected: Bool { !allowed.isEmpty }
+    /// Player 1 stays connected at rest for the whole session, even with no
+    /// visible touch control (GamepadInput.reserveSessionSlot). Layout changes
+    /// and lifecycle clearing release holds but keep the reservation.
+    var reserved = false
+    var connected: Bool { reserved || !allowed.isEmpty }
 
     mutating func configure(_ controls: Set<UUID>) {
         allowed = controls

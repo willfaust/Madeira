@@ -69,7 +69,20 @@ state.update(owner: owner2, control: b, value: TouchPadAction.sample("LS", x: 0.
 assert(state.sample.lx == -32768)
 state.update(owner: owner1, control: a, value: nil)
 assert(state.sample.lx == 16384)
-print("PASS: touch mappings, independent holds, lifecycle clearing, analogue ranges and physical merge")
+// ml1990: a session reservation keeps player 1 connected at rest.
+var session = TouchGamepadState()
+session.reserved = true
+assert(session.connected && session.sample == GamepadSample())
+session.configure([a])
+session.update(owner: owner1, control: a, value: TouchPadAction.sample("A"))
+assert(session.sample.buttons == 0x1000)
+session.configure([]) // hidden/editing/portrait: holds released, slot kept
+assert(session.connected && session.sample == GamepadSample())
+session.update(owner: owner1, control: a, value: TouchPadAction.sample("A"))
+assert(session.sample == GamepadSample())
+session.clear()
+assert(session.connected)
+print("PASS: touch mappings, independent holds, lifecycle clearing, analogue ranges, physical merge and session slot")
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-touch-pad-') as tmp:
     src, exe = Path(tmp) / 'main.swift', Path(tmp) / 'check'
