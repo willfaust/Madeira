@@ -25,6 +25,7 @@
 
 #include <assert.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "ntstatus.h"
 #include "ntgdi_private.h"
@@ -87,10 +88,66 @@ void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_
      * a dispatch layer that can fail for its own reasons. */
     NTSTATUS st = send_hardware_message( NULL, 0, &input, 0 );
     {
-        static unsigned cnt;
-        if (cnt++ < 40)
-            dprintf(2, "[winios] drv_post_mouse hwnd=%p flags=0x%x x=%d y=%d -> status=0x%x\n",
-                    hwnd, flags, x, y, (unsigned)st);
+        /* ml661: the old "first 40 lines" cap is the same trap ml647 fixed on
+         * the keyboard side — it is exhausted in the first second of pointer
+         * movement, so every later event, including every FAILING one, left no
+         * trace and the log read as if the driver had never been called. A
+         * button transition (the events a dead on-screen button is about) is
+         * rare enough to log every time; moves are thinned. Failures are always
+         * logged, and the running failure total is always truthful. */
+        static unsigned cnt, moves, bad;
+        BOOL is_move = !(flags & ~(unsigned)(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE));
+        cnt++;
+        if (st) bad++;
+        if (st || !is_move || cnt <= 8 || (moves & 0xff) == 0)
+            dprintf(2, "[winios] ml661 drv_post_mouse #%u hwnd=%p flags=0x%x x=%d y=%d "
+                       "-> status=0x%x (failures=%u)\n",
+                    cnt, hwnd, flags, x, y, (unsigned)st, bad);
+        if (is_move) moves++;
+
+        /* ml667 — the driver half of [relmouse]; the server half is printed by
+         * relmouse_report() in queue_ios.c. Together they bracket the one gap
+         * nothing could see before: whether a relative delta that LEFT the app
+         * ever became a WM_INPUT for the game.
+         *
+         * This end reports what win32u handed the server and what the cursor
+         * did as a result. rel/acc rising with cursor= standing still means the
+         * cursor is pinned (a clip rect, or a game re-centring); rel rising
+         * with the server's rel_in standing still means the send_hardware_message
+         * call itself is being lost. Relative moves only, so the line appears
+         * only in Relative pointer mode, at most once every 5s. */
+        if (is_move && !(flags & MOUSEEVENTF_ABSOLUTE))
+        {
+            static unsigned rel_cnt, rel_bad;
+            static long long acc_x, acc_y;
+            static struct timespec next_at;
+            struct timespec now;
+
+            rel_cnt++;
+            if (st) rel_bad++;
+            acc_x += x;
+            acc_y += y;
+
+            clock_gettime( CLOCK_MONOTONIC, &now );
+            if (now.tv_sec >= next_at.tv_sec)
+            {
+                CURSORINFO info = { .cbSize = sizeof(info) };
+                POINT pt = {0};
+                DWORD fg_tid = 0, fg_pid = 0;
+                HWND fg = NtUserGetForegroundWindow();
+
+                if (NtUserGetCursorInfo( &info )) pt = info.ptScreenPos;
+                if (fg) fg_tid = get_window_thread( fg, &fg_pid );
+
+                next_at.tv_sec = now.tv_sec + 5;
+                dprintf(2, "[relmouse] ml667 src=drv rel=%u fail=%u acc=(%lld,%lld) "
+                           "last=(%d,%d) cursor=(%d,%d) cursor_flags=0x%x "
+                           "foreground=%p fg_tid=%04x fg_pid=%04x\n",
+                        rel_cnt, rel_bad, acc_x, acc_y, x, y,
+                        (int)pt.x, (int)pt.y, (unsigned)info.flags,
+                        fg, (unsigned)fg_tid, (unsigned)fg_pid);
+            }
+        }
     }
 }
 
@@ -254,9 +311,25 @@ extern int winios_surface_present( HWND hwnd, int dirty_x, int dirty_y, int dirt
                                     int surf_w, int surf_h, int stride, const void *bits ) __attribute__((weak));
 extern void winios_window_frame( HWND hwnd, int x, int y, int w, int h, int visible,
                                  int cx, int cy, int cw, int ch ) __attribute__((weak));
+/* ml1110 — WHERE THE SURFACE SITS INSIDE THE WINDOW.
+ *
+ * winios_surface_present carries only the surface's SIZE, and the app side
+ * assumed that size was always at window-local (0,0) and never smaller than
+ * the window ("surfaces are 128px-aligned, usually LARGER"). get_surface_rect()
+ * breaks both halves of that: it INTERSECTS the surface with the virtual screen
+ * for a window bigger than the screen, then rounds the result down/up to 128 —
+ * so a 1286x1011 window on a 1280x720 desktop gets a 1280x768 surface, and a
+ * window whose visible rect starts far off the left/top edge gets a non-zero
+ * origin. Publishing the rect once per surface creation is enough: it cannot
+ * change without the surface being recreated. Weak, like every other app hook
+ * here — a stale app side simply keeps the old (0,0)-and-no-smaller assumption. */
+extern void winios_window_surface_rect( HWND hwnd, int left, int top,
+                                        int right, int bottom ) __attribute__((weak));
 extern void winios_cursor_set( unsigned int id, int w, int h, int hot_x, int hot_y,
                                const void *bgra ) __attribute__((weak));
 extern void winios_cursor_show( int show ) __attribute__((weak));
+/* ml — direct-launch overlay, see winios_direct_overlay() below. */
+extern int winios_overlay_skip_hwnd( void *hwnd ) __attribute__((weak));
 
 static int winios_desktop_mode(void);
 
@@ -275,7 +348,14 @@ static void winios_drv_set_cursor( HWND hwnd, HCURSOR cursor )
     char bmibuf[sizeof(BITMAPINFOHEADER) + 256 * sizeof(RGBQUAD)];
     BITMAPINFO *bmi = (BITMAPINFO *)bmibuf;
 
-    if (!winios_desktop_mode() || !winios_cursor_set) return;
+    /* ml — WAS gated to desktop mode only ("iOS has no mouse cursor" — see
+     * winios_pSetCursor's own comment in Winios.m). Direct-launch titles
+     * that rely on the SYSTEM cursor (no self-drawn pointer, common in
+     * older DirectInput/GDI-menu games) need this hook too now that the app
+     * side can host the drawn cursor on the game's own presented layer
+     * instead of the desktop compositor — see winios_set_game_layer in
+     * Winios.m. `last_cursor` caching below still applies in both modes. */
+    if (!winios_cursor_set) return;
     if (!cursor)
     {
         if (winios_cursor_show) winios_cursor_show( 0 );
@@ -364,6 +444,225 @@ static int winios_desktop_mode(void)
     return mode;
 }
 
+/* ml — THE DIRECT-LAUNCH GDI OVERLAY, win32u side.
+ *
+ * Two gates in this file used to make a direct launch blind to every ordinary
+ * window: pCreateWindowSurface was installed only in desktop mode (so a
+ * dialog got win32u's OFFSCREEN surface, whose flush is a no-op and reaches
+ * nobody), and winios_window_frame was forwarded only in desktop mode (so
+ * nothing on the app side ever learned where a window was). A program that
+ * asks a question before it creates its 3D window — a windowed/fullscreen
+ * chooser, a message box, an installer-style window — therefore sat waiting
+ * for a click on something that was never drawn.
+ *
+ * Nothing about that is desktop-specific: the surface bits and the window
+ * rect are the same data in both modes. So both gates now also open for a
+ * direct launch, and the app side decides where to draw the result — into a
+ * transparent overlay inside the game's own presented layer rather than the
+ * desktop compositor, which must not exist here (its opaque backdrop would
+ * cover the game; see winios_ensure_compositor's own comment).
+ *
+ * The one window this must NOT apply to is the one hosting the presented
+ * Metal layer: its GDI client area is the program's own paint, normally
+ * black, and drawing it would cover the game image. Only the app side knows
+ * which HWND that is (it is told by the swapchain), so the flush path asks —
+ * winios_overlay_skip_hwnd, which answers 0 in desktop mode.
+ *
+ * MADEIRA_DIRECT_OVERLAY=0 restores the previous behaviour exactly. */
+static int winios_direct_overlay(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *env = getenv( "MADEIRA_DIRECT_OVERLAY" );
+        on = !winios_desktop_mode() && !(env && *env == '0');
+    }
+    return on;
+}
+
+/* ml1110 — EVERY "HOW BIG IS THE SCREEN" ROUTE, ONCE, IN ONE LINE.
+ *
+ * A program that centres its own dialog can read the screen through at least
+ * six different APIs, and in a direct launch — where no explorer has ever run —
+ * they do not all come from the same place: SM_CXSCREEN and
+ * GetDeviceCaps(HORZRES) end at get_primary_monitor_rect(), SPI_GETWORKAREA at
+ * a separately cached work area, GetWindowRect(GetDesktopWindow()) at either a
+ * per-thread SYNTHESISED monitor rect or the window's STORED rect depending on
+ * whether the calling thread has resolved top_window, and MonitorFromPoint +
+ * GetMonitorInfo at the monitor list itself. ml1100 healed the list and the
+ * work area; ml1090 sized the desktop window asynchronously from a thread that
+ * may not own it. Two rounds have now been spent inferring which of those a
+ * mis-centred dialog actually read. Print all of them, once, at the moment the
+ * first ordinary window appears — which is the state the program's own
+ * centring helper runs in — and the next log names the route outright. */
+static void winios_log_screen_routes( const char *when )
+{
+    static int logged;
+    struct window_rects desk_rects = {0};
+    RECT mon, virt, work = {0};
+    HWND desktop;
+
+    if (logged || !winios_direct_overlay()) return;
+    logged = 1;
+
+    desktop = get_desktop_window();
+    mon = get_primary_monitor_rect( get_thread_dpi() );
+    virt = get_virtual_screen_rect( get_thread_dpi(), MDT_DEFAULT );
+    NtUserSystemParametersInfo( SPI_GETWORKAREA, 0, &work, 0 );
+    get_window_rects( desktop, COORDS_SCREEN, &desk_rects, get_thread_dpi() );
+
+    dprintf( 2, "[screen-routes] ml1110 at=%s SM_CXSCREEN=%d SM_CYSCREEN=%d "
+             "SM_CXVIRTUALSCREEN=%d SM_CYVIRTUALSCREEN=%d primary={%d,%d,%d,%d} "
+             "virtual={%d,%d,%d,%d} workarea={%d,%d,%d,%d} desktop=%p "
+             "desktop-win={%d,%d,%d,%d} desktop-client={%d,%d,%d,%d}%s\n",
+             when,
+             get_system_metrics( SM_CXSCREEN ), get_system_metrics( SM_CYSCREEN ),
+             get_system_metrics( SM_CXVIRTUALSCREEN ), get_system_metrics( SM_CYVIRTUALSCREEN ),
+             (int)mon.left, (int)mon.top, (int)mon.right, (int)mon.bottom,
+             (int)virt.left, (int)virt.top, (int)virt.right, (int)virt.bottom,
+             (int)work.left, (int)work.top, (int)work.right, (int)work.bottom,
+             desktop,
+             (int)desk_rects.window.left, (int)desk_rects.window.top,
+             (int)desk_rects.window.right, (int)desk_rects.window.bottom,
+             (int)desk_rects.client.left, (int)desk_rects.client.top,
+             (int)desk_rects.client.right, (int)desk_rects.client.bottom,
+             IsRectEmpty( &desk_rects.window )
+                 ? "  <-- THE DESKTOP WINDOW IS STILL 0x0: every CenterWindow helper that "
+                   "reads it lands at (-cx/2,-cy/2)" : "" );
+}
+
+/* One [overlay] line for the FIRST window whose GDI content actually reaches
+ * the app in a direct launch. Class and size are what identify the window in
+ * a device log; the style word says whether it is the dialog/popup shape the
+ * overlay exists for. Once per session, so this stays a low-volume family. */
+static void winios_overlay_log_first( HWND hwnd, int surf_w, int surf_h )
+{
+    static int logged;
+    struct window_rects rects = {0};
+    UNICODE_STRING us;
+    WCHAR clsW[64];
+    char cls[64];
+    int j;
+
+    if (logged || !winios_direct_overlay()) return;
+    logged = 1;
+    winios_log_screen_routes( "first-window-content" );
+
+    us.Buffer = clsW;
+    us.Length = 0;
+    us.MaximumLength = sizeof(clsW);
+    cls[0] = 0;
+    if (NtUserGetClassName( hwnd, FALSE, &us ) > 0)
+    {
+        for (j = 0; j < us.Length / (int)sizeof(WCHAR) && j < 63; j++)
+            cls[j] = (clsW[j] >= 32 && clsW[j] < 127) ? (char)clsW[j] : '?';
+        cls[j] = 0;
+    }
+    get_window_rects( hwnd, COORDS_SCREEN, &rects, get_thread_dpi() );
+    dprintf( 2, "[overlay] first window hwnd=%p class='%s' surface=%dx%d "
+             "win={%d,%d,%d,%d} style=%08x\n", hwnd, cls, surf_w, surf_h,
+             (int)rects.window.left, (int)rects.window.top,
+             (int)rects.window.right, (int)rects.window.bottom,
+             (unsigned)get_window_long( hwnd, GWL_STYLE ) );
+}
+
+/* ml1110 — PER-WINDOW diagnostic budget for the direct-launch overlay.
+ *
+ * The question these lines answer is always per-WINDOW ("did THIS window's
+ * content ever reach a layer, and with what geometry"), so a global counter is
+ * the wrong shape: a window created late — the child that covers the client
+ * area, the dialog that appears after a minute — falls past any global window
+ * and is never sampled at all. That is the ml493 lesson one file over, and it
+ * cost a whole round there. Returns the 1-based call number while it is within
+ * `max` for this hwnd, 0 afterwards, so every caller is `if (!n) skip`.
+ *
+ * Lock-free and approximate on purpose: it runs on the GDI flush path. A race
+ * can only mis-count a line, never lose the window. */
+#define WINIOS_DIAG_SLOTS 16
+struct winios_diag_table
+{
+    struct { HWND hwnd; int n; } slot[WINIOS_DIAG_SLOTS];
+    int used;
+};
+static int winios_overlay_diag_n( struct winios_diag_table *t, HWND hwnd, int max )
+{
+    int i;
+
+    if (!winios_direct_overlay()) return 0;
+    for (i = 0; i < t->used && i < WINIOS_DIAG_SLOTS; i++)
+        if (t->slot[i].hwnd == hwnd) return t->slot[i].n < max ? ++t->slot[i].n : 0;
+    if (t->used >= WINIOS_DIAG_SLOTS) return 0;
+    i = t->used++;
+    t->slot[i].hwnd = hwnd;
+    t->slot[i].n = 1;
+    return 1;
+}
+
+/* ml1110 — THE LINE THAT DECIDES "WHY IS THE CLIENT AREA BLANK".
+ *
+ * A direct launch has no window manager and no desktop compositor, so between
+ * "the program painted" and "pixels on screen" there are four places the
+ * content can be lost, and no log so far could tell them apart:
+ *
+ *   1. the window is a CHILD and has no surface of its own — it paints into an
+ *      ancestor's, and only that ancestor ever flushes (surface=... here names
+ *      the owner, `child=1 own-surface=0` names the case);
+ *   2. the surface is SMALLER than the window, because get_surface_rect()
+ *      cropped it to the virtual screen — the rows past `surf` are bits win32u
+ *      never allocated and nothing downstream can show them;
+ *   3. the dirty rect the program damaged lies wholly or partly OUTSIDE that
+ *      surface, so the flush carries nothing (dirty vs clipped below);
+ *   4. the client rect is not where the layer thinks it is.
+ *
+ * All four are printed together, first few flushes per window, direct launch
+ * only — so one device log settles which it is without another round. */
+static void winios_overlay_log_flush( struct window_surface *surface, const RECT *dirty )
+{
+    static struct winios_diag_table flush_diag;
+    struct window_rects rects = {0};
+    RECT surf, clipped, client_local;
+    HWND hwnd = surface->hwnd, parent;
+    UINT style, ex_style;
+    int n, is_child;
+
+    if (!(n = winios_overlay_diag_n( &flush_diag, hwnd, 3 ))) return;
+
+    surf = surface->rect;
+    parent = NtUserGetAncestor( hwnd, GA_PARENT );
+    is_child = parent && parent != get_desktop_window();
+    style = get_window_long( hwnd, GWL_STYLE );
+    ex_style = get_window_long( hwnd, GWL_EXSTYLE );
+    get_window_rects( hwnd, COORDS_SCREEN, &rects, get_thread_dpi() );
+
+    clipped = *dirty;
+    if (!intersect_rect( &clipped, &clipped, &surf )) SetRectEmpty( &clipped );
+
+    /* The client area in the SAME window-local space the surface rect uses —
+     * the only way to read "does the surface reach the bottom of the client". */
+    client_local = rects.client;
+    OffsetRect( &client_local, -rects.visible.left, -rects.visible.top );
+
+    dprintf( 2, "[overlay-flush] #%d hwnd=%p parent=%p child=%d own-surface=1 "
+             "style=%08x ex=%08x win={%d,%d,%d,%d} client={%d,%d,%d,%d} "
+             "visible={%d,%d,%d,%d} surf={%d,%d,%d,%d} client-local={%d,%d,%d,%d} "
+             "dirty={%d,%d,%d,%d} -> clipped={%d,%d,%d,%d}%s%s rev=ml1110\n",
+             n, hwnd, parent, is_child, (unsigned)style, (unsigned)ex_style,
+             (int)rects.window.left, (int)rects.window.top,
+             (int)rects.window.right, (int)rects.window.bottom,
+             (int)rects.client.left, (int)rects.client.top,
+             (int)rects.client.right, (int)rects.client.bottom,
+             (int)rects.visible.left, (int)rects.visible.top,
+             (int)rects.visible.right, (int)rects.visible.bottom,
+             (int)surf.left, (int)surf.top, (int)surf.right, (int)surf.bottom,
+             (int)client_local.left, (int)client_local.top,
+             (int)client_local.right, (int)client_local.bottom,
+             (int)dirty->left, (int)dirty->top, (int)dirty->right, (int)dirty->bottom,
+             (int)clipped.left, (int)clipped.top, (int)clipped.right, (int)clipped.bottom,
+             IsRectEmpty( &clipped ) ? "  <-- DAMAGE ENTIRELY OUTSIDE THE SURFACE" : "",
+             (client_local.bottom > surf.bottom || client_local.right > surf.right)
+                 ? "  <-- SURFACE DOES NOT COVER THE WHOLE CLIENT (cropped to the virtual screen)" : "" );
+}
+
 /* ml505 probe. This hook was a pure stub: wine hands the driver the
  * surface's VISIBLE REGION here — the rects left after sibling and child
  * occlusion — and we discarded all of it.
@@ -419,6 +718,12 @@ static BOOL winios_surface_flush( struct window_surface *surface, const RECT *re
         int surf_w = color_info->bmiHeader.biWidth;
         int surf_h = color_info->bmiHeader.biHeight;
         if (surf_h < 0) surf_h = -surf_h;
+        /* Direct launch: never hand the app the GDI surface of the window
+         * that hosts the presented Metal layer — see winios_direct_overlay.
+         * Answers 0 in desktop mode, so nothing changes there. */
+        if (winios_overlay_skip_hwnd && winios_overlay_skip_hwnd( surface->hwnd )) return TRUE;
+        winios_overlay_log_first( surface->hwnd, surf_w, surf_h );
+        winios_overlay_log_flush( surface, dirty );
         /* ml1028: propagate the snapshot allocation result. dce.c only calls
          * reset_bounds() when we return TRUE, so returning FALSE keeps the
          * dirty region and the frame is repainted on a later flush instead of
@@ -452,6 +757,17 @@ static BOOL winios_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *sur
     BITMAPINFO *info = (BITMAPINFO *)buffer;
     struct window_surface *previous;
 
+    /* ml1090: NEVER give the DESKTOP window a surface in a direct launch.
+     *
+     * The desktop window is now sized to the virtual screen even without a
+     * shell (winstation_ios.c, [desktop-rect]) so that every CenterWindow
+     * helper and DS_CENTER dialog has a screen to centre on. A screen-sized
+     * window with a GDI surface is a screen-sized opaque backdrop, and the
+     * overlay would draw it straight over the presented game image — the
+     * exact failure winios_ensure_compositor refuses to allow in this mode.
+     * The desktop is a coordinate system here, never a painted surface. */
+    if (winios_direct_overlay() && hwnd == get_desktop_window()) return FALSE;
+
     if ((previous = *window_surface) && previous->funcs == &winios_surface_funcs
         && EqualRect( &previous->rect, surface_rect )) return TRUE;
 
@@ -466,7 +782,34 @@ static BOOL winios_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *sur
 
     *window_surface = window_surface_create( sizeof(struct window_surface), &winios_surface_funcs,
                                              hwnd, surface_rect, info, 0 );
+
+    /* ml750: window_surface_create() returns NULL when the backing DIB
+     * cannot be allocated. Dropping `previous` then leaves the window with
+     * NO surface at all: nothing ever flushes, so the window is invisible
+     * for the rest of its life even though it is WS_VISIBLE and on the
+     * taskbar. Keep whatever the window already had and say so loudly --
+     * a stale surface still paints, a NULL one never can. */
+    if (!*window_surface)
+    {
+        static unsigned fail_n;
+        dprintf( 2, "[surf-create] #%u hwnd=%p rect={%d,%d,%d,%d} bytes=%u "
+                 "ALLOCATION FAILED -- keeping previous surface %p (window would be invisible) rev=ml750\n",
+                 ++fail_n, hwnd, (int)surface_rect->left, (int)surface_rect->top,
+                 (int)surface_rect->right, (int)surface_rect->bottom,
+                 (unsigned)info->bmiHeader.biSizeImage, previous );
+        *window_surface = previous;
+        return TRUE;
+    }
+
     if (previous) window_surface_release( previous );
+
+    /* ml1110: tell the app side WHERE in the window these bits live, before
+     * any flush of this surface can reach it — see the extern's own comment.
+     * Both modes: the crop is not direct-launch-specific, and desktop mode's
+     * per-window layers scale the same contents the same way. */
+    if (winios_window_surface_rect)
+        winios_window_surface_rect( hwnd, (int)surface_rect->left, (int)surface_rect->top,
+                                    (int)surface_rect->right, (int)surface_rect->bottom );
 
     {
         /* ml505: was capped at 16 GLOBALLY, so a window created late (the
@@ -492,15 +835,109 @@ static BOOL winios_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *sur
 static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                                            const struct window_rects *new_rects, struct window_surface *surface )
 {
-    /* desktop mode only — game windows must never wake the compositor
-     * (it would draw its backdrop OVER the DXMT Metal layer) */
-    if (winios_window_frame && winios_desktop_mode())
+    /* Desktop mode: the full-screen compositor. Direct launch: the
+     * transparent overlay inside the presented layer (winios_direct_overlay).
+     * Neither wakes the desktop compositor outside desktop mode — the app
+     * side keeps that gate, so its backdrop can still never cover a game. */
+    if (winios_window_frame && (winios_desktop_mode() || winios_direct_overlay()))
     {
-        const RECT *v = &new_rects->visible;
-        const RECT *c = &new_rects->client;
+        RECT vr = new_rects->visible, cr = new_rects->client;
+        const RECT *v = &vr, *c = &cr;
         int visible = !IsRectEmpty( v ) && !(swp_flags & SWP_HIDEWINDOW);
+        /* ml1690: a CHILD window's rects arrive in its parent's client
+         * coordinates, but every window layer is a sibling under the one
+         * compositor root, framed in desktop pixels. So a child with its own
+         * layer -- the embedded browser view of a sign-in dialog, drawn through
+         * a swapchain -- was placed at the desktop's origin instead of inside
+         * its dialog. Map child rects to the desktop first.
+         * MADEIRA_CHILD_LAYER_SCREEN=0 restores parent-relative placement. */
+        {
+            static int enabled = -1;
+            HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+            if (enabled < 0) { const char *e = getenv( "MADEIRA_CHILD_LAYER_SCREEN" ); enabled = !(e && e[0] == '0'); }
+            if (enabled && parent && parent != get_desktop_window())
+            {
+                UINT dpi = get_thread_dpi();
+                map_window_points( parent, 0, (POINT *)&vr, 2, dpi );
+                map_window_points( parent, 0, (POINT *)&cr, 2, dpi );
+            }
+        }
         winios_window_frame( hwnd, v->left, v->top, v->right - v->left, v->bottom - v->top, visible,
                              c->left, c->top, c->right - c->left, c->bottom - c->top );
+
+        /* ml1690: children do not get a WindowPosChanged when only their parent
+         * moves (their parent-relative rects are unchanged), so their layers
+         * would stay where the dialog used to be. Re-send the direct children's
+         * desktop rects whenever a top-level window moves or resizes. */
+        if (!(swp_flags & SWP_NOMOVE) || !(swp_flags & SWP_NOSIZE))
+        {
+            HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+            const char *e = getenv( "MADEIRA_CHILD_LAYER_SCREEN" );
+            if (!(e && e[0] == '0') && (!parent || parent == get_desktop_window()))
+            {
+                HWND *list = list_window_children( hwnd );
+                UINT dpi = get_thread_dpi();
+                int i;
+                for (i = 0; list && list[i] && i < 64; i++)
+                {
+                    RECT wr, cl;
+                    DWORD style = NtUserGetWindowLongW( list[i], GWL_STYLE );
+                    if (!NtUserGetWindowRect( list[i], &wr, dpi ) || !NtUserGetClientRect( list[i], &cl, dpi )) continue;
+                    map_window_points( list[i], 0, (POINT *)&cl, 2, dpi );
+                    winios_window_frame( list[i], wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                                         (style & WS_VISIBLE) && !IsRectEmpty( &wr ),
+                                         cl.left, cl.top, cl.right - cl.left, cl.bottom - cl.top );
+                    {
+                        static unsigned logged;
+                        if (logged < 60)
+                        {
+                            logged++;
+                            dprintf( 2, "[child-layer] ml1730 parent=%p flags=%#x child=%p window={%d,%d,%d,%d} "
+                                        "client={%d,%d,%d,%d} vis=%d\n", hwnd, swp_flags, list[i],
+                                     (int)wr.left, (int)wr.top, (int)wr.right, (int)wr.bottom,
+                                     (int)cl.left, (int)cl.top, (int)cl.right, (int)cl.bottom,
+                                     (style & WS_VISIBLE) ? 1 : 0 );
+                        }
+                    }
+                }
+                free( list );
+            }
+        }
+    }
+
+    /* ml1110 — THE OTHER HALF OF "WHY IS THE CLIENT AREA BLANK": the windows
+     * that never flush at all. A CHILD window gets NO surface of its own
+     * (get_default_window_surface returns NULL for it and the caller falls back
+     * to the parent's), so it paints into an ancestor's bits and the only trace
+     * it ever leaves is this hook. The existing [win-pos] family deliberately
+     * drops children with an empty visible rect — which is exactly the shape a
+     * client-covering paint-box child can have here — so a child could get an
+     * overlay layer created for it and appear in no other line in the log.
+     * First two events per window, direct launch only; `surface=(none)` is the
+     * "paints into an ancestor's surface" case stated outright. */
+    {
+        static struct winios_diag_table pos_diag;
+        int n = winios_overlay_diag_n( &pos_diag, hwnd, 4 );
+        if (n)
+        {
+            /* First window event in a direct launch: the state every
+             * self-centring dialog is about to read. */
+            winios_log_screen_routes( "first-window-event" );
+            const RECT *v = &new_rects->visible, *w = &new_rects->window, *c = &new_rects->client;
+            HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+            int is_child = parent && parent != get_desktop_window();
+            dprintf( 2, "[overlay-win] #%d hwnd=%p parent=%p child=%d style=%08x ex=%08x "
+                     "after=%p swp=%08x win={%d,%d,%d,%d} client={%d,%d,%d,%d} "
+                     "visible={%d,%d,%d,%d} surface=%s rev=ml1110\n",
+                     n, hwnd, parent, is_child,
+                     (unsigned)get_window_long( hwnd, GWL_STYLE ),
+                     (unsigned)get_window_long( hwnd, GWL_EXSTYLE ),
+                     insert_after, (unsigned)swp_flags,
+                     (int)w->left, (int)w->top, (int)w->right, (int)w->bottom,
+                     (int)c->left, (int)c->top, (int)c->right, (int)c->bottom,
+                     (int)v->left, (int)v->top, (int)v->right, (int)v->bottom,
+                     surface ? "own" : "(none) — paints into an ancestor's surface" );
+        }
     }
     /* ml505: z-order and geometry churn. If the three same-rect siblings are
      * being reordered, the topmost changes and the surface shows whichever
@@ -545,6 +982,126 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
                     dprintf( 2, "[win-name] #%u hwnd=%p class='%s' text=\"%s\" rev=ml853\n", n, hwnd, cls, txt );
             }
         }
+    }
+    /* ml750: an EMPTY visible rect used to be filtered out here (to keep the
+     * 1x1 IME/message windows from burying the signal) -- which is precisely
+     * why a top-level window collapsing to 0x0 left NO trace in the log at
+     * all: [win-pos] fell silent, the compositor got a zero frame, and the
+     * only surviving evidence was a 128x128 surface (get_surface_rect()
+     * clamps an empty rect up to the 128px minimum) and a zero-size Metal
+     * layer. Degenerate rects are rare and always interesting, so log them
+     * unconditionally, with the window rect and style that produced them. */
+    else
+    {
+        /* ml780: an empty visible rect fires constantly for ordinary
+         * zero-size CHILD controls (e.g. a toolbar/rebar child window with
+         * no area) -- 40+ lines per session with no diagnostic value. Only
+         * a top-level window collapsing to 0x0 is interesting, so gate the
+         * whole diagnostic on "no WS_CHILD" before even touching the
+         * throttle counter. */
+        UINT style = get_window_long( hwnd, GWL_STYLE );
+        if (!(style & WS_CHILD) && (style & WS_VISIBLE))
+        {
+            static unsigned degen_n;
+            unsigned n = ++degen_n;
+            if (n <= 64 || (n % 64) == 0)
+            {
+                const RECT *w = &new_rects->window, *c = &new_rects->client;
+                dprintf( 2, "[win-pos] #d%u hwnd=%p after=%p flags=%08x vis=EMPTY "
+                         "win={%d,%d,%d,%d} client={%d,%d,%d,%d} style=%08x surface=%p"
+                         "%s rev=ml750\n",
+                         n, hwnd, insert_after, (unsigned)swp_flags,
+                         (int)w->left, (int)w->top, (int)w->right, (int)w->bottom,
+                         (int)c->left, (int)c->top, (int)c->right, (int)c->bottom,
+                         (unsigned)style, surface,
+                         (style & WS_VISIBLE) ? "  <-- DEGENERATE, WS_VISIBLE: nothing can be shown" : "" );
+
+                /* A WS_VISIBLE top-level window with no area almost always means
+                 * the application sized itself from a display query that came back
+                 * empty. Print what this driver would have told it, so the next log
+                 * says immediately whether the geometry the application read was
+                 * wrong or whether it invented the zero itself. */
+                HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+                if ((style & WS_VISIBLE) && (!parent || parent == get_desktop_window()))
+                {
+                    RECT mon = get_primary_monitor_rect( get_thread_dpi() );
+                    RECT virt = get_virtual_screen_rect( get_thread_dpi(), MDT_DEFAULT );
+                    dprintf( 2, "[win-pos] #d%u    driver would report: primary monitor={%d,%d,%d,%d} "
+                             "virtual screen={%d,%d,%d,%d} rev=ml750\n", n,
+                             (int)mon.left, (int)mon.top, (int)mon.right, (int)mon.bottom,
+                             (int)virt.left, (int)virt.top, (int)virt.right, (int)virt.bottom );
+                }
+            }
+        }
+    }
+
+    /* iOS: synthesize the expose/damage-driven repaint a real windowing system
+     * delivers. Every other display driver gets an Expose (x11drv), a
+     * drawRect/needsDisplay (macdrv) or a damage event when a window becomes
+     * visible or when its backing surface is (re)created, and answers it with
+     * NtUserRedrawWindow( RDW_INVALIDATE ) — that is what puts the window's
+     * update region into the server, which is the ONLY source of the queue's
+     * QS_PAINT bit and therefore of WM_PAINT (server get_message only reports
+     * WM_PAINT while queue->paint_count is non-zero).
+     *
+     * winios.drv has no such event: the surface IS the presented buffer. So
+     * nothing ever asked the application to paint, and a window whose contents
+     * the runtime just dropped stayed empty forever. Two cases hit this:
+     *   - the show path took a route that carries SWP_NOREDRAW (the server then
+     *     skips expose_window() and the frame/client invalidation entirely, see
+     *     window.c set_window_pos: `if (swp_flags & SWP_NOREDRAW) goto done`),
+     *     e.g. when ShowWindow() degenerates to a WS_VISIBLE style toggle plus
+     *     update_window_state() because the parent looks invisible;
+     *   - CreateWindowSurface replaced the surface ("RECREATED — old content
+     *     dropped" above): the new buffer is blank and only the application can
+     *     refill it.
+     * apply_window_pos() already computes exactly the signal we need:
+     * SWP_FRAMECHANGED is forced whenever the surface pointer changed, and
+     * SWP_SHOWWINDOW marks the window going visible.
+     *
+     * Surface-less windows (GPU/client-surface presented, e.g. the D3D path)
+     * are deliberately left alone: they do not paint through GDI. */
+    if (surface && !IsRectEmpty( &new_rects->visible ) && !(swp_flags & SWP_HIDEWINDOW) &&
+        (swp_flags & (SWP_SHOWWINDOW | SWP_FRAMECHANGED)) &&
+        (get_window_long( hwnd, GWL_STYLE ) & WS_VISIBLE))
+    {
+        /* MADEIRA-TEMP: one line per newly shown surface-backed window, to
+         * settle WHY the show path carried SWP_NOREDRAW. A window that reaches
+         * here WITHOUT SWP_SHOWWINDOW was made visible by the WS_VISIBLE style
+         * toggle in show_window() (window.c:4855-4859), which happens only when
+         * is_window_visible(parent) is FALSE — parent_vis/parent_style/parent
+         * vs desktop/msgwin below say which of the three possible reasons it is
+         * (parent is the message window, parent handle is unresolvable, or the
+         * desktop style query failed). Remove once diagnosed. */
+        if (!(swp_flags & SWP_SHOWWINDOW))
+        {
+            static unsigned diag_n;
+            if (diag_n++ < 8)
+            {
+                /* ml1090: RESOLVE THE DESKTOP FIRST, IN ITS OWN STATEMENT.
+                 *
+                 * get_win_ptr() only maps a handle to WND_DESKTOP when
+                 * is_desktop_window() says so, and that test reads THIS
+                 * THREAD's thread_info->top_window — which get_desktop_window()
+                 * is what fills in. As one argument list the evaluation order
+                 * is unspecified, and clang evaluated the style query first: on
+                 * a thread that had not yet resolved the desktop, log 77 printed
+                 * parent=0x10020 desktop=0x10020 parent_style=00000000
+                 * parent_vis=0 — the same handle answered as "the desktop" and
+                 * as a style-less foreign window in one line, which cost real
+                 * time to disbelieve. */
+                HWND desktop = get_desktop_window();
+                HWND msgwin = get_hwnd_message_parent();
+                HWND parent = NtUserGetAncestor( hwnd, GA_PARENT );
+                DWORD parent_style = get_window_long( parent, GWL_STYLE );
+                BOOL parent_vis = is_window_visible( parent );
+
+                dprintf( 2, "MADEIRA-TEMP [paint-diag] hwnd=%p swp=%08x parent=%p desktop=%p "
+                         "msgwin=%p parent_style=%08x parent_vis=%d\n", hwnd, (unsigned)swp_flags,
+                         parent, desktop, msgwin, (unsigned)parent_style, parent_vis );
+            }
+        }
+        NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
     }
 
     if (winios_pWindowPosChanged)
@@ -1593,20 +2150,33 @@ static void load_display_driver(void)
         if (winios_pCreateWindow)        winios_user_driver.pCreateWindow        = winios_pCreateWindow;
         if (winios_pDestroyWindow)       winios_user_driver.pDestroyWindow       = winios_pDestroyWindow;
         if (winios_pProcessEvents)       winios_user_driver.pProcessEvents       = winios_pProcessEvents;
-        if (winios_desktop_mode())       winios_user_driver.pSetCursor           = winios_drv_set_cursor;
-        else if (winios_pSetCursor)      winios_user_driver.pSetCursor           = winios_pSetCursor;
+        /* ml — installed unconditionally now (was desktop-mode only): see
+         * winios_drv_set_cursor's own comment above. winios_pSetCursor
+         * (Winios.m's old empty stub) is no longer wired to anything. */
+        winios_user_driver.pSetCursor            = winios_drv_set_cursor;
         if (winios_pDestroyCursorIcon)   winios_user_driver.pDestroyCursorIcon   = winios_pDestroyCursorIcon;
         if (winios_pShowWindow)          winios_user_driver.pShowWindow          = winios_pShowWindow;
         /* window-pos wrapper dereferences window_rects on this side and
          * forwards plain ints to Winios.m's layer compositor */
-        if (winios_pWindowPosChanged || winios_window_frame)
-            winios_user_driver.pWindowPosChanged = winios_drv_window_pos_changed;
-        /* S2 desktop mode only: GDI window surfaces → app compositor.
-         * Games keep the offscreen (invisible) surface path. */
+        /* Always install the wrapper, even with no app-side hook linked: it
+         * also carries the expose-equivalent repaint request (see
+         * winios_drv_window_pos_changed), which must not depend on Winios.m. */
+        winios_user_driver.pWindowPosChanged = winios_drv_window_pos_changed;
+        /* GDI window surfaces → app compositor. Desktop mode composites them
+         * into its own view; a direct launch draws them in the overlay inside
+         * the presented layer (see winios_direct_overlay). Without this hook
+         * a window gets win32u's offscreen surface, whose flush goes nowhere —
+         * which is precisely why a directly-launched dialog was invisible. */
         if (winios_desktop_mode())
         {
             winios_user_driver.pCreateWindowSurface = winios_CreateWindowSurface;
             dprintf( 2, "[winios] desktop mode: window-surface compositing ENABLED\n" );
+        }
+        else if (winios_direct_overlay())
+        {
+            winios_user_driver.pCreateWindowSurface = winios_CreateWindowSurface;
+            dprintf( 2, "[overlay] direct launch: window-surface compositing ENABLED "
+                        "(MADEIRA_DIRECT_OVERLAY=0 to disable)\n" );
         }
         winios_user_driver.pUpdateDisplayDevices = winios_UpdateDisplayDevices;
         __wine_set_user_driver( &winios_user_driver, WINE_GDI_DRIVER_VERSION );

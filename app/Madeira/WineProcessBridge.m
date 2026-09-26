@@ -21,6 +21,8 @@
 #include <sys/stat.h>
 #include <limits.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 #include "WineProcessBridge.h"
 #include "WineServerBridge.h"
@@ -43,6 +45,112 @@ static os_log_t wine_proc_log(void) {
 }
 
 #define LOG(fmt, ...) os_log(wine_proc_log(), "[WineProc] " fmt, ##__VA_ARGS__)
+
+/* ---------------------------------------------------------------------------
+ * 2026-09-26 -- THE AUDIO SESSION, MADE ROBUST AND MADE VISIBLE.
+ *
+ * Device report: a tablet is silent while the phone is fine, and the engine
+ * census on the tablet proves samples with real signal are being rendered
+ * (the bus limiter engages, the RemoteIO IO thread runs). So the silence is
+ * downstream of us: the session category, activation, route or volume.
+ * A session that is NOT in the Playback category obeys the tablet Silent
+ * Mode (a Control Centre toggle there, not a hardware switch) and is muted
+ * with no error anywhere -- which is exactly what a failed or overridden
+ * setCategory looks like. The previous code logged its results through os_log
+ * only, so the exported log could not say which of these it was.
+ *
+ * So: one function that (a) sets Playback and activates, retrying as
+ * mixable if a non-mixable activation is refused, (b) reports category,
+ * route, volume and errors into the EXPORTED log (stderr), and (c) is called
+ * again whenever the system tells us the session changed under us --
+ * interruption ended, route change, media services reset -- and by the audio
+ * driver every time it starts the output unit (weak symbol, see
+ * build/ntdll-unix/audio_null_ios.c).
+ * ------------------------------------------------------------------------- */
+void madeira_audio_session_ensure(const char *why)
+{
+    @autoreleasepool {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        NSError *err = nil;
+        BOOL cat_ok, act_ok;
+
+        cat_ok = [session setCategory:AVAudioSessionCategoryPlayback
+                                 mode:AVAudioSessionModeDefault
+                              options:0
+                                error:&err];
+        if (!cat_ok)
+            dprintf(STDERR_FILENO, "[audio-route] setCategory(Playback) FAILED: %s\n",
+                    err.localizedDescription.UTF8String ?: "?");
+        err = nil;
+        act_ok = [session setActive:YES error:&err];
+        if (!act_ok) {
+            dprintf(STDERR_FILENO, "[audio-route] setActive FAILED (%ld): %s -- retrying as mixable\n",
+                    (long)err.code, err.localizedDescription.UTF8String ?: "?");
+            err = nil;
+            [session setCategory:AVAudioSessionCategoryPlayback
+                            mode:AVAudioSessionModeDefault
+                         options:AVAudioSessionCategoryOptionMixWithOthers
+                           error:&err];
+            err = nil;
+            act_ok = [session setActive:YES error:&err];
+            if (!act_ok)
+                dprintf(STDERR_FILENO, "[audio-route] setActive (mixable) FAILED (%ld): %s\n",
+                        (long)err.code, err.localizedDescription.UTF8String ?: "?");
+        }
+
+        NSMutableArray<NSString *> *outs = [NSMutableArray array];
+        for (AVAudioSessionPortDescription *port in session.currentRoute.outputs)
+            [outs addObject:[NSString stringWithFormat:@"%@(%@)", port.portType, port.portName]];
+        NSString *joined = outs.count ? [outs componentsJoinedByString:@", "] : @"none";
+        dprintf(STDERR_FILENO,
+                "[audio-route] why=%s category=%s options=0x%lx active=%d outputs=<%s> "
+                "outputVolume=%.2f sampleRate=%.0f ioBuffer=%.1fms otherAudioPlaying=%d "
+                "secondaryHint=%d\n",
+                why ? why : "?", session.category.UTF8String,
+                (unsigned long)session.categoryOptions, act_ok ? 1 : 0, joined.UTF8String,
+                session.outputVolume, session.sampleRate, session.IOBufferDuration * 1000.0,
+                session.isOtherAudioPlaying ? 1 : 0,
+                session.secondaryAudioShouldBeSilencedHint ? 1 : 0);
+        if (session.outputVolume <= 0.001f)
+            dprintf(STDERR_FILENO, "[audio-route] NOTE: the system output volume is 0 -- "
+                                   "that alone explains silence\n");
+    }
+}
+
+static void madeira_audio_session_observe(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+        [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil
+                    usingBlock:^(NSNotification *n) {
+            NSUInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+            dprintf(STDERR_FILENO, "[audio-route] interruption %s\n",
+                    type == AVAudioSessionInterruptionTypeBegan ? "BEGAN" : "ENDED");
+            if (type == AVAudioSessionInterruptionTypeEnded)
+                madeira_audio_session_ensure("interruption-ended");
+        }];
+        [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil
+                    usingBlock:^(NSNotification *n) {
+            NSUInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+            /* CategoryChange (3) is caused by our own setCategory: re-running
+             * ensure() from it would loop. Report it, act on the others. */
+            if (reason == AVAudioSessionRouteChangeReasonCategoryChange) {
+                AVAudioSession *s2 = [AVAudioSession sharedInstance];
+                dprintf(STDERR_FILENO, "[audio-route] category changed -> %s options=0x%lx\n",
+                        s2.category.UTF8String, (unsigned long)s2.categoryOptions);
+                return;
+            }
+            char why[48];
+            snprintf(why, sizeof(why), "route-change-%lu", (unsigned long)reason);
+            madeira_audio_session_ensure(why);
+        }];
+        [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:nil
+                    usingBlock:^(NSNotification *n __unused) {
+            madeira_audio_session_ensure("media-services-reset");
+        }];
+    });
+}
 
 /* ---- ml581: undo the hand-made AppData skeleton ------------------------
  *
@@ -205,6 +313,50 @@ static void ios_merge_move(const char *src, const char *dst, int depth)
     rmdir( src );                       /* only succeeds once genuinely empty */
 }
 
+/* 2026-09-27 -- THE PER-USER AppData SKELETON, EVERY LAUNCH, FOR EVERY PROFILE.
+ *
+ * shell32 answers SHGetKnownFolderPath / SHGetFolderPath for a per-user folder
+ * only if the directory EXISTS (unless the caller passes KF_FLAG_CREATE or
+ * DONT_VERIFY, and engines generally do not). A managed-runtime engine asks for
+ * LocalAppDataLow to place its log and save data; when that fails it carries
+ * on with an EMPTY base path, then opens "<Company>\<Product>\output_log.txt"
+ * relative to the current directory, gets OBJECT_PATH_NOT_FOUND, hands the
+ * NULL stream to the CRT, and the CRT's invalid-parameter handler fast-fails
+ * the process (0xC0000409) before the first frame. The one-shot, marker-gated
+ * repair above only ever created the skeleton under ONE hard-coded profile
+ * name, once; a prefix whose live profile directory has another name (it is
+ * derived from the host account name) or that was created later never got it.
+ * mkdir -p is idempotent and costs nothing, so do it for every profile
+ * directory present, on every launch, and say what was found. */
+static void madeira_ensure_appdata(NSString *prefix)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *users = [prefix stringByAppendingPathComponent:@"drive_c/users"];
+    NSArray<NSString *> *names = [fm contentsOfDirectoryAtPath:users error:nil];
+    NSMutableString *report = [NSMutableString string];
+
+    for (NSString *name in names)
+    {
+        BOOL isDir = NO;
+        NSString *home = [users stringByAppendingPathComponent:name];
+        if ([name hasPrefix:@"."] || [name caseInsensitiveCompare:@"Public"] == NSOrderedSame) continue;
+        if (![fm fileExistsAtPath:home isDirectory:&isDir] || !isDir) continue;
+
+        int made = 0;
+        for (NSString *leaf in @[ @"AppData/Roaming", @"AppData/Local", @"AppData/LocalLow",
+                                  @"AppData/Local/Temp" ])
+        {
+            NSString *path = [home stringByAppendingPathComponent:leaf];
+            if ([fm fileExistsAtPath:path]) continue;
+            if ([fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil])
+                made++;
+        }
+        [report appendFormat:@" %@(+%d)", name, made];
+    }
+    dprintf(STDERR_FILENO, "[profile] AppData skeleton ensured for:%s\n",
+            report.length ? report.UTF8String : " (no profile directories yet)");
+}
+
 static void madeira_repair_profile(NSString *prefix)
 {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -284,8 +436,67 @@ extern void __wine_main(int argc, char *argv[]);
 extern void wine_log_set_file(const char *path);
 
 static pthread_t g_wine_thread;
-static volatile int g_wine_running = 0;
+static int g_wine_running = 0;
 static char *g_prefix_path = NULL;
+
+/***********************************************************************
+ *           madeira_install_user_fonts
+ *
+ * "Double-click install" for iOS: anything the user drops into
+ * Documents/fonts/ is installed into the prefix's C:\windows\Fonts.
+ *
+ * That directory is the ONE place a font has to be for Wine to install it:
+ * win32u's font_init() -> load_file_system_fonts() scans
+ * \??\C:\windows\fonts on every session start and registers every face it
+ * finds in the font list and in the HKCU\Software\Wine\Fonts\Cache key —
+ * which IS Wine's font cache — so a file copied here behaves exactly like one
+ * of the preinstalled faces, for 32-bit and 64-bit guests alike. (The
+ * HKLM\...\CurrentVersion\Fonts value only carries fonts that live OUTSIDE
+ * that directory; Wine writes it itself, from the face's real name, in
+ * update_external_font_keys().)
+ *
+ * Generic: no font name, no title, no app is special-cased — whatever is in
+ * the folder gets installed. Runs before the wineserver starts, every
+ * session, so a font added between runs is picked up on the next launch.
+ */
+static void madeira_install_user_fonts(NSString *prefix)
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *src = [[prefix stringByDeletingLastPathComponent]
+                        stringByAppendingPathComponent:@"fonts"];
+    NSString *dst = [prefix stringByAppendingPathComponent:@"drive_c/windows/Fonts"];
+    NSArray<NSString *> *names = [fm contentsOfDirectoryAtPath:src error:nil];
+    NSUInteger installed = 0;
+
+    if (!names.count) return;
+    [fm createDirectoryAtPath:dst withIntermediateDirectories:YES attributes:nil error:nil];
+
+    for (NSString *name in names) {
+        NSString *ext = name.pathExtension.lowercaseString;
+        if (![ext isEqualToString:@"ttf"] && ![ext isEqualToString:@"otf"] &&
+            ![ext isEqualToString:@"ttc"] && ![ext isEqualToString:@"fon"]) continue;
+        if ([name hasPrefix:@"."]) continue;
+
+        NSString *from = [src stringByAppendingPathComponent:name];
+        NSString *to   = [dst stringByAppendingPathComponent:name];
+        NSDictionary *a = [fm attributesOfItemAtPath:from error:nil];
+        NSDictionary *b = [fm attributesOfItemAtPath:to error:nil];
+
+        /* already installed and unchanged: leave it alone (size is enough —
+         * a replaced font of identical size is indistinguishable to the user
+         * and re-copying every launch costs more than it is worth) */
+        if (b && [a[NSFileSize] isEqual:b[NSFileSize]]) continue;
+
+        [fm removeItemAtPath:to error:nil];
+        if ([fm copyItemAtPath:from toPath:to error:nil]) {
+            installed++;
+            LOG("[fonts] installed %{public}s", name.UTF8String);
+        } else {
+            LOG("[fonts] FAILED to install %{public}s", name.UTF8String);
+        }
+    }
+    LOG("[fonts] installed %lu from Documents/fonts", (unsigned long)installed);
+}
 
 /***********************************************************************
  *           madeira_seed_prefix_if_needed
@@ -341,10 +552,61 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
         madeira_repair_profile( prefix );
         /* ml581: see madeira_undo_appdata_skeleton() above. */
         madeira_undo_appdata_skeleton( prefix );
+        /* 2026-09-27: every launch -- see madeira_ensure_appdata(). */
+        madeira_ensure_appdata( prefix );
+        /* Fonts the user dropped into Documents/fonts. Must be in place before
+         * the wineserver starts, so win32u's session-start scan of
+         * C:\windows\fonts sees them. */
+        madeira_install_user_fonts( prefix );
     }
 }
 
+/***********************************************************************
+ *           madeira_pe_machine
+ *
+ * WOW64_DESIGN.md stage E: read IMAGE_FILE_HEADER.Machine straight off disk
+ * (MZ -> e_lfanew -> "PE\0\0" -> Machine) instead of guessing from the exe
+ * name, so an i386 target can be routed to the syswow64 farm generically —
+ * this has nothing game-specific about it, it just answers "what machine is
+ * this PE". Returns 0 (and touches nothing else) on any read/format failure,
+ * which callers treat as "not i386" so behaviour for unreadable/odd inputs
+ * never regresses.
+ */
+static uint16_t madeira_pe_machine(const char *unix_path) {
+    if (!unix_path || !*unix_path) return 0;
+    FILE *f = fopen(unix_path, "rb");
+    if (!f) return 0;
+
+    unsigned char dos[64];
+    uint16_t machine = 0;
+    if (fread(dos, 1, sizeof(dos), f) == sizeof(dos) && dos[0] == 'M' && dos[1] == 'Z') {
+        uint32_t e_lfanew = (uint32_t)dos[0x3c] | ((uint32_t)dos[0x3d] << 8) |
+                            ((uint32_t)dos[0x3e] << 16) | ((uint32_t)dos[0x3f] << 24);
+        unsigned char pe[6];
+        if (e_lfanew <= (16u << 20) &&  /* sanity bound, real headers are tiny */
+            fseek(f, (long)e_lfanew, SEEK_SET) == 0 &&
+            fread(pe, 1, sizeof(pe), f) == sizeof(pe) &&
+            pe[0] == 'P' && pe[1] == 'E' && pe[2] == 0 && pe[3] == 0) {
+            machine = (uint16_t)pe[4] | ((uint16_t)pe[5] << 8);
+        }
+    }
+    fclose(f);
+    return machine;
+}
+
+#define MADEIRA_IMAGE_FILE_MACHINE_I386  0x14c
+#define MADEIRA_IMAGE_FILE_MACHINE_AMD64 0x8664
+#define MADEIRA_IMAGE_FILE_MACHINE_ARM64 0xaa64
+
+static void wine_process_finished(void *arg) {
+    /* Also runs when SIGQUIT makes the main guest thread call pthread_exit. */
+    wineserver_finish_session();
+    __atomic_store_n(&g_wine_running, 0, __ATOMIC_RELEASE);
+    dprintf(STDERR_FILENO, "[session-stop] ml1220 guest session retired\n");
+}
+
 static void *wine_process_thread(void *arg) {
+    pthread_cleanup_push(wine_process_finished, NULL);
     @autoreleasepool {
         /* Perf: the guest main thread runs ON this pthread. Promote to
          * USER_INTERACTIVE so it schedules on P-cores with minimal kernel
@@ -472,20 +734,10 @@ static void *wine_process_thread(void *arg) {
 
         /* 2026-07-05 audio: activate the AVAudioSession before Wine boots
          * so the RemoteIO unit in the mmdevapi driver can start. Playback
-         * category = ignores silent switch (it's a game). */
-        {
-            NSError *aerr = nil;
-            AVAudioSession *session = [AVAudioSession sharedInstance];
-            [session setCategory:AVAudioSessionCategoryPlayback error:&aerr];
-            if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
-                          aerr.localizedDescription.UTF8String);
-            aerr = nil;
-            [session setActive:YES error:&aerr];
-            if (aerr) LOG("AVAudioSession setActive failed: %{public}s",
-                          aerr.localizedDescription.UTF8String);
-            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms",
-                     session.sampleRate, session.outputLatency * 1000.0);
-        }
+         * category = ignores the silent switch (this is a game).
+         * 2026-09-26: moved into madeira_audio_session_ensure() -- see it. */
+        madeira_audio_session_observe();
+        madeira_audio_session_ensure("session-start");
 
         /* 2026-07-04 BISECT RESULT: arm A (this env set, all handler fixes
          * on) booted to menu at 17-18 FPS with the x18-access emulator
@@ -677,12 +929,112 @@ static void *wine_process_thread(void *arg) {
         // Otherwise: detect "x64" in the exe name (cube-x64, fib-x64, etc.)
         // OR a Win32 full path (real game launches typically need ARM64EC).
         const char *force_ec = getenv("MADEIRA_USE_ARM64EC");
-        BOOL use_arm64ec = (force_ec && *force_ec == '1') ||
-                           (strstr(madeira_exe, "x64") != NULL) ||
-                           (strchr(madeira_exe, '\\') != NULL);
+
+        /* WOW64_DESIGN.md stage E: read the target's actual PE machine instead
+         * of guessing from its name. A bare exe name lives directly in one of
+         * the per-arch bundle dirs (same convention the farms below rely on);
+         * a full Win32 path lives under the prefix's drive_c. Any lookup or
+         * parse failure leaves target_machine at 0, i.e. "unknown", and the
+         * name heuristic below is then used exactly as before. */
+        BOOL is_full_path_exe = (strchr(madeira_exe, '\\') != NULL) ||
+                                (madeira_exe[0] && madeira_exe[1] == ':');
+        uint16_t target_machine = 0;
+        {
+            char probe[1024];
+            probe[0] = 0;
+            if (is_full_path_exe && strlen(madeira_exe) > 3 && madeira_exe[1] == ':') {
+                /* stage C review F10: only skip the "C:\" prefix when there
+                 * actually is one — otherwise madeira_exe + 3 reads past the
+                 * end of a short name. */
+                char windir[1024];
+                /* verbatim apart from the separator flip: spaces, apostrophes
+                 * and anything else in the path are copied as-is, and fopen()
+                 * below takes the bytes with no shell in between */
+                if (snprintf(windir, sizeof(windir), "%s", madeira_exe + 3) >= (int)sizeof(windir))
+                    dprintf(STDERR_FILENO, "[WineProc] WARNING: exe path truncated in the PE-machine probe; "
+                                           "a 32-bit target may be misdetected as 64-bit\n");
+                for (char *p = windir; *p; p++) if (*p == '\\') *p = '/';
+                if (snprintf(probe, sizeof(probe), "%s/drive_c/%s", g_prefix_path, windir) >= (int)sizeof(probe))
+                    dprintf(STDERR_FILENO, "[WineProc] WARNING: probe path truncated; "
+                                           "a 32-bit target may be misdetected as 64-bit\n");
+            } else {
+                /* A BARE NAME is resolved by the launch below as
+                 * C:\windows\system32\<name>, which is symlinked from the
+                 * 64-bit farm — so a name that exists in a 64-bit farm is NOT
+                 * a 32-bit target, whatever i386-windows also happens to hold.
+                 *
+                 * This test is load-bearing now that the full i386 Wine set
+                 * ships: i386-windows carries explorer.exe, cmd.exe, start.exe,
+                 * notepad.exe, regedit.exe and friends under exactly the same
+                 * names as the 64-bit farms. Probing i386-windows first would
+                 * make the virtual-desktop launch (MADEIRA_EXE=explorer.exe)
+                 * look like a 32-bit MAIN image, reserve a guest window for the
+                 * whole session and route the exe at C:\windows\syswow64. To
+                 * launch a 32-bit build of a colliding name on purpose, give its
+                 * full path (C:\windows\syswow64\<name>) — the drive_c branch
+                 * above reads that file's own header and needs no name rules. */
+                NSString *bundlePathForProbe = [[NSBundle mainBundle] bundlePath];
+                static const char * const farms64[] = { "aarch64-windows", "arm64ec-windows" };
+                int in_64bit_farm = 0;
+                for (size_t f = 0; f < sizeof(farms64) / sizeof(farms64[0]) && !in_64bit_farm; f++) {
+                    char cand[1024];
+                    snprintf(cand, sizeof(cand), "%s/%s/%s",
+                             bundlePathForProbe.UTF8String, farms64[f], madeira_exe);
+                    if (access(cand, R_OK) == 0) in_64bit_farm = 1;
+                }
+                if (in_64bit_farm) {
+                    dprintf(STDERR_FILENO, "[WineProc] PE probe: bare name '%s' exists in a 64-bit farm — "
+                                           "not probing i386-windows for it\n", madeira_exe);
+                } else {
+                    snprintf(probe, sizeof(probe), "%s/i386-windows/%s",
+                             bundlePathForProbe.UTF8String, madeira_exe);
+                    if (access(probe, R_OK) != 0) probe[0] = 0;
+                }
+            }
+            if (probe[0]) target_machine = madeira_pe_machine(probe);
+            /* Name the file that was (or was not) read. A typed path that does
+             * not exist, or one under a folder the probe resolved differently,
+             * otherwise shows up only as a target silently treated as 64-bit. */
+            dprintf(STDERR_FILENO, "[WineProc] PE probe: '%s' -> machine=0x%x%s\n",
+                    probe[0] ? probe : "(no probe path)", target_machine,
+                    probe[0] && !target_machine ? "  (unreadable or not a PE)" : "");
+        }
+        BOOL is_i386_target = (target_machine == MADEIRA_IMAGE_FILE_MACHINE_I386);
+        if (target_machine) {
+            LOG("Target exe PE machine=0x%x (%{public}s)", target_machine,
+                is_i386_target ? "i386" : "not i386");
+            dprintf(STDERR_FILENO, "[WineProc] Target exe PE machine=0x%x (%s)\n",
+                    target_machine, is_i386_target ? "i386" : "not i386");
+        }
+
+        /* Which 64-bit system-DLL farm this session's own Wine core runs on.
+         * x86_64 guests need arm64ec-windows (ARM64EC hybrid DLLs that interop
+         * with FEX-translated x86_64 code); everything else runs on plain
+         * aarch64-windows. MADEIRA_USE_ARM64EC=1 forces it.
+         *
+         * Decided from the PROBED machine when the probe succeeded. The old
+         * rule was "the name contains x64, or the path contains a backslash",
+         * and that second clause is wrong for a 32-bit target given by full
+         * path: a WoW64 process's 64-bit half is plain aarch64 (get_pe_dir()
+         * resolves /aarch64-windows because the main image is i386, so
+         * is_arm64ec() is false), yet the farm would have been populated with
+         * ARM64EC builds. Bare-name inputs do not resolve in the probe, so they
+         * fall back to the name heuristic and keep their existing behaviour;
+         * an x86_64 full-path target probes 0x8664 and keeps arm64ec too. */
+        BOOL use_arm64ec;
+        if (force_ec && *force_ec == '1')
+            use_arm64ec = YES;
+        else if (target_machine == MADEIRA_IMAGE_FILE_MACHINE_AMD64)
+            use_arm64ec = YES;
+        else if (target_machine == MADEIRA_IMAGE_FILE_MACHINE_I386 ||
+                 target_machine == MADEIRA_IMAGE_FILE_MACHINE_ARM64)
+            use_arm64ec = NO;
+        else
+            use_arm64ec = (strstr(madeira_exe, "x64") != NULL) || is_full_path_exe;
         const char *bundle_subdir = use_arm64ec ? "arm64ec-windows" : "aarch64-windows";
         LOG("Target exe: %{public}s (bundle=%{public}s)", madeira_exe, bundle_subdir);
-        dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s)\n", madeira_exe, bundle_subdir);
+        dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s, probed machine=0x%x)\n",
+                madeira_exe, bundle_subdir, target_machine);
 
         // Ensure Wine prefix has system32 directory with DLLs from bundle
         {
@@ -745,13 +1097,20 @@ static void *wine_process_thread(void *arg) {
             // system32 name resolves to the session arch's binary — colliding
             // names (ucrtbase, kernel32, ...) always do. sysaa64 is the
             // mirror for the future inverse case (aarch64 child in an EC
-            // session, e.g. rpcss under Steam).
+            // session, e.g. rpcss under Steam). syswow64 (WOW64_DESIGN.md
+            // stage E) is the REAL Windows farm name for this pattern: it is
+            // where a 32-bit ntdll.dll/kernel32.dll/kernelbase.dll and a
+            // bare-name i386 test exe live, and where the unix ntdll's
+            // machine->dir mapping (loader_ios.c) expects to find them.
             {
                 struct { const char *farm; const char *arch; } farms[] = {
-                    { "sysx64",  "arm64ec-windows" },
-                    { "sysaa64", "aarch64-windows" },
+                    { "sysx64",   "arm64ec-windows" },
+                    { "sysaa64",  "aarch64-windows" },
+                    { "syswow64", "i386-windows" },
                 };
-                for (int i = 0; i < 2; i++) {
+                /* stage C review F11: derive the bound from the array so
+                 * adding a farm cannot silently skip it. */
+                for (size_t i = 0; i < sizeof(farms) / sizeof(farms[0]); i++) {
                     NSString *farmDir = [prefix stringByAppendingPathComponent:
                         [NSString stringWithFormat:@"drive_c/windows/%s", farms[i].farm]];
                     NSString *archSource = [bundlePath stringByAppendingPathComponent:
@@ -768,7 +1127,370 @@ static void *wine_process_thread(void *arg) {
                     }
                     dprintf(STDERR_FILENO, "[WineProc] Farm %s: %d links -> %s\n",
                             farms[i].farm, farmLinked, farms[i].arch);
+
+                    /* system32\wbem — the one SUBDIRECTORY of the farm.
+                     *
+                     * The bundle farms are flat, but WMI's registered
+                     * InprocServer32 paths are C:\windows\system32\wbem\<name>
+                     * (they are in the shipped registry, and wine.inf installs
+                     * these five modules there: "11,wbem,mofcomp.exe" etc).
+                     * A flat link leaves system32\wbem EMPTY, so
+                     * CoCreateInstance(CLSID_WbemLocator) fails with
+                     * c0000135 / "no class object" — which is what two
+                     * different 32-bit programs hit in the device logs, both
+                     * through dxdiagn asking WMI about the display adapter.
+                     * The list is wine.inf's, not any program's. */
+                    {
+                        static const char *wbem[] = { "wbemprox.dll", "wbemdisp.dll",
+                                                      "wmiutils.dll", "wmic.exe",
+                                                      "mofcomp.exe" };
+                        NSString *wbemDir = [farmDir stringByAppendingPathComponent:@"wbem"];
+                        int wbemLinked = 0;
+                        [fm createDirectoryAtPath:wbemDir withIntermediateDirectories:YES
+                                       attributes:nil error:nil];
+                        for (size_t w = 0; w < sizeof(wbem) / sizeof(wbem[0]); w++) {
+                            NSString *n = [NSString stringWithUTF8String:wbem[w]];
+                            NSString *src = [archSource stringByAppendingPathComponent:n];
+                            NSString *dst = [wbemDir stringByAppendingPathComponent:n];
+                            [fm removeItemAtPath:dst error:nil];
+                            if (![fm fileExistsAtPath:src]) continue;  /* farm doesn't build it */
+                            if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil])
+                                wbemLinked++;
+                        }
+                        dprintf(STDERR_FILENO, "[WineProc] Farm %s\\wbem: %d/%zu links -> %s\n",
+                                farms[i].farm, wbemLinked,
+                                sizeof(wbem) / sizeof(wbem[0]), farms[i].arch);
+                    }
                 }
+
+                /* the same subdirectory for the session's own system32 (the
+                 * flat pass above linked the session arch into system32, but
+                 * never its wbem subdir) */
+                {
+                    static const char *wbem[] = { "wbemprox.dll", "wbemdisp.dll",
+                                                  "wmiutils.dll", "wmic.exe", "mofcomp.exe" };
+                    NSString *wbemDir = [sys32Dir stringByAppendingPathComponent:@"wbem"];
+                    int wbemLinked = 0;
+                    [fm createDirectoryAtPath:wbemDir withIntermediateDirectories:YES
+                                   attributes:nil error:nil];
+                    for (size_t w = 0; w < sizeof(wbem) / sizeof(wbem[0]); w++) {
+                        NSString *n = [NSString stringWithUTF8String:wbem[w]];
+                        NSString *src = [dllSource stringByAppendingPathComponent:n];
+                        NSString *dst = [wbemDir stringByAppendingPathComponent:n];
+                        [fm removeItemAtPath:dst error:nil];
+                        if (![fm fileExistsAtPath:src]) continue;
+                        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil])
+                            wbemLinked++;
+                    }
+                    dprintf(STDERR_FILENO, "[WineProc] system32\\wbem: %d/%zu links -> %s\n",
+                            wbemLinked, sizeof(wbem) / sizeof(wbem[0]), bundle_subdir);
+                }
+            }
+
+            /* C:\windows\winsxs — THE SIDE-BY-SIDE ASSEMBLY STORE.
+             *
+             * DEVICE EVIDENCE, every 32-bit run and the desktop alike:
+             *   fixme:actctx:parse_depend_manifests Could not find dependent
+             *       assembly "Microsoft.Windows.Common-Controls" (6.0.0.0)
+             *   err:commdlg:DllMain failed to create activation context ...
+             *       14001
+             * because the prefix has no winsxs directory AT ALL, so no program
+             * in it can ever get a v6 common-controls activation context.
+             * Non-fatal in Wine, but it is a permanent, prefix-wide gap: comdlg32
+             * gives up on its activation context in DllMain, and every app
+             * manifest that asks for Common-Controls 6.0.0.0 — which is nearly
+             * all of them — takes the v5 path forever.
+             *
+             * WHY IT IS MISSING: the store is not in the shipped template
+             * (scripts/build-prefix-snapshot.sh deletes drive_c/windows/winsxs
+             * before tarring), and nothing recreates it here because this port
+             * never runs wineboot's fake-DLL install — which is what builds it
+             * on a normal Wine prefix.
+             *
+             * WHAT WINE ACTUALLY WRITES, reproduced here exactly
+             * (dlls/setupapi/fakedll.c register_manifest/append_manifest_filename/
+             *  create_manifest/create_winsxs_dll_path):
+             *   windows\winsxs\manifests\<DIR>.manifest
+             *   windows\winsxs\<DIR>\comctl32.dll        (= comctl32_v6.dll)
+             * with
+             *   <DIR> = <arch>_microsoft.windows.common-controls_
+             *           6595b64144ccf1df_6.0.2600.2982_none_deadbeef
+             * — lower case, publicKeyToken and version verbatim, and the literal
+             * "deadbeef" where Microsoft puts a content hash (fakedll.c writes
+             * that constant; ntdll's actctx.c lookup_manifest_file recognises it
+             * and prefers a non-Wine assembly if one is ever present).
+             * The manifest BYTES are dlls/comctl32_v6/comctl32.manifest with the
+             * empty processorArchitecture="" filled in with the architecture —
+             * fakedll.c does that substitution at install time, and actctx.c
+             * validates the identity inside the file against the one parsed out
+             * of the file NAME, so the two must agree.
+             *
+             * ntdll searches, for a dependency on 6.0.0.0 (actctx.c
+             * build_manifest_filter/lookup_winsxs):
+             *   windows\winsxs\manifests\
+             *     <arch>_Microsoft.Windows.Common-Controls_6595b64144ccf1df_6.0.*.*_*_*.manifest
+             * with <arch> = "x86" for a 32-bit process and "arm64" for both
+             * aarch64 AND arm64ec (actctx.c current_archW). "amd64" is seeded
+             * too because an arm64ec setupapi would have installed it under that
+             * name (fakedll.c has no __arm64ec__ case and falls into __x86_64__),
+             * and lookup_manifest_file's __arm64ec__ branch rewrites an explicit
+             * "amd64_" request to the wildcard "a??64_", which matches either.
+             *
+             * ONLY WHEN THE DLL IS THERE. A manifest without
+             * winsxs\<DIR>\comctl32.dll would make ntdll's find_actctx_dll
+             * redirect every comctl32.dll load for that assembly into a
+             * directory that has none — strictly worse than no manifest. So an
+             * architecture whose farm has no comctl32_v6.dll is skipped, loudly.
+             *
+             * ------------------------------------------------------------------
+             * ml760: THE SAME GAP, FOR THE VISUAL C++ RUNTIMES.
+             *
+             * DEVICE EVIDENCE, a 32-bit title in the last log:
+             *   err:actctx:parse_depend_manifests Could not find dependent
+             *       assembly "Microsoft.VC80.CRT" (8.0.50727.762)
+             * This one is NOT cosmetic. A program built with Visual Studio 2005
+             * or 2008 carries its CRT as a side-by-side dependency in its own
+             * RT_MANIFEST and imports MSVCR80.dll/MSVCP80.dll by name. With no
+             * VC80.CRT assembly in the store the activation context fails, the
+             * loader falls back to a plain system32 search, and — crucially —
+             * every DLL the program loads later that has the SAME dependency
+             * gets the same failure. Wine ships the runtimes and the assembly
+             * manifests; it is only the store that was never built here.
+             *
+             * Wine's assembly manifests are the ten WINE_MANIFEST resources in
+             * the tree (grep -rn WINE_MANIFEST wine/dlls --include=*.rc):
+             *   comctl32_v6  Microsoft.Windows.Common-Controls 6.0.2600.2982
+             *   msvcr80      Microsoft.VC80.CRT   8.0.50727.9672
+             *                 (msvcr80.dll, msvcp80.dll, msvcm80.dll)
+             *   msvcr90      Microsoft.VC90.CRT   9.0.30729.6161
+             *                 (msvcr90.dll, msvcp90.dll, msvcm90.dll)
+             *   atl80        Microsoft.VC80.ATL   8.0.50727.4053
+             *   atl90        Microsoft.VC90.ATL   9.0.30729.6161
+             *   gdiplus      Microsoft.Windows.GdiPlus 1.0.6000.16386
+             *                 and 1.1.7601.23038 (WINE_MANIFEST11, same DLL)
+             *   msxml3       Microsoft-Windows-MSXML30 6.0.6000.16386
+             *   msxml4       Microsoft.MSXML2          4.1.0.0
+             *   msxml6       Microsoft-Windows-MSXML60 6.0.6000.16386
+             *
+             * A REQUEST FOR AN OLDER BUILD STILL MATCHES. actctx.c
+             * build_manifest_filter only pins major.minor —
+             *   <arch>_<name>_<key>_<major>.<minor>.*.*_*_*.manifest
+             * — and lookup_manifest_file then accepts any candidate whose
+             * build/revision is >= the requested one. So the 8.0.50727.762 the
+             * title asked for is served by the 8.0.50727.9672 Wine ships, and
+             * one seeded assembly per major.minor covers every service pack of
+             * it. That is why these are worth seeding blind: the version a
+             * given program asks for cannot be enumerated in advance, and it
+             * does not have to be.
+             *
+             * NOT SEEDED, and why:
+             *   Microsoft.VC100.* / VC110+ — VS2010 stopped deploying the CRT
+             *     side-by-side; msvcr100 and later install into system32 and
+             *     Wine ships no manifest for them. Nothing to seed.
+             *   Microsoft.VC80.MFC / VC90.MFC — Wine has no mfc* module at all
+             *     (there is no wine/dlls/mfc*), so the assembly would point at
+             *     a DLL that does not exist. See the farm audit.
+             */
+            {
+                /* One entry per WINE_MANIFEST assembly in the Wine tree.
+                 *
+                 *   name     assemblyIdentity name, verbatim (it is written
+                 *            into the manifest and actctx.c compares it
+                 *            case-insensitively against the parsed file name)
+                 *   lname    the same, lower-cased: fakedll.c append_string()
+                 *            lower-cases arch/name/language when it builds the
+                 *            directory name, but copies publicKeyToken and
+                 *            version through verbatim
+                 *   files    <file name="..."> entries, in manifest order, each
+                 *            paired with the farm file it is linked from. The
+                 *            FIRST one is the assembly's reason to exist: if it
+                 *            is missing from a farm the whole assembly is
+                 *            skipped for that architecture. A later one that is
+                 *            missing is dropped from BOTH the directory and the
+                 *            manifest text, so the manifest never advertises a
+                 *            file that is not there.
+                 *   body     extra XML inside <file>…</file>; NULL means the
+                 *            self-closing <file name="x"/> form Wine uses for
+                 *            everything except comctl32.
+                 */
+                struct sxs_file { const char *in_assembly; const char *in_farm; };
+                struct sxs_assembly {
+                    const char *name, *lname, *key, *version, *body;
+                    struct sxs_file files[4];
+                };
+                static const char *comctl32_body =
+                    "    <windowClass>Button</windowClass>\n"
+                    "    <windowClass>ButtonListBox</windowClass>\n"
+                    "    <windowClass>ComboBoxEx32</windowClass>\n"
+                    "    <windowClass>ComboLBox</windowClass>\n"
+                    "    <windowClass>ComboBox</windowClass>\n"
+                    "    <windowClass>Edit</windowClass>\n"
+                    "    <windowClass>ListBox</windowClass>\n"
+                    "    <windowClass>NativeFontCtl</windowClass>\n"
+                    "    <windowClass>ReBarWindow32</windowClass>\n"
+                    "    <windowClass>ScrollBar</windowClass>\n"
+                    "    <windowClass>Static</windowClass>\n"
+                    "    <windowClass>SysAnimate32</windowClass>\n"
+                    "    <windowClass>SysDateTimePick32</windowClass>\n"
+                    "    <windowClass>SysHeader32</windowClass>\n"
+                    "    <windowClass>SysIPAddress32</windowClass>\n"
+                    "    <windowClass>SysLink</windowClass>\n"
+                    "    <windowClass>SysListView32</windowClass>\n"
+                    "    <windowClass>SysMonthCal32</windowClass>\n"
+                    "    <windowClass>SysPager</windowClass>\n"
+                    "    <windowClass>SysTabControl32</windowClass>\n"
+                    "    <windowClass>SysTreeView32</windowClass>\n"
+                    "    <windowClass>ToolbarWindow32</windowClass>\n"
+                    "    <windowClass>msctls_hotkey32</windowClass>\n"
+                    "    <windowClass>msctls_progress32</windowClass>\n"
+                    "    <windowClass>msctls_statusbar32</windowClass>\n"
+                    "    <windowClass>msctls_trackbar32</windowClass>\n"
+                    "    <windowClass>msctls_updown32</windowClass>\n"
+                    "    <windowClass>tooltips_class32</windowClass>\n";
+                static const struct sxs_assembly asms[] = {
+                    /* dlls/comctl32_v6/comctl32.manifest */
+                    { "Microsoft.Windows.Common-Controls", "microsoft.windows.common-controls",
+                      "6595b64144ccf1df", "6.0.2600.2982", NULL /*set below*/,
+                      { { "comctl32.dll", "comctl32_v6.dll" } } },
+                    /* dlls/msvcr80/msvcr80.manifest */
+                    { "Microsoft.VC80.CRT", "microsoft.vc80.crt",
+                      "1fc8b3b9a1e18e3b", "8.0.50727.9672", NULL,
+                      { { "msvcr80.dll", "msvcr80.dll" },
+                        { "msvcp80.dll", "msvcp80.dll" },
+                        { "msvcm80.dll", "msvcm80.dll" } } },
+                    /* dlls/msvcr90/msvcr90.manifest */
+                    { "Microsoft.VC90.CRT", "microsoft.vc90.crt",
+                      "1fc8b3b9a1e18e3b", "9.0.30729.6161", NULL,
+                      { { "msvcr90.dll", "msvcr90.dll" },
+                        { "msvcp90.dll", "msvcp90.dll" },
+                        { "msvcm90.dll", "msvcm90.dll" } } },
+                    /* dlls/atl80/atl80.manifest */
+                    { "Microsoft.VC80.ATL", "microsoft.vc80.atl",
+                      "1fc8b3b9a1e18e3b", "8.0.50727.4053", NULL,
+                      { { "atl80.dll", "atl80.dll" } } },
+                    /* dlls/atl90/atl90.manifest */
+                    { "Microsoft.VC90.ATL", "microsoft.vc90.atl",
+                      "1fc8b3b9a1e18e3b", "9.0.30729.6161", NULL,
+                      { { "atl90.dll", "atl90.dll" } } },
+                    /* dlls/gdiplus/gdiplus.manifest and gdiplus11.manifest:
+                     * two assemblies, one DLL. */
+                    { "Microsoft.Windows.GdiPlus", "microsoft.windows.gdiplus",
+                      "6595b64144ccf1df", "1.0.6000.16386", NULL,
+                      { { "gdiplus.dll", "gdiplus.dll" } } },
+                    { "Microsoft.Windows.GdiPlus", "microsoft.windows.gdiplus",
+                      "6595b64144ccf1df", "1.1.7601.23038", NULL,
+                      { { "gdiplus.dll", "gdiplus.dll" } } },
+                    /* dlls/msxml3, msxml4 and msxml6 manifests */
+                    { "Microsoft-Windows-MSXML30", "microsoft-windows-msxml30",
+                      "31bf3856ad364e35", "6.0.6000.16386", NULL,
+                      { { "msxml3.dll", "msxml3.dll" } } },
+                    { "Microsoft.MSXML2", "microsoft.msxml2",
+                      "6bd6b9abf345378f", "4.1.0.0", NULL,
+                      { { "msxml4.dll", "msxml4.dll" } } },
+                    { "Microsoft-Windows-MSXML60", "microsoft-windows-msxml60",
+                      "31bf3856ad364e35", "6.0.6000.16386", NULL,
+                      { { "msxml6.dll", "msxml6.dll" } } },
+                };
+                static const struct { const char *arch; const char *farm; } sxs[] = {
+                    { "x86",   "i386-windows"    },   /* every 32-bit process */
+                    { "arm64", "aarch64-windows" },   /* aarch64 AND arm64ec sessions */
+                    { "amd64", "arm64ec-windows" },   /* what an arm64ec setupapi installs */
+                };
+                NSString *winsxsDir = [prefix stringByAppendingPathComponent:@"drive_c/windows/winsxs"];
+                NSString *manifestsDir = [winsxsDir stringByAppendingPathComponent:@"manifests"];
+                int sxsSeeded = 0, sxsSkipped = 0;
+                size_t sxsWanted = (sizeof(asms) / sizeof(asms[0])) * (sizeof(sxs) / sizeof(sxs[0]));
+
+                [fm createDirectoryAtPath:manifestsDir withIntermediateDirectories:YES
+                               attributes:nil error:nil];
+                for (size_t s = 0; s < sizeof(sxs) / sizeof(sxs[0]); s++) {
+                    NSString *arch = [NSString stringWithUTF8String:sxs[s].arch];
+                    NSString *archSource = [bundlePath stringByAppendingPathComponent:
+                        [NSString stringWithUTF8String:sxs[s].farm]];
+                    for (size_t a = 0; a < sizeof(asms) / sizeof(asms[0]); a++) {
+                        const struct sxs_assembly *asmdef = &asms[a];
+                        const char *body = asmdef->body;
+                        /* the comctl32 window-class list, attached by index so
+                         * the table itself stays a plain initialiser */
+                        if (a == 0) body = comctl32_body;
+
+                        NSString *first = [archSource stringByAppendingPathComponent:
+                            [NSString stringWithUTF8String:asmdef->files[0].in_farm]];
+                        if (![fm fileExistsAtPath:first]) {
+                            dprintf(STDERR_FILENO,
+                                    "[WineProc] winsxs: %s/%s SKIPPED -- %s has no %s, and a manifest "
+                                    "without the assembly's DLL would redirect that DLL's loads into "
+                                    "an empty directory (the i386 farm is built by "
+                                    "build/wine-i386/build.sh)\n",
+                                    sxs[s].arch, asmdef->name, sxs[s].farm, asmdef->files[0].in_farm);
+                            sxsSkipped++;
+                            continue;
+                        }
+                        NSString *dir = [NSString stringWithFormat:@"%@_%s_%s_%s_none_deadbeef",
+                            arch, asmdef->lname, asmdef->key, asmdef->version];
+                        NSString *asmDir = [winsxsDir stringByAppendingPathComponent:dir];
+                        NSString *manifest = [manifestsDir stringByAppendingPathComponent:
+                            [dir stringByAppendingString:@".manifest"]];
+
+                        [fm createDirectoryAtPath:asmDir withIntermediateDirectories:YES
+                                       attributes:nil error:nil];
+
+                        /* Build the manifest and the directory together, so the
+                         * <file> list and the directory contents cannot drift.
+                         * LF only, no BOM: actctx.c assumes UTF-8 when there is
+                         * no UTF-16 BOM. The architecture is spliced into the
+                         * source manifest's empty processorArchitecture="",
+                         * exactly as fakedll.c does at install time — actctx.c
+                         * validates the identity inside the file against the one
+                         * parsed out of the file NAME, so the two must agree. */
+                        NSMutableString *text = [NSMutableString stringWithString:
+                            @"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+                            @"<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n"];
+                        [text appendFormat:
+                            @"  <assemblyIdentity type=\"win32\" name=\"%s\" version=\"%s\" "
+                            @"processorArchitecture=\"%@\" publicKeyToken=\"%s\"/>\n",
+                            asmdef->name, asmdef->version, arch, asmdef->key];
+
+                        BOOL ok = YES;
+                        for (size_t f = 0; f < sizeof(asmdef->files) / sizeof(asmdef->files[0]); f++) {
+                            if (!asmdef->files[f].in_assembly) break;
+                            NSString *src = [archSource stringByAppendingPathComponent:
+                                [NSString stringWithUTF8String:asmdef->files[f].in_farm]];
+                            NSString *link = [asmDir stringByAppendingPathComponent:
+                                [NSString stringWithUTF8String:asmdef->files[f].in_assembly]];
+                            [fm removeItemAtPath:link error:nil];  /* the bundle path changes on reinstall */
+                            if (![fm fileExistsAtPath:src]) continue;
+                            if (![fm createSymbolicLinkAtPath:link withDestinationPath:src error:nil]) {
+                                dprintf(STDERR_FILENO, "[WineProc] winsxs: FAILED to link %s\n",
+                                        link.UTF8String);
+                                ok = NO;
+                                break;
+                            }
+                            if (body)
+                                [text appendFormat:@"  <file name=\"%s\">\n%s  </file>\n",
+                                    asmdef->files[f].in_assembly, body];
+                            else
+                                [text appendFormat:@"  <file name=\"%s\"/>\n",
+                                    asmdef->files[f].in_assembly];
+                        }
+                        [text appendString:@"</assembly>\n"];
+                        if (!ok) { sxsSkipped++; continue; }
+
+                        if (![[text dataUsingEncoding:NSUTF8StringEncoding]
+                                writeToFile:manifest atomically:YES]) {
+                            dprintf(STDERR_FILENO, "[WineProc] winsxs: FAILED to write %s\n",
+                                    manifest.UTF8String);
+                            sxsSkipped++;
+                            continue;
+                        }
+                        sxsSeeded++;
+                    }
+                }
+                dprintf(STDERR_FILENO,
+                        "[WineProc] winsxs: %d/%zu assemblies seeded, %d skipped "
+                        "(Common-Controls 6.0, VC80/VC90 CRT+ATL, GdiPlus 1.0/1.1, MSXML 3/4/6 "
+                        "x x86/arm64/amd64) -> %s\n",
+                        sxsSeeded, sxsWanted, sxsSkipped, winsxsDir.UTF8String);
             }
 
             /* ml719: REPAIR THE SHELL FOLDERS. They ship as symlinks to the BUILD
@@ -890,32 +1612,71 @@ static void *wine_process_thread(void *arg) {
         // If MADEIRA_EXE contains a backslash or starts with a drive letter
         // (e.g. "C:\\Program Files\\Thumper\\THUMPER_win10.exe"), use it
         // as-is. Otherwise treat it as a bare exe name in system32 (legacy
-        // path used by cube/fib/hello tests).
-        char exe_path[512];
-        if (strchr(madeira_exe, '\\') || (madeira_exe[0] && madeira_exe[1] == ':')) {
+        // path used by cube/fib/hello tests) — or in syswow64 for an i386
+        // target (WOW64_DESIGN.md stage E), matching where the syswow64 farm
+        // above just symlinked it from i386-windows/.
+        /* 1024, not 512: a typed Win32 path can be long, and a SILENT truncation
+         * here turns into "file not found" far away from its cause. */
+        char exe_path[1024];
+        if (is_full_path_exe) {
+            if (strlen(madeira_exe) >= sizeof(exe_path))
+                dprintf(STDERR_FILENO, "[WineProc] ERROR: MADEIRA_EXE is %zu bytes, longer than the %zu-byte "
+                                       "launch path buffer — it will be truncated and will not be found\n",
+                        strlen(madeira_exe), sizeof(exe_path));
             snprintf(exe_path, sizeof(exe_path), "%s", madeira_exe);
+        } else if (is_i386_target) {
+            snprintf(exe_path, sizeof(exe_path), "C:\\windows\\syswow64\\%s", madeira_exe);
         } else {
             snprintf(exe_path, sizeof(exe_path), "C:\\windows\\system32\\%s", madeira_exe);
         }
 
-        // Optional MADEIRA_ARGS env var: space-separated args appended to argv.
-        // Tokenized in-place; max 16 extra tokens.
-        static char args_buf[1024];
-        char *extra_argv[16] = {0};
+        // Optional MADEIRA_ARGS env var: args appended to argv, max 64 tokens
+        // (ml1500: was 16, too few for a launcher plus its lightweight-mode flags).
+        //
+        // Tokenized in place, honouring DOUBLE QUOTES. The old split was a plain
+        // strtok_r on " ", so an argument containing a space (any Windows path —
+        // "C:\Some Folder\data.pak") was silently torn into two argv entries and
+        // the program received nonsense. Quotes group; the quote characters
+        // themselves are removed, exactly as a Win32 command line would be
+        // parsed, and Wine's build_command_line re-quotes on the way out so the
+        // guest sees the argument whole again. Apostrophes are ordinary
+        // characters here and in the shell-free path below — nothing strips or
+        // escapes them.
+        static char args_buf[4096];
+        char *extra_argv[64] = {0};
         int extra_argc = 0;
         const char *madeira_args = getenv("MADEIRA_ARGS");
         if (madeira_args && *madeira_args) {
+            if (strlen(madeira_args) >= sizeof(args_buf))
+                dprintf(STDERR_FILENO, "[WineProc] WARNING: MADEIRA_ARGS is %zu bytes, truncating to %zu\n",
+                        strlen(madeira_args), sizeof(args_buf) - 1);
             strncpy(args_buf, madeira_args, sizeof(args_buf) - 1);
             args_buf[sizeof(args_buf) - 1] = 0;
-            char *saveptr = NULL;
-            for (char *tok = strtok_r(args_buf, " ", &saveptr);
-                 tok && extra_argc < 16;
-                 tok = strtok_r(NULL, " ", &saveptr)) {
-                extra_argv[extra_argc++] = tok;
+
+            char *src = args_buf;      /* read cursor */
+            char *dst = args_buf;      /* write cursor: always <= src, so in place */
+            while (*src && extra_argc < 64) {
+                while (*src == ' ' || *src == '\t') src++;
+                if (!*src) break;
+                extra_argv[extra_argc++] = dst;
+                int in_quotes = 0;
+                while (*src && (in_quotes || (*src != ' ' && *src != '\t'))) {
+                    if (*src == '"') { in_quotes = !in_quotes; src++; continue; }
+                    *dst++ = *src++;
+                }
+                /* dst can still EQUAL src here (a token with no quotes in it),
+                 * so the separator has to be read before the terminator is
+                 * written over it. */
+                int had_separator = (*src != 0);
+                *dst++ = 0;
+                if (had_separator) src++;
             }
+            if (*src)
+                dprintf(STDERR_FILENO, "[WineProc] WARNING: MADEIRA_ARGS has more than 64 tokens, "
+                                       "the rest are dropped: %s\n", src);
         }
 
-        char *argv[24];
+        char *argv[72];
         int argc = 0;
         argv[argc++] = "wine";
         argv[argc++] = exe_path;
@@ -933,16 +1694,33 @@ static void *wine_process_thread(void *arg) {
          * "cache/721e72f7.pc") then resolve to doubled paths that don't
          * exist. Per GPT diagnosis 2026-05-12. Only chdir for full-path EXE
          * launches; bare-name launches (cube, hello-x64) use C:\windows\system32. */
-        if (strchr(madeira_exe, '\\') || (madeira_exe[0] && madeira_exe[1] == ':')) {
-            /* Convert "C:\Program Files\Thumper\X.exe" → unix path */
+        if (is_full_path_exe) {
+            /* Convert "C:\Some Folder\It's Here\Binaries\app.exe" → unix path.
+             *
+             * Byte-for-byte: only '\\' becomes '/'. Spaces, apostrophes and
+             * every other character are copied verbatim, and nothing here goes
+             * through a shell — chdir()/setenv() take the bytes directly — so
+             * no quoting or escaping is involved at any step.
+             *
+             * Guarded like the PE-machine probe above (stage C review F10): the
+             * "C:\\" prefix is only skipped when there really is a drive letter,
+             * so a relative "\\dir\\app.exe" no longer reads three bytes in from
+             * an arbitrary offset. */
             char unix_dir[1024];
+            char wine_cwd[1024];
             const char *drive_c = "drive_c";
-            const char *after_drive = madeira_exe + 3; /* skip "C:\" */
+            int has_drive = (madeira_exe[0] && madeira_exe[1] == ':' && madeira_exe[2] == '\\');
+            const char *after_drive = has_drive ? madeira_exe + 3 : madeira_exe;
             char *last_sep = strrchr(madeira_exe, '\\');
-            if (last_sep && last_sep > madeira_exe + 3) {
-                /* Get "Program Files\Thumper" from "C:\Program Files\Thumper\X.exe" */
+
+            unix_dir[0] = 0;
+            wine_cwd[0] = 0;
+            if (last_sep && last_sep > after_drive) {
+                /* Get "Some Folder\It's Here\Binaries" from the full path */
                 size_t dir_len = (size_t)(last_sep - after_drive);
-                char windir[512];
+                char windir[1024];
+
+                if (dir_len >= sizeof(windir)) dir_len = sizeof(windir) - 1;
                 memcpy(windir, after_drive, dir_len);
                 windir[dir_len] = 0;
                 /* Translate backslashes to forward slashes */
@@ -954,20 +1732,23 @@ static void *wine_process_thread(void *arg) {
                 /* Also set the iOS-specific override so env_ios.c's
                  * get_initial_directory bypasses unix_to_nt_file_name (which
                  * fails to resolve drive_c via dosdevices on iOS). */
-                char wine_cwd[768];
-                /* Strip trailing exe name from madeira_exe to get the dir part */
                 {
-                    const char *exe = madeira_exe;
-                    size_t dir_len = (size_t)(last_sep - exe);
-                    if (dir_len < sizeof(wine_cwd) - 2) {
-                        memcpy(wine_cwd, exe, dir_len);
-                        wine_cwd[dir_len] = '\\';
-                        wine_cwd[dir_len + 1] = 0;
+                    size_t win_len = (size_t)(last_sep - madeira_exe);
+                    if (win_len < sizeof(wine_cwd) - 2) {
+                        memcpy(wine_cwd, madeira_exe, win_len);
+                        wine_cwd[win_len] = '\\';
+                        wine_cwd[win_len + 1] = 0;
                         setenv("MADEIRA_INITIAL_CWD", wine_cwd, 1);
                     }
                 }
                 dprintf(STDERR_FILENO, "[WineProc] chdir(%s) = %d errno=%d, PWD + MADEIRA_INITIAL_CWD=%s\n",
                         unix_dir, rc, rc ? errno : 0, wine_cwd);
+                if (rc)
+                    dprintf(STDERR_FILENO, "[WineProc] WARNING: the exe's own directory is not the working "
+                                           "directory; programs that open files relative to it will fail\n");
+            } else {
+                dprintf(STDERR_FILENO, "[WineProc] no directory component in '%s' — working directory left as is\n",
+                        madeira_exe);
             }
         }
 
@@ -977,18 +1758,23 @@ static void *wine_process_thread(void *arg) {
 
         LOG("Calling __wine_main...");
 
+        /* WOW64_DESIGN.md §2 (device-run fix): publish the main image's arch so
+         * the unix side reserves this pseudo-process's guest window BEFORE its
+         * first TEB. A 32-bit MAIN image otherwise runs with no window (the
+         * machine is unknown unix-side until after the TEB is placed), the
+         * image lands outside [B,B+4G) and build_wow64_parameters' 2GB ceiling
+         * is unmappable below 4GB. Mirrors the child path's ios_child_main_machine. */
+        {
+            extern int ios_main_image_i386;
+            ios_main_image_i386 = is_i386_target ? 1 : 0;
+        }
+
         if (setjmp(wine_ios_exit_jmpbuf) == 0) {
             __wine_main(argc, argv);
             dprintf(STDERR_FILENO, "[WineProc] __wine_main returned normally\n");
         } else {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
         }
-
-        g_wine_running = 0;
-
-        // Stop wineserver to prevent CPU spin (iOS kills for excessive CPU)
-        dprintf(STDERR_FILENO, "[WineProc] stopping wineserver...\n");
-        wineserver_stop();
 
         dprintf(STDERR_FILENO, "[WineProc] Wine process thread finished cleanly\n");
 
@@ -1005,11 +1791,12 @@ static void *wine_process_thread(void *arg) {
             *(void **)(tsd_base + 275 * 8) = NULL;
         }
     }
+    pthread_cleanup_pop(1);
     return NULL;
 }
 
 int wine_process_start(const char *prefix_path) {
-    if (g_wine_running) {
+    if (__atomic_load_n(&g_wine_running, __ATOMIC_ACQUIRE)) {
         LOG("Wine process already running");
         return 0;
     }
@@ -1019,7 +1806,7 @@ int wine_process_start(const char *prefix_path) {
 
     LOG("Starting Wine process with prefix: %{public}s", prefix_path);
 
-    g_wine_running = 1;
+    __atomic_store_n(&g_wine_running, 1, __ATOMIC_RELEASE);
 
     // Create socketpair to bypass broken iOS UDS accept()
     // pair[0] = wineserver side (injected as client fd)
@@ -1027,7 +1814,7 @@ int wine_process_start(const char *prefix_path) {
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1) {
         LOG("socketpair failed: %{public}s", strerror(errno));
-        g_wine_running = 0;
+        __atomic_store_n(&g_wine_running, 0, __ATOMIC_RELEASE);
         return -1;
     }
     LOG("socketpair created: server_fd=%d, client_fd=%d", pair[0], pair[1]);
@@ -1053,7 +1840,7 @@ int wine_process_start(const char *prefix_path) {
         LOG("Failed to create Wine process thread: %d", ret);
         close(pair[0]);
         close(pair[1]);
-        g_wine_running = 0;
+        __atomic_store_n(&g_wine_running, 0, __ATOMIC_RELEASE);
         return -1;
     }
 
@@ -1063,7 +1850,7 @@ int wine_process_start(const char *prefix_path) {
 }
 
 int wine_process_is_running(void) {
-    return g_wine_running;
+    return __atomic_load_n(&g_wine_running, __ATOMIC_ACQUIRE);
 }
 
 int madeira_write_continue_flag(void) {

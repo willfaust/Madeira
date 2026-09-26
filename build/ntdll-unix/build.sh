@@ -116,6 +116,17 @@ compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" 
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
+compile_one "$BUILD_DIR/nsi_network_ios.c" "nsi_network_ios"
+compile_one "$BUILD_DIR/nsi_ndis_ios.c" "nsi_ndis"
+compile_one "$BUILD_DIR/nsi_ip_ios.c" "nsi_ip"
+# MADEIRA 2026-09-15: dnsapi had NO unix side, so its DllMain printed "No
+# libresolv support" and every later DnsQuery_* went through a NULL unixlib
+# handle -- a host-side fault in __wine_unix_call_dispatcher that killed the
+# process (log n60).  dnsapi_unixlib_ios.c is upstream dlls/dnsapi/libresolv.c
+# with res_init/res_query/_res/h_errno rebound to /usr/lib/libresolv.9.dylib
+# through dlopen, so nothing new is added to the app's final link.
+compile_unixlib "$BUILD_DIR/dnsapi_unixlib_ios.c" "dnsapi_unixlib" "dnsapi" \
+    -I"$WINE_SRC/dlls/dnsapi"
 
 for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
     name=$(basename "$src" .c)
@@ -162,9 +173,10 @@ echo ""
 echo "=== Building libntdll_unix.a ==="
 ar rcs "$OBJ_DIR/libntdll_unix.a" \
     "$OBJ_DIR/audio_null_ios.o" "$OBJ_DIR/madsync.o" "$OBJ_DIR/nsi_unixlib_ios.o" \
+    "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \
     "$OBJ_DIR/bcrypt_unixlib.o" "$OBJ_DIR/secur32_unixlib.o" "$OBJ_DIR/crypt32_unixlib.o" \
-    "$OBJ_DIR/dwrite_unixlib.o" \
+    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/dnsapi_unixlib.o" \
     "$OBJ_DIR/cdrom.o" "$OBJ_DIR/debug.o" "$OBJ_DIR/env.o" "$OBJ_DIR/file.o" \
     "$OBJ_DIR/loader.o" "$OBJ_DIR/loadorder.o" "$OBJ_DIR/process.o" "$OBJ_DIR/registry.o" \
     "$OBJ_DIR/security.o" "$OBJ_DIR/serial.o" "$OBJ_DIR/server.o" \

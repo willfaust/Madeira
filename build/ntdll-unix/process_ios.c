@@ -71,6 +71,7 @@
 #include "winioctl.h"
 #include "ddk/ntddk.h"
 #include "unix_private.h"
+#include "ios_wow.h"
 #include "wine/condrv.h"
 #include "wine/server.h"
 #include "wine/debug.h"
@@ -423,13 +424,31 @@ struct ios_child_args {
     struct pe_image_info pe_info;
 };
 
+/* WOW64_DESIGN.md §2: the machine of the child's main image, published to
+ * wine_ios_child_main so it can reserve the child's [B, B+4G) guest window
+ * BEFORE allocating the child's TEB/PEB pair — those must live in the window
+ * (guest code reads TEB32->Self / TEB32->Peb as 32-bit guest addresses), and
+ * unix_init_startup_info, which is where the machine would otherwise first be
+ * known, runs long after the TEB exists.  The parent already has the image
+ * info in struct ios_child_args. */
+_Thread_local WORD ios_child_main_machine;
+
+/* Where this child currently is in wine_ios_child_main (which updates it).  A
+ * child that dies during bring-up used to leave no trace at all beyond a couple
+ * of dprintf lines, so a failed CreateProcess from the desktop looked like
+ * nothing happening; the thread entry below names the stage in one ERR. */
+_Thread_local const char *ios_child_boot_stage = "not started";
+
 static void *ios_child_thread_entry( void *arg )
 {
     struct ios_child_args *args = arg;
 
+    ios_child_main_machine = args->pe_info.machine;
+
     /* Use dprintf for early logging — ERR requires TEB which isn't set up yet */
-    dprintf(STDERR_FILENO, "[Wine child thread] ENTRY: fd=%d, argc=%d, exe=%s\n",
-            args->socketfd, args->argc, args->argc > 1 ? args->argv[1] : "(none)");
+    dprintf(STDERR_FILENO, "[Wine child thread] ENTRY: fd=%d, argc=%d, machine=0x%x, exe=%s\n",
+            args->socketfd, args->argc, args->pe_info.machine,
+            args->argc > 1 ? args->argv[1] : "(none)");
 
     /* Set up exit handling for this child thread */
     wine_ios_main_thread = pthread_self();
@@ -444,13 +463,47 @@ static void *ios_child_thread_entry( void *arg )
 
         dprintf(STDERR_FILENO, "[Wine child thread] calling wine_ios_child_main...\n");
         wine_ios_child_main( args->argc, args->argv, args->socketfd );
-        /* Should not return */
+        /* Should not return: every return is a bring-up failure. */
         dprintf(STDERR_FILENO, "[Wine child thread] wine_ios_child_main returned unexpectedly!\n");
+        ERR( "spawn_process: child %s (machine %04x) FAILED to boot at stage '%s'; "
+             "CreateProcess in the parent will report failure\n",
+             args->argc > 1 ? args->argv[1] : "?", args->pe_info.machine,
+             ios_child_boot_stage );
+
+        /* CRITICAL: hand the wineserver the EOF it is waiting for.
+         *
+         * NtCreateUserProcess blocks in NtWaitForSingleObject( process_info )
+         * until the new process either finishes init_process_done or DIES.  The
+         * server only learns a pseudo-process died when its side of the
+         * socketpair reaches EOF — and the only remaining reference to this
+         * child's end is args->socketfd (the parent closed socketfd[0] right
+         * after spawn_process returned).  Leaving it open therefore wedged the
+         * SPAWNER forever: a desktop double-click that failed anywhere in
+         * wine_ios_child_main produced no window, no error and no return from
+         * CreateProcess.  Closing it turns the same failure into a reported
+         * STATUS_INTERNAL_ERROR from NtCreateUserProcess. */
+        if (args->socketfd != -1)
+        {
+            close( args->socketfd );
+            args->socketfd = -1;
+        }
     } else {
         dprintf(STDERR_FILENO, "[Wine child thread] child exited with code %d\n", wine_ios_exit_code);
     }
 
     dprintf(STDERR_FILENO, "[Wine child thread] thread exiting cleanly\n");
+    /* WOW64_DESIGN.md §2: the pseudo-process is over — give its guest window
+     * back so the next 32-bit pseudo-process can adopt the slot (a launcher
+     * starting the real program is the normal shape of a 32-bit title).  Must
+     * run while this thread still resolves to that process (before the TEB TLS
+     * slot is cleared below).
+     *
+     * The ORDINARY exit already did this from process_exit_wrapper, keyed by
+     * the dying PEB; this call is the FALLBACK for a child that never got far
+     * enough to bind its window to a PEB — a boot failure, where the only way
+     * back to the slot is the owner-thread match in ios_wow_slot_current().
+     * It is a no-op once the window has been released. */
+    ios_wow_window_release_current();
     free( args->argv );
     free( args );
 
@@ -657,14 +710,19 @@ NTSTATUS wow64_wine_spawnvp( void *args )
         int   wait;
     } const *params32 = args;
 
-    ULONG *argv32 = ULongToPtr( params32->argv );
+    /* WOW64_DESIGN.md §2: the argv ARRAY is an embedded guest pointer, and so
+     * is every string in it — both need +B (the outer args block is the only
+     * pointer the WoW64 module converts). */
+    ULONG *argv32 = ios_wow_host_ptr( params32->argv );
     unsigned int i, count = 0;
     char **argv;
     NTSTATUS ret;
 
+    if (!argv32) return STATUS_INVALID_PARAMETER;
     while (argv32[count]) count++;
     argv = malloc( (count + 1) * sizeof(*argv) );
-    for (i = 0; i < count; i++) argv[i] = ULongToPtr( argv32[i] );
+    if (!argv) return STATUS_NO_MEMORY;
+    for (i = 0; i < count; i++) argv[i] = ios_wow_host_ptr( argv32[i] );
     argv[count] = NULL;
     ret = __wine_unix_spawnvp( argv, params32->wait );
     free( argv );
@@ -976,6 +1034,14 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         }
     }
 
+    /* ml1520: a program parked while the game runs (ios_park_check,
+     * signal_arm64_ios.c) may not start again until the session ends. */
+    {
+        extern int ios_park_refuse( const WCHAR *path, size_t len );
+        if (ios_park_refuse( params->ImagePathName.Buffer, params->ImagePathName.Length / sizeof(WCHAR) ))
+            return STATUS_ACCESS_DENIED;
+    }
+
     /* ml526: stamp every accepted spawn on the startup timeline. This is the
      * boundary the coarse phase accounting could not see — steam.exe -> the
      * webhelper spawn was a ~16s block with no internal detail. */
@@ -984,6 +1050,53 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         char pbuf[160];
         snprintf( pbuf, sizeof(pbuf), "spawn:%s", debugstr_us( &params->ImagePathName ) );
         winios_phase( pbuf );
+    }
+
+    /* ml1620: the launcher client started by its own installer or by its
+     * self-update restart carries none of the front end's arguments, so it
+     * kept its browser-helper hang timeout. On a slower tablet the helper's
+     * first page took longer than that and the client killed it ("Assertion
+     * Failed: killing unresponsive browser", tablet log 3 (2)); the sign-in
+     * window never came. Append -cef-disable-hang-timeouts to any steam.exe
+     * spawn that lacks it (the front end already passes it on game launches).
+     * MADEIRA_STEAM_NO_HANG_KILL=0 disables it; [proc-gate] logs it. */
+    {
+        static const char client[] = "\\steam.exe", flag[] = " -cef-disable-hang-timeouts";
+        const WCHAR *ip = params->ImagePathName.Buffer, *cl = params->CommandLine.Buffer;
+        int ip_len = params->ImagePathName.Length / sizeof(WCHAR), cl_len = params->CommandLine.Length / sizeof(WCHAR);
+        int nl = sizeof(client) - 1, fl = sizeof(flag) - 1, k, j, match = 0, has = 0;
+        const char *off = getenv( "MADEIRA_STEAM_NO_HANG_KILL" );
+
+        if (!(off && off[0] == '0') && ip && cl && ip_len >= nl)
+        {
+            for (j = 0; j < nl; j++)
+            {
+                WCHAR c = ip[ip_len - nl + j];
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c == '/') c = '\\';
+                if (c != (WCHAR)client[j]) break;
+            }
+            match = (j == nl);
+            for (k = 0; match && k + fl - 1 <= cl_len && !has; k++)
+            {
+                for (j = 1; j < fl; j++) if (cl[k + j - 1] != (WCHAR)flag[j]) break;
+                if (j == fl) has = 1;
+            }
+        }
+        if (match && !has)
+        {
+            WCHAR *nbuf = malloc( (cl_len + fl + 1) * sizeof(WCHAR) );
+            if (nbuf)
+            {
+                memcpy( nbuf, cl, cl_len * sizeof(WCHAR) );
+                for (j = 0; j < fl; j++) nbuf[cl_len + j] = (WCHAR)flag[j];
+                nbuf[cl_len + fl] = 0;
+                params->CommandLine.Buffer = nbuf;
+                params->CommandLine.Length = (cl_len + fl) * sizeof(WCHAR);
+                params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
+                dprintf( 2, "[proc-gate] ml1620 steam.exe: appended -cef-disable-hang-timeouts\n" );
+            }
+        }
     }
 
     /* task #34 single-process CEF: the 64GB VA window above the GPU carveout
@@ -1031,45 +1144,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
              * The new buffer intentionally leaks (once per helper launch);
              * RtlDestroyProcessParameters only frees the params block itself. */
             {
-                /* ml279: also raise CEF's OWN verbosity.
-                 *
-                 * Across every run that reached CEF init, cef_log.txt ends on the SAME four
-                 * lines -- chrome_main_delegate / process_singleton_win / os_crypt_win /
-                 * network_change_notifier_win -- and then goes silent. A consistent stopping
-                 * point (not scattered crash sites) says CEF is getting somewhere specific
-                 * and dying there, but Chromium's default verbosity only emits WARNING and
-                 * ERROR, so whatever it attempts next is simply never written down.
-                 *
-                 * --enable-logging routes Chromium's logging to the --log-file it already
-                 * has, and --v=1 turns on VLOG(1) across the codebase, which covers browser
-                 * startup, CefBrowserHost creation and the compositor bring-up -- exactly
-                 * the stretch after network_change_notifier that we cannot currently see.
-                 * Cheap: one command-line append, no code paths changed, and if CEF dies at
-                 * the same place the log now says what it was doing. */
-                /* ml281: it must be --enable-logging=FILE, not bare --enable-logging.
-                 *
-                 * Bare --enable-logging makes Chromium log to STDERR and ignore --log-file.
-                 * The verbose output WAS produced -- the user saw it filling a rendered
-                 * conhost window in the virtual desktop -- but cef_log.txt received only
-                 * the usual 4 WARNING/ERROR lines, so none of it was readable by us. (The
-                 * 58 INFO/VERBOSE lines already in that file are all stamped 0428/, from
-                 * whatever Windows box this Steam install was copied off.)
-                 * --enable-logging=file routes the same output through the --log-file the
-                 * command line already carries, which we can pull. */
-                /* ml282: add --log-severity=verbose.
-                 *
-                 * --enable-logging=file --v=1 still produced ONLY 2 WARNING + 2 ERROR lines.
-                 * That severity profile is itself the diagnosis: it is exactly
-                 * LOGSEVERITY_WARNING, which is a CefSettings field the HOST APP sets, and
-                 * CefSettings overrides Chromium's --v. So Steam is capping CEF's logging.
-                 *
-                 * CEF reads the --log-severity switch when the app leaves log_severity at
-                 * LOGSEVERITY_DEFAULT, and Steam's own webhelper command line does NOT pass
-                 * one (checked in webhelper.txt), so this may be honoured. If the next run
-                 * still shows only WARNING/ERROR then Steam sets log_severity explicitly and
-                 * no command line can raise it -- at which point the answer is to capture
-                 * the webhelper's STDERR instead, which we know carries the output because it
-                 * was visibly filling a rendered conhost window. */
+                /* ml1300: Chromium rejects enable-logging=file. Use the
+                 * supported empty value so its existing log-file/default file
+                 * destination applies. CEF may still set its own severity. */
                 /* ml287: steer proxy resolution AWAY from the in-process V8 PAC resolver.
                  *
                  * CEF's own verbose trace dies immediately after
@@ -1230,16 +1307,26 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                  * Interpreted V8 costs 5-20x on all of Steam's UI JavaScript, so
                  * this is the largest single startup lever we have.
                  * MADEIRA_JITLESS=0 turns it off; default stays ON (unchanged). */
-                static const char sp_jitless[] = " --single-process --enable-logging=file --v=1 --log-severity=verbose"
-                                                 " --no-proxy-server --winhttp-proxy-resolver --js-flags=--jitless";
-                static const char sp_jit[]     = " --single-process --enable-logging=file --v=1 --log-severity=verbose"
-                                                 " --no-proxy-server --winhttp-proxy-resolver";
                 const char *jl = getenv( "MADEIRA_JITLESS" );
+                const char *lf = getenv( "MADEIRA_CEF_LOGGING_FIX" );
+                /* ml1520: VERBOSE browser logging only with diagnostics on.
+                 * --v=1 at verbose severity had the helper formatting and
+                 * writing every VLOG line for the whole session, game running
+                 * or not; the quiet build keeps warnings and errors, which is
+                 * all the [guest-log] mirror reads. MADEIRA_CEF_QUIET_LOG=0
+                 * restores verbose always. */
+                const char *ql = getenv( "MADEIRA_CEF_QUIET_LOG" );
+                extern int madeira_diag_on( void );
+                int verbose = (ql && ql[0] == '0') || madeira_diag_on();
                 int jitless_on = !(jl && jl[0] == '0');
-                const char *sp = jitless_on ? sp_jitless : sp_jit;
-                dprintf(2, "[proc-gate] V8 %s (MADEIRA_JITLESS=%s) rev=ml526\n",
-                        jitless_on ? "JITLESS (interpreted)" : "JIT ENABLED — #82 retest",
-                        jl ? jl : "unset");
+                int logging_fix = !(lf && lf[0] == '0');
+                char sp[256];
+                snprintf( sp, sizeof(sp), " --single-process --enable-logging%s%s"
+                          " --no-proxy-server --winhttp-proxy-resolver%s",
+                          logging_fix ? "" : "=file", verbose ? " --v=1 --log-severity=verbose" : " --log-severity=warning",
+                          jitless_on ? " --js-flags=--jitless" : "" );
+                dprintf(2, "[cef-logging] ml1300 valid-destination=%d jitless=%d verbose=%d (ml1520)\n",
+                        logging_fix, jitless_on, verbose);
                 static const char dfs[] = "--disable-features=";
                 /* ml426 (#70): + segmentation-platform features. Four CreateBrowser
                  * runs died C00000FD in the CreateResponse→BrowserReady gap, and
@@ -1345,6 +1432,18 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         if (ios_is_arm64ec_cur() && pe_info.is_hybrid && machine == IMAGE_FILE_MACHINE_ARM64)
             machine = ios_cur_image_info()->Machine;
     }
+#ifdef WINE_IOS
+    /* One line saying which machine the child will be created with and which
+     * PE farm its system DLLs will come from.  A 32-bit child routed to the
+     * 64-bit farm (or the other way round) is invisible otherwise, and it is
+     * the first thing to check when a spawn silently produces no window. */
+    {
+        extern const char *ios_pe_dir_for_machine( WORD machine );
+        ERR( "NtCreateUserProcess: child machine=%04x (image machine=%04x hybrid=%d) pe_dir=%s\n",
+             machine, pe_info.machine, (int)pe_info.is_hybrid,
+             ios_pe_dir_for_machine( machine ) );
+    }
+#endif
     if (!(startup_info = create_startup_info( attr.ObjectName, process_flags, params, &pe_info, &startup_info_size )))
         goto done;
     env_size = get_env_size( params, &winedebug );
@@ -1472,6 +1571,13 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     if (!success)
     {
         if (!status) status = STATUS_INTERNAL_ERROR;
+#ifdef WINE_IOS
+        /* Name the failure at the boundary the caller sees.  Without this the
+         * only evidence a spawn failed was the absence of a window. */
+        ERR( "NtCreateUserProcess: %s (machine %04x) did not reach init_process_done; "
+             "returning %x — see the [Wine child] boot lines above for the stage\n",
+             debugstr_us(&path), machine, (unsigned)status );
+#endif
         goto done;
     }
 
@@ -2247,9 +2353,71 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     if (self)
     {
 #ifdef WINE_IOS
-        if (!handle) *exiting_flag = TRUE;
-        else if (*exiting_flag) exit_process( exit_code );
-        else abort_process( exit_code );
+        /* MADEIRA-TEMP: WOW64_DESIGN.md M1 exit-status observability. This is
+         * the one chokepoint every pseudo-process's own termination reaches
+         * exactly once (self == TRUE means the calling process is the one
+         * being terminated), so one generic line here covers every exe --
+         * not just the x86 test path -- with the image name and the decimal
+         * status the guest actually asked to exit with. */
+        {
+            PEB *peb = NtCurrentTeb() ? NtCurrentTeb()->Peb : NULL;
+            RTL_USER_PROCESS_PARAMETERS *pp = peb ? peb->ProcessParameters : NULL;
+            const WCHAR *path = (pp && pp->ImagePathName.Buffer) ? pp->ImagePathName.Buffer : NULL;
+            unsigned int len = path ? pp->ImagePathName.Length / sizeof(WCHAR) : 0;
+            unsigned int base = 0, i, n = 0;
+            char name[64];
+
+            for (i = 0; i < len; i++) if (path[i] == '\\' || path[i] == '/') base = i + 1;
+            for (i = base; i < len && n < sizeof(name) - 1; i++) name[n++] = (char)path[i];
+            name[n] = 0;
+            ERR( "MADEIRA-EXIT: %s status=%d\n", n ? name : "?", (int)exit_code );
+            /* ml962: the [srv-stats] report is piggy-backed on the 10 s
+             * deadline being crossed at the end of some server call, so a run
+             * that dies before the first window -- which is every crash worth
+             * diagnosing -- produced no counters at all.  This is the one
+             * chokepoint each pseudo-process's own exit passes exactly once,
+             * so dump the window here too: per-kind traffic, the Nt* entry
+             * points, the select breakdown and the fastsync hit/miss and
+             * cache-learn lines. */
+            {
+                extern void ios_srv_stats_report_now(void);
+                ios_srv_stats_report_now();
+            }
+            /* Unbuffered duplicate: ERR goes through the debug channel, which a
+             * muted err: channel or a dying log pump can swallow.  Everything
+             * below is the teardown that used to end the log (and the app), so
+             * each step names itself on fd 2 with a plain write(2). */
+            extern const SECTION_IMAGE_INFORMATION *ios_cur_image_info(void);
+            dprintf( 2, "[Wine child exit] stage=madeira-exit exe=%s status=%d handle=%p "
+                        "exiting_flag=%d machine=%04x window=%p teb=%p peb=%p\n",
+                     n ? name : "?", (int)exit_code, handle, (int)*exiting_flag,
+                     ios_cur_image_info()->Machine, (void *)ios_wow_base(),
+                     NtCurrentTeb(), peb );
+        }
+        if (!handle)
+        {
+            dprintf( 2, "[Wine child exit] stage=mark-exiting (no teardown yet)\n" );
+            *exiting_flag = TRUE;
+        }
+        else if (*exiting_flag)
+        {
+            dprintf( 2, "[Wine child exit] stage=exit_process\n" );
+            exit_process( exit_code );
+            dprintf( 2, "[Wine child exit] stage=returned-from-exit_process (UNEXPECTED)\n" );
+        }
+        else
+        {
+            /* The loader_init-failure path: ntdll called
+             * NtTerminateProcess( GetCurrentProcess(), status ) with no
+             * preceding NtTerminateProcess( 0, ... ), so exiting_flag is still
+             * FALSE.  abort_process() used to _exit() here, which on iOS ends
+             * the whole Mach task — every other pseudo-process, the UI, the log.
+             * It now performs the same per-pseudo-process teardown as
+             * exit_process (thread_ios.c). */
+            dprintf( 2, "[Wine child exit] stage=abort_process\n" );
+            abort_process( exit_code );
+            dprintf( 2, "[Wine child exit] stage=returned-from-abort_process (UNEXPECTED)\n" );
+        }
 #else
         if (!handle) process_exiting = TRUE;
         else if (process_exiting) exit_process( exit_code );
@@ -2711,6 +2879,31 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                 ret = wine_server_call( req );
                 if (!ret && !is_machine_64bit( reply->machine ) && is_machine_64bit( native_machine ))
                     val = reply->peb + 0x1000;
+            }
+            SERVER_END_REQ;
+            if (!ret) *(ULONG_PTR *)info = val;
+        }
+        break;
+
+    /* iOS-Madeira (WOW64_DESIGN.md §2): the single source of truth for B, the
+     * host address of guest 0 for a 32-bit pseudo-process.  0 when the target
+     * has no guest window.  wow64.dll and the FEX WoW64 module each read this
+     * once at process init; nothing else may invent a B. */
+    case ProcessWineIosWowGuestBase:
+        len = sizeof(ULONG_PTR);
+        if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
+        if (handle == GetCurrentProcess()) *(ULONG_PTR *)info = ios_wow_base();
+        else
+        {
+            ULONG_PTR val = 0;
+
+            /* pseudo-processes share one address space, so the registry is
+             * keyed by PEB and a handle resolves through the server. */
+            SERVER_START_REQ( get_process_info )
+            {
+                req->handle = wine_server_obj_handle( handle );
+                ret = wine_server_call( req );
+                if (!ret) val = ios_wow_base_for_peb( wine_server_get_ptr( reply->peb ) );
             }
             SERVER_END_REQ;
             if (!ret) *(ULONG_PTR *)info = val;

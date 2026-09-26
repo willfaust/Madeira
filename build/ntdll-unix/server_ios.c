@@ -139,6 +139,7 @@ static void wine_log_write(const char *fmt, ...)
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "ios_wow.h"
 #include "ddk/wdm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(server);
@@ -1498,7 +1499,8 @@ static void ios_xprobe_main( void )
             n = snprintf( line, sizeof(line),
                           "[xp] %s +%.2f dt=%.0f cpu=%.0f (thr %.0f) P=%.0f E=%.0f run=%.0f pgw=%.1f GHz P=%.2f E=%.2f Minst=%.0f IPC=%.2f mJ=%.0f pin=%llu rdKB=%llu fpMB=%llu",
                           wall, XP_MS( now - t_start ) / 1000.0, dt_ms, cpu, sum_thr_ms, pms, ems,
-                          XP_MS( ru.ri_runnable_time - pru.ri_runnable_time ), XP_MS( ru.ri_page_wait_time_mach - pru.ri_page_wait_time_mach ),
+                          XP_MS( ru.ri_runnable_time - pru.ri_runnable_time ),
+                          0.0 /* pgw: the xtool SDK's rusage_info_v6 has no ri_page_wait_time_mach */,
                           pms > 0 ? pcy / (pms * 1e6) : 0, ems > 0 ? (cy - pcy) / (ems * 1e6) : 0, ins / 1e6, cy > 0 ? ins / cy : 0,
                           (double)(ru.ri_energy_nj - pru.ri_energy_nj) / 1e6,
                           (unsigned long long)(ru.ri_pageins - pru.ri_pageins), (unsigned long long)((ru.ri_diskio_bytesread - pru.ri_diskio_bytesread) >> 10),
@@ -1751,12 +1753,1661 @@ volatile int ios_srv_req_count = 0;       /* ALL threads: wineserver requests */
 uintptr_t ios_srv_game_teb = 0;           /* set once by server_init_process_done */
 
 /***********************************************************************
+ *           [frame]  —  the frame critical-path breakdown (ml1050)
+ *
+ * Design, cost and the list of things it deliberately cannot see:
+ * build/ntdll-unix/shims/ios_frame_stats.h.  This is the storage, the
+ * accumulators and the reporter; the producers are winemetal_unix.c (present,
+ * drawable, GPU) and wine/dlls/ntdll/unix/sync.c (the waits).
+ */
+#include "ios_frame_stats.h"
+#include <mach/mach_time.h>
+
+int ios_frame_stats_on = 1;               /* MADEIRA_FRAME_STATS=0 */
+unsigned long long ios_frame_role_tid[IOS_FRAME_ROLE_MAX];
+
+struct ios_frame_acc
+{
+    /* presenting thread, closed once per Present */
+    unsigned long long frames;
+    unsigned long long wall_ns;
+    unsigned long long cpu_ns;
+    unsigned long long wall_max_ns;
+    unsigned long long wait_ns[IOS_FRAME_WAIT_MAX];
+    /* encode thread */
+    unsigned long long presents, skips;
+    unsigned long long enc_cpu_ns, enc_wall_ns;
+    unsigned long long drawable_ns;
+    /* finish thread / GPU */
+    unsigned long long gpu_ns, gpu_bufs, qdepth_sum;
+    unsigned long long pass_render, pass_blit, pass_compute, pass_load, pass_store, pass_clear;
+    /* distributions, 1 ms per bucket */
+    unsigned int wall_hist[IOS_FRAME_HIST_N];
+    unsigned int draw_hist[IOS_FRAME_HIST_N];
+};
+
+static struct ios_frame_acc ios_frame_acc;
+static int ios_frame_panel_hz, ios_frame_intent_hz, ios_frame_mode = -1;
+
+#define IOS_FRAME_ADD(field, v) __atomic_fetch_add( &ios_frame_acc.field, (v), __ATOMIC_RELAXED )
+
+static inline unsigned long long ios_frame_now_ns(void)
+{
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info( &tb );
+    return mach_absolute_time() * tb.numer / tb.denom;
+}
+
+static inline unsigned long long ios_frame_cpu_ns(void)
+{
+    struct timespec ts;
+    /* CLOCK_THREAD_CPUTIME_ID is the calling thread's user+system time and is
+     * a vDSO-free but cheap trap on Darwin; two per frame per role thread. */
+    if (clock_gettime( CLOCK_THREAD_CPUTIME_ID, &ts )) return 0;
+    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
+}
+
+static inline void ios_frame_hist_add( unsigned int *h, unsigned long long ns )
+{
+    unsigned idx = (unsigned)(ns / 1000000ull);
+    if (idx >= IOS_FRAME_HIST_N) idx = IOS_FRAME_HIST_N - 1;
+    __atomic_fetch_add( &h[idx], 1, __ATOMIC_RELAXED );
+}
+
+/* Percentile out of a 1 ms-bucket histogram.  Returns the bucket's UPPER edge
+ * in ms, so a reported p95 of 25 means "95 % of frames finished within 25 ms",
+ * which is the direction that cannot mislead. */
+static unsigned ios_frame_pct( const unsigned int *h, unsigned pct )
+{
+    unsigned long long total = 0, seen = 0;
+    unsigned i;
+    for (i = 0; i < IOS_FRAME_HIST_N; i++) total += h[i];
+    if (!total) return 0;
+    for (i = 0; i < IOS_FRAME_HIST_N; i++)
+    {
+        seen += h[i];
+        if (seen * 1000 >= total * pct) return i + 1;
+    }
+    return IOS_FRAME_HIST_N;
+}
+
+/* Claim a role for the calling thread.  Written once per role for the life of
+ * the process; the CAS makes a double claim (two threads racing through the
+ * same hook before either has published) resolve to one winner instead of
+ * ping-ponging, which would make the wait attribution flicker. */
+void ios_frame_stats_init(void);
+
+static void ios_frame_claim( enum ios_frame_role role )
+{
+    unsigned long long self = (unsigned long long)(uintptr_t)pthread_self(), expect = 0;
+    ios_frame_stats_init();
+    if (__atomic_load_n( &ios_frame_role_tid[role], __ATOMIC_RELAXED ) == self) return;
+    if (__atomic_load_n( &ios_frame_role_tid[role], __ATOMIC_RELAXED )) return;
+    __atomic_compare_exchange_n( &ios_frame_role_tid[role], &expect, self, 0,
+                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED );
+}
+
+void ios_frame_game_tick(void)
+{
+    static unsigned long long last_wall, last_cpu;   /* GAME thread only */
+    static pthread_mutex_t tick_lock = PTHREAD_MUTEX_INITIALIZER;
+    static unsigned switches;
+    unsigned long long now, cpu, dw;
+    unsigned long long self = (unsigned long long)(uintptr_t)pthread_self(), owner;
+    const char *follow;
+
+    if (!ios_frame_stats_on) return;
+    ios_frame_claim( IOS_FRAME_ROLE_GAME );
+    /* ml1140: a loading thread may hand presentation to the render thread.
+     * Pinning the first thread forever produced n=0 beside hundreds of actual
+     * presents. Serialize only this two-clock diagnostic, never the renderer;
+     * a contended hook drops its sample. Never subtract CPU clocks belonging
+     * to different threads. MADEIRA_FRAME_FOLLOW=0 restores the old owner. */
+    if (pthread_mutex_trylock( &tick_lock )) return;
+    owner = __atomic_load_n( &ios_frame_role_tid[IOS_FRAME_ROLE_GAME], __ATOMIC_RELAXED );
+    if (owner != self)
+    {
+        follow = getenv( "MADEIRA_FRAME_FOLLOW" );
+        if (follow && !strcmp( follow, "0" )) { pthread_mutex_unlock( &tick_lock ); return; }
+        __atomic_store_n( &ios_frame_role_tid[IOS_FRAME_ROLE_GAME], self, __ATOMIC_RELAXED );
+        last_wall = last_cpu = 0;
+        if (++switches <= 8)
+            wine_log_write( "[frame-owner] ml1140 presenter changed; resetting thread clocks (#%u)", switches );
+    }
+
+    now = ios_frame_now_ns();
+    cpu = ios_frame_cpu_ns();
+    if (last_wall)
+    {
+        dw = now - last_wall;
+        /* A frame longer than four seconds is a load screen, an alt-tab or a
+         * breakpoint, not a frame; charging it would move every average by
+         * more than the effect being measured. */
+        if (dw < 4000000000ull)
+        {
+            IOS_FRAME_ADD( frames, 1 );
+            IOS_FRAME_ADD( wall_ns, dw );
+            IOS_FRAME_ADD( cpu_ns, cpu - last_cpu );
+            unsigned long long worst = __atomic_load_n( &ios_frame_acc.wall_max_ns, __ATOMIC_RELAXED );
+            while (dw > worst && !__atomic_compare_exchange_n( &ios_frame_acc.wall_max_ns, &worst,
+                    dw, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) { }
+            ios_frame_hist_add( ios_frame_acc.wall_hist, dw );
+        }
+    }
+    last_wall = now; last_cpu = cpu;
+    pthread_mutex_unlock( &tick_lock );
+}
+
+/* ml1140: actual native encoder creation, aggregated once per heartbeat.
+ * Attachment actions are counts (depth/stencil separately), not bytes. */
+void ios_frame_pass( unsigned kind, unsigned loads, unsigned stores, unsigned clears )
+{
+    if (!ios_frame_stats_on) return;
+    if (kind == 0) IOS_FRAME_ADD( pass_render, 1 );
+    else if (kind == 1) IOS_FRAME_ADD( pass_blit, 1 );
+    else if (kind == 2) IOS_FRAME_ADD( pass_compute, 1 );
+    if (loads) IOS_FRAME_ADD( pass_load, loads );
+    if (stores) IOS_FRAME_ADD( pass_store, stores );
+    if (clears) IOS_FRAME_ADD( pass_clear, clears );
+}
+
+void ios_frame_encode_present( int skipped )
+{
+    static unsigned long long last_wall, last_cpu;   /* ENCODE thread only */
+    unsigned long long now, cpu;
+
+    if (!ios_frame_stats_on) return;
+    ios_frame_claim( IOS_FRAME_ROLE_ENCODE );
+    if (!ios_frame_is_role( IOS_FRAME_ROLE_ENCODE )) return;
+
+    IOS_FRAME_ADD( presents, 1 );
+    if (skipped) IOS_FRAME_ADD( skips, 1 );
+
+    now = ios_frame_now_ns();
+    cpu = ios_frame_cpu_ns();
+    if (last_wall && now - last_wall < 4000000000ull)
+    {
+        IOS_FRAME_ADD( enc_wall_ns, now - last_wall );
+        IOS_FRAME_ADD( enc_cpu_ns, cpu - last_cpu );
+    }
+    last_wall = now; last_cpu = cpu;
+}
+
+void ios_frame_drawable_wait( unsigned long long ns )
+{
+    if (!ios_frame_stats_on) return;
+    IOS_FRAME_ADD( drawable_ns, ns );
+    ios_frame_hist_add( ios_frame_acc.draw_hist, ns );
+}
+
+void ios_frame_gpu( unsigned long long gpu_ns, unsigned long long inflight )
+{
+    if (!ios_frame_stats_on) return;
+    /* GPU completion callbacks need not run on DXMT's finish thread. */
+    if (gpu_ns)
+    {
+        IOS_FRAME_ADD( gpu_ns, gpu_ns );
+        IOS_FRAME_ADD( gpu_bufs, 1 );
+        IOS_FRAME_ADD( qdepth_sum, inflight );
+    }
+}
+
+void ios_frame_limiter( unsigned long long ns )
+{
+    if (!ios_frame_stats_on || !ns) return;
+    IOS_FRAME_ADD( wait_ns[IOS_FRAME_WAIT_LIMITER], ns );
+}
+
+void ios_frame_wait_add( enum ios_frame_wait kind, unsigned long long ns )
+{
+    if (kind >= IOS_FRAME_WAIT_MAX) return;
+    if (!ios_frame_tracking()) return;
+    IOS_FRAME_ADD( wait_ns[kind], ns );
+}
+
+/* ml1100 [frame] srv-sites: WHICH server wait costs the presenting thread its frame.
+ *
+ * The 32-minute session that motivated this puts `srv=' at 20-24 ms of a 40 ms frame
+ * and gives no way at all to ask what the thread was waiting FOR. The whole-process
+ * [srv-stats] line can only say what every thread did together (`w1 inf=0 fin=4697
+ * poll=2900 | wN inf=471 fin=624 ... tmo=4302'), and the presenting thread is one of
+ * six. A per-site table on the presenting thread alone answers it, and it is cheap
+ * because that thread already reads the clock twice around this exact call.
+ *
+ * The key is deliberately made of things that are free at the call site: how many
+ * objects, whether the timeout is infinite/finite/poll, the first handle (which
+ * [wait-census] already prints alongside the object pointer, its type and its
+ * fastsync cell, so a later log resolves it without a new probe), and the caller's
+ * return address inside ntdll. Object TYPE is not read here on purpose: it would
+ * need either a server round trip or a reach into the fastsync cache from the wrong
+ * translation unit, and the handle plus [wait-census] gives the same answer offline.
+ *
+ * The table is per-process, tiny, and raced only by one thread by construction (the
+ * GAME role is a single TEB). It is drained and zeroed by the reporter. */
+#define IOS_FRAME_SRVSITE_N 12
+
+static struct {
+    unsigned long long ns;
+    unsigned int n;
+    unsigned int tmo;
+    const void *pc;
+    unsigned int handle;
+    unsigned short nobj;
+    unsigned char tclass;   /* 0 = infinite, 1 = finite, 2 = poll (zero timeout) */
+} ios_frame_srvsite[IOS_FRAME_SRVSITE_N];
+
+void ios_frame_srv_site( const void *pc, unsigned int handle, unsigned int nobj,
+                         unsigned char tclass, unsigned long long ns, int timed_out )
+{
+    int i, worst = 0;
+
+    if (!ios_frame_stats_on) return;
+    for (i = 0; i < IOS_FRAME_SRVSITE_N; i++)
+    {
+        if (ios_frame_srvsite[i].n && ios_frame_srvsite[i].pc == pc &&
+            ios_frame_srvsite[i].handle == handle && ios_frame_srvsite[i].nobj == nobj &&
+            ios_frame_srvsite[i].tclass == tclass)
+        {
+            ios_frame_srvsite[i].ns += ns;
+            ios_frame_srvsite[i].n++;
+            if (timed_out) ios_frame_srvsite[i].tmo++;
+            return;
+        }
+        /* Evict the cheapest slot: the table ranks by TIME, so the site that has
+         * cost least is the one whose loss the top-3 cannot notice. */
+        if (ios_frame_srvsite[i].ns < ios_frame_srvsite[worst].ns) worst = i;
+    }
+    ios_frame_srvsite[worst].ns = ns;
+    ios_frame_srvsite[worst].n = 1;
+    ios_frame_srvsite[worst].tmo = timed_out ? 1 : 0;
+    ios_frame_srvsite[worst].pc = pc;
+    ios_frame_srvsite[worst].handle = handle;
+    ios_frame_srvsite[worst].nobj = (unsigned short)nobj;
+    ios_frame_srvsite[worst].tclass = tclass;
+}
+
+void ios_frame_note_display( int panel_hz, int intent_hz, int mode )
+{
+    ios_frame_panel_hz = panel_hz;
+    ios_frame_intent_hz = intent_hz;
+    ios_frame_mode = mode;
+}
+
+/* Parsed once, from the first producer that runs -- which is whichever of the
+ * presenting thread or the encode thread reaches its hook first.  There is no
+ * init hook shared by both halves of the image early enough to do it anywhere
+ * better, and a double parse is harmless. */
+void ios_frame_stats_init(void)
+{
+    static int done;
+    const char *e;
+    if (done) return;
+    done = 1;
+    e = getenv( "MADEIRA_FRAME_STATS" );
+    ios_frame_stats_on = (e && !strcmp( e, "0" )) ? 0 : 1;
+    wine_log_write( "[frame] ml1050 %s - one critical-path line per heartbeat: what BOUNDS a "
+                    "frame (presenting-thread CPU vs wait split by cause, encode thread, GPU "
+                    "time, drawable acquire, limiter). MADEIRA_FRAME_STATS=0 disables",
+                    ios_frame_stats_on ? "ON" : "OFF" );
+}
+
+/* ml2000 [spin-probe]: WHERE is a saturated thread spinning while another
+ * thread sits in a long server wait?
+ *
+ * Logs 80/89 froze with one worker at ~99.9% CPU in pure user mode (no server
+ * requests, no faults) while the main thread waited INFINITE on an event that
+ * worker should set.  [cpu-thread] names the thread but not the loop, and the
+ * task-wide samplers were off (they stalled things before, ml1640).  This
+ * reads ONE thread's registers 8 times with thread_get_state -- XNU briefly
+ * stops only that thread to copy its saved state; no task-wide suspend -- and
+ * resolves the host pc (dladdr, 64-bit PE loader list, JIT pool) plus, when
+ * the thread is in FEX JIT code, the guest EIP/RIP (block-tail resolver on
+ * [x28+0], same as ml876) against the guest loader list (PEB32 for WoW64).
+ * Trigger: a thread >= 90% of a core for 2 consecutive 10 s intervals while
+ * any registered server wait is >= 10 s old.  Once per thread per continuous
+ * hot episode, at most 16 episodes per run.  MADEIRA_SPIN_PROBE=0 disables. */
+static unsigned int ios_spin_long_waits( unsigned long long min_ms, unsigned int *oldest_tid,
+                                         unsigned long long *oldest_ms );
+
+static void ios_spin_wname( uint64_t buf, unsigned int bytes, char *out, size_t cap )
+{
+    uint16_t w[48]; unsigned int k, n = bytes / 2;
+    if (n > 47) n = 47;
+    if (n >= cap) n = (unsigned int)cap - 1;
+    out[0] = 0;
+    if (!n || !ios_ts_read( buf, w, n * 2 )) { snprintf( out, cap, "?" ); return; }
+    for (k = 0; k < n; k++) out[k] = (w[k] >= 32 && w[k] < 127) ? (char)w[k] : '?';
+    out[n] = 0;
+}
+
+/* Stateless: walks the 64-bit loader list once per lookup (bounded). */
+static int ios_spin_mod64( uint64_t teb, uint64_t va, char *name, size_t cap, uint64_t *rva )
+{
+    uint64_t peb = 0, ldr = 0, head, cur = 0;
+    int guard = 0;
+    if (!teb || !ios_ts_read( teb + 0x60, &peb, 8 ) || !peb || !ios_ts_read( peb + 0x18, &ldr, 8 ) || !ldr) return 0;
+    head = ldr + 0x10;                                 /* InLoadOrderModuleList */
+    if (!ios_ts_read( head, &cur, 8 )) return 0;
+    while (cur && cur != head && guard++ < 256)
+    {
+        uint64_t base = 0, buf = 0, next = 0; uint32_t size = 0; uint16_t len = 0;
+        if (!ios_ts_read( cur + 0x30, &base, 8 ) || !ios_ts_read( cur + 0x40, &size, 4 )) break;
+        if (base && size && va >= base && va < base + size)
+        {
+            ios_ts_read( cur + 0x58, &len, 2 ); ios_ts_read( cur + 0x60, &buf, 8 );
+            ios_spin_wname( buf, len, name, cap );
+            *rva = va - base;
+            return 1;
+        }
+        if (!ios_ts_read( cur, &next, 8 )) break;
+        cur = next;
+    }
+    return 0;
+}
+
+/* Same for a WoW64 guest: guest address g lives at host B + g (ios_wow.h). */
+static int ios_spin_mod32( uint64_t B, uint32_t peb32, uint32_t eip, char *name, size_t cap, uint32_t *rva )
+{
+    uint32_t ldr = 0, head32, cur32 = 0;
+    int guard = 0;
+    if (!B || !peb32 || !ios_ts_read( B + peb32 + 0x0c, &ldr, 4 ) || !ldr) return 0;
+    head32 = ldr + 0x0c;                               /* PEB_LDR_DATA32.InLoadOrderModuleList */
+    if (!ios_ts_read( B + head32, &cur32, 4 )) return 0;
+    while (cur32 && cur32 != head32 && guard++ < 256)
+    {
+        uint32_t base = 0, size = 0, buf = 0, next = 0; uint16_t len = 0;
+        if (!ios_ts_read( B + cur32 + 0x18, &base, 4 ) || !ios_ts_read( B + cur32 + 0x20, &size, 4 )) break;
+        if (base && size && eip >= base && eip - base < size)
+        {
+            ios_ts_read( B + cur32 + 0x2c, &len, 2 ); ios_ts_read( B + cur32 + 0x30, &buf, 4 );
+            ios_spin_wname( buf ? B + buf : 0, len, name, cap );
+            *rva = eip - base;
+            return 1;
+        }
+        if (!ios_ts_read( B + cur32, &next, 4 )) break;
+        cur32 = next;
+    }
+    return 0;
+}
+
+static void ios_spin_host_where( uint64_t teb, uint64_t a, char *out, size_t cap )
+{
+    extern void *ios_jit_rx_base_global;
+    extern size_t ios_jit_pool_size_global;
+    uint64_t rx = (uint64_t)(uintptr_t)ios_jit_rx_base_global, rva = 0;
+    char nm[48];
+    if (ios_ts_sym( a, out, cap )) return;
+    if (ios_spin_mod64( teb, a, nm, sizeof(nm), &rva )) { snprintf( out, cap, "%s+0x%llx", nm, (unsigned long long)rva ); return; }
+    if (rx && ios_jit_pool_size_global && a >= rx && a < rx + ios_jit_pool_size_global)
+    { snprintf( out, cap, "jit-pool+0x%llx", (unsigned long long)(a - rx) ); return; }
+    snprintf( out, cap, "0x%llx(anon)", (unsigned long long)a );
+}
+
+static void ios_spin_probe_thread( thread_act_t port, uint64_t id, double pct,
+                                   unsigned int nlong, unsigned int wtid, unsigned long long wms )
+{
+    extern uint64_t ios_native_rip_from_hostpc( uint64_t, uint64_t, const char ** );
+    pthread_t pt = pthread_from_mach_thread_np( port );
+    uint64_t teb = ios_ts_teb( pt ), peb = 0, B = 0, tstate = 0, tframe = 0;
+    uint32_t tid = 0, peb32 = 0;
+    int s;
+
+    if (!teb)
+    {
+        /* ios_ts_teb needs the TSD offset, calibrated once from a live thread. */
+        if (ios_ts_tsd_off < 0) ios_ts_calibrate();
+        teb = ios_ts_teb( pt );
+    }
+    if (teb)
+    {
+        ios_ts_read( teb + 0x48, &tid, 4 );                          /* ClientId.UniqueThread */
+        if (ios_ts_read( teb + 0x60, &peb, 8 ) && peb) B = ios_wow_base_for_peb( (void *)(uintptr_t)peb );
+        if (B)
+        {
+            int32_t wow_off = 0; uint32_t tmp = 0;
+            /* FEX WoW64 keeps its ThreadState in TlsSlots[14] ([wow64-tls]);
+             * InternalThreadState starts with CurrentFrame. */
+            if (ios_ts_read( teb + offsetof(TEB, TlsSlots) + 14 * 8, &tstate, 8 ) && tstate >= 0x10000)
+                ios_ts_read( tstate, &tframe, 8 );
+            if (ios_ts_read( teb + offsetof(TEB, WowTebOffset), &wow_off, 4 ) && wow_off &&
+                ios_ts_read( teb + (int64_t)wow_off + 0x30, &tmp, 4 )) peb32 = tmp;   /* TEB32.Peb */
+        }
+    }
+    wine_log_write( "[spin-probe] ml2000 HOT tid=%04x id=%llu mach=%#x cpu=%.1f%% x2 intervals; long-waits(>=10s)=%u oldest tid=%04x age=%llums "
+                    "teb=0x%llx wow=%s B=0x%llx fex-ts=0x%llx frame=0x%llx; 8 register reads, this thread only",
+                    tid, (unsigned long long)id, port, pct, nlong, wtid, wms, (unsigned long long)teb, B ? "yes" : "no",
+                    (unsigned long long)B, (unsigned long long)tstate, (unsigned long long)tframe );
+    for (s = 0; s < 8; s++)
+    {
+        arm_thread_state64_t st;
+        mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        uint64_t pc, lr, sp, x28, bb = 0, rip = 0, srip = 0;
+        const char *why = "no block", *src = "-";
+        char wpc[112], wlr[112], gm[48] = "", line[640];
+        int n;
+
+        if (s) usleep( 2000 );
+        if (thread_get_state( port, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt ) != KERN_SUCCESS)
+        {
+            wine_log_write( "[spin-probe] ml2000 s%d thread_get_state failed (thread gone?)", s );
+            break;
+        }
+        pc = arm_thread_state64_get_pc( st ); lr = arm_thread_state64_get_lr( st );
+        sp = arm_thread_state64_get_sp( st ); x28 = st.__x[28];
+        ios_spin_host_where( teb, pc, wpc, sizeof(wpc) );
+        ios_spin_host_where( teb, lr, wlr, sizeof(wlr) );
+        /* In JIT code x28 is the FEX CpuStateFrame: [+0] InlineJITBlockHeader,
+         * [+0x18] State.rip (stale while the JIT runs). */
+        if (ios_ts_read( x28, &bb, 8 ) && bb > 0x10000) { rip = ios_native_rip_from_hostpc( bb, pc, &why ); if (rip) src = "jit-pc"; }
+        if (!rip && tframe && tframe != x28 && ios_ts_read( tframe, &bb, 8 ) && bb > 0x10000)
+        { rip = ios_native_rip_from_hostpc( bb, pc, &why ); if (rip) src = "ts-frame"; }
+        if (!ios_ts_read( (tframe ? tframe : x28) + 0x18, &srip, 8 )) srip = 0;
+        n = snprintf( line, sizeof(line), "[spin-probe] ml2000 s%d tid=%04x pc=0x%llx(%s) lr=0x%llx(%s) sp=0x%llx x18=0x%llx x28=0x%llx%s",
+                      s, tid, (unsigned long long)pc, wpc, (unsigned long long)lr, wlr, (unsigned long long)sp,
+                      (unsigned long long)st.__x[18], (unsigned long long)x28, (tframe && x28 == tframe) ? "(=frame)" : "" );
+        if (rip)
+        {
+            if (B && rip < 0x100000000ull)
+            {
+                uint32_t rva32 = 0;
+                if (ios_spin_mod32( B, peb32, (uint32_t)rip, gm, sizeof(gm), &rva32 ))
+                    n += snprintf( line + n, sizeof(line) - n, " GUEST eip=0x%08x(%s+0x%x) via %s", (unsigned)rip, gm, rva32, src );
+                else
+                    n += snprintf( line + n, sizeof(line) - n, " GUEST eip=0x%08x(?) via %s", (unsigned)rip, src );
+            }
+            else
+            {
+                uint64_t rva = 0;
+                if (ios_spin_mod64( teb, rip, gm, sizeof(gm), &rva ))
+                    n += snprintf( line + n, sizeof(line) - n, " GUEST rip=0x%llx(%s+0x%llx) via %s", (unsigned long long)rip, gm, (unsigned long long)rva, src );
+                else
+                    n += snprintf( line + n, sizeof(line) - n, " GUEST rip=0x%llx(?) via %s", (unsigned long long)rip, src );
+            }
+        }
+        else n += snprintf( line + n, sizeof(line) - n, " GUEST ? (%s)", why );
+        if (srip && n < (int)sizeof(line) - 40)
+            n += snprintf( line + n, sizeof(line) - n, " state-rip=0x%llx", (unsigned long long)srip );
+        wine_log_write( "%s", line );
+    }
+}
+
+/* Called from ios_cpu_diagnostics with the live port list, BEFORE the ports
+ * are released. rows[] carry the per-interval CPU deltas. */
+static void ios_spin_probe( const uint64_t *ids, const unsigned int *ports, const uint64_t *deltas,
+                            unsigned int n, uint64_t elapsed )
+{
+    static struct { uint64_t id; unsigned int streak, probed, seen; } hot[16];
+    static int enabled = -1;
+    static unsigned int epoch, episodes;
+    mach_port_t self = pthread_mach_thread_np( pthread_self() );
+    unsigned int i, k, probes = 0, nlong = 0, wtid = 0;
+    unsigned long long wms = 0;
+    int waits_checked = 0;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_SPIN_PROBE" );
+        enabled = !(e && !strcmp( e, "0" ));
+        wine_log_write( "[spin-probe] ml2000 %s (>=90%% CPU for 2 intervals + a >=10 s server wait -> 8 single-thread "
+                        "register reads; MADEIRA_SPIN_PROBE=0 disables)", enabled ? "armed" : "OFF" );
+    }
+    if (!enabled || !elapsed) return;
+    epoch++;
+    for (k = 0; k < n; k++)
+    {
+        unsigned int slot = 16;
+        if (deltas[k] * 10 < elapsed * 9) continue;           /* < 90% of one core */
+        for (i = 0; i < 16; i++) if (hot[i].id == ids[k]) { slot = i; break; }
+        if (slot == 16)
+            for (i = 0; i < 16; i++) if (!hot[i].id || hot[i].seen + 1 < epoch) { slot = i; hot[i].id = ids[k]; hot[i].streak = 0; hot[i].probed = 0; break; }
+        if (slot == 16) continue;
+        /* A gap of one interval ends the episode. */
+        if (hot[slot].seen + 1 != epoch) { hot[slot].streak = 0; hot[slot].probed = 0; }
+        hot[slot].seen = epoch;
+        hot[slot].streak++;
+        if (hot[slot].streak < 2 || hot[slot].probed || probes >= 2 || episodes >= 16 || ports[k] == self) continue;
+        if (!waits_checked) { nlong = ios_spin_long_waits( 10000, &wtid, &wms ); waits_checked = 1; }
+        if (!nlong) continue;
+        hot[slot].probed = 1;
+        probes++; episodes++;
+        ios_spin_probe_thread( ports[k], ids[k], 100.0 * deltas[k] / elapsed, nlong, wtid, wms );
+    }
+}
+
+/* ml1950: cumulative thread CPU deltas, without suspending a thread or reading
+ * its registers/stack. Ten-second cadence separates a busy worker from a waiting
+ * presenter; wall-minus-CPU alone cannot establish CPU saturation. Kernel thread
+ * IDs distinguish a new thread from a recycled Mach port name. Dead/new threads
+ * are deliberately excluded from deltas, so the sum is not whole-task CPU. */
+static void ios_cpu_diagnostics(void)
+{
+    struct sample { uint64_t id, cpu; unsigned int generation; };
+    struct row { uint64_t id, delta; unsigned int port; int state, role; char name[64]; };
+    static struct sample previous[256];
+    static struct row rows[256];
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t last;
+    static unsigned int generation;
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t count = 0;
+    uint64_t now, elapsed, total = 0;
+    unsigned int k, n = 0, dropped = 0, matched = 0;
+    const char *enabled = getenv( "MADEIRA_CPU_DIAGNOSTICS" );
+
+    if (!enabled || strcmp( enabled, "1" ) || pthread_mutex_trylock( &lock )) return;
+    now = ios_frame_now_ns();
+    if (last && now - last < 10000000000ull) goto done;
+    if (task_threads( mach_task_self(), &threads, &count ) != KERN_SUCCESS) goto done;
+    elapsed = last ? now - last : 0;
+    generation++;
+    for (k = 0; k < count; k++)
+    {
+        thread_identifier_info_data_t identity;
+        thread_basic_info_data_t basic;
+        mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT, bc = THREAD_BASIC_INFO_COUNT;
+        unsigned int i, slot = 256;
+        uint64_t cpu;
+        if (thread_info( threads[k], THREAD_IDENTIFIER_INFO, (thread_info_t)&identity, &ic ) != KERN_SUCCESS ||
+            thread_info( threads[k], THREAD_BASIC_INFO, (thread_info_t)&basic, &bc ) != KERN_SUCCESS) continue;
+        cpu = ((uint64_t)basic.user_time.seconds + basic.system_time.seconds) * 1000000000ull +
+              ((uint64_t)basic.user_time.microseconds + basic.system_time.microseconds) * 1000ull;
+        for (i = 0; i < 256; i++)
+            if (previous[i].id == identity.thread_id) { slot = i; break; }
+        if (slot == 256)
+            for (i = 0; i < 256; i++)
+                if (!previous[i].id || previous[i].generation + 1 < generation) { slot = i; break; }
+        if (slot == 256) { dropped++; continue; }
+        if (elapsed && previous[slot].id == identity.thread_id &&
+            previous[slot].generation + 1 == generation && cpu >= previous[slot].cpu)
+        {
+            struct row *r = &rows[n++];
+            thread_extended_info_data_t extended;
+            mach_msg_type_number_t ec = THREAD_EXTENDED_INFO_COUNT;
+            pthread_t pt = pthread_from_mach_thread_np( threads[k] );
+            r->id = identity.thread_id;
+            r->port = threads[k];
+            r->delta = cpu - previous[slot].cpu;
+            r->state = basic.run_state;
+            r->role = -1;
+            r->name[0] = 0;
+            total += r->delta;
+            matched++;
+            for (i = 0; i < IOS_FRAME_ROLE_MAX; i++)
+                if ((uint64_t)(uintptr_t)pt == __atomic_load_n( &ios_frame_role_tid[i], __ATOMIC_RELAXED )) r->role = i;
+            if (thread_info( threads[k], THREAD_EXTENDED_INFO, (thread_info_t)&extended, &ec ) == KERN_SUCCESS)
+            {
+                memcpy( r->name, extended.pth_name, sizeof(r->name) - 1 );
+                r->name[sizeof(r->name) - 1] = 0;
+                for (i = 0; r->name[i]; i++) if ((unsigned char)r->name[i] < 32 || (unsigned char)r->name[i] > 126) r->name[i] = '?';
+            }
+        }
+        previous[slot].id = identity.thread_id;
+        previous[slot].cpu = cpu;
+        previous[slot].generation = generation;
+    }
+    /* ml2000: probe a saturated thread while its port is still held. */
+    if (elapsed && n)
+    {
+        static uint64_t sp_ids[256], sp_deltas[256];
+        static unsigned int sp_ports[256];
+        for (k = 0; k < n; k++) { sp_ids[k] = rows[k].id; sp_ports[k] = rows[k].port; sp_deltas[k] = rows[k].delta; }
+        ios_spin_probe( sp_ids, sp_ports, sp_deltas, n, elapsed );
+    }
+    /* Release every port even if metadata queries failed. */
+    for (k = 0; k < count; k++) mach_port_deallocate( mach_task_self(), threads[k] );
+    vm_deallocate( mach_task_self(), (vm_address_t)threads, count * sizeof(*threads) );
+    if (elapsed)
+    {
+        wine_log_write( "[cpu-budget] ml1950 interval=%.2fs live-threads=%u matched=%u dropped=%u live-core-equivalents=%.2f (no thread suspension)",
+                        elapsed * 1e-9, count, matched, dropped, (double)total / elapsed );
+        for (k = 0; k < 6 && k < n; k++)
+        {
+            unsigned int i, best = 0;
+            for (i = 1; i < n; i++) if (rows[i].delta > rows[best].delta) best = i;
+            if (!rows[best].delta) break;
+            wine_log_write( "[cpu-thread] ml1950 id=%llu mach=%#x name=%s role=%d cpu=%.1f%% state=%d",
+                            (unsigned long long)rows[best].id, rows[best].port, rows[best].name, rows[best].role,
+                            100.0 * rows[best].delta / elapsed, rows[best].state );
+            rows[best].delta = 0;
+        }
+    }
+    last = now;
+done:
+    pthread_mutex_unlock( &lock );
+}
+
+/* One line per heartbeat window.  Everything is per-frame except fps, n and
+ * the two percentiles, because a per-window total cannot be compared against
+ * a refresh interval and the refresh interval is the thing every number here
+ * is trying to be measured against. */
+void ios_frame_report( unsigned long long win_ns )
+{
+    struct ios_frame_acc a;
+    unsigned int wall_p95, draw_p95, wall_p99, wall_p999, over50 = 0, over100 = 0;
+    double f, ef, gf, fps;
+    unsigned i;
+
+    if (!ios_frame_stats_on) return;
+
+    ios_cpu_diagnostics();
+
+    /* Exchange the 64-bit prefix to zero: these are per-window rates.  A
+     * producer racing this loses at most one frame's contribution.  The bound
+     * is derived from the struct rather than written down, so adding a counter
+     * cannot silently leave it un-zeroed -- and it stops exactly where the
+     * 32-bit histograms begin. */
+    memset( &a, 0, sizeof(a) );
+    for (i = 0; i < offsetof(struct ios_frame_acc, wall_hist) / sizeof(unsigned long long); i++)
+        ((unsigned long long *)&a)[i] =
+            __atomic_exchange_n( &((unsigned long long *)&ios_frame_acc)[i], 0, __ATOMIC_RELAXED );
+    /* wall_hist/draw_hist are unsigned int and sit past that prefix. */
+    {
+        unsigned int wh[IOS_FRAME_HIST_N], dh[IOS_FRAME_HIST_N];
+        for (i = 0; i < IOS_FRAME_HIST_N; i++)
+        {
+            wh[i] = __atomic_exchange_n( &ios_frame_acc.wall_hist[i], 0, __ATOMIC_RELAXED );
+            dh[i] = __atomic_exchange_n( &ios_frame_acc.draw_hist[i], 0, __ATOMIC_RELAXED );
+        }
+        wall_p95 = ios_frame_pct( wh, 950 );
+        draw_p95 = ios_frame_pct( dh, 950 );
+        wall_p99 = ios_frame_pct( wh, 990 );
+        wall_p999 = ios_frame_pct( wh, 999 );
+        for (i = 50; i < IOS_FRAME_HIST_N; i++) over50 += wh[i];
+        for (i = 100; i < IOS_FRAME_HIST_N; i++) over100 += wh[i];
+    }
+
+    if (!a.frames)
+    {
+        /* Silence would be ambiguous: "no frames" and "the instrument is not
+         * wired up" are different diagnoses and only one of them is a bug. */
+        if (a.presents || ios_frame_mode >= 0)
+            wine_log_write( "[frame] ml1050 n=0 (no Present reached the presenter this window) "
+                            "presents=%llu mode=%d panel=%dHz intent=%dHz",
+                            a.presents, ios_frame_mode, ios_frame_panel_hz, ios_frame_intent_hz );
+        return;
+    }
+
+    f  = 1e-6 / (double)a.frames;                       /* ns total -> ms/frame */
+    ef = a.presents ? 1e-6 / (double)a.presents : 0.0;
+    gf = a.gpu_bufs ? 1e-6 / (double)a.gpu_bufs : 0.0;
+    fps = win_ns ? (double)a.frames * 1e9 / (double)win_ns : 0.0;
+    wine_log_write( "[frame-tail] ml1150 n=%llu p99=%ums p99.9=%ums max=%.2fms >=50ms=%u >=100ms=%u "
+                    "(1ms buckets; samples under 4s; MADEIRA_FRAME_STATS=0 disables)",
+                    a.frames, wall_p99, wall_p999, a.wall_max_ns * 1e-6, over50, over100 );
+
+    {
+        double waitsum = 0.0;
+        for (i = 0; i < IOS_FRAME_WAIT_MAX; i++) waitsum += (double)a.wait_ns[i];
+        wine_log_write(
+            "[frame] ml1050 n=%llu fps=%.1f wall=%.1fms(p95 %u) | game: cpu=%.1f wait=%.1f "
+            "(fast=%.1f srv=%.1f sleep=%.1f unix=%.1f present=%.1f other=%.1f) | "
+            "encode: n=%llu skip=%llu cpu=%.1f idle=%.1f | gpu=%.2f(n=%llu) qdepth=%.1f | "
+            "drawable=%.2f(p95 %u) limiter=%.2f | mode=%d panel=%dHz intent=%dHz",
+            a.frames, fps, (double)a.wall_ns * f, wall_p95,
+            (double)a.cpu_ns * f,
+            ((double)a.wall_ns - (double)a.cpu_ns) * f,
+            (double)a.wait_ns[IOS_FRAME_WAIT_FAST] * f,
+            (double)a.wait_ns[IOS_FRAME_WAIT_SRV] * f,
+            (double)a.wait_ns[IOS_FRAME_WAIT_SLEEP] * f,
+            (double)a.wait_ns[IOS_FRAME_WAIT_UNIX] * f,
+            (double)a.wait_ns[IOS_FRAME_WAIT_PRESENT] * f,
+            ((double)a.wall_ns - (double)a.cpu_ns - waitsum
+             + (double)a.wait_ns[IOS_FRAME_WAIT_LIMITER]) * f,
+            a.presents, a.skips,
+            (double)a.enc_cpu_ns * ef,
+            ((double)a.enc_wall_ns - (double)a.enc_cpu_ns) * ef,
+            (double)a.gpu_ns * gf, a.gpu_bufs,
+            a.gpu_bufs ? (double)a.qdepth_sum / (double)a.gpu_bufs : 0.0,
+            (double)a.drawable_ns * ef, draw_p95,
+            (double)a.wait_ns[IOS_FRAME_WAIT_LIMITER] * ef,
+            ios_frame_mode, ios_frame_panel_hz, ios_frame_intent_hz );
+        wine_log_write( "[gpu-work] ml1140 per-present: render=%.1f blit=%.1f compute=%.1f "
+                        "load=%.1f store=%.1f clear=%.1f buffers=%.2f gpu-ms=%.2f (MADEIRA_FRAME_STATS=0 disables)",
+                        a.pass_render * ef * 1e6, a.pass_blit * ef * 1e6, a.pass_compute * ef * 1e6,
+                        a.pass_load * ef * 1e6, a.pass_store * ef * 1e6, a.pass_clear * ef * 1e6,
+                        a.gpu_bufs * ef * 1e6, a.gpu_ns * ef );
+    }
+
+    /* ml1050: the handoff half, on its own line because it is a distribution
+     * and a distribution does not fit in a field.  `spin' is the adaptive
+     * spin's payoff rate (hit = a park and a wake that did not happen) and
+     * `park us' is the log2 histogram of how long the handoffs that DID park
+     * actually took.  Together they say whether MADEIRA_FASTSYNC_SPIN_US is
+     * set too low (mass at 1-32 us with a poor hit rate) or is simply not the
+     * problem (mass above 256 us, where no spin budget could have helped). */
+    {
+        extern void madeira_fast_park_hist_snapshot( unsigned int *out, unsigned n,
+                                                     unsigned int *spin_hit,
+                                                     unsigned int *spin_miss, int *credit,
+                                                     unsigned int *spin_probe );
+        unsigned int ph[16], i2, total = 0, seen = 0, p50 = 0, p90 = 0;
+        unsigned int spin_hit = 0, spin_miss = 0, spin_probe = 0;
+        int credit = 0;
+        char line[512];
+        int len;
+
+        madeira_fast_park_hist_snapshot( ph, 16, &spin_hit, &spin_miss, &credit, &spin_probe );
+        for (i2 = 0; i2 < 16; i2++) total += ph[i2];
+        if (total || spin_hit || spin_miss)
+        {
+            for (i2 = 0; i2 < 16; i2++)
+            {
+                seen += ph[i2];
+                if (!p50 && seen * 2 >= total) p50 = i2 ? (1u << (i2 - 1)) : 0;
+                if (!p90 && seen * 10 >= total * 9) { p90 = i2 ? (1u << (i2 - 1)) : 0; break; }
+            }
+            /* ml1100: `probe' is what separates "the controller decided not to spin"
+             * from "the controller can no longer decide anything" — see the probe
+             * note in sync.c. hit=0 miss=0 probe=0 now means OFF by configuration. */
+            len = snprintf( line, sizeof(line),
+                            "[frame]   handoff: spin hit=%u miss=%u probe=%u credit=%d | parked=%u "
+                            "p50=%uus p90=%uus | us:",
+                            spin_hit, spin_miss, spin_probe, credit, total, p50, p90 );
+            for (i2 = 0; i2 < 16 && len > 0 && len < (int)sizeof(line); i2++)
+                if (ph[i2])
+                    len += snprintf( line + len, sizeof(line) - len, " %u=%u",
+                                     i2 ? (1u << (i2 - 1)) : 0, ph[i2] );
+            wine_log_write( "%s", line );
+        }
+    }
+
+    /* ml1100: the third [frame] line — where the presenting thread's `srv=' went.
+     * Top three sites by TIME, drained and zeroed here. `obj=' is the first handle
+     * and resolves against [wait-census], which prints handle, object pointer, type
+     * and fastsync cell for every blocked waiter. `n=' with `tmo=' equal to it is a
+     * poll loop; `n=' near the frame count with a large mean is a real dependency. */
+    {
+        unsigned long long tot = 0;
+        char line[512];
+        int len, i2, k, printed = 0;
+
+        for (i2 = 0; i2 < IOS_FRAME_SRVSITE_N; i2++) tot += ios_frame_srvsite[i2].ns;
+        if (tot)
+        {
+            len = snprintf( line, sizeof(line), "[frame]   srv-sites:" );
+            for (k = 0; k < 3; k++)
+            {
+                int best = -1;
+
+                for (i2 = 0; i2 < IOS_FRAME_SRVSITE_N; i2++)
+                    if (ios_frame_srvsite[i2].n &&
+                        (best < 0 || ios_frame_srvsite[i2].ns > ios_frame_srvsite[best].ns))
+                        best = i2;
+                if (best < 0) break;
+                if (len > 0 && len < (int)sizeof(line))
+                    len += snprintf( line + len, sizeof(line) - len,
+                                     " #%d %s %s obj=%08x n=%u tmo=%u %llums(mean %lluus) pc=%p |",
+                                     k + 1,
+                                     ios_frame_srvsite[best].nobj > 1 ? "waitN" : "wait1",
+                                     ios_frame_srvsite[best].tclass == 0 ? "inf" :
+                                     ios_frame_srvsite[best].tclass == 1 ? "fin" : "poll",
+                                     ios_frame_srvsite[best].handle, ios_frame_srvsite[best].n,
+                                     ios_frame_srvsite[best].tmo,
+                                     ios_frame_srvsite[best].ns / 1000000ull,
+                                     ios_frame_srvsite[best].ns / ios_frame_srvsite[best].n / 1000ull,
+                                     ios_frame_srvsite[best].pc );
+                ios_frame_srvsite[best].ns = 0;   /* so the next pass finds the next one */
+                ios_frame_srvsite[best].n = 0;
+                printed = 1;
+            }
+            if (printed)
+                wine_log_write( "%s total=%llums", line, tot / 1000000ull );
+            memset( ios_frame_srvsite, 0, sizeof(ios_frame_srvsite) );
+        }
+    }
+}
+
+#ifdef WINE_IOS
+
+/***********************************************************************
+ *           [srv-stats]  —  what the wineserver round trip actually costs
+ *
+ * ml920's [prof] put 15-25 % of ALL CPU inside the round trip itself
+ * (read<-read_request, read<-read_reply_data, semaphore_signal_trap<-
+ * server_call_unlocked, semaphore_timedwait_trap<-main_loop) but could not
+ * say WHICH requests were paying it: the kernel stacks are identical for
+ * every request kind.  This is the missing half.
+ *
+ * Accounting is CLIENT-side and wraps exactly the span the profiler charges
+ * us for: send_request() entry to the last byte of the reply, i.e. the whole
+ * of server_call_unlocked, which is the single chokepoint every request kind
+ * goes through (wine_server_call, server_select and SERVER_START_REQ all end
+ * up here).  Cost per request: two mach_absolute_time() reads (a commpage
+ * read on arm64, no syscall) and three relaxed atomic adds.
+ *
+ * Counters are plain arrays written with __ATOMIC_RELAXED.  A lost increment
+ * costs fidelity, never correctness, and the alternative — a lock — would
+ * become the thing being measured.  The report is PIGGY-BACKED: whichever
+ * thread first sees the 10 s deadline at the end of its own call publishes
+ * the new deadline with a CAS and prints; every other thread sees the CAS
+ * fail and walks away, so the report happens exactly once per window with no
+ * timer thread of its own.  Each counter is exchanged to zero as it is read,
+ * so the numbers are per-window rates.
+ *
+ * The request NAMES come from server_req_names.h, generated once from the
+ * enum in wine/include/wine/server_protocol.h.  Regenerate it with:
+ *   sed -n '/^enum request$/,/REQ_NB_REQUESTS/p' include/wine/server_protocol.h \
+ *     | sed -n 's/^ *REQ_\([a-z0-9_]*\),$/    "\1",/p'
+ * and keep the C_ASSERT at its foot — it is what turns a Wine update that
+ * inserts a request into a build failure instead of a silently shifted table.
+ */
+#include <mach/mach_time.h>
+#include "ios_srv_stats.h"
+#include "ios_spin_hist.h"
+#include "ios_fastsync.h"     /* ml1110: MADEIRA_CELL_KIND_* for [late-wake] */
+#include "ios_late_wake.h"
+#include "server_req_names.h"
+
+/* MADEIRA_SRV_STATS=0 turns the accounting off entirely (both timer reads
+ * and every atomic add); any other value, or absent, leaves it on. */
+static int ios_srv_stats_on = -1;         /* -1 = not yet probed */
+
+/* ml990: the ten-line report and the per-request timing/caller work that only
+ * the report consumes. Follows MADEIRA_DIAG; see ios_srv_stats_enabled(). */
+static int ios_srv_report_on = 0;
+
+#define IOS_SRV_STATS_PERIOD_S   10
+#define IOS_SRV_STATS_TOP_KINDS  12
+#define IOS_SRV_STATS_TOP_THR    6
+#define IOS_SRV_THR_SLOTS        256
+
+unsigned int ios_srv_nt_counts[IOS_NT_COUNTER_MAX];
+unsigned int ios_srv_thrinfo_counts[IOS_TI_COUNTER_MAX];   /* ml951, see ios_srv_stats.h */
+
+static unsigned int        ios_srv_kind_count[REQ_NB_REQUESTS];
+static unsigned long long  ios_srv_kind_ticks[REQ_NB_REQUESTS];
+static unsigned int        ios_srv_thr_tid[IOS_SRV_THR_SLOTS];
+static unsigned int        ios_srv_thr_count[IOS_SRV_THR_SLOTS];
+/*
+ * ml970  CALLER ATTRIBUTION for the kinds line.
+ *
+ * `kinds:' answers WHICH request is hot and `threads:' answers WHO issues it,
+ * but neither says WHAT CODE asked.  Log 46 had five request kinds locked to
+ * each other at ~177/s -- dup_handle=1770 get_object_info=1770
+ * close_handle=1772 get_thread_context=1770 and set_thread_context=2950 per
+ * 10 s -- with nothing in a D3D9 game that should touch a thread context per
+ * frame.  A count cannot distinguish "the game polls a worker" from "our own
+ * wow64 plumbing round-trips on the CURRENT thread", and those want opposite
+ * fixes.
+ *
+ * WHAT IS RECORDED.  One return address per request, taken at
+ * server_call_unlocked: preferably ONE FRAME ABOVE it -- server_call_unlocked's
+ * immediate caller is nearly always the thin wrapper (wine_server_call, or
+ * server_select), and the frame above that is the Nt* entry point that is
+ * worth naming.  The hop is a guarded read of this thread's own frame-pointer
+ * chain (arm64 keeps x29 linked on Darwin); if any guard fails it falls back
+ * to the immediate return address, so it can degrade but never fault.
+ *
+ * WHY NOT THE GUEST RIP.  For a 32-bit caller the interesting address is the
+ * i386 EIP, and it is NOT cheaply available on this side: the wow64 CPU area's
+ * Eip is only valid once FEX has flushed its JIT state into it, which is
+ * itself a server round trip (Context::FlushThreadStateContext), so reading it
+ * here would either be stale or cost more than the request being measured.
+ * What the host symbol gives instead is the Nt* function, which is the level
+ * the fix lives at anyway: NtQueryInformationThread(ThreadWow64Context) and
+ * NtQueryObject name their own callers unambiguously.
+ *
+ * Resolution is dladdr() at report time on at most 8x2 addresses; nothing on
+ * the hot path but two loads, a bounds check and one relaxed CAS/add.  PCs are
+ * never cleared (they are stable for the life of the process, so the table
+ * stays warm across windows); only the counts are exchanged to zero.
+ */
+#define IOS_SRV_CALLER_SLOTS 4
+
+static uintptr_t    ios_srv_caller_pc[REQ_NB_REQUESTS][IOS_SRV_CALLER_SLOTS];
+static unsigned int ios_srv_caller_n[REQ_NB_REQUESTS][IOS_SRV_CALLER_SLOTS];
+static unsigned int ios_srv_caller_other[REQ_NB_REQUESTS];
+
+/* One guarded hop up the frame-pointer chain.  `ra' is the caller's own return
+ * address and `fp' its frame pointer; on arm64 a frame is { saved x29, saved
+ * x30 } at [fp], so the caller's caller is at [[fp]+8].  Every guard below is
+ * about never dereferencing a value we did not prove is a live frame link:
+ * non-NULL, 16-byte aligned, strictly ascending (stacks grow down, so an outer
+ * frame is at a HIGHER address), and within 64 KB -- a single Wine stack frame
+ * is never larger, and the bound is what stops a leaf function that reused x29
+ * from sending us into unmapped memory. */
+static inline uintptr_t ios_srv_caller_hop( uintptr_t ra, uintptr_t fp )
+{
+    uintptr_t outer;
+
+    if (!fp || (fp & 15) || fp < 0x1000) return ra;
+    outer = *(const uintptr_t *)fp;
+    if (!outer || (outer & 15) || outer <= fp || outer - fp > 0x10000) return ra;
+    return *(const uintptr_t *)(outer + 8);
+}
+
+#define IOS_SRV_CALLER_PC() \
+    ios_srv_caller_hop( (uintptr_t)__builtin_return_address(0), (uintptr_t)__builtin_frame_address(0) )
+
+static void ios_srv_caller_bump( unsigned int kind, uintptr_t pc )
+{
+    int i;
+
+    if (kind >= REQ_NB_REQUESTS || !pc) return;
+    for (i = 0; i < IOS_SRV_CALLER_SLOTS; i++)
+    {
+        uintptr_t have = __atomic_load_n( &ios_srv_caller_pc[kind][i], __ATOMIC_RELAXED );
+
+        if (have == pc)
+        {
+            __atomic_fetch_add( &ios_srv_caller_n[kind][i], 1, __ATOMIC_RELAXED );
+            return;
+        }
+        if (!have)
+        {
+            uintptr_t expect = 0;
+            if (__atomic_compare_exchange_n( &ios_srv_caller_pc[kind][i], &expect, pc, 0,
+                                             __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+            {
+                __atomic_fetch_add( &ios_srv_caller_n[kind][i], 1, __ATOMIC_RELAXED );
+                return;
+            }
+            i--;   /* someone claimed it under us; re-read this same slot */
+        }
+    }
+    /* A kind with more than IOS_SRV_CALLER_SLOTS distinct call sites: counted
+     * but not named, so the printed shares are honest about what they miss. */
+    __atomic_fetch_add( &ios_srv_caller_other[kind], 1, __ATOMIC_RELAXED );
+}
+
+static unsigned long long  ios_srv_stats_deadline;   /* mach ticks */
+static unsigned long long  ios_srv_stats_window_t0;
+
+static inline unsigned long long ios_srv_ticks_to_ns( unsigned long long ticks )
+{
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info( &tb );
+    return ticks * tb.numer / tb.denom;
+}
+
+static inline unsigned long long ios_srv_ns_to_ticks( unsigned long long ns )
+{
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info( &tb );
+    return ns * tb.denom / tb.numer;
+}
+
+/* Open-addressed, fixed, never-grown.  A tid that cannot find a slot in four
+ * probes is folded into slot 0 and reported as tid 0000 — the top callers are
+ * a handful of threads, and a long tail that lands in the bucket is exactly
+ * what "other" should mean. */
+static inline void ios_srv_thr_bump( unsigned int tid )
+{
+    unsigned int i, idx = (tid * 2654435761u) % IOS_SRV_THR_SLOTS;
+
+    for (i = 0; i < 4; i++)
+    {
+        unsigned int slot = (idx + i) % IOS_SRV_THR_SLOTS;
+        unsigned int have = __atomic_load_n( &ios_srv_thr_tid[slot], __ATOMIC_RELAXED );
+
+        if (have == tid)
+        {
+            __atomic_fetch_add( &ios_srv_thr_count[slot], 1, __ATOMIC_RELAXED );
+            return;
+        }
+        if (!have)
+        {
+            unsigned int expect = 0;
+            if (__atomic_compare_exchange_n( &ios_srv_thr_tid[slot], &expect, tid, 0,
+                                             __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+            {
+                __atomic_fetch_add( &ios_srv_thr_count[slot], 1, __ATOMIC_RELAXED );
+                return;
+            }
+            i--;   /* someone claimed it under us; re-read this same slot */
+        }
+    }
+    __atomic_fetch_add( &ios_srv_thr_count[0], 1, __ATOMIC_RELAXED );
+}
+
+static int ios_srv_stats_busy;   /* ml962: serialises the two callers below */
+static int ios_srv_stats_enabled(void);
+
+static void ios_srv_stats_report( unsigned long long now )
+{
+    unsigned int top_kind[IOS_SRV_STATS_TOP_KINDS], top_thr[IOS_SRV_STATS_TOP_THR];
+    /* The snapshot arrays are static, not automatic: ~4.7 KB of stack would
+     * otherwise land on whichever thread happened to cross the deadline, and
+     * that can be a FEX/CEF-created thread with a small stack.  Only one
+     * thread is ever inside this function — the deadline CAS in
+     * ios_srv_stats_account() elects exactly one per window and publishes the
+     * next deadline before calling, and ios_srv_stats_report_now() takes the
+     * ios_srv_stats_busy flag — so one shared set is safe. */
+    static unsigned int counts[REQ_NB_REQUESTS], thr_counts[IOS_SRV_THR_SLOTS];
+    static unsigned long long ticks[REQ_NB_REQUESTS];
+    unsigned long long total_ns = 0, window_ns;
+    unsigned int total = 0, nt[IOS_NT_COUNTER_MAX];
+    char line[1024];
+    int i, j, n, len, expect = 0;
+
+    /* ml962: the window reporter is elected by the deadline CAS, but the
+     * process-exit reporter below is not, and both use the static snapshot
+     * arrays.  One CAS keeps them from overlapping; a losing caller simply
+     * skips its report rather than interleaving lines with the winner's. */
+    if (!__atomic_compare_exchange_n( &ios_srv_stats_busy, &expect, 1, 0,
+                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED )) return;
+
+    window_ns = ios_srv_ticks_to_ns( now - ios_srv_stats_window_t0 );
+    ios_srv_stats_window_t0 = now;
+    if (!window_ns) window_ns = 1;
+
+    for (i = 0; i < REQ_NB_REQUESTS; i++)
+    {
+        counts[i] = __atomic_exchange_n( &ios_srv_kind_count[i], 0, __ATOMIC_RELAXED );
+        ticks[i]  = __atomic_exchange_n( &ios_srv_kind_ticks[i], 0, __ATOMIC_RELAXED );
+        total    += counts[i];
+        total_ns += ios_srv_ticks_to_ns( ticks[i] );
+    }
+    for (i = 0; i < IOS_SRV_THR_SLOTS; i++)
+        thr_counts[i] = __atomic_exchange_n( &ios_srv_thr_count[i], 0, __ATOMIC_RELAXED );
+    for (i = 0; i < IOS_NT_COUNTER_MAX; i++)
+        nt[i] = __atomic_exchange_n( &ios_srv_nt_counts[i], 0, __ATOMIC_RELAXED );
+
+    if (!total && !nt[IOS_NT_DELAY_ZERO] && !nt[IOS_NT_ALERT_WAIT] &&
+        !nt[IOS_NT_FAST_HIT] && !nt[IOS_NT_FAST_MISS] && !nt[IOS_FS_LEARN_EVENT] &&
+        !nt[IOS_FS_LEARN_NONE] && !nt[IOS_FS_EVICT] && !nt[IOS_FS_POLLPEEK])
+    {
+        __atomic_store_n( &ios_srv_stats_busy, 0, __ATOMIC_RELEASE );
+        return;
+    }
+
+    /* selection sort of the top N; N is tiny, the arrays are not sorted */
+    for (i = 0; i < IOS_SRV_STATS_TOP_KINDS; i++)
+    {
+        unsigned int best = 0, best_n = 0;
+        for (j = 0; j < REQ_NB_REQUESTS; j++)
+        {
+            int dup = 0;
+            for (n = 0; n < i; n++) if (top_kind[n] == (unsigned int)j) dup = 1;
+            if (dup || counts[j] <= best_n) continue;
+            best = j; best_n = counts[j];
+        }
+        top_kind[i] = best_n ? best : REQ_NB_REQUESTS;
+    }
+    for (i = 0; i < IOS_SRV_STATS_TOP_THR; i++)
+    {
+        unsigned int best = IOS_SRV_THR_SLOTS, best_n = 0;
+        for (j = 0; j < IOS_SRV_THR_SLOTS; j++)
+        {
+            int dup = 0;
+            for (n = 0; n < i; n++) if (top_thr[n] == (unsigned int)j) dup = 1;
+            if (dup || thr_counts[j] <= best_n) continue;
+            best = j; best_n = thr_counts[j];
+        }
+        top_thr[i] = best_n ? best : IOS_SRV_THR_SLOTS;
+    }
+
+    /* line 1: the headline — how much wall time this task spent inside the
+     * round trip, as a fraction of ONE core-second per second. */
+    wine_log_write( "[srv-stats] %llums reqs=%u (%llu/s) in-call=%llums (%llu.%02llu core) rev=ml951",
+                    window_ns / 1000000ull, total,
+                    (unsigned long long)total * 1000000000ull / window_ns,
+                    total_ns / 1000000ull,
+                    total_ns / window_ns,
+                    total_ns * 100ull / window_ns % 100ull );
+
+    /* snprintf returns the length it WOULD have written, so `len` must be
+     * clamped back to the buffer before it is used as an offset again — an
+     * unclamped len makes `sizeof(line) - len` underflow to a huge size_t on
+     * the next iteration, which is a buffer overrun, not a truncation. */
+#define IOS_SRV_APPEND(...)                                                        \
+    do {                                                                           \
+        int _w = snprintf( line + len, sizeof(line) - len, __VA_ARGS__ );           \
+        if (_w < 0) break;                                                         \
+        len += _w;                                                                 \
+        if (len > (int)sizeof(line) - 1) len = (int)sizeof(line) - 1;               \
+    } while (0)
+
+    len = snprintf( line, sizeof(line), "[srv-stats]   kinds:" );
+    for (i = 0; i < IOS_SRV_STATS_TOP_KINDS && len < (int)sizeof(line) - 1; i++)
+    {
+        unsigned int k = top_kind[i];
+        if (k >= REQ_NB_REQUESTS) break;
+        IOS_SRV_APPEND( " %s=%u/%lluus", ios_srv_req_names[k], counts[k],
+                        ios_srv_ticks_to_ns( ticks[k] ) / 1000ull / counts[k] );
+    }
+    wine_log_write( "%s", line );
+
+    /* ml970: and WHAT called each of them.  Two names per kind at most -- the
+     * question this answers is "who owns this traffic", and a kind with a
+     * genuine long tail of callers says so through `+N more'. */
+    len = snprintf( line, sizeof(line), "[srv-stats]   kinds-by-caller:" );
+    for (i = 0; i < 8 && len < (int)sizeof(line) - 1; i++)
+    {
+        unsigned int k = top_kind[i], shown = 0;
+        int c;
+
+        if (k >= REQ_NB_REQUESTS) break;
+        IOS_SRV_APPEND( " %s:", ios_srv_req_names[k] );
+        for (c = 0; c < IOS_SRV_CALLER_SLOTS && shown < 2; c++)
+        {
+            unsigned int n = __atomic_exchange_n( &ios_srv_caller_n[k][c], 0, __ATOMIC_RELAXED );
+            uintptr_t pc = __atomic_load_n( &ios_srv_caller_pc[k][c], __ATOMIC_RELAXED );
+            Dl_info di;
+
+            if (!n || !pc) continue;
+            shown++;
+            if (dladdr( (void *)pc, &di ) && di.dli_sname && di.dli_saddr)
+                IOS_SRV_APPEND( " %s+0x%llx=%u", di.dli_sname,
+                                (unsigned long long)(pc - (uintptr_t)di.dli_saddr), n );
+            else
+                IOS_SRV_APPEND( " 0x%llx=%u", (unsigned long long)pc, n );
+        }
+        /* drain whatever the two-name cap left behind so the next window is
+         * not skewed by this one's residue */
+        for (; c < IOS_SRV_CALLER_SLOTS; c++)
+            __atomic_exchange_n( &ios_srv_caller_n[k][c], 0, __ATOMIC_RELAXED );
+        {
+            unsigned int other = __atomic_exchange_n( &ios_srv_caller_other[k], 0, __ATOMIC_RELAXED );
+            if (other) IOS_SRV_APPEND( " +%u more", other );
+        }
+        IOS_SRV_APPEND( " |" );
+    }
+    wine_log_write( "%s", line );
+
+    len = snprintf( line, sizeof(line), "[srv-stats]   threads:" );
+    for (i = 0; i < IOS_SRV_STATS_TOP_THR && len < (int)sizeof(line) - 1; i++)
+    {
+        unsigned int s = top_thr[i];
+        if (s >= IOS_SRV_THR_SLOTS) break;
+        IOS_SRV_APPEND( " tid=%04x:%u",
+                        __atomic_load_n( &ios_srv_thr_tid[s], __ATOMIC_RELAXED ),
+                        thr_counts[s] );
+    }
+    wine_log_write( "%s", line );
+
+    wine_log_write( "[srv-stats]   nt: setev=%u resetev=%u pulse=%u wait1=%u waitN=%u sigwait=%u "
+                    "relsem=%u relmut=%u sleep0=%u sleepN=%u yield_sc=%u park=%u",
+                    nt[IOS_NT_SET_EVENT], nt[IOS_NT_RESET_EVENT], nt[IOS_NT_PULSE_EVENT],
+                    nt[IOS_NT_WAIT_SINGLE], nt[IOS_NT_WAIT_MULTI], nt[IOS_NT_SIGNAL_AND_WAIT],
+                    nt[IOS_NT_RELEASE_SEM], nt[IOS_NT_RELEASE_MUTANT],
+                    nt[IOS_NT_DELAY_ZERO], nt[IOS_NT_DELAY_NONZERO], nt[IOS_NT_YIELD_SYSCALL],
+                    nt[IOS_NT_SLEEP0_PARK] );
+
+    /* ml951: who is calling NtQueryInformationThread 10 k times a second.
+     * `cached' are the ones the client-side self cache answered with no
+     * server round trip at all; basic_other is the residue that still needs
+     * the server (a handle to a DIFFERENT thread — typically an exit-code or
+     * priority poll on a worker, which cannot be cached). */
+    {
+        unsigned int ti[IOS_TI_COUNTER_MAX];
+        unsigned int k;
+
+        for (k = 0; k < IOS_TI_COUNTER_MAX; k++)
+            ti[k] = __atomic_exchange_n( &ios_srv_thrinfo_counts[k], 0, __ATOMIC_RELAXED );
+
+        if (ti[IOS_TI_BASIC_SELF] || ti[IOS_TI_BASIC_OTHER] || ti[IOS_TI_AFFINITY] ||
+            ti[IOS_TI_AMILAST] || ti[IOS_TI_TERMINATED] || ti[IOS_TI_SUSPEND] ||
+            ti[IOS_TI_START_ADDR] || ti[IOS_TI_NAME] || ti[IOS_TI_OTHER_CLASS] ||
+            ti[IOS_TI_TIMES] || ti[IOS_TI_SET])
+            wine_log_write( "[thrinfo] basic self=%u (cached=%u) other=%u | affinity=%u (cached=%u) "
+                            "| times=%u amilast=%u terminated=%u suspend=%u startaddr=%u name=%u "
+                            "other_class=%u | set=%u",
+                            ti[IOS_TI_BASIC_SELF], ti[IOS_TI_BASIC_CACHED], ti[IOS_TI_BASIC_OTHER],
+                            ti[IOS_TI_AFFINITY], ti[IOS_TI_AFFINITY_CACHED], ti[IOS_TI_TIMES],
+                            ti[IOS_TI_AMILAST], ti[IOS_TI_TERMINATED], ti[IOS_TI_SUSPEND],
+                            ti[IOS_TI_START_ADDR], ti[IOS_TI_NAME], ti[IOS_TI_OTHER_CLASS],
+                            ti[IOS_TI_SET] );
+    }
+
+    /* The alert ping-pong is NOT server-backed on this target: USE_FUTEX is
+     * defined for __APPLE__ in sync.c, so NtAlertThreadByThreadId is an
+     * InterlockedExchange plus os_sync_wake_by_address_any and
+     * NtWaitForAlertByThreadId is os_sync_wait_on_address.  Neither appears
+     * in reqs= above; they are reported here so [alert-storm] can be sized
+     * against the server traffic rather than confused with it. */
+    /* The decisive line for "what is the select traffic actually made of".
+     * *_inf is nearly free (one request, then the thread is off the CPU until
+     * something signals); *_fin and *_poll are the ones that cost a round trip
+     * per iteration, and tmo_fin says how many of the finite ones bought
+     * nothing but a STATUS_TIMEOUT. */
+    wine_log_write( "[srv-stats]   select: w1 inf=%u fin=%u poll=%u | wN inf=%u fin=%u poll=%u | "
+                    "all=%u sigwait=%u keyed=%u delay=%u other=%u | tmo=%u tmo_fin=%u",
+                    nt[IOS_SEL_WAIT1_INF], nt[IOS_SEL_WAIT1_FIN], nt[IOS_SEL_WAIT1_POLL],
+                    nt[IOS_SEL_WAITN_INF], nt[IOS_SEL_WAITN_FIN], nt[IOS_SEL_WAITN_POLL],
+                    nt[IOS_SEL_WAITALL], nt[IOS_SEL_SIGWAIT], nt[IOS_SEL_KEYED],
+                    nt[IOS_SEL_DELAY_ALERT], nt[IOS_SEL_OTHER],
+                    nt[IOS_SEL_RET_TIMEOUT], nt[IOS_SEL_RET_TIMEOUT_FIN] );
+
+    /* ml970: the spin governor's own distribution (sync.c).  `sleep0'/`yield'
+     * are the GOVERNED calls, `sys' the syscalls those calls actually cost --
+     * the ratio between them is the whole point of the governor, and p50/p80
+     * are the time-to-progress percentiles the park ladder is sized against. */
+    {
+        struct ios_spin_snapshot sp;
+        unsigned int b;
+
+        ios_spin_hist_snapshot( &sp );
+        if (sp.streaks || sp.gov_sleep0 || sp.gov_yield)
+        {
+            wine_log_write( "[sleep0] streaks=%u calls: sleep0=%u yield=%u | syscalls: yield=%u park=%u "
+                            "(%llu/s) | per-call=%u.%03u%% | to-progress p50=%uus p80=%uus warm=%u rev=ml970",
+                            sp.streaks, sp.gov_sleep0, sp.gov_yield, sp.sys_yield, sp.sys_park,
+                            ((unsigned long long)sp.sys_yield + sp.sys_park) * 1000000000ull / window_ns,
+                            (sp.gov_sleep0 + sp.gov_yield)
+                              ? (sp.sys_yield + sp.sys_park) * 100u / (sp.gov_sleep0 + sp.gov_yield) : 0,
+                            (sp.gov_sleep0 + sp.gov_yield)
+                              ? (unsigned int)(((unsigned long long)(sp.sys_yield + sp.sys_park) * 100000ull /
+                                                (sp.gov_sleep0 + sp.gov_yield)) % 1000ull) : 0,
+                            sp.us_p50, sp.us_p80, sp.warm_hits );
+
+            len = snprintf( line, sizeof(line), "[sleep0]   hist calls:" );
+            for (b = 0; b < IOS_SPIN_HIST_N; b++)
+                if (sp.calls[b]) IOS_SRV_APPEND( " %u=%u", 1u << b, sp.calls[b] );
+            wine_log_write( "%s", line );
+
+            len = snprintf( line, sizeof(line), "[sleep0]   hist us:" );
+            for (b = 0; b < IOS_SPIN_HIST_N; b++)
+                if (sp.us[b]) IOS_SRV_APPEND( " %u=%u", b ? 1u << b : 0u, sp.us[b] );
+            wine_log_write( "%s", line );
+        }
+    }
+
+    wine_log_write( "[srv-stats]   futex(no server): alert_wait=%u alert_wake=%u | "
+                    "fast hit=%u miss=%u wake=%u sleep=%u",
+                    nt[IOS_NT_ALERT_WAIT], nt[IOS_NT_ALERT_WAKE],
+                    nt[IOS_NT_FAST_HIT], nt[IOS_NT_FAST_MISS],
+                    nt[IOS_NT_FAST_WAKE], nt[IOS_NT_FAST_SLEEP] );
+
+    /* ml962: the cache's own behaviour.  learn_ev+learn_none must track
+     * get_inproc_sync_fd in the kinds line above; if it does and both stay
+     * high while relearn is high too, the (handle>>2) slot is being fought
+     * over rather than warmed.
+     *
+     * ml972: ... and each number now comes with the RUNNING TOTAL in
+     * parentheses.  The ml962 line printed window deltas only, and a warm
+     * cache legitimately learns nothing for minutes at a time -- so "all five
+     * zero" could mean either "nothing happened this window" or "this code
+     * never runs", and on the device it meant the latter for evict (NtClose is
+     * server_ios.c's, and it was missing the call: see NtClose below).  A
+     * total that is still zero after the process has been up for a while is
+     * now unambiguous evidence that the counter is not wired, which is the
+     * only reading that tells you to go and look at the call site. */
+    {
+        static unsigned int fs_total[10];
+        fs_total[0] += nt[IOS_FS_LEARN_EVENT];
+        fs_total[1] += nt[IOS_FS_LEARN_NONE];
+        fs_total[2] += nt[IOS_FS_RELEARN];
+        fs_total[3] += nt[IOS_FS_STALE_GEN];
+        fs_total[4] += nt[IOS_FS_EVICT];
+        fs_total[5] += nt[IOS_FS_POLLPEEK];
+        fs_total[6] += nt[IOS_FS_WATCHDOG];
+        fs_total[7] += nt[IOS_FS_DESYNC];
+        fs_total[8] += nt[IOS_FS_SEM_REL];
+        fs_total[9] += nt[IOS_FS_SEM_WAIT];
+        wine_log_write( "[srv-stats]   fastsync cache: learn_ev=%u(%u) learn_none=%u(%u) "
+                        "relearn=%u(%u) stale_gen=%u(%u) evict=%u(%u)",
+                        nt[IOS_FS_LEARN_EVENT], fs_total[0],
+                        nt[IOS_FS_LEARN_NONE],  fs_total[1],
+                        nt[IOS_FS_RELEARN],     fs_total[2],
+                        nt[IOS_FS_STALE_GEN],   fs_total[3],
+                        nt[IOS_FS_EVICT],       fs_total[4] );
+        /* ml982: pollpeek is the request kind that is NOT in `reqs=' because it
+         * never happened -- so it is printed next to the w1 poll= count it came
+         * out of.  desync is the only number here that is ever alarming. */
+        wine_log_write( "[srv-stats]   fastsync served: pollpeek=%u(%u) [w1 poll left=%u] "
+                        "watchdog=%u(%u) desync=%u(%u) sem_rel=%u(%u) sem_wait=%u(%u) "
+                        "[NtReleaseSemaphore=%u]",
+                        nt[IOS_FS_POLLPEEK], fs_total[5], nt[IOS_SEL_WAIT1_POLL],
+                        nt[IOS_FS_WATCHDOG], fs_total[6],
+                        nt[IOS_FS_DESYNC],   fs_total[7],
+                        nt[IOS_FS_SEM_REL],  fs_total[8],
+                        nt[IOS_FS_SEM_WAIT], fs_total[9],
+                        nt[IOS_NT_RELEASE_SEM] );
+
+        /* ml1110: THE LATE-WAKE CENSUS.  See build/ntdll-unix/shims/ios_late_wake.h.
+         *
+         * `tmo_fin=' above says how many finite waits bought nothing but a
+         * STATUS_TIMEOUT; it cannot say whether the object was signalled when
+         * the timer fired, and that single bit is the difference between "the
+         * program asked for a poll and got one" and "a hand-off is being
+         * delivered by a timer".  This block answers it, with the age of the
+         * token so an honest race (a few microseconds) is not read as a lost
+         * wake (hundreds, or milliseconds). */
+        {
+            struct ios_late_snapshot lw;
+            unsigned int i;
+
+            madeira_late_wake_snapshot( &lw );
+            if (lw.tmo_fin || lw.hb || lw.rescued)
+            {
+                wine_log_write( "[late-wake] ml1110 %llums: tmo_fin=%u late=%u (sem=%u event=%u "
+                                "no-stamp=%u) age p50=%uus p90=%uus | heartbeat: expiries=%u "
+                                "late=%u rescued=%u",
+                                window_ns / 1000000ull, lw.tmo_fin,
+                                lw.late_sem + lw.late_event, lw.late_sem, lw.late_event,
+                                lw.nostamp, lw.age_p50, lw.age_p90,
+                                lw.hb, lw.hb_late, lw.rescued );
+
+                if (lw.late_sem + lw.late_event)
+                {
+                    len = snprintf( line, sizeof(line), "[late-wake]   age us:" );
+                    for (i = 0; i < IOS_LATE_AGE_N; i++)
+                        if (lw.age[i])
+                            IOS_SRV_APPEND( " %u=%u", i ? (1u << (i - 1)) : 0u, lw.age[i] );
+                    wine_log_write( "%s", line );
+                }
+
+                for (i = 0; i < IOS_LATE_HOT_N; i++)
+                    if (lw.hot[i].cell != 0xffffffffu && lw.hot[i].late)
+                        wine_log_write( "[late-wake]   #%u cell=%u obj=%s late=%u", i + 1,
+                                        lw.hot[i].cell,
+                                        lw.hot[i].kind == MADEIRA_CELL_KIND_SEM ? "sem" : "event",
+                                        lw.hot[i].late );
+            }
+        }
+
+        /* ml982: the "auto" rule.  This reporter is the only thing in the image
+         * that already knows the task's request rate, so the rule costs nothing
+         * of its own.  A no-op unless MADEIRA_FASTSYNC=auto. */
+        {
+            extern void madeira_fastsync_auto_arm( unsigned int ops, unsigned long long window_ns );
+            /* ml1010: NtReleaseSemaphore joins the traffic estimate.  A title
+             * whose handoffs are semaphores rather than events was previously
+             * invisible to this rule except through its select half, which on
+             * the motivating measurement was still enough -- but the rule is
+             * supposed to measure the traffic the fast path can remove, and
+             * that now includes the release side. */
+            madeira_fastsync_auto_arm( nt[IOS_NT_SET_EVENT] + nt[IOS_NT_RESET_EVENT] +
+                                       nt[IOS_NT_RELEASE_SEM] +
+                                       nt[IOS_SEL_WAIT1_INF] + nt[IOS_SEL_WAIT1_FIN] +
+                                       nt[IOS_SEL_WAIT1_POLL] + nt[IOS_FS_POLLPEEK],
+                                       window_ns );
+        }
+    }
+
+#undef IOS_SRV_APPEND
+
+    __atomic_store_n( &ios_srv_stats_busy, 0, __ATOMIC_RELEASE );
+}
+
+/* ml962: print one report immediately, wherever the caller is.  The 10 s
+ * window reporter is piggy-backed on server traffic, so a process that dies
+ * in its first few seconds -- which is exactly the case the fastsync counters
+ * are needed for -- used to produce no [srv-stats] at all.  Called from the
+ * MADEIRA-EXIT path in process_ios.c. */
+void ios_srv_stats_report_now(void)
+{
+    if (!ios_srv_stats_enabled()) return;
+    wine_log_write( "[srv-stats] final report (process exit)" );
+    ios_srv_stats_report( mach_absolute_time() );
+}
+
+/* ml990: THE COMPACT QUIET-BUILD SUMMARY.
+ *
+ * Called once every 10 s from the pool-warmer heartbeat when MADEIRA_DIAG is
+ * off, in place of the ~60 lines the full reporters print between them.  It
+ * measures nothing of its own: every number here is already being counted for
+ * another reason -- the footprint came from the heartbeat's own task_info(),
+ * the request counts are the ones ios_srv_stats_account() maintains on the
+ * server path regardless, and the fastsync counters are relaxed adds on paths
+ * that were going to touch that cache line anyway.  Summing REQ_NB_REQUESTS
+ * slots once per ten seconds is free.
+ *
+ * fps is deliberately absent: the app knows it and prints it, and duplicating
+ * it here would mean a frame counter on a path that has none.
+ *
+ * Deltas, not totals, because the question this line answers is "is the server
+ * traffic collapsing the way fastsync says it should" -- which only a rate can
+ * answer. */
+void ios_perf_line( unsigned long long phys_mb, unsigned long long peak_mb,
+                    unsigned long long comp_mb )
+{
+    static unsigned long long prev_reqs, prev_ns;
+    static unsigned int prev_hit, prev_miss, prev_peek, prev_desync, prev_ops;
+    static unsigned int prev_srel, prev_swait;
+    unsigned long long reqs = 0, now_ns, win_ns;
+    unsigned int hit, miss, peek, desync, ops, srel, swait;
+    unsigned int i;
+
+    for (i = 0; i < REQ_NB_REQUESTS; i++)
+        reqs += __atomic_load_n( &ios_srv_kind_count[i], __ATOMIC_RELAXED );
+
+    hit    = __atomic_load_n( &ios_srv_nt_counts[IOS_NT_FAST_HIT],  __ATOMIC_RELAXED );
+    miss   = __atomic_load_n( &ios_srv_nt_counts[IOS_NT_FAST_MISS], __ATOMIC_RELAXED );
+    peek   = __atomic_load_n( &ios_srv_nt_counts[IOS_FS_POLLPEEK],  __ATOMIC_RELAXED );
+    desync = __atomic_load_n( &ios_srv_nt_counts[IOS_FS_DESYNC],    __ATOMIC_RELAXED );
+    srel   = __atomic_load_n( &ios_srv_nt_counts[IOS_FS_SEM_REL],   __ATOMIC_RELAXED );
+    swait  = __atomic_load_n( &ios_srv_nt_counts[IOS_FS_SEM_WAIT],  __ATOMIC_RELAXED );
+
+    /* The counters the "auto" rule has always been fed, plus ml1010's
+     * NtReleaseSemaphore: see the identical sum in ios_srv_stats_report(). */
+    ops = __atomic_load_n( &ios_srv_nt_counts[IOS_NT_SET_EVENT],   __ATOMIC_RELAXED )
+        + __atomic_load_n( &ios_srv_nt_counts[IOS_NT_RESET_EVENT], __ATOMIC_RELAXED )
+        + __atomic_load_n( &ios_srv_nt_counts[IOS_NT_RELEASE_SEM], __ATOMIC_RELAXED )
+        + __atomic_load_n( &ios_srv_nt_counts[IOS_SEL_WAIT1_INF],  __ATOMIC_RELAXED )
+        + __atomic_load_n( &ios_srv_nt_counts[IOS_SEL_WAIT1_FIN],  __ATOMIC_RELAXED )
+        + __atomic_load_n( &ios_srv_nt_counts[IOS_SEL_WAIT1_POLL], __ATOMIC_RELAXED )
+        + peek;
+
+    now_ns = ios_srv_ticks_to_ns( mach_absolute_time() );
+    win_ns = now_ns - prev_ns;
+    if (prev_ns && win_ns >= 1000000ull)
+    {
+        /* ml1001: the guest's own clock, in the one line a quiet build prints.
+         *
+         * GetTickCount64() is three loads from KUSER_SHARED_DATA and nothing
+         * else, so this IS what every guest program is being told the time is.
+         * It sat at 0 for the whole life of this port and no log could show
+         * that, because a clock only reveals itself through the program that
+         * trips over it.  One relaxed 64-bit read every ten seconds; a value
+         * that does not advance between two [perf] lines is the whole bug. */
+        {
+            extern struct _KUSER_SHARED_DATA *user_shared_data;
+            unsigned long long usd_ms = 0;
+            unsigned int late_rescued = 0, late_total;
+            /* The pointer starts life as the canonical 0x7ffe0000, which XNU's
+             * 4 GB __PAGEZERO makes unreadable, and only becomes a real address
+             * once virtual_alloc_first_teb() has run.  This reporter cannot run
+             * that early, but a diagnostic must not be the thing that decides
+             * that: read only an address that is plainly past __PAGEZERO. */
+            if ((unsigned long long)(uintptr_t)user_shared_data > 0x100000000ull)
+                usd_ms = ((unsigned long long)user_shared_data->TickCount.High1Time << 32)
+                         | user_shared_data->TickCount.LowPart;
+            /* ml1060: `lostwake' is the server-side detector in
+             * build/wineserver/queue_ios.c (ios_scan_lost_wakeups): the number
+             * of times a thread was found queued on a cell-backed object across
+             * two consecutive 5 s scans while that object's cell said signalled.
+             * Each one was also self-healed with a wake_up(), so a non-zero
+             * value here means the run SURVIVED a lost wakeup rather than hung
+             * on it -- and the [lost-wake] line names the object.  The counter
+             * lives in the wineserver archive, the same cross-archive direction
+             * as madeira_sync_cells. */
+            extern unsigned int madeira_lostwake_count;
+            /* ml1110: `late' and `rescued' are the always-on half of the
+             * late-wake census (build/ntdll-unix/shims/ios_late_wake.h).  Both
+             * are RUNNING TOTALS here rather than window deltas, because the
+             * quiet build has no other reader and a delta that has to be
+             * differenced by hand across a log is not a number anybody reads.
+             * late>0 says some hand-off was delivered by a timer rather than
+             * by a wake; rescued>0 says this port's own heartbeat is what
+             * delivered it.  MADEIRA_DIAG=1 turns on [late-wake], which says
+             * WHICH object and how old the token was. */
+            late_total = madeira_late_wake_peek( &late_rescued );
+            wine_log_write( "[perf] rev=ml1110 phys=%lluMB(peak %llu, comp %llu) srv=%llu/s "
+                            "fastsync hit=%u miss=%u peek=%u sem_rel=%u sem_wait=%u "
+                            "desync=%u lostwake=%u late=%u rescued=%u tick=%llums"
+                            " - MADEIRA_DIAG=1 for the full reporters",
+                            phys_mb, peak_mb, comp_mb,
+                            (reqs - prev_reqs) * 1000000000ull / win_ns,
+                            hit - prev_hit, miss - prev_miss, peek - prev_peek,
+                            srel - prev_srel, swait - prev_swait,
+                            desync - prev_desync,
+                            __atomic_load_n( &madeira_lostwake_count, __ATOMIC_RELAXED ),
+                            late_total, late_rescued,
+                            usd_ms );
+        }
+
+        /* ml990: THE "auto" RULE MOVED HERE, AND IT HAD TO.
+         *
+         * ml982 put it inside ios_srv_stats_report(), on the reasoning that
+         * the reporter was "the only thing in the image that already knows the
+         * task's request rate".  That was true then.  Now the report is behind
+         * MADEIRA_DIAG and the default is MADEIRA_FASTSYNC=auto, so leaving
+         * the rule there would have meant the wake path never arming in a
+         * shipping build -- the default would have been auto in name only.
+         *
+         * The two callers are mutually exclusive by construction: this line
+         * only runs when MADEIRA_DIAG is off, and the reporter only runs when
+         * it is on.  Never both, so never a double count.  (Arming twice would
+         * be harmless anyway -- madeira_fastsync_auto_arm latches with an
+         * exchange -- but "harmless" is not the same as "correct".) */
+        {
+            extern void madeira_fastsync_auto_arm( unsigned int ops, unsigned long long window_ns );
+            madeira_fastsync_auto_arm( ops - prev_ops, win_ns );
+        }
+
+        /* ml1050: the frame critical path, next to the line it belongs with.
+         * This runs in the QUIET build too -- what bounds a frame is not a
+         * diagnostic, it is the thing the port is being optimised against. */
+        ios_frame_report( win_ns );
+    }
+
+    prev_reqs = reqs; prev_ns = now_ns; prev_ops = ops;
+    prev_hit = hit; prev_miss = miss; prev_peek = peek; prev_desync = desync;
+    prev_srel = srel; prev_swait = swait;
+}
+
+static inline void ios_srv_stats_account( unsigned int kind, unsigned long long t0, uintptr_t caller )
+{
+    /* ml990: the SECOND clock read is as gated as the first -- reading it here
+     * and discarding it would have left the quiet build paying for exactly the
+     * thing the gate exists to remove. */
+    unsigned long long now = t0 ? mach_absolute_time() : 0;
+    TEB *teb;
+
+    if (kind < REQ_NB_REQUESTS)
+    {
+        __atomic_fetch_add( &ios_srv_kind_count[kind], 1, __ATOMIC_RELAXED );
+        /* ml990: t0 == 0 means the quiet build did not read the clock, so
+         * there is no duration to charge and nothing downstream reads the
+         * per-kind ticks. The COUNT above is what [perf] differences. */
+        if (t0) __atomic_fetch_add( &ios_srv_kind_ticks[kind], now - t0, __ATOMIC_RELAXED );
+    }
+    if (!__atomic_load_n( &ios_srv_report_on, __ATOMIC_RELAXED )) return;
+
+    teb = NtCurrentTeb();
+    ios_srv_caller_bump( kind, caller );
+    ios_srv_thr_bump( teb ? (unsigned int)(ULONG_PTR)teb->ClientId.UniqueThread : 0 );
+
+    if (now >= __atomic_load_n( &ios_srv_stats_deadline, __ATOMIC_RELAXED ))
+    {
+        unsigned long long expect = __atomic_load_n( &ios_srv_stats_deadline, __ATOMIC_RELAXED );
+        if (now >= expect &&
+            __atomic_compare_exchange_n( &ios_srv_stats_deadline, &expect,
+                                         now + ios_srv_ns_to_ticks( IOS_SRV_STATS_PERIOD_S * 1000000000ull ),
+                                         0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+            ios_srv_stats_report( now );
+    }
+}
+
+/* Bucket one server_wait by what it is actually waiting on and how long for.
+ * Called from server_wait, which is the only place that still has the CALLER's
+ * timeout — by the time server_select sees it, a relative timeout has already
+ * been folded into a QPC-epoch absolute and a zero-timeout poll is no longer
+ * distinguishable from a 1 ms one.  `size` is how NtWaitForMultipleObjects
+ * encodes the handle count (offsetof(wait.handles[count])), which is the same
+ * arithmetic ios_wait_enter already does above. */
+static void ios_srv_classify_select( const union select_op *op, data_size_t size,
+                                     const LARGE_INTEGER *timeout )
+{
+    int inf = !timeout, poll = timeout && !timeout->QuadPart;
+    int count = 1;
+
+    if (__atomic_load_n( &ios_srv_stats_on, __ATOMIC_RELAXED ) == 0) return;
+
+    if (!op)   /* alertable NtDelayExecution: server_wait( NULL, 0, ... ) */
+    {
+        ios_srv_nt_count( IOS_SEL_DELAY_ALERT );
+        return;
+    }
+
+    if (size >= offsetof( union select_op, wait.handles ))
+        count = (int)((size - offsetof( union select_op, wait.handles )) / sizeof(obj_handle_t));
+    if (count < 1) count = 1;
+
+    switch (op->op)
+    {
+    case SELECT_WAIT:
+        if (count > 1) ios_srv_nt_count( inf ? IOS_SEL_WAITN_INF : poll ? IOS_SEL_WAITN_POLL : IOS_SEL_WAITN_FIN );
+        else           ios_srv_nt_count( inf ? IOS_SEL_WAIT1_INF : poll ? IOS_SEL_WAIT1_POLL : IOS_SEL_WAIT1_FIN );
+        break;
+    case SELECT_WAIT_ALL:           ios_srv_nt_count( IOS_SEL_WAITALL ); break;
+    case SELECT_SIGNAL_AND_WAIT:    ios_srv_nt_count( IOS_SEL_SIGWAIT ); break;
+    case SELECT_KEYED_EVENT_WAIT:
+    case SELECT_KEYED_EVENT_RELEASE: ios_srv_nt_count( IOS_SEL_KEYED ); break;
+    default:                        ios_srv_nt_count( IOS_SEL_OTHER ); break;
+    }
+}
+
+static int ios_srv_stats_enabled(void)
+{
+    int on = __atomic_load_n( &ios_srv_stats_on, __ATOMIC_RELAXED );
+
+    if (on < 0)
+    {
+        /* ml990: TWO gates now, because counting and reporting have very
+         * different costs and very different value in a shipping run.
+         *
+         *   ios_srv_stats_on      the COUNTING.  Stays on unless
+         *                         MADEIRA_SRV_STATS=0, because the compact
+         *                         [perf] line differences these counters and
+         *                         they are a few relaxed adds on a path that
+         *                         fastsync has already taken from ~40 k/s to a
+         *                         few thousand per second.
+         *   ios_srv_report_on     the ten-line REPORT, and with it the two
+         *                         mach_absolute_time() calls and the caller-PC
+         *                         frame hop that only the report consumes.
+         *                         Follows MADEIRA_DIAG, or MADEIRA_SRV_STATS
+         *                         set to anything but 0. */
+        extern int madeira_diag_on( void );
+        const char *e = getenv( "MADEIRA_SRV_STATS" );
+        on = (e && !strcmp( e, "0" )) ? 0 : 1;
+        __atomic_store_n( &ios_srv_report_on,
+                          on && (e || madeira_diag_on()) ? 1 : 0, __ATOMIC_RELAXED );
+        if (on)
+        {
+            /* The window is armed either way: the MADEIRA-EXIT forced report
+             * has to be able to divide by a real window even in a quiet run. */
+            unsigned long long now = mach_absolute_time();
+            ios_srv_stats_window_t0 = now;
+            __atomic_store_n( &ios_srv_stats_deadline,
+                              now + ios_srv_ns_to_ticks( IOS_SRV_STATS_PERIOD_S * 1000000000ull ),
+                              __ATOMIC_RELAXED );
+            if (__atomic_load_n( &ios_srv_report_on, __ATOMIC_RELAXED ))
+                wine_log_write( "[srv-stats] ON rev=ml990 period=%ds — per-kind wineserver traffic; "
+                                "MADEIRA_SRV_STATS=0 to disable", IOS_SRV_STATS_PERIOD_S );
+            else
+                wine_log_write( "[srv-stats] counting only (rev=ml990) — the per-kind report is "
+                                "behind MADEIRA_DIAG=1; the compact [perf] line carries reqs/s" );
+        }
+        __atomic_store_n( &ios_srv_stats_on, on, __ATOMIC_RELAXED );
+    }
+    return on;
+}
+
+#endif /* WINE_IOS */
+
+/***********************************************************************
  *           server_call_unlocked
  */
 unsigned int server_call_unlocked( void *req_ptr )
 {
     struct __server_request_info * const req = req_ptr;
     unsigned int ret;
+#ifdef WINE_IOS
+    const unsigned int stats_kind = req->u.req.request_header.req;
+    const int stats_on = ios_srv_stats_enabled();
+    /* ml990: the clock read and the caller-PC frame hop exist only to feed the
+     * ten-line report, so they follow ios_srv_report_on, not ios_srv_stats_on.
+     * The quiet build keeps the per-kind COUNT (which [perf] differences) and
+     * pays one relaxed add for it. */
+    const int stats_rep = stats_on && __atomic_load_n( &ios_srv_report_on, __ATOMIC_RELAXED );
+    const unsigned long long stats_t0 = stats_rep ? mach_absolute_time() : 0;
+    /* ml970: taken HERE, not inside ios_srv_stats_account(), because the
+     * return address a static inline sees depends on whether it was inlined. */
+    const uintptr_t stats_ra = stats_rep ? IOS_SRV_CALLER_PC() : 0;
+#endif
 
     ios_srv_req_count++;
     if ((ret = send_request( req ))) return ret;
@@ -1767,7 +3418,11 @@ unsigned int server_call_unlocked( void *req_ptr )
         extern void ios_wineserver_wake(void);
         ios_wineserver_wake();
     }
-    return wait_reply( req );
+    ret = wait_reply( req );
+#ifdef WINE_IOS
+    if (stats_on) ios_srv_stats_account( stats_kind, stats_t0, stats_ra );
+#endif
+    return ret;
 }
 
 
@@ -1802,10 +3457,48 @@ NTSTATUS unixcall_wine_server_call( void *args )
 /***********************************************************************
  *           server_enter_uninterrupted_section
  */
+#ifdef WINE_IOS
+/* iOS-Madeira ml1650: fd_cache_mutex MUST NOT OUTLIVE ITS OWNER.
+ *
+ * One ntdll unix side serves every pseudo-process, so this is one lock for the
+ * whole session. It is held across server calls (NtClose, NtDuplicateObject,
+ * get_unix_fd), and a thread whose process is torn down in the middle of one
+ * leaves through abort_thread/exit without ever reaching the leave call. With
+ * Steam restarting itself after its update, both test devices ended with
+ * steam.exe and the web helper parked in __psynch_mutexwait on this lock and no
+ * live owner (the same shape as ml1090's user lock). Record the owner, and let
+ * every thread-exit path give the lock back if the exiting thread holds it.
+ * MADEIRA_FD_CACHE_LOCK_DROP=0 disables the release (the owner is still logged). */
+static pthread_t ios_fd_cache_owner;
+static void *ios_fd_cache_owner_at;
+static volatile int ios_fd_cache_owned;
+
+void ios_drop_fd_cache_lock( const char *why )
+{
+    static int enabled = -1;
+    if (!ios_fd_cache_owned || !pthread_equal( ios_fd_cache_owner, pthread_self() )) return;
+    if (enabled < 0) { const char *e = getenv( "MADEIRA_FD_CACHE_LOCK_DROP" ); enabled = !(e && e[0] == '0'); }
+    dprintf( 2, "[fd-cache-lock] ml1650 %s: exiting thread mach=%#x holds fd_cache_mutex (taken at %p) -- %s\n",
+             why, (unsigned)pthread_mach_thread_np( pthread_self() ), ios_fd_cache_owner_at,
+             enabled ? "released" : "NOT released (MADEIRA_FD_CACHE_LOCK_DROP=0)" );
+    if (!enabled) return;
+    ios_fd_cache_owned = 0;
+    pthread_mutex_unlock( &fd_cache_mutex );
+}
+#endif
+
 void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
 {
     pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
     mutex_lock( mutex );
+#ifdef WINE_IOS
+    if (mutex == &fd_cache_mutex)
+    {
+        ios_fd_cache_owner = pthread_self();
+        ios_fd_cache_owner_at = __builtin_return_address( 0 );
+        ios_fd_cache_owned = 1;
+    }
+#endif
 }
 
 
@@ -1814,6 +3507,9 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
  */
 void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
 {
+#ifdef WINE_IOS
+    if (mutex == &fd_cache_mutex) ios_fd_cache_owned = 0;
+#endif
     mutex_unlock( mutex );
     pthread_sigmask( SIG_SETMASK, sigset, NULL );
 }
@@ -1911,6 +3607,13 @@ static void invoke_system_apc( const union apc_call *call, union apc_result *res
         else result->async_io.status = STATUS_PENDING; /* restart it */
         break;
     }
+    /* WOW64_DESIGN.md §2 "Namespace rule": in every APC below, `addr` is a
+     * client_ptr_t and therefore a HOST address (one namespace per process),
+     * while zero_bits / limit_low / limit_high are GUEST-namespace ceilings.
+     * Nothing is converted here: these calls execute inside the TARGET
+     * process, so NtAllocateVirtualMemory / NtMapViewOfSection / the
+     * MEM_ADDRESS_REQUIREMENTS path translate the ceiling into that
+     * process's own window.  Do not "fix" this by adding B here. */
     case APC_VIRTUAL_ALLOC:
         result->type = call->type;
         addr = wine_server_get_ptr( call->virtual_alloc.addr );
@@ -2208,6 +3911,7 @@ static void invoke_system_apc( const union apc_call *call, union apc_result *res
 unsigned int server_select( const union select_op *select_op, data_size_t size, UINT flags,
                             timeout_t abs_timeout, struct context_data *context, struct user_apc *user_apc )
 {
+    extern void ios_qos_refresh( void );   /* ml1510: see signal_arm64_ios.c */
 #ifdef WINE_IOS
     { extern void ios_tls38_poll( const char * ); ios_tls38_poll( "wait" ); }
 #endif
@@ -2226,6 +3930,7 @@ unsigned int server_select( const union select_op *select_op, data_size_t size, 
     } reply_data;
 
     memset( &result, 0, sizeof(result) );
+    ios_qos_refresh();
 
     do
     {
@@ -2303,6 +4008,10 @@ unsigned int server_select( const union select_op *select_op, data_size_t size, 
  * table, fixed slots, no allocation, no locks. A slot is only ever written
  * by its owning thread; the reader tolerates torn reads by re-checking seq.
  */
+/* iOS-Madeira ml940: consecutive zero-timeout (polling) waits per thread
+ * before one sched_yield is spent on them; see the end of server_wait. */
+#define IOS_SRV_YIELD_EVERY 64
+
 #define IOS_WAITREG_SLOTS 512
 struct ios_wait_entry
 {
@@ -2363,6 +4072,35 @@ static void ios_wait_leave(void)
     e->seq++;                       /* -> even: no longer waiting */
 }
 
+/* ml2000 [spin-probe] gate: registered waits at least min_ms old (same torn-
+ * read discipline as ios_dump_stuck_waits in queue_ios.c). */
+static unsigned int ios_spin_long_waits( unsigned long long min_ms, unsigned int *oldest_tid,
+                                         unsigned long long *oldest_ms )
+{
+    struct timespec ts;
+    unsigned long long now_ns;
+    unsigned int i, n = 0;
+
+    *oldest_tid = 0; *oldest_ms = 0;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    now_ns = (unsigned long long)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    for (i = 0; i < IOS_WAITREG_SLOTS; i++)
+    {
+        struct ios_wait_entry *e = &ios_wait_reg[i];
+        unsigned int s0 = e->seq, tid;
+        unsigned long long t0, age;
+        if (!(s0 & 1)) continue;
+        t0 = e->t0_ns; tid = e->wine_tid;
+        __sync_synchronize();
+        if (e->seq != s0 || !t0 || now_ns < t0) continue;
+        age = (now_ns - t0) / 1000000ull;
+        if (age < min_ms) continue;
+        n++;
+        if (age > *oldest_ms) { *oldest_ms = age; *oldest_tid = tid; }
+    }
+    return n;
+}
+
 unsigned int server_wait( const union select_op *select_op, data_size_t size, UINT flags,
                           const LARGE_INTEGER *timeout )
 {
@@ -2381,12 +4119,58 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
     {
         int is_game = ios_srv_game_teb &&
                       (uintptr_t)NtCurrentTeb() == ios_srv_game_teb;
+        /* ml1050: a SECOND, different notion of "the game thread".
+         * ios_srv_game_teb is whichever thread ran server_init_process_done,
+         * i.e. the process's initial thread -- which in a job-system title is
+         * not the thread that presents. The frame instrument identifies the
+         * presenting thread by the fact that it presents, so the two are asked
+         * separately and neither is derived from the other. */
+        int is_presenter = ios_frame_tracking();
         struct timespec t0, t1;
-        if (is_game) clock_gettime( CLOCK_MONOTONIC, &t0 );
+
+        /* ml950: a real wait ends any Sleep(0) streak this thread had going
+         * (sync.c, ios_spin_governor) — a thread that blocks is not spinning. */
+        { extern void ios_spin_reset(void); ios_spin_reset(); }
+#ifdef WINE_IOS
+        ios_srv_classify_select( select_op, size, timeout );
+#endif
+        if (is_game || is_presenter) clock_gettime( CLOCK_MONOTONIC, &t0 );
         ios_wait_enter( select_op, size, flags, abs_timeout,
                         __builtin_return_address(0) );
         ret = server_select( select_op, size, flags, abs_timeout, NULL, &apc );
         ios_wait_leave();
+        if (is_presenter)
+        {
+            struct timespec tp;
+            unsigned long long ns;
+            clock_gettime( CLOCK_MONOTONIC, &tp );
+            ns = (unsigned long long)((tp.tv_sec - t0.tv_sec) * 1000000000ll
+                                      + (tp.tv_nsec - t0.tv_nsec));
+            ios_frame_wait_add( IOS_FRAME_WAIT_SRV, ns );
+            /* ml1100: and WHICH wait it was — see ios_frame_srv_site. Everything
+             * here is already in registers; nothing is queried. */
+            {
+                unsigned int nobj = 1, h0 = 0;
+                unsigned char tclass = !timeout ? 0 : (timeout->QuadPart ? 1 : 2);
+
+                if (select_op && size >= offsetof( union select_op, wait.handles ))
+                {
+                    nobj = (unsigned int)((size - offsetof( union select_op, wait.handles ))
+                                          / sizeof(obj_handle_t));
+                    if (!nobj) nobj = 1;
+                    else h0 = (unsigned int)select_op->wait.handles[0];
+                }
+                ios_frame_srv_site( __builtin_return_address(0), h0, nobj, tclass,
+                                    ns, ret == STATUS_TIMEOUT );
+            }
+        }
+#ifdef WINE_IOS
+        if (ret == STATUS_TIMEOUT)
+        {
+            ios_srv_nt_count( IOS_SEL_RET_TIMEOUT );
+            if (timeout && timeout->QuadPart) ios_srv_nt_count( IOS_SEL_RET_TIMEOUT_FIN );
+        }
+#endif
         if (is_game)
         {
             clock_gettime( CLOCK_MONOTONIC, &t1 );
@@ -2417,7 +4201,26 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
     /* A test on Windows 2000 shows that Windows always yields during
        a wait, but a wait that is hit by an event gets a priority
        boost as well.  This seems to model that behavior the closest.  */
-    if (ret == STATUS_TIMEOUT) NtYieldExecution();
+    /* iOS-Madeira ml940: that upstream comment (unchanged from
+       wine/dlls/ntdll/unix/server.c:815 - this yield is upstream's, not a
+       Madeira anti-livelock addition) is about modelling a priority boost,
+       and nothing in Wine reads a status back from it.  A wait that timed
+       out after a real interval has already been off the CPU for that
+       interval, so the swtch_pri(0) was pure overhead on every timed-out
+       server_wait.  Only a zero-timeout wait - a poll - can be spun on, so
+       yield only for those, and only on every IOS_SRV_YIELD_EVERY'th
+       CONSECUTIVE one, which is what tells a spinner from a poll that
+       happens once per frame.  Per-thread streak, native TLS.  */
+    if (ret == STATUS_TIMEOUT)
+    {
+        static __thread unsigned int ios_poll_streak;
+
+        if (timeout && !timeout->QuadPart)
+        {
+            if (!(++ios_poll_streak % IOS_SRV_YIELD_EVERY)) NtYieldExecution();
+        }
+        else ios_poll_streak = 0;
+    }
     return ret;
 }
 
@@ -2524,6 +4327,7 @@ unsigned int server_queue_process_apc( HANDLE process, const union apc_call *cal
 
             /* remove the handle from the cache, get_apc_result will close it for us */
             close_inproc_sync( handle );
+            madeira_fast_close( handle );   /* ml972 fastsync, see NtClose below */
 
             SERVER_START_REQ( get_apc_result )
             {
@@ -2810,6 +4614,8 @@ void ios_fd_cache_release( void *peb )
     { extern void ios_inproc_cache_release( void *peb ); ios_inproc_cache_release( peb ); }   /* ml1058 */
     int i, j, n, closed = 0;
     struct ios_fd_cache *c = NULL;
+    const char *env = getenv( "MADEIRA_FD_CACHE_RELEASE_FIX" );
+    const int fixed = !env || strcmp( env, "0" );
 
     pthread_mutex_lock( &ios_fd_cache_alloc_lock );
     n = ios_fd_cache_count;
@@ -2829,55 +4635,27 @@ void ios_fd_cache_release( void *peb )
         union fd_cache_entry *block = c->blocks[i];
         if (!block) continue;
         for (j = 0; j < FD_CACHE_BLOCK_SIZE; j++)
-        {
-            /* ml961: `s.fd` holds fd+1, not fd. add_fd_to_cache stores it that
-             * way so 0 can mean "unset" ("store fd+1 so that 0 can be used as
-             * the unset value"), and both readers decode it: get_cached_fd does
-             * `*fd = cache.s.fd - 1` and remove_fd_from_cache does
-             * `fd = cache.s.fd - 1`. This loop was the only place that passed
-             * the stored word straight to close(), so it closed the descriptor
-             * AFTER the one this pseudo-process owned -- leaking the real one
-             * and closing an unrelated live fd.
-             *
-             * Measured in rdr25, three consecutive lines:
-             *   CROSS! close fd=30 why=fd-cache-release kind=request_wr
-             *          owner_peb=0x6fdff0000 closer_tid=007c dead_peb=0x48ff84000
-             *   read_request EOF tid=0024 pid=0020 request_unixfd=27 -> kill_thread
-             *   kill_thread tid=0024 pid=0020 violent=0
-             * The exiting launcher closed another pseudo-process's request-pipe
-             * write end, and wineserver killed that thread on the EOF. The
-             * other entries show the same shift (221/225/229 closed for real
-             * fds 220/224/228).
-             *
-             * Decode ONCE and use the same value for the ownership log and the
-             * close, so the two can never disagree. Descriptor 0 is a valid
-             * descriptor (stored as 1), so the populated test is on the stored
-             * word being non-zero, not on the decoded fd being positive.
-             *
-             * FD_TYPE_INVALID entries do not hold a descriptor at all -- they
-             * cache an NTSTATUS ("if fd type is invalid, fd stores an error
-             * value"), so closing them closes an arbitrary number. Skip them. */
-            int stored = block[j].s.fd;
-            int real_fd;
-
-            if (!stored) continue;                              /* unset entry      */
-            if (block[j].s.type == FD_TYPE_INVALID) continue;   /* cached NTSTATUS  */
-            real_fd = stored - 1;
-            ios_fdt_note_close( real_fd, "fd-cache-release", peb );
-            close( real_fd );
-            closed++;
-        }
-        /* ml961: secondary blocks come from anon_mmap_alloc (mmap), so they must
-         * be released with munmap at the same size -- free() on an mmap'd
-         * pointer is undefined and corrupts the malloc heap. Only the enclosing
-         * cache object below belongs to free(); initial_block is an inline
-         * array inside *c and is released with it. */
+            if (block[j].s.fd > 0 && (!fixed || block[j].s.type != FD_TYPE_INVALID))
+            {
+                /* ml1270: add_fd_to_cache stores fd+1 (zero means empty).
+                 * Closing that encoded value closes an unrelated descriptor
+                 * and leaks the real one. Invalid entries encode NTSTATUS,
+                 * not a descriptor. Decode exactly as get_cached_fd does. */
+                int fd = block[j].s.fd - (fixed ? 1 : 0);
+                ios_fdt_note_close( fd, "fd-cache-release", peb );
+                close( fd );
+                closed++;
+            }
         if (block != c->initial_block)
-            munmap( block, FD_CACHE_BLOCK_SIZE * sizeof(union fd_cache_entry) );
+        {
+            /* Additional blocks come from anon_mmap_alloc, not malloc. */
+            if (fixed) munmap( block, FD_CACHE_BLOCK_SIZE * sizeof(*block) );
+            else free( block );
+        }
     }
     free( c );
-    dprintf( 2, "[fd-cache] rev=ml961 released peb=%p, closed %d cached fd(s) (decoded fd+1; "
-             "skipped FD_TYPE_INVALID; munmap for secondary blocks)\n", peb, closed );
+    dprintf( 2, "[fd-cache-retire] ml1270 decoded=%d closed=%d\n", fixed, closed );
+    dprintf( 2, "[fd-cache] rev=ml571 released peb=%p, closed %d cached fd(s)\n", peb, closed );
 }
 
 #define fd_cache           (ios_get_fd_cache()->blocks)
@@ -3471,9 +5249,29 @@ static int init_thread_pipe(void)
  *
  * Close server socket and exit process normally.
  */
+/* Notify at the common exit wrapper, before reclaiming the PEB or its image:
+ * a normal ExitProcess first marks exiting with a NULL handle, and its later
+ * self-termination takes an early fast path in NtTerminateProcess. */
+/* ml2000: the app's compositor keys window layers by the PEB of the process
+ * that framed them, so the layers of a process that died without destroying
+ * its windows (a crash, TerminateProcess) are retired at its exit. */
+void *madeira_current_peb( void )
+{
+    TEB *teb = NtCurrentTeb();
+    return teb ? teb->Peb : NULL;
+}
+
+static void ios_notify_process_exit( int status )
+{
+    extern void winios_process_exited( void *peb ) __attribute__((weak));
+    PEB *peb = NtCurrentTeb() ? NtCurrentTeb()->Peb : NULL;
+    if (winios_process_exited && peb) winios_process_exited( peb );   /* ml2000 */
+}
+
 void process_exit_wrapper( int status )
 {
 #ifdef WINE_IOS
+    ios_notify_process_exit( status );
     /* Close THIS pseudo-process's master socket — the EOF is how wineserver
      * learns the process died (signals its process object, wakes waiters).
      * Clear the registry slot so a stray second call can't double-close. */
@@ -3504,6 +5302,14 @@ void process_exit_wrapper( int status )
          * the session (else-branch) lives as long as the app. Reuse is
          * grace-delayed inside the allocator for laggard exit threads. */
         ios_jit_reclaim_process( dead_peb );
+        /* WOW64_DESIGN.md §2: and its guest window, if it had one.  Here rather
+         * than only in ios_child_thread_entry because THIS is the chokepoint
+         * every pseudo-process exit reaches, on whichever thread called
+         * ExitProcess — a guest worker thread that ends the process does not
+         * return to the boot thread's setjmp at all.  Keyed by the dying PEB,
+         * not by the calling thread.  Nothing is unmapped here; see
+         * ios_wow_window_mark_released(). */
+        ios_wow_window_release( dead_peb );
         /* ml988 phase 2: only now may the retired fixed base be handed on. Until
          * this point the old generation's pool mappings and FEX translations are
          * still live, so a new claimant taking the same VA would race them. */
@@ -3906,6 +5712,13 @@ void server_init_process_done(void)
         ios_srv_game_teb = (uintptr_t)NtCurrentTeb();
     }
 
+    /* ml982: this process owns no handles yet, so any entry in the shared
+     * handle -> cell cache that carries OUR pid is a ghost left behind by a
+     * dead pseudo-process whose id the server has since reissued to us.  See
+     * madeira_fast_flush_pid() in ntdll/unix/sync.c for why that is a
+     * correctness problem and not just a leak. */
+    madeira_fast_flush_pid();
+
     if (!get_device_info( initial_cwd, &info ) && (info.Characteristics & FILE_REMOVABLE_MEDIA))
         chdir( "/" );
     close( initial_cwd );
@@ -4042,6 +5855,22 @@ void server_init_process_done(void)
         /* ml875 [thread-sample]: ONE task-wide sampler (ml873 armed seven, one
          * per pseudo-process, each suspending the others' threads). Body in
          * ios_thread_sampler_main() above. */
+        /* ml1640: OPT-IN. These three suspend every thread in the task on a
+         * timer. Up to ml1620 this fork never ran them, and with them on the
+         * Steam client stalled on both test devices with steam.exe and the web
+         * helper parked on fd_cache_mutex that nothing ever released; a Mach
+         * suspend taken here can interleave with the server's own Mach
+         * suspend/resume bookkeeping for SuspendThread. They are profilers, so
+         * the default is off. MADEIRA_THREAD_SAMPLERS=1 turns them on. */
+        {
+            const char *ts = getenv( "MADEIRA_THREAD_SAMPLERS" );
+            static int said;
+            if (!(ts && ts[0] == '1'))
+            {
+                if (!said++) dprintf( 2, "[samplers] ml1640 thread-sample/xprobe/wprof off (MADEIRA_THREAD_SAMPLERS=1 enables)\n" );
+                ios_ts_armed = 1;   /* never arm */
+            }
+        }
         if (__sync_bool_compare_and_swap(&ios_ts_armed, 0, 1))
         {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
@@ -4364,6 +6193,7 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
     {
         fd = remove_fd_from_cache( source );
         close_inproc_sync( source );
+        madeira_fast_close( source );   /* ml972 fastsync, see NtClose below */
     }
 
     SERVER_START_REQ( dup_handle )
@@ -4438,6 +6268,27 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      * retrieve it again */
     fd = remove_fd_from_cache( handle );
     close_inproc_sync( handle );
+    /* ml972 fastsync: THE EVICTION THAT WAS NEVER WIRED.
+     *
+     * dlls/ntdll/unix/server.c has carried this call since ml952, but that file
+     * is not the one that gets compiled: build.sh substitutes THIS overlay for
+     * server.c, so on the device NtClose never dropped anything from the
+     * handle -> cell cache.  `[srv-stats] fastsync cache: ... evict=0' was not
+     * a quiet cache, it was a dead call site.
+     *
+     * The consequence is worse than a stale-entry miss.  A positive entry is
+     * validated against the CELL's generation, and a cell stays live as long as
+     * its EVENT does -- not as long as this handle does.  So close a handle to
+     * an event something else still holds (a duplicate, an inherited handle, a
+     * named event opened twice), let the handle VALUE come back out of the
+     * handle table for an unrelated object, and the cache still answers with
+     * the old event's cell: handle value matches, pid matches, generation
+     * matches.  NtSetEvent on the new handle then signals the OLD event, and a
+     * wait on the new handle is satisfied by the OLD event's token.  With a
+     * loader creating and closing events thousands of times a second that is a
+     * handshake signalled to nobody: a worker that never resumes, and the
+     * critical section it holds never released. */
+    madeira_fast_close( handle );
 
     SERVER_START_REQ( close_handle )
     {
@@ -4518,16 +6369,26 @@ NTSTATUS wow64_wine_server_call( void *args )
     NTSTATUS status;
     struct __server_request_info req;
 
+    /* WOW64_DESIGN.md §2: the WoW64 module converted the OUTER args pointer
+     * only, so req32 is a host pointer but every pointer INSIDE it is still a
+     * guest address — the request's own iov data blocks and the reply buffer
+     * live in the 32-bit caller's window.  ios_wow_host_ptr() is +B and
+     * NULL-preserving (a NULL iov entry stays NULL). */
     req.u.req = req32->u.req;
     req.data_count = req32->data_count;
     for (i = 0; i < req.data_count; i++)
     {
-        req.data[i].ptr = ULongToPtr( req32->data[i].ptr );
+        req.data[i].ptr = ios_wow_host_ptr( req32->data[i].ptr );
         req.data[i].size = req32->data[i].size;
     }
-    req.reply_data = ULongToPtr( req32->reply_data );
+    req.reply_data = ios_wow_host_ptr( req32->reply_data );
     status = wine_server_call( &req );
     req32->u.reply = req.u.reply;
+    /* NOTE: req.u.req is copied verbatim.  client_ptr_t members inside the
+     * request union that a 32-bit caller filled in are guest addresses and are
+     * NOT converted here — see the gap list in the stage-C report.  No request
+     * on the milestone-1 path (dbg output, file I/O, handle/console requests)
+     * carries one. */
     return status;
 }
 
@@ -4544,7 +6405,8 @@ NTSTATUS wow64_wine_server_fd_to_handle( void *args )
         ULONG        handle;
     } const *params32 = args;
 
-    ULONG *handle32 = ULongToPtr( params32->handle );
+    /* embedded guest pointer: the caller's output slot */
+    ULONG *handle32 = ios_wow_host_ptr( params32->handle );
     HANDLE handle;
     NTSTATUS ret;
 
@@ -4566,8 +6428,11 @@ NTSTATUS wow64_wine_server_handle_to_fd( void *args )
         ULONG        options;
     } const *params32 = args;
 
+    /* handle stays a handle; unix_fd and options are embedded guest pointers
+     * to the caller's output slots */
     return wine_server_handle_to_fd( ULongToHandle( params32->handle ), params32->access,
-                                     ULongToPtr( params32->unix_fd ), ULongToPtr( params32->options ));
+                                     ios_wow_host_ptr( params32->unix_fd ),
+                                     ios_wow_host_ptr( params32->options ));
 }
 
 #endif /* _WIN64 */

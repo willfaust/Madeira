@@ -518,9 +518,15 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
     /* task #24: include requester identity — the settings-freeze loop
      * resends the same handle forever; tid names the retrying thread and
      * process id disambiguates which pseudo-process's msg socket this is. */
-    ws_log("[wineserver] send_client_fd: fd=%d handle=0x%x msg_fd_unix=%d proc=%04x tid=%04x",
-           fd, handle, get_unix_fd( process->msg_fd ), process->id,
-           current ? current->id : 0);
+    /* Capped: a game that opens files at frame rate made these two success
+     * lines 34,000 log lines per session (each one a write plus a UI log
+     * entry). First 64, then one in 4096; failures below are never capped. */
+    static unsigned int ios_scf_calls;
+    int ios_scf_log = (++ios_scf_calls <= 64) || !(ios_scf_calls & 4095);
+    if (ios_scf_log)
+        ws_log("[wineserver] send_client_fd: #%u fd=%d handle=0x%x msg_fd_unix=%d proc=%04x tid=%04x",
+               ios_scf_calls, fd, handle, get_unix_fd( process->msg_fd ), process->id,
+               current ? current->id : 0);
 
     msghdr.msg_name    = NULL;
     msghdr.msg_namelen = 0;
@@ -545,8 +551,9 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
 
     ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
 
-    ws_log("[wineserver] send_client_fd: sendmsg returned %d (expected %lu) errno=%d",
-           ret, (unsigned long)sizeof(handle), errno);
+    if (ios_scf_log || ret != sizeof(handle))
+        ws_log("[wineserver] send_client_fd: sendmsg returned %d (expected %lu) errno=%d",
+               ret, (unsigned long)sizeof(handle), errno);
 
     if (ret == sizeof(handle)) return 0;
 

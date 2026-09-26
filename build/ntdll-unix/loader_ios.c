@@ -89,6 +89,7 @@
 #include "winioctl.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "ios_wow.h"
 #include "wine/list.h"
 #include "wine/debug.h"
 
@@ -345,18 +346,56 @@ int ios_is_arm64ec_cur(void)
 
 void ios_register_proc_ident( void *peb_id, const SECTION_IMAGE_INFORMATION *info )
 {
-    int idx = ios_proc_ident_count;
+    int idx = ios_proc_ident_count, i;
+
+    /* prefer a slot released by a dead pseudo-process (ios_proc_ident_release)
+     * — without this the registry fills up over a long multi-process session
+     * even though entries keep being freed.  Writing `info` before `peb` is the
+     * same publish order the append path uses, for the same lock-free readers. */
+    for (i = 0; i < ios_proc_ident_count; i++)
+        if (!ios_proc_idents[i].peb) { idx = i; break; }
+
     if (idx >= IOS_MAX_PROC_IDENTS)
     {
         dprintf(2, "[proc-ident] registry FULL — %p keeps session identity\n", peb_id);
         return;
     }
     ios_proc_idents[idx].info = *info;
+    ios_proc_idents[idx].ntdll_module = NULL;
+    __sync_synchronize();
     ios_proc_idents[idx].peb = peb_id;
     __sync_synchronize();
-    ios_proc_ident_count = idx + 1;
+    if (idx == ios_proc_ident_count) ios_proc_ident_count = idx + 1;
     dprintf(2, "[proc-ident] peb=%p Machine=0x%x (slot %d)\n",
             peb_id, info->Machine, idx);
+}
+
+/* A pseudo-process has exited and its PEB is about to be REUSED.
+ *
+ * This registry is keyed by PEB pointer, and a 32-bit child's PEB is allocated
+ * inside its guest window — so when the window is released and re-adopted, the
+ * next child's PEB lands at the same host address.  A surviving entry would
+ * then answer for the new process with the dead one's main-image info and its
+ * private (already tombstoned) ntdll copy, which is how a stale identity turns
+ * into a wrong pe_dir, a wrong is_arm64ec() and a call into freed pool memory.
+ * Called from the guest-window teardown (virtual_ios.c). */
+void ios_proc_ident_release( void *peb_id )
+{
+    int i, n = ios_proc_ident_count;
+
+    if (!peb_id) return;
+    for (i = 0; i < n; i++)
+    {
+        if (ios_proc_idents[i].peb != peb_id) continue;
+        ios_proc_idents[i].peb = NULL;        /* readers match on peb: clear it first */
+        __sync_synchronize();
+        ios_proc_idents[i].ntdll_module = NULL;
+        memset( &ios_proc_idents[i].funcs, 0, sizeof(ios_proc_idents[i].funcs) );
+        memset( &ios_proc_idents[i].info, 0, sizeof(ios_proc_idents[i].info) );
+        dprintf(2, "[proc-ident] released peb=%p (slot %d)\n", peb_id, i);
+        return;
+    }
+    dprintf(2, "[proc-ident] release: peb=%p was not registered\n", peb_id);
 }
 
 /* X3c: attach a private ntdll image + entry points to a registered ident. */
@@ -542,6 +581,15 @@ static const char *get_pe_dir( WORD machine )
         return "/aarch64-windows";
     default: return "";
     }
+}
+
+/* Same answer as get_pe_dir(), exported so the spawn path can SAY which PE farm
+ * a child's system DLLs will be resolved from.  Routing an i386 child at an
+ * aarch64/arm64ec farm (or vice versa) otherwise shows up only as a child that
+ * never produces a window. */
+const char *ios_pe_dir_for_machine( WORD machine )
+{
+    return get_pe_dir( machine );
 }
 
 static WORD get_alt_machine( WORD machine )
@@ -1406,6 +1454,15 @@ static const unixlib_entry_t unix_call_funcs[] =
 static NTSTATUS wow64_load_so_dll( void *args ) { return STATUS_INVALID_IMAGE_FORMAT; }
 static NTSTATUS wow64_unwind_builtin_dll( void *args ) { return STATUS_UNSUCCESSFUL; }
 
+/* The four iOS-private entries below speak 64-bit-only argument structs
+ * (host `void *` PEBs, host function pointers, 64-bit alias addresses) and
+ * are spoken only by the native / ARM64EC side that owns the JIT pool.  A
+ * 32-bit caller's struct has a different LAYOUT, not merely guest pointers,
+ * so a +B conversion could not rescue it — refuse the call instead of
+ * reading a mismatched struct and corrupting the alias tables.  The table
+ * still has to be the same length as unix_call_funcs. */
+static NTSTATUS wow64_ios_unsupported( void *args ) { return STATUS_NOT_SUPPORTED; }
+
 const unixlib_entry_t unix_call_wow64_funcs[] =
 {
     wow64_load_so_dll,
@@ -1415,12 +1472,12 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_server_fd_to_handle,
     wow64_wine_server_handle_to_fd,
     wow64_wine_spawnvp,
-    system_time_precise,
-    unixcall_ios_push_jit_aliases,       /* iOS only — wow64 case unreachable */
-    unixcall_ios_register_hold_release,  /* iOS only — wow64 case unreachable */
-    unixcall_ios_jit_alias_probe,        /* ml631 — keep table lengths in step */
-    unixcall_ios_mono_bridge_ptr,        /* ml648 — keep table lengths in step */
-    unixcall_ios_get_fex_arena,          /* ml800 — keep table lengths in step */
+    system_time_precise,                 /* writes one LONGLONG through args */
+    wow64_ios_unsupported,               /* ios_push_jit_aliases */
+    wow64_ios_unsupported,               /* ios_register_hold_release */
+    wow64_ios_unsupported,               /* ml631 ios_jit_alias_probe */
+    wow64_ios_unsupported,               /* ml648 ios_mono_bridge_ptr */
+    wow64_ios_unsupported,               /* ml800 ios_get_fex_arena */
 };
 
 #endif  /* _WIN64 */
@@ -2019,15 +2076,35 @@ static void load_ntdll_functions( HMODULE module )
      * import one authoritative value instead of hardcoding a slot. This runs
      * after the discovery in the init path above, so the offset is already
      * known and non-zero. */
+    /* ml800: this publish is already generic — it runs from load_ntdll() for
+     * whichever native PE ntdll this session loaded (aarch64-windows or
+     * arm64ec-windows) and is NOT gated on is_arm64ec(). What it cannot do is
+     * write into an export the PE does not have, and the shipped
+     * aarch64-windows/ntdll.dll (PE timestamp 2026-08-02, SizeOfImage 0xf0000)
+     * predates ntdll.spec's `ios_teb_tsd_offset` line: its export table jumps
+     * straight from p_ios_jit_reverse_translate_addr (1451) to
+     * __wine_unixlib_handle (1452), while arm64ec (1460) and i386 (1475) both
+     * carry it. A 32-bit MAIN image runs on that aarch64 ntdll, so the WoW64
+     * CPU module's GetProcAddress returns NULL and it refuses to start.
+     *
+     * The old GET_FUNC here reported that as a bare "not found", which is
+     * indistinguishable from the dozens of other optional-export lines. Say
+     * what is missing, in which module, and what breaks because of it. */
     {
         extern int ios_teb_tls_slot_offset;
-        GET_FUNC( ios_teb_tsd_offset );
+        pios_teb_tsd_offset = (unsigned int *)find_named_export( module, exports, "ios_teb_tsd_offset" );
         if (pios_teb_tsd_offset)
         {
             *pios_teb_tsd_offset = (unsigned int)ios_teb_tls_slot_offset;
-            ERR("[teb-tsd] published offset=0x%x to ntdll export at %p\n",
-                *pios_teb_tsd_offset, pios_teb_tsd_offset);
+            dprintf( 2, "[teb-tsd] published offset=0x%x to ntdll export at %p (module %p)\n",
+                     *pios_teb_tsd_offset, pios_teb_tsd_offset, module );
         }
+        else
+            dprintf( 2, "[teb-tsd] FATAL-FOR-WOW64: native ntdll at %p does NOT export "
+                        "ios_teb_tsd_offset (slot offset 0x%x stays unpublished). The WoW64 CPU "
+                        "module refuses to run without it; rebuild this PE ntdll from "
+                        "dlls/ntdll/ntdll.spec, which already declares the export.\n",
+                     module, (unsigned int)ios_teb_tls_slot_offset );
     }
     /* ml797: hand the FEX arena to the PE side as plain data. It cannot travel
      * as an environment variable -- its consumer runs before any CRT or TEB
@@ -2210,13 +2287,29 @@ static void load_ntdll_functions( HMODULE module )
 static void load_ntdll_wow64_functions( HMODULE module )
 {
     const IMAGE_EXPORT_DIRECTORY *exports;
+    /* WOW64_DESIGN.md §2/§3: every p* entry of LdrSystemDllInitBlock ends up
+     * in a 32-bit CONTEXT (Eip/Pc for LdrInitializeThunk, the Ki*Dispatchers,
+     * RtlUserThreadStart), so it must hold a GUEST address.  find_named_export
+     * returns module + rva, i.e. HOST, so subtract B.  The one host-valued
+     * member is ntdll_handle, and by the same rule it is published as the
+     * guest base too: wow64.dll adds B back before using it as an HMODULE.
+     * Outside a window wow_base is 0 and this is the classic identity.
+     *
+     * stage C review F5: the conversion must be NULL-preserving.
+     * find_named_export() returns 0 for an export this ntdll does not have
+     * (RtlpFreezeTimeBias and RtlpQueryProcessDebugInformationRemote are
+     * genuinely absent in Wine's i386 ntdll), and a plain `- wow_base` would
+     * publish -B there instead of the 0 that "not present" means. */
+    ULONG_PTR wow_base = ios_wow_base();
+#define TO_GUEST(v) ((v) ? (ULONG_PTR)(v) - wow_base : 0)
 
     exports = get_module_data_dir( module, IMAGE_FILE_EXPORT_DIRECTORY, NULL );
     assert( exports );
 
-    pLdrSystemDllInitBlock->ntdll_handle = (ULONG_PTR)module;
+    pLdrSystemDllInitBlock->ntdll_handle = TO_GUEST( (ULONG_PTR)module );
 
-#define GET_FUNC(name) pLdrSystemDllInitBlock->p##name = find_named_export( module, exports, #name )
+#define GET_FUNC(name) pLdrSystemDllInitBlock->p##name = \
+        TO_GUEST( find_named_export( module, exports, #name ) )
     GET_FUNC( KiUserApcDispatcher );
     GET_FUNC( KiUserCallbackDispatcher );
     GET_FUNC( KiUserExceptionDispatcher );
@@ -2226,7 +2319,9 @@ static void load_ntdll_wow64_functions( HMODULE module )
     GET_FUNC( RtlpFreezeTimeBias );
     GET_FUNC( RtlpQueryProcessDebugInformationRemote );
 #undef GET_FUNC
+#undef TO_GUEST
 
+    /* host pointer: the unix side calls through this one directly */
     p__wine_ctrl_routine = (void *)find_named_export( module, exports, "__wine_ctrl_routine" );
 
 #ifdef _WIN64
@@ -2237,9 +2332,15 @@ static void load_ntdll_wow64_functions( HMODULE module )
     }
 #endif
 
-    /* also set the 32-bit LdrSystemDllInitBlock */
-    memcpy( (void *)(ULONG_PTR)pLdrSystemDllInitBlock->pLdrSystemDllInitBlock,
-            pLdrSystemDllInitBlock, sizeof(*pLdrSystemDllInitBlock) );
+    /* also set the 32-bit LdrSystemDllInitBlock (guest address -> host).
+     * Guarded: pLdrSystemDllInitBlock is now 0 if the 32-bit ntdll does not
+     * export it, and writing at wow_base + 0 would scribble on guest page 0. */
+    if (pLdrSystemDllInitBlock->pLdrSystemDllInitBlock)
+        memcpy( (void *)((ULONG_PTR)pLdrSystemDllInitBlock->pLdrSystemDllInitBlock + wow_base),
+                pLdrSystemDllInitBlock, sizeof(*pLdrSystemDllInitBlock) );
+    else
+        ERR( "[wow-window] 32-bit ntdll has no LdrSystemDllInitBlock export — "
+             "its copy of the init block will stay zero\n" );
 }
 
 
@@ -2530,14 +2631,22 @@ static void load_ntdll(void)
 
 
 /***********************************************************************
- *           load_apiset_dll
+ *           map_apiset_schema
+ *
+ * Map <pe_dir(machine)>/apisetschema.dll and return the API_SET_NAMESPACE
+ * inside the mapped view.  Split out of load_apiset_dll so the child boot
+ * path can ask for a DIFFERENT machine's schema than the session's
+ * `current_machine` (an i386 child under a 64-bit session needs
+ * /i386-windows/apisetschema.dll, and it needs it mapped inside its own
+ * guest window).  *view is the whole mapped view, for unmapping on rejection.
  */
-static void load_apiset_dll(void)
+static unsigned int map_apiset_schema( WORD machine, void **view, SIZE_T *view_size,
+                                       API_SET_NAMESPACE **map_out )
 {
     static WCHAR path[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s','\\',
                            's','y','s','t','e','m','3','2','\\',
                            'a','p','i','s','e','t','s','c','h','e','m','a','.','d','l','l',0};
-    const char *pe_dir = get_pe_dir( current_machine );
+    const char *pe_dir = get_pe_dir( machine );
     const IMAGE_NT_HEADERS *nt;
     const IMAGE_SECTION_HEADER *sec;
     API_SET_NAMESPACE *map;
@@ -2549,6 +2658,10 @@ static void load_apiset_dll(void)
     char *name = NULL;
     void *ptr;
     UINT i;
+
+    *view = NULL;
+    *view_size = 0;
+    *map_out = NULL;
 
     init_unicode_string( &str, path );
     InitializeObjectAttributes( &attr, &str, 0, 0, NULL );
@@ -2568,35 +2681,167 @@ static void load_apiset_dll(void)
     }
     if (!status)
     {
+        /* map_section() passes user_space_wow_limit as zero_bits; inside a
+         * windowed (32-bit) pseudo-process ios_wow_translate_limits turns that
+         * guest ceiling into [B, B+limit], which is what puts the view inside
+         * the guest window.  Outside a window it is an ordinary host mapping. */
         status = map_section( mapping, &ptr, &size, PAGE_READONLY );
         NtClose( mapping );
     }
-    if (!status)
-    {
-        nt = get_rva( ptr, ((IMAGE_DOS_HEADER *)ptr)->e_lfanew );
-        sec = IMAGE_FIRST_SECTION( nt );
+    if (status) return status;
 
-        for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++)
+    *view = ptr;
+    *view_size = size;
+
+    nt = get_rva( ptr, ((IMAGE_DOS_HEADER *)ptr)->e_lfanew );
+    sec = IMAGE_FIRST_SECTION( nt );
+
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++)
+    {
+        if (memcmp( (char *)sec->Name, ".apiset", 8 )) continue;
+        map = (API_SET_NAMESPACE *)((char *)ptr + sec->PointerToRawData);
+        if (sec->PointerToRawData < size &&
+            size - sec->PointerToRawData >= sec->Misc.VirtualSize &&
+            map->Version == 6 &&
+            map->Size <= sec->Misc.VirtualSize)
         {
-            if (memcmp( (char *)sec->Name, ".apiset", 8 )) continue;
-            map = (API_SET_NAMESPACE *)((char *)ptr + sec->PointerToRawData);
-            if (sec->PointerToRawData < size &&
-                size - sec->PointerToRawData >= sec->Misc.VirtualSize &&
-                map->Version == 6 &&
-                map->Size <= sec->Misc.VirtualSize)
+            *map_out = map;
+            return STATUS_SUCCESS;
+        }
+        break;
+    }
+    NtUnmapViewOfSection( NtCurrentProcess(), ptr );
+    *view = NULL;
+    *view_size = 0;
+    return STATUS_APISET_NOT_PRESENT;
+}
+
+
+/***********************************************************************
+ *           load_apiset_dll
+ */
+static void load_apiset_dll(void)
+{
+    API_SET_NAMESPACE *map;
+    unsigned int status;
+    SIZE_T size;
+    void *ptr;
+
+    if ((status = map_apiset_schema( current_machine, &ptr, &size, &map )))
+    {
+        ERR( "failed to load apiset: %x\n", status );
+        return;
+    }
+    peb->ApiSetMap = map;
+    /* iOS-Madeira (WOW64_DESIGN.md §3 invariant 1): wow_peb holds
+     * GUEST addresses.  When this process has no window the view is a plain
+     * host mapping with no guest address at all, and PtrToUlong() would
+     * publish a truncated host pointer that 32-bit ntdll would dereference in
+     * get_apiset_entry().  Publish a guest address only if the view really is
+     * inside the window; 0 means "no apiset", which get_apiset_entry()
+     * handles as STATUS_APISET_NOT_PRESENT. */
+    if (wow_peb)
+        wow_peb->ApiSetMap = ios_wow_in_window( map ) ? ios_wow_guest_addr( map ) : 0;
+    TRACE( "loaded apiset at %p\n", map );
+}
+
+
+#ifdef WINE_IOS
+/***********************************************************************
+ *           ios_child_load_apiset
+ *
+ * The child (CreateProcess) boot path never ran load_apiset_dll at all: it
+ * clones the PEB of the 64-bit session process, so peb->ApiSetMap arrived as
+ * an inherited host pointer and the 32-bit PEB — which is freshly zeroed
+ * memory, not part of the sizeof(PEB) clone — kept ApiSetMap == 0.  The
+ * 32-bit ntdll's get_apiset_entry() then reports STATUS_APISET_NOT_PRESENT
+ * for every `api-ms-win-*` import, each one is retried as a real DLL file,
+ * and loader_init fails the whole process with STATUS_DLL_NOT_FOUND.
+ *
+ * Two maps, two namespaces, one per half of the process:
+ *   - peb->ApiSetMap   (HOST pointer) is what the 64-bit half — wow64.dll,
+ *     the CPU DLL, every aarch64 module — consults.  The clone from the
+ *     session PEB is a live view in this one shared address space, so it is
+ *     reusable; it is only re-mapped when it is missing or not a v6 schema.
+ *   - wow_peb->ApiSetMap (GUEST address) is what 32-bit code consults, and it
+ *     must be the CHILD's machine's schema, mapped inside the child's own
+ *     [B, B+4G) window.  map_section()'s user_space_wow_limit ceiling is what
+ *     places it there (same mechanism the 32-bit MAIN path relies on).
+ *
+ * Must run after unix_init_startup_info() (which publishes wow_peb and the
+ * guest ceiling) and before server_init_process_done().
+ */
+static void ios_child_load_apiset( WORD machine )
+{
+    API_SET_NAMESPACE *map;
+    unsigned int status;
+    SIZE_T size;
+    void *ptr;
+
+    /* --- 64-bit half ------------------------------------------------- */
+    {
+        const API_SET_NAMESPACE *cur = peb->ApiSetMap;
+
+        /* Nothing is mapped below iOS's 4 GB __PAGEZERO, so a non-zero
+         * sub-4 GB value is a truncated/guest pointer, never a host map. */
+        if (!cur || (ULONG_PTR)cur < IOS_WOW_WINDOW_SIZE || cur->Version != 6)
+        {
+            if ((status = map_apiset_schema( native_machine, &ptr, &size, &map )))
+                ERR( "[wow-apiset] child has no usable 64-bit apiset map (inherited %p) and "
+                     "re-mapping the %04x schema failed: %x — api-ms-win-* names will not "
+                     "resolve for the 64-bit half of this process\n",
+                     peb->ApiSetMap, native_machine, status );
+            else
             {
                 peb->ApiSetMap = map;
-                if (wow_peb) wow_peb->ApiSetMap = PtrToUlong(map);
-                TRACE( "loaded %s apiset at %p\n", debugstr_w(path), map );
-                return;
+                dprintf( STDERR_FILENO, "[wow-apiset] child 64-bit schema re-mapped at host %p\n", map );
             }
-            break;
         }
-        NtUnmapViewOfSection( NtCurrentProcess(), ptr );
-        status = STATUS_APISET_NOT_PRESENT;
     }
-    ERR( "failed to load apiset: %x\n", status );
+
+    /* --- 32-bit half -------------------------------------------------- */
+    if (is_machine_64bit( machine )) return;
+
+    if (!wow_peb)
+    {
+        ERR( "[wow-apiset] FAILED: i386 child has no 32-bit PEB (wow_peb=NULL) — every "
+             "api-ms-win-* import will fail with STATUS_DLL_NOT_FOUND\n" );
+        dprintf( STDERR_FILENO, "[wow-apiset] FAILED: i386 child has no wow_peb\n" );
+        return;
+    }
+    if ((status = map_apiset_schema( machine, &ptr, &size, &map )))
+    {
+        ERR( "[wow-apiset] FAILED: cannot map %s/apisetschema.dll for the i386 child: %x — "
+             "every api-ms-win-* import will fail with STATUS_DLL_NOT_FOUND\n",
+             get_pe_dir( machine ), status );
+        dprintf( STDERR_FILENO, "[wow-apiset] FAILED: map_apiset_schema(%04x) = 0x%x\n",
+                 machine, status );
+        wow_peb->ApiSetMap = 0;
+        return;
+    }
+    if (!ios_wow_in_window( map ))
+    {
+        /* Publishing PtrToUlong(host) here is what invariant 1 forbids: the
+         * guest would dereference a truncated host pointer.  Refuse loudly and
+         * leave 0 (= STATUS_APISET_NOT_PRESENT) instead. */
+        ERR( "[wow-apiset] FAILED: the i386 child's schema landed OUTSIDE its guest window "
+             "(host %p, window %p, guest ceiling %p) — refusing to publish a truncated host "
+             "pointer; api-ms-win-* imports will fail\n",
+             map, (void *)ios_wow_base(), (void *)user_space_wow_limit );
+        dprintf( STDERR_FILENO, "[wow-apiset] FAILED: schema host %p outside window %p\n",
+                 map, (void *)ios_wow_base() );
+        NtUnmapViewOfSection( NtCurrentProcess(), ptr );
+        wow_peb->ApiSetMap = 0;
+        return;
+    }
+    wow_peb->ApiSetMap = ios_wow_guest_addr( map );
+    dprintf( STDERR_FILENO, "[wow-apiset] child i386 schema mapped at host %p = guest 0x%x "
+             "(view %p+%p, wow_peb=%p)\n",
+             map, (unsigned)wow_peb->ApiSetMap, ptr, (void *)size, wow_peb );
+    ERR( "[wow-apiset] child i386 schema mapped at host %p = guest %08x\n",
+         map, (unsigned)wow_peb->ApiSetMap );
 }
+#endif /* WINE_IOS */
 
 
 /***********************************************************************
@@ -2669,9 +2914,50 @@ static void start_main_thread(void)
 #else
 #define WINE_IOS_LOG(msg)
 #endif
+#ifdef WINE_IOS
+    /* Device-run fix: reserve this pseudo-process's guest window BEFORE the
+     * first TEB, when the MAIN image is 32-bit.  Only wine_ios_child_main did
+     * this before, so a 32-bit MAIN image (`wine hello-x86.exe`) ran with no
+     * window — the image landed outside [B,B+4G) and build_wow64_parameters'
+     * 2GB ceiling was unmappable below 4GB (assert !status).  The machine is
+     * not known unix-side until unix_init_startup_info (after this point), so
+     * the app publishes it in ios_main_image_i386.  The window is reserved
+     * unbound/owner=this thread here; virtual_alloc_first_teb resolves it via
+     * the owner fallback so the TEB block and PEB land inside it, and we bind
+     * it to the PEB right after.  A 64-bit main image leaves the flag 0 and is
+     * completely unaffected. */
+    if (ios_main_image_i386)
+    {
+        NTSTATUS wst = ios_wow_window_reserve();
+        if (wst)
+        {
+            /* Do NOT continue windowless: with B=0 the i386 image lands outside
+             * any window, every guest pointer conversion is wrong, and boot
+             * walks into the assert in build_wow64_parameters (env_ios.c).
+             * fatal_error() is this file's startup-failure path and, on iOS,
+             * pthread_exit()s just this pseudo-process's thread — pseudo-
+             * processes are threads in one Mach task, so exit()/abort() would
+             * take the whole app down with them. */
+            dprintf( STDERR_FILENO,
+                     "[wow-window] main-process reserve FAILED 0x%x — a 32-bit main image "
+                     "cannot run without a guest window; terminating this process\n",
+                     (unsigned)wst );
+            fatal_error( "no WoW64 guest window for the 32-bit main image (status %x)\n",
+                         (unsigned)wst );
+        }
+        else
+            dprintf( STDERR_FILENO, "[wow-window] main-process window reserved (i386 main image)\n" );
+    }
+#endif
     WINE_IOS_LOG("virtual_alloc_first_teb...");
     TEB *teb = virtual_alloc_first_teb();
     WINE_IOS_LOG("virtual_alloc_first_teb done");
+#ifdef WINE_IOS
+    /* the PEB now exists (virtual_alloc_first_teb set the global `peb` and
+     * teb->Peb); bind the window so every later ios_wow_base() lookup resolves
+     * through the PEB (image map, build_wow64_parameters, 32-bit stack). */
+    if (ios_main_image_i386 && ios_wow_base()) ios_wow_window_bind( peb );
+#endif
 
 #ifdef WINE_IOS
     /* Create TLS key for TEB storage BEFORE any PE loading.
@@ -2759,7 +3045,13 @@ static void start_main_thread(void)
     set_load_order_app_name( main_wargv[0] );
     WINE_IOS_LOG("init_thread_stack...");
     init_thread_stack( teb, 0, 0, 0 );
-    NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
+    /* iOS-Madeira: NAMED, and created through the same helper every child
+     * pseudo-process uses.  wineserver handle tables are per pseudo-process, so
+     * an anonymous handle created here would name a different object (or
+     * nothing) in every later process that falls back to it — the same class of
+     * bug as the GDI shared section.  See ios_default_keyed_event() in
+     * wine/dlls/ntdll/unix/sync.c; the name is the one Windows uses. */
+    keyed_event = ios_default_keyed_event();
     /* ml756: take FEX's host arena BEFORE any PE module is placed.
      *
      * This is the whole point of the placeholder: once guest DLLs start
@@ -3147,12 +3439,31 @@ extern size_t server_init_process_child( int child_fd_socket );
 
 DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_socket )
 {
+    /* set by the spawner (process_ios.c) and updated as this child boots, so a
+     * failure anywhere on the path names the stage exactly once */
+    extern _Thread_local const char *ios_child_boot_stage;
+    extern _Thread_local WORD ios_child_main_machine;
     TEB *teb;
     PEB *child_peb;
     NTSTATUS status;
 
     dprintf(STDERR_FILENO, "[Wine child] wine_ios_child_main: argc=%d argv[1]=%s fd=%d\n",
             argc, argc > 1 ? argv[1] : "(none)", child_fd_socket);
+
+    /* WOW64_DESIGN.md §2: every early-return below used to be a bare dprintf,
+     * so a child that died during bring-up produced no ERR at all and the
+     * parent simply never saw a process appear.  CHILD_STAGE() names the stage
+     * the child is in; CHILD_BOOT_FAIL() is the single exit that reports it. */
+#define CHILD_STAGE(s)  (ios_child_boot_stage = (s))
+#define CHILD_BOOT_FAIL(fmt, ...)                                                       \
+    do {                                                                                \
+        dprintf( STDERR_FILENO, "[Wine child] BOOT FAILED at stage '%s': " fmt,          \
+                 ios_child_boot_stage, ##__VA_ARGS__ );                                  \
+        ERR( "[Wine child] boot FAILED at stage '%s' for %s: " fmt,                      \
+             ios_child_boot_stage, argc > 1 ? argv[1] : "?", ##__VA_ARGS__ );            \
+        return;                                                                         \
+    } while (0)
+    CHILD_STAGE( "entry" );
 
     /* X1 recon: EC-ness is currently session-wide (main_image_info /
      * current_machine are shared ntdll-unix globals). Log what this child
@@ -3162,21 +3473,76 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
             is_arm64ec(), main_image_info.Machine, current_machine,
             argc > 1 ? argv[1] : "?");
 
-    /* Allocate a new TEB for this child "process" thread */
-    status = virtual_alloc_teb( &teb );
-    if (status) {
-        dprintf(STDERR_FILENO, "[Wine child] virtual_alloc_teb FAILED: 0x%x\n", status);
-        return;
+    /* WOW64_DESIGN.md §2: a 32-bit child gets its own [B, B+4G) guest window,
+     * reserved HERE — before the TEB/PEB pair, because that pair has to live
+     * inside it (guest code reads TEB32->Self, TEB32->Peb and the 32-bit
+     * process parameters as guest addresses < 4 GB).  ios_child_main_machine
+     * is published by the parent's spawn path; unix_init_startup_info, the
+     * usual source of the machine, only runs much further down.  The window
+     * is bound to the child's PEB as soon as that exists. */
+    {
+        int child_is_i386 = ios_child_main_machine &&
+                            !is_machine_64bit( ios_child_main_machine );
+
+        /* One line with everything needed to tell "this child is 32-bit and got
+         * a window" from "the spawner never told us the machine" and from "the
+         * one window slot was already gone" — the three shapes a silent
+         * desktop-launched 32-bit child can have. */
+        if (child_is_i386)
+        {
+            CHILD_STAGE( "guest-window-reserve" );
+            status = ios_wow_window_reserve();
+            dprintf(STDERR_FILENO, "[Wine child] i386 image %s machine=0x%x window=%p reserve=0x%x\n",
+                    argc > 1 ? argv[1] : "(none)", ios_child_main_machine,
+                    (void *)ios_wow_base(), (unsigned)status);
+            ERR( "[Wine child] i386 image %s machine=%04x window=%p reserve=%x\n",
+                 argc > 1 ? argv[1] : "(none)", ios_child_main_machine,
+                 (void *)ios_wow_base(), (unsigned)status );
+            if (status)
+                CHILD_BOOT_FAIL( "guest window reserve returned 0x%x — a 32-bit child "
+                                 "cannot start without one (the furniture band holds very "
+                                 "few 4GB-aligned slots; see [wow-window] lines above)\n",
+                                 (unsigned)status );
+        }
+        else
+            dprintf(STDERR_FILENO, "[Wine child] 64-bit image %s machine=0x%x (no guest window)\n",
+                    argc > 1 ? argv[1] : "(none)", ios_child_main_machine);
     }
+
+    /* Allocate a new TEB for this child "process" thread */
+    CHILD_STAGE( "virtual_alloc_teb" );
+    status = virtual_alloc_teb( &teb );
+    if (status)
+        CHILD_BOOT_FAIL( "virtual_alloc_teb returned 0x%x\n", (unsigned)status );
 
     /* Allocate a SEPARATE PEB for this child "process".
      * Without this, parent and child share peb->Ldr (module list),
      * causing corruption when both PE loaders modify it. */
-    child_peb = mmap( NULL, 0x4000, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANON, -1, 0 );
-    if (child_peb == MAP_FAILED) {
-        dprintf(STDERR_FILENO, "[Wine child] PEB mmap FAILED: errno=%d\n", errno);
-        return;
+    if (ios_wow_base())
+    {
+        /* WOW64_DESIGN.md §2: a 32-bit child's PEB pair must be guest-
+         * addressable — PEB32 sits at child_peb + page_size and the guest
+         * reads it through TEB32->Peb.  Allocating through Wine (rather than
+         * a raw mmap) both places it in this process's window and registers a
+         * view there, so nothing else can be placed on top of it. */
+        SIZE_T peb_size = 0x4000;
+
+        CHILD_STAGE( "windowed-peb-alloc" );
+        child_peb = NULL;
+        status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&child_peb, limit_4g - 1,
+                                          &peb_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+        if (status)
+            CHILD_BOOT_FAIL( "windowed PEB alloc returned 0x%x (window %p)\n",
+                             (unsigned)status, (void *)ios_wow_base() );
+        memset( child_peb, 0, 0x4000 );
+    }
+    else
+    {
+        CHILD_STAGE( "peb-mmap" );
+        child_peb = mmap( NULL, 0x4000, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANON, -1, 0 );
+        if (child_peb == MAP_FAILED)
+            CHILD_BOOT_FAIL( "PEB mmap failed, errno=%d\n", errno );
     }
     /* Copy parent PEB — share heap, locks, etc. Clear LdrData so the child's
      * LdrInitializeThunk builds a fresh module list instead of traversing
@@ -3228,6 +3594,32 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
     child_peb->TlsBitmapBits[1] = 0;
     /* Point child's TEB to the new PEB */
     teb->Peb = child_peb;
+    /* WOW64_DESIGN.md §2: the window now has an owner, so every later
+     * ios_wow_base()/ios_wow_base_for_peb() lookup resolves through the PEB
+     * (including from other threads and from NtQueryInformationProcess). */
+    CHILD_STAGE( "window-bind" );
+    ios_wow_window_bind( child_peb );
+    /* init_teb ran before the child PEB existed, so TEB32->Peb still points at
+     * the CREATOR's PEB (which is outside this window — a truncated host
+     * address, i.e. garbage to guest code).  Repoint it now.
+     *
+     * This runs in the gap between ios_wow_window_bind() above and the
+     * pthread_setspecific( ios_teb_tls_key, teb ) further down, so this thread
+     * cannot yet resolve its own PEB and the window is found only through the
+     * slot's owner thread (see ios_wow_slot_current()).  Assert that it IS
+     * found: with base 0 ios_wow_guest_addr() silently truncates the host
+     * pointer and writes exactly the garbage this repoint exists to remove. */
+    {
+        WOW_TEB *wow_teb = get_wow_teb( teb );
+        ULONG_PTR wow_base = ios_wow_base();
+
+        if (wow_teb && !wow_base)
+            CHILD_BOOT_FAIL( "the guest window is not resolvable while repointing TEB32->Peb "
+                             "(child_peb=%p) — TEB32->Peb would be a truncated host pointer\n",
+                             child_peb );
+        if (wow_teb)
+            wow_teb->Peb = ios_wow_guest_addr( (char *)child_peb + page_size );
+    }
 
     dprintf(STDERR_FILENO, "[Wine child] teb=%p child_peb=%p (parent_peb=%p)\n",
             teb, child_peb, peb);
@@ -3267,6 +3659,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
         main_argv = argv;
 
         /* Register with wineserver using the child's socketfd */
+        CHILD_STAGE( "server_init_process_child" );
         startup_info_size = server_init_process_child( child_fd_socket );
 
         /* init_startup_info — reads startup info from wineserver, loads the
@@ -3278,19 +3671,77 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
          * thread reads identity owner-aware from here on. */
         {
             SECTION_IMAGE_INFORMATION session_image_info = main_image_info;
+            /* WOW64_DESIGN.md §3: `wow_peb` is a SESSION global, and init_peb()
+             * (env_ios.c) only ever WRITES it — for a 32-bit image — so it
+             * stays pointing at the previous 32-bit pseudo-process when a
+             * 64-bit child boots next.  init_peb's `if (wow_peb)` block then
+             * ran for that 64-bit child: it called ios_wow_map_user_shared_data
+             * and build_wow64_parameters, whose limit_2g ceiling was NOT
+             * translated into a window (this child has none), so the
+             * allocation was attempted below 4 GB, returned STATUS_NO_MEMORY,
+             * and `assert( !status )` (env_ios.c:1934) aborted — which on iOS
+             * is an abort() inside the one shared Mach task.  Observed on
+             * device: a console-subsystem i386 child's conhost.exe died this
+             * way and NtCreateUserProcess returned c00000e5.
+             * Clearing it here makes the derivation per-process: init_peb
+             * re-publishes it for a 32-bit child, and if it comes back NULL
+             * this child is 64-bit and the 32-bit sibling's value (still live
+             * and blocked in NtCreateUserProcess) is restored. */
+            WOW_PEB *saved_wow_peb = wow_peb;
+
+            wow_peb = NULL;
+            CHILD_STAGE( "unix_init_startup_info" );
             unix_init_startup_info();
+            if (!wow_peb && saved_wow_peb)
+            {
+                dprintf( STDERR_FILENO, "[wow-peb] 64-bit child kept out of the WoW64 branch; "
+                         "restoring the session wow_peb=%p\n", saved_wow_peb );
+                wow_peb = saved_wow_peb;
+            }
             ios_register_proc_ident( child_peb, &main_image_info );
             main_image_info = session_image_info;
         }
         dprintf(STDERR_FILENO, "[Wine child] PE loaded: Machine=0x%x TransferAddress=%p ImageBase=%p\n",
                 ios_cur_image_info()->Machine, ios_cur_image_info()->TransferAddress, peb->ImageBaseAddress);
+        if (!is_machine_64bit( ios_cur_image_info()->Machine ))
+            ERR( "[Wine child] i386 image mapped: base=%p transfer=%p window=%p guest_base=%p\n",
+                 peb->ImageBaseAddress, ios_cur_image_info()->TransferAddress,
+                 (void *)ios_wow_base(),
+                 (void *)(ULONG_PTR)ios_wow_guest_addr( peb->ImageBaseAddress ) );
 
         /* Set DLL load order for child's exe */
         *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
         set_load_order_app_name( main_wargv[0] );
 
-        /* Set up thread stack */
-        init_thread_stack( teb, 0, 0, 0 );
+        /* Set up thread stack.  The status was dropped on the floor before: a
+         * failed 32-bit stack allocation (the window is the only place one can
+         * come from) left the child booting with TEB32 stack fields at 0 and
+         * faulting on its first guest push, with nothing said about it. */
+        CHILD_STAGE( "init_thread_stack" );
+        if ((status = init_thread_stack( teb, 0, 0, 0 )))
+            CHILD_BOOT_FAIL( "init_thread_stack returned 0x%x (window %p, guest ceiling %p)\n",
+                             (unsigned)status, (void *)ios_wow_base(),
+                             (void *)user_space_wow_limit );
+
+        /* WOW64_DESIGN.md §2: a 32-bit child needs its own i386 ntdll mapped
+         * (and LdrSystemDllInitBlock filled with GUEST addresses) exactly as
+         * start_main_thread does for the session's main process.  The child
+         * boot path never did this — there had never been a 32-bit child. */
+        if (!is_machine_64bit( ios_cur_image_info()->Machine ))
+        {
+            CHILD_STAGE( "load_wow64_ntdll" );
+            load_wow64_ntdll( ios_cur_image_info()->Machine );
+            ERR( "[Wine child] i386 ntdll bound: ntdll_handle=%p LdrInitializeThunk=%p (guest)\n",
+                 (void *)(ULONG_PTR)pLdrSystemDllInitBlock->ntdll_handle,
+                 (void *)(ULONG_PTR)pLdrSystemDllInitBlock->pLdrInitializeThunk );
+        }
+
+        /* start_main_thread runs load_apiset_dll() right after load_wow64_ntdll;
+         * the child path never did, so every `api-ms-win-*` import of every
+         * module this child loads failed.  Same position, but per-machine and
+         * window-aware (see ios_child_load_apiset). */
+        CHILD_STAGE( "load_apiset" );
+        ios_child_load_apiset( ios_cur_image_info()->Machine );
 
         /* X3c: a cross-arch child (AMD64 exe, non-EC session) cannot run on
          * the session's aarch64 ntdll at all — load the ARM64EC build as a
@@ -3299,11 +3750,9 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
          * the standard map pipeline gave it pool/EC/x18 treatment. */
         if (ios_cur_image_info()->Machine == IMAGE_FILE_MACHINE_AMD64 && !is_arm64ec())
         {
+            CHILD_STAGE( "load_child_ec_ntdll" );
             if (ios_load_child_ec_ntdll( child_peb ) != 0)
-            {
-                dprintf(STDERR_FILENO, "[Wine child] EC ntdll load FAILED — cross-arch child cannot start\n");
-                return;
-            }
+                CHILD_BOOT_FAIL( "EC ntdll load failed — a cross-arch child cannot start\n" );
         }
         else
         /* S1: per-child ntdll copy. The child cannot share the parent's
@@ -3375,9 +3824,13 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
     }
 
     /* Finalize init and enter PE code (calls signal_start_thread, never returns) */
+    CHILD_STAGE( "server_init_process_done" );
     server_init_process_done();
 
     /* Never reaches here — server_init_process_done calls signal_start_thread */
+    CHILD_STAGE( "after-server_init_process_done" );
+#undef CHILD_STAGE
+#undef CHILD_BOOT_FAIL
 }
 #endif
 

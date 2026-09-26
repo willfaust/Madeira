@@ -28,6 +28,17 @@ void jit_region_destroy(JITRegion *region);
 /// changes nothing if the private ownership API refuses.
 bool jit_make_region_no_footprint(void *addr, size_t size, const char *label);
 
+/// ml962: is [addr, addr+size) still MAPPED, with at least `need_prot`
+/// (VM_PROT_* bits; pass 0 to test mapped-ness only) on every region it spans?
+/// A hole anywhere in the range answers false.
+///
+/// The JIT pool outlives a single Wine session (StikJITHelper caches it for the
+/// process lifetime), so the second launch of an app run has to ask whether the
+/// pool it is about to hand back still exists rather than assume it. Cheap:
+/// mach_vm_region walks whole regions, so a healthy 512MB pool answers in one
+/// or two iterations.
+bool jit_range_is_mapped(void *addr, size_t size, int need_prot);
+
 // Get the RW (writable) pointer. Write generated code here.
 void *jit_region_rw_ptr(JITRegion *region);
 
@@ -48,6 +59,10 @@ void jit_region_invalidate(JITRegion *region, size_t offset, size_t size);
 // Check if CS_DEBUGGED flag is set (JIT execution is allowed).
 // Returns true if the debugger has attached and set the flag.
 bool jit_check_debugged(void);
+
+// ml1330: true while a debugger is attached now (P_TRACED), unlike the sticky
+// CS_DEBUGGED flag. Only an attached debugger services BRK #0xf00d.
+bool jit_debugger_attached(void);
 
 // Install SIGTRAP handler so BRK instructions don't crash the app
 // when no debugger is attached. Must be called before any jit26_* functions.
@@ -81,6 +96,15 @@ int64_t jit_test_execute_strategy2(void);
 /// is local to it; if both strip it, the loader's reliance on RWX over image
 /// pages is a real portability bug. Call after JIT is enabled.
 void jit_wx_probe(void);
+
+/// WOW64_DESIGN.md §9.2 step 0: address-space probe. Call once at startup,
+/// before any Wine/JIT allocation, right after EntitlementStatus is checked
+/// (`entitlement_present` is EntitlementStatus.extendedVA). Read-only: walks
+/// the task's free/mapped map and tries releasing 4GB-aligned reservations,
+/// releasing each immediately. No behaviour change; logs via fprintf(stderr)
+/// / the jit log callback under "[va-map]"/"[va-probe]" tags so it lands in
+/// madeira-log.txt. Budgeted at < 50ms (a few thousand mach calls).
+void mad_va_probe(bool entitlement_present);
 
 // Log callback type
 typedef void (*jit_log_callback_t)(const char *message);

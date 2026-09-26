@@ -91,6 +91,7 @@ PATCHED_FILES=(
     "winstation:$WINE_SRC/server/winstation.c:winstation.o"
     # task#32 Steam: stop_thread Mach-based context capture (iOS signal
     # suspend is dead) lives in the submodule's thread.c
+    # ml952 also puts the fastsync claim release in check_wait() here.
     "thread:$WINE_SRC/server/thread.c:thread.o"
     # ml1058: in-process synchronisation. The archive's copy was compiled with no
     # ntsync header, i.e. as the all-stubs variant; build the real one against the
@@ -166,6 +167,8 @@ REPLACEMENTS=(
     "mapping.o:mapping.o"
     "winstation.o:winstation.o"
     "thread.o:thread.o"
+    "event.o:event.o"
+    "inproc_sync.o:inproc_sync.o"
     "sock.o:sock.o"
     "object.o:object.o"
     "async.o:async.o"

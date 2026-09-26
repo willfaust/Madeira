@@ -105,6 +105,14 @@ for src in $WINE_SRC/dlls/win32u/*.c $WINE_SRC/dlls/win32u/dibdrv/*.c; do
             compile_one "$BUILD_DIR/message_ios.c" "message"
             continue
             ;;
+        syscall)
+            # Wraps upstream syscall.c and adds win32u_zero_bits(): win32u's
+            # `zero_bits` is a PROCESS global upstream but TASK-global here, so
+            # every consumer asks the calling pseudo-process instead — see the
+            # header comment in syscall_ios.c.
+            compile_one "$BUILD_DIR/syscall_ios.c" "syscall"
+            continue
+            ;;
         freetype)
             # Statically-linked freetype (build/freetype-ios). The wrapper
             # re-defines HAVE_FT2BUILD_H itself; config_ios.h's #undefs win
@@ -133,6 +141,10 @@ fi
 
 echo ""
 echo "=== Building libwin32u_unix.a ==="
+# Start from scratch: `ar r` into a leftover archive keeps the previous
+# run's merged freetype members, and the libtool merge below then adds
+# them again (observed: 214 members for 88 objects after three runs).
+rm -f "$OBJ_DIR/libwin32u_unix.a"
 ar rcs "$OBJ_DIR/libwin32u_unix.a" "$OBJ_DIR"/*.o
 
 # Merge the static freetype so the app link needs no project changes.

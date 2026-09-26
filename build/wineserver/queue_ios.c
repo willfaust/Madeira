@@ -58,6 +58,38 @@ enum message_kind { SEND_MESSAGE, POST_MESSAGE };
 /* list of processes registered for rawinput in the input desktop */
 static struct list rawinput_processes = LIST_INIT(rawinput_processes);
 
+/* ml667 - [relmouse] counters.
+ *
+ * Relative pointer motion has TWO consumers with completely different routing
+ * rules, and only one of them was visible in any existing log line:
+ *
+ *   WM_MOUSEMOVE  is routed by HIT TEST (find_hardware_message_window falls
+ *                 back to shallow_window_from_point), so it keeps working for
+ *                 as long as the game's window is under the cursor.
+ *   WM_INPUT      is routed by FOREGROUND (get_foreground_thread) and by
+ *                 process membership of rawinput_processes, so it can die
+ *                 silently and permanently while the cursor keeps moving.
+ *
+ * That asymmetry is exactly the reported symptom - "the pause-menu cursor
+ * still moves but the camera stopped turning" - and nothing in the log could
+ * tell the two apart: [winios] drain/drv_post_mouse only prove the delta left
+ * the app. Every field below names a stage that can drop it. Emitted from
+ * queue_mouse_message, at most once every 5s, and only while RELATIVE moves
+ * are actually arriving - i.e. only in Relative pointer mode. */
+static struct
+{
+    unsigned int rel_in;         /* relative MOUSEEVENTF_MOVE inputs received */
+    unsigned int abs_in;         /* absolute moves received */
+    int          rel_dx, rel_dy; /* accumulated relative motion */
+    unsigned int move_q;         /* WM_MOUSEMOVE queued/merged to a thread */
+    unsigned int raw_disp;       /* dispatch_rawinput_message calls (= had a foreground) */
+    unsigned int raw_q;          /* WM_INPUT actually queued to a thread */
+    unsigned int raw_no_fg;      /* mouse events with NO foreground thread at all */
+    unsigned int raw_no_dev;     /* process in the list but no matching rawinput device */
+    unsigned int raw_not_fg;     /* not the foreground process and no RIDEV_INPUTSINK */
+    unsigned int raw_no_win;     /* dropped in queue_hardware_message: no target window */
+} relmouse;
+
 struct message_result
 {
     struct list            sender_entry;  /* entry in sender list */
@@ -1948,11 +1980,17 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
 
     if (!win || !thread || (flags & RIDEV_NOLEGACY))
     {
+        if (msg->msg == WM_INPUT) relmouse.raw_no_win++;     /* ml667 */
         if (input && !(flags & RIDEV_NOLEGACY)) update_thread_input_key_state( input, msg->msg, msg->wparam );
         free_message( msg );
         if (thread) release_object( thread );
         return;
     }
+
+    /* ml667: counted here, past every routing decision - this is the last point
+     * at which a message can still be dropped without a trace. */
+    if (msg->msg == WM_INPUT) relmouse.raw_q++;
+    else if (msg->msg == WM_MOUSEMOVE) relmouse.move_q++;
 
     if (win != msg->win) always_queue = 1;
     if (!always_queue || merge_message( input, msg )) free_message( msg );
@@ -2007,13 +2045,46 @@ static int send_hook_ll_message( struct desktop *desktop, struct message *hardwa
 /* get the foreground thread for a desktop and a window receiving input */
 static struct thread *get_foreground_thread( struct desktop *desktop, user_handle_t window )
 {
+    struct thread *thread;
+    user_handle_t target = 0;
+
     /* if desktop has no foreground process, assume the receiving window is */
     if (desktop->foreground_input)
     {
         input_shm_t *input_shm = desktop->foreground_input->shared;
-        if (!(window = input_shm->focus)) window = input_shm->active;
+        if (!(target = input_shm->focus)) target = input_shm->active;
     }
-    if (window) return get_window_thread( window );
+
+    /* ml667: THE RAW-INPUT CAMERA DIES HERE AND THE CURSOR DOES NOT.
+     *
+     * Returning NULL means queue_mouse_message / queue_keyboard_message skip
+     * dispatch_rawinput_message entirely: no WM_INPUT for anyone, so a game
+     * reading the camera through raw input or DirectInput stops turning - while
+     * WM_MOUSEMOVE keeps flowing, because queue_hardware_message routes that by
+     * hit test and not by foreground. Menus keep working, mouse-look does not.
+     * That is the reported failure exactly, and it is silent: no error, no
+     * status, nothing in any log.
+     *
+     * Three ordinary events leave this function with nothing:
+     *   - DECL_HANDLER(set_foreground_window) stores foreground_input = NULL
+     *     when the window made foreground IS the desktop window;
+     *   - thread_input_destroy() clears foreground_input when the foreground
+     *     thread exits, and NOTHING ever restores it;
+     *   - a foreground thread input whose focus AND active are both 0 (a window
+     *     was destroyed - see thread_input_cleanup_window).
+     * Upstream survives all three because the driver passes the window the
+     * event landed on. Ours cannot: the iOS driver deliberately posts with
+     * hwnd = NULL (driver_ios.c) so the legacy path hit-tests, so the
+     * "assume the receiving window is" fallback promised by the comment above
+     * has had nothing to fall back to.
+     *
+     * Give it the same ground truth the legacy path uses, in order: the
+     * caller's window, then the window the cursor is actually over. This can
+     * only ever ADD a foreground where there was none - when focus or active
+     * resolve, they still win. */
+    if (!target) target = window;
+    if (!target) target = desktop->cursor_win;
+    if (target && (thread = get_window_thread( target ))) return thread;
     return NULL;
 }
 
@@ -2179,12 +2250,20 @@ static void queue_rawinput_message( struct desktop *desktop, struct process *pro
         data_size = offsetof(RAWHID, bRawData[0]);
         report_size = raw_msg->data.hid.dwCount * raw_msg->data.hid.dwSizeHid;
     }
-    if (!device) return;
+    if (!device)
+    {
+        if (raw_msg->rawinput.type == RIM_TYPEMOUSE) relmouse.raw_no_dev++;
+        return;
+    }
 
     if (raw_msg->message == WM_INPUT_DEVICE_CHANGE && !(device->flags & RIDEV_DEVNOTIFY)) return;
     if (process != raw_msg->foreground->process)
     {
-        if (raw_msg->message == WM_INPUT && !(device->flags & RIDEV_INPUTSINK)) return;
+        if (raw_msg->message == WM_INPUT && !(device->flags & RIDEV_INPUTSINK))
+        {
+            if (raw_msg->rawinput.type == RIM_TYPEMOUSE) relmouse.raw_not_fg++;
+            return;
+        }
         wparam = RIM_INPUTSINK;
     }
 
@@ -2215,6 +2294,84 @@ static void dispatch_rawinput_message( struct desktop *desktop, struct rawinput_
 
     LIST_FOR_EACH_ENTRY( process, &rawinput_processes, struct process, rawinput_entry )
         queue_rawinput_message( desktop, process, raw_msg );
+}
+
+/* ml667 - one line that names the stage where a relative delta died.
+ *
+ * Read it like a pipeline: rel_in is what the app posted and the server
+ * received; move_q is what became a cursor move; raw_disp / raw_q are what
+ * became WM_INPUT. The interesting failure is rel_in climbing while raw_q
+ * stands still - then the drop reason says which gate closed:
+ *
+ *   nofg   get_foreground_thread() returned NULL: the desktop has no
+ *          foreground input and no cursor window. Nothing gets WM_INPUT.
+ *   nodev  the process is in rawinput_processes but has no mouse device
+ *          registered any more - a RIDEV_REMOVE (dinput Unacquire) that was
+ *          never undone.
+ *   notfg  the raw-input process is not the foreground process and did not
+ *          ask for RIDEV_INPUTSINK - foreground moved to another process.
+ *   nowin  the WM_INPUT had no target window (hwndTarget destroyed, or a
+ *          NULL target with focus == 0).
+ *
+ * and rawprocs == 0 means the game's process fell out of the rawinput list
+ * entirely, which no other gate would ever report. */
+static void relmouse_report( struct desktop *desktop )
+{
+    static unsigned int next_at;
+
+    const desktop_shm_t *desktop_shm = desktop->shared;
+    const struct rawinput_device *dev = NULL;
+    user_handle_t focus = 0, active = 0;
+    unsigned int now = get_tick_count();
+    unsigned int procs = 0, devs = 0;
+    struct thread *cursor_thread;
+    struct process *process;
+    int self_listed = -1;
+    unsigned int cur_pid = 0, cur_tid = 0;
+
+    if (next_at && (int)(now - next_at) < 0) return;
+    next_at = now + 5000;
+
+    if (desktop->foreground_input)
+    {
+        const input_shm_t *input_shm = desktop->foreground_input->shared;
+        focus  = input_shm->focus;
+        active = input_shm->active;
+    }
+
+    LIST_FOR_EACH_ENTRY( process, &rawinput_processes, struct process, rawinput_entry ) procs++;
+
+    /* the window under the cursor is the game window in a full-screen title;
+     * report ITS process's raw-input registration, which is the one that has
+     * to be alive for mouse-look to work. */
+    if ((cursor_thread = get_window_thread( desktop->cursor_win )))
+    {
+        struct process *cp = cursor_thread->process;
+        cur_tid = get_thread_id( cursor_thread );
+        cur_pid = get_process_id( cp );
+        dev  = cp->rawinput_mouse;
+        devs = cp->rawinput_device_count;
+        self_listed = (cp->rawinput_entry.next != &cp->rawinput_entry);
+        release_object( cursor_thread );
+    }
+
+    fprintf( stderr, "[relmouse] ml667 rel_in=%u acc=(%d,%d) abs_in=%u | move_q=%u "
+             "raw: disp=%u q=%u drop(nofg=%u nodev=%u notfg=%u nowin=%u) | "
+             "cursor=(%d,%d) clip={%d,%d,%d,%d} cursor_win=%08x | "
+             "fg_input=%p focus=%08x active=%08x | "
+             "rawprocs=%u cursor_proc(pid=%04x tid=%04x listed=%d devs=%u "
+             "mouse_flags=0x%x target=%08x)\n",
+             relmouse.rel_in, relmouse.rel_dx, relmouse.rel_dy, relmouse.abs_in,
+             relmouse.move_q, relmouse.raw_disp, relmouse.raw_q,
+             relmouse.raw_no_fg, relmouse.raw_no_dev, relmouse.raw_not_fg, relmouse.raw_no_win,
+             desktop_shm->cursor.x, desktop_shm->cursor.y,
+             desktop_shm->cursor.clip.left, desktop_shm->cursor.clip.top,
+             desktop_shm->cursor.clip.right, desktop_shm->cursor.clip.bottom,
+             desktop->cursor_win,
+             (void *)desktop->foreground_input, focus, active,
+             procs, cur_pid, cur_tid, self_listed, devs,
+             dev ? dev->flags : 0, dev ? dev->target : 0 );
+    fflush( stderr );
 }
 
 /* queue a hardware message for a mouse event */
@@ -2279,6 +2436,20 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         y = desktop_shm->cursor.y;
     }
 
+    /* ml667: account for this event BEFORE the routing decisions below, so the
+     * report can say "N deltas arrived, 0 became WM_INPUT" instead of leaving
+     * the difference to be inferred. */
+    if (input->mouse.flags & MOUSEEVENTF_MOVE)
+    {
+        if (input->mouse.flags & MOUSEEVENTF_ABSOLUTE) relmouse.abs_in++;
+        else
+        {
+            relmouse.rel_in++;
+            relmouse.rel_dx += input->mouse.x;
+            relmouse.rel_dy += input->mouse.y;
+        }
+    }
+
     if ((foreground = get_foreground_thread( desktop, win )))
     {
         memset( &raw_msg, 0, sizeof(raw_msg) );
@@ -2290,9 +2461,14 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         rawmouse_init( &raw_msg.rawinput, &raw_msg.data.mouse, x - desktop_shm->cursor.x, y - desktop_shm->cursor.y,
                        raw_msg.flags, input->mouse.data, input->mouse.info );
 
+        relmouse.raw_disp++;
         dispatch_rawinput_message( desktop, &raw_msg );
         release_object( foreground );
     }
+    else relmouse.raw_no_fg++;
+
+    if (!(input->mouse.flags & MOUSEEVENTF_ABSOLUTE) && (input->mouse.flags & MOUSEEVENTF_MOVE))
+        relmouse_report( desktop );
 
     for (i = 0; i < ARRAY_SIZE( messages ); i++)
     {
@@ -4201,6 +4377,28 @@ DECL_HANDLER(update_rawinput_devices)
 
         release_object( desktop );
     }
+
+    /* ml667: RE-REGISTRATION MUST NOT BE ABLE TO FAIL SILENTLY.
+     *
+     * The walk above only re-arms a process that owns a thread on the input
+     * desktop's THREAD LIST, and it is the only thing that ever puts a process
+     * back into rawinput_processes after the !size branch above took it out.
+     *
+     * dinput takes that branch routinely: input_thread_update_device_list()
+     * re-registers with RIDEV_REMOVE as soon as the last raw-input device is
+     * unacquired - which is what a pause menu does - and registers again on
+     * the next Acquire. It does all of that from its own hidden input thread
+     * (di_em_win). If that thread is not on the input desktop's list, or the
+     * visible winstation / input desktop lookup comes back empty at that
+     * instant, the process is simply never re-added, dispatch_rawinput_message
+     * skips it forever, and WM_INPUT is gone for the rest of the session while
+     * WM_MOUSEMOVE carries on: mouse-look dead, menus fine.
+     *
+     * A process that just asked for raw input is by definition a process that
+     * wants raw input, so if the walk did not cover it, cover it here. Guarded
+     * on membership so this only ever fires in the case that was broken. */
+    if (process->rawinput_entry.next == &process->rawinput_entry)
+        set_rawinput_process( process, 1 );
 }
 
 DECL_HANDLER(set_keyboard_repeat)
@@ -4498,6 +4696,385 @@ void ios_dump_stuck_waits(void)
             }
             release_object( obj );
         }
+    }
+    fflush( stderr );
+}
+
+/* ============================================================
+ * iOS-Madeira ml1060: [lost-wake] -- a SERVER-SIDE lost-wakeup detector that
+ * also cures what it finds, and [wait-census], which makes a hang name the
+ * object everybody is waiting for.
+ *
+ * WHY THE DETECTOR HAD TO MOVE TO THIS SIDE.
+ * ml982 put the watchdog in the CLIENT (madeira_fast_watched_wait in
+ * ntdll/unix/sync.c): turn an INFINITE single-object wait into a heartbeat,
+ * and if the server says "not signaled" while the shared cell says "signaled",
+ * demote the object. That is the right instrument for the thread that is
+ * stuck, and it had one structural blind spot that a device log made
+ * unmissable: it only ran for NON-ALERTABLE waits. A managed-runtime title
+ * issues WaitForSingleObjectEx( h, INFINITE, TRUE ) for every handoff, so in
+ * log k67 all 56429 infinite single-object waits per 10 s arrived at the
+ * server with timeout == NULL, the heartbeat never ran once, and desync=0
+ * meant only that the detector was switched off for every thread that could
+ * hang. ml1060 removes that gate as well (see madeira_fast_watched_wait),
+ * but a client-side probe can only ever see the ONE object the calling thread
+ * is blocked on, and only when that thread's own code path reaches the probe.
+ *
+ * This one has neither limitation. The wineserver is a thread in the same
+ * Mach task; it owns every wait queue and can read every cell. It sees:
+ *
+ *   - the CLIENT's view, from the ml585 wait registry (ios_wait_reg, published
+ *     on entry to server_wait and cleared on exit, so a wait that never
+ *     returns is exactly the case it can describe);
+ *   - the SERVER's view, from ios_thread_wait_links(), which answers "is this
+ *     thread's active wait really queued on this object";
+ *   - the CELL, which is the shared word both sides transact on.
+ *
+ * WHAT IS REPORTED. Nothing, unless all four of these hold and hold across
+ * TWO consecutive scans of the same wait (same registry sequence number, same
+ * handle, same cell generation):
+ *
+ *   (1) a thread has been inside one server_wait for more than
+ *       MADEIRA_LOSTWAKE_SECS (5) seconds,
+ *   (2) on exactly ONE object, which is cell-backed (an event or a semaphore;
+ *       for anything else this prints nothing at all),
+ *   (3) the server really has that thread queued on that object, and the
+ *       thread is not suspended (a suspended thread cannot acquire a lock, so
+ *       its queued-ness is not evidence of anything),
+ *   (4) the cell says a waiter could be released right now
+ *       (madeira_cell_signalled(): count > 0, or SET).
+ *
+ * Requiring two scans is what separates "a token appeared a microsecond ago
+ * and the wake is in flight" from "this token has been sitting there for five
+ * seconds with a queued thread next to it".
+ *
+ * AND THEN IT CURES IT. wake_up( sync, 0 ) is exactly what a release does:
+ * it re-runs check_wait() for every queued thread, which CAS-claims a token
+ * out of the cell and refuses when there is none. It therefore CANNOT mint a
+ * token or release a thread that is not entitled to one -- the worst a false
+ * positive can do is deliver a token this thread was going to get anyway, one
+ * scan early. That is the direction this whole mechanism is supposed to fail
+ * in: a lost wakeup becomes a logged five-second stutter instead of a hang.
+ *
+ * COST. One pass over 512 registry slots every 5 s, no allocation, no locks,
+ * and for the overwhelmingly common case (an even sequence number = the thread
+ * is not in a wait) two loads per slot. It runs in the QUIET build by design:
+ * a detector that has to be switched on is a detector that is off during the
+ * event it exists for, which is the lesson of 2026-09-30.
+ * ============================================================ */
+
+#include "ios_fastsync.h"
+
+/* Differenced by the [perf] line in build/ntdll-unix/server_ios.c. Same
+ * cross-archive direction as madeira_sync_cells: defined here, referenced
+ * there. */
+unsigned int madeira_lostwake_count;
+
+#define MADEIRA_LOSTWAKE_SECS      5
+#define MADEIRA_LOSTWAKE_MAX_LINES 64
+#define MADEIRA_CENSUS_OBJS        64
+
+struct ios_lw_memo
+{
+    unsigned int seq;          /* registry sequence: the identity of ONE wait */
+    unsigned int tid;
+    unsigned int handle;
+    unsigned int gen;          /* cell generation, so a recycle is not a match */
+};
+
+struct ios_lw_find { unsigned int tid; struct thread *found; };
+
+static int ios_lw_match( struct process *process, void *arg )
+{
+    struct ios_lw_find *f = arg;
+    struct thread *t;
+    LIST_FOR_EACH_ENTRY( t, &process->thread_list, struct thread, proc_entry )
+        if (t->id == f->tid) { f->found = t; return 1; }
+    return 0;
+}
+
+/* Resolve a handle's object to its cell, if it has one. Returns the index, or
+ * -1 for "not a cell-backed object" -- which is the silent case by design: a
+ * thread parked on a mutex, a timer, a process or a socket is not something
+ * this detector knows anything about. */
+static int ios_lw_cell_of( struct object *obj, unsigned int *kind, unsigned int *manual )
+{
+    int man = 0, idx = madeira_event_cell_index( obj, &man );
+
+    if (idx >= 0) { *kind = MADEIRA_CELL_KIND_EVENT; *manual = (unsigned int)!!man; return idx; }
+    if ((idx = madeira_semaphore_cell_index( obj )) >= 0)
+    {
+        *kind = MADEIRA_CELL_KIND_SEM;
+        *manual = 0;
+        return idx;
+    }
+    return -1;
+}
+
+static unsigned long long ios_lw_now_ns( void )
+{
+    struct timespec ts;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    return (unsigned long long)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+/* One scan. Called from main_loop (fd_ios.c) roughly every 5 s, at the point
+ * where the server has just recomputed its timers, i.e. with current_time and
+ * monotonic_time fresh -- check_wait() reads both. Calling wake_up() from
+ * there is exactly as safe as an expiring wait timeout, which is the same call
+ * from the same place. */
+void ios_scan_lost_wakeups( void )
+{
+    static struct ios_lw_memo memo[IOS_WAITREG_SLOTS];
+    static unsigned int printed;
+    static int secs = -1;
+    unsigned long long now_ns;
+    int i;
+
+    if (secs < 0)
+    {
+        const char *e = getenv( "MADEIRA_LOSTWAKE_SECS" );
+        secs = (e && *e) ? atoi( e ) : MADEIRA_LOSTWAKE_SECS;
+        if (secs < 1) secs = 1;
+    }
+    now_ns = ios_lw_now_ns();
+
+    for (i = 0; i < IOS_WAITREG_SLOTS; i++)
+    {
+        struct ios_wait_entry *e = &ios_wait_reg[i];
+        unsigned int s0 = e->seq, s1, handle, tid, flags;
+        unsigned int kind = 0, manual = 0, gen;
+        struct madeira_sync_cell *cell;
+        struct ios_lw_find f;
+        struct object *obj, *sync;
+        unsigned long long t0, age_ms;
+        uint64_t sg;
+        int idx, st, count;
+
+        if (!(s0 & 1)) { memo[i].seq = 0; continue; }   /* not in a wait */
+
+        t0     = e->t0_ns;
+        count  = e->count;
+        handle = e->handles[0];
+        tid    = e->wine_tid;
+        flags  = e->flags;
+        __sync_synchronize();
+        s1 = e->seq;
+        if (s1 != s0) { memo[i].seq = 0; continue; }     /* it moved: not stuck */
+
+        if (count != 1 || !handle || !t0 || now_ns < t0) { memo[i].seq = 0; continue; }
+        age_ms = (now_ns - t0) / 1000000ull;
+        if (age_ms < (unsigned long long)secs * 1000ull) { memo[i].seq = 0; continue; }
+
+        f.tid = tid; f.found = NULL;
+        enum_processes( ios_lw_match, &f );
+        if (!f.found) { memo[i].seq = 0; continue; }
+        if (f.found->suspend) { memo[i].seq = 0; continue; }
+
+        if (!(obj = get_handle_obj( f.found->process, handle, 0, NULL )))
+        {
+            clear_error();
+            memo[i].seq = 0;
+            continue;
+        }
+        if ((idx = ios_lw_cell_of( obj, &kind, &manual )) < 0)
+        {
+            release_object( obj );                       /* not a cell object */
+            memo[i].seq = 0;
+            continue;
+        }
+        cell = &madeira_sync_cells[idx];
+        sg   = __atomic_load_n( &cell->sg, __ATOMIC_SEQ_CST );
+        gen  = MADEIRA_SG_GEN( sg );
+        st   = MADEIRA_SG_STATE( sg );
+
+        /* The server must really have this thread queued on this object. A
+         * populated queue somewhere else proves nothing (ml687), and a client
+         * that has published a wait the server has already ended is a
+         * different bug with a different name. */
+        if (!madeira_cell_signalled( kind, manual, st ) ||
+            ios_thread_wait_links( f.found, obj ) != 1)
+        {
+            release_object( obj );
+            memo[i].seq = 0;
+            continue;
+        }
+
+        /* Two consecutive scans, same wait, same cell generation. */
+        if (memo[i].seq != s0 || memo[i].tid != tid ||
+            memo[i].handle != handle || memo[i].gen != gen)
+        {
+            memo[i].seq = s0; memo[i].tid = tid;
+            memo[i].handle = handle; memo[i].gen = gen;
+            release_object( obj );
+            continue;
+        }
+
+        __atomic_add_fetch( &madeira_lostwake_count, 1, __ATOMIC_RELAXED );
+        if (printed < MADEIRA_LOSTWAKE_MAX_LINES)
+        {
+            printed++;
+            fprintf( stderr,
+                     "[lost-wake] ml1060 #%u obj=%s cell=%d gen=%u %s=%d waiters=%d "
+                     "srv_waiters=%d manual=%u tid=%04x handle=%08x alertable=%d "
+                     "waited=%llu.%03llus - the cell says this object can release a waiter "
+                     "and the server has had this thread queued on it across two scans; "
+                     "waking its queue now. MADEIRA_FASTSYNC_SEM=0 / MADEIRA_FASTSYNC=cells "
+                     "/ MADEIRA_FASTSYNC=0 bisect the fast path.%s\n",
+                     __atomic_load_n( &madeira_lostwake_count, __ATOMIC_RELAXED ),
+                     kind == MADEIRA_CELL_KIND_SEM ? "sem" : "event",
+                     idx, gen,
+                     kind == MADEIRA_CELL_KIND_SEM ? "count" : "state", st,
+                     __atomic_load_n( &cell->waiters, __ATOMIC_RELAXED ),
+                     __atomic_load_n( &cell->srv_waiters, __ATOMIC_RELAXED ),
+                     manual, tid, handle, !!(flags & SELECT_ALERTABLE),
+                     age_ms / 1000ull, age_ms % 1000ull,
+                     printed == MADEIRA_LOSTWAKE_MAX_LINES
+                         ? "  (last line; further occurrences are counted in [perf] lostwake= only)"
+                         : "" );
+            fflush( stderr );
+        }
+
+        /* THE CURE. Identical to what a release does, and it cannot
+         * over-deliver: check_wait() CASes a token out of the cell per thread
+         * and refuses when there is none. */
+        sync = get_obj_sync( obj );
+        if (sync)
+        {
+            wake_up( sync, 0 );
+            release_object( sync );
+        }
+        release_object( obj );
+        memo[i].seq = 0;       /* a fresh pair of scans before reporting again */
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * [wait-census]: under MADEIRA_DIAG=1, once per ~10 s, how many threads are
+ * blocked, on what kind of object, and which three objects have the most
+ * waiters -- with each one's cell state. A hang then names what everybody is
+ * waiting for instead of leaving it to be inferred from a stack sample.
+ * ---------------------------------------------------------------------- */
+
+struct ios_census_obj
+{
+    struct object *obj;
+    struct process *proc;
+    unsigned int handle;
+    unsigned int waiters;
+};
+
+void ios_wait_census( void )
+{
+    struct ios_census_obj tab[MADEIRA_CENSUS_OBJS];
+    unsigned int ntab = 0, blocked = 0, single = 0, alertable = 0, multi = 0, other_op = 0;
+    unsigned int n_event = 0, n_sem = 0, n_nocell = 0, n_unres = 0;
+    unsigned long long now_ns = ios_lw_now_ns(), oldest_ms = 0;
+    unsigned int oldest_tid = 0;
+    int i, k, slot;
+
+    for (i = 0; i < IOS_WAITREG_SLOTS; i++)
+    {
+        struct ios_wait_entry *e = &ios_wait_reg[i];
+        unsigned int s0 = e->seq, handle, tid, flags;
+        unsigned long long t0, age_ms;
+        struct ios_lw_find f;
+        struct object *obj;
+        unsigned int kind = 0, manual = 0;
+        int count;
+
+        if (!(s0 & 1)) continue;
+        t0 = e->t0_ns; count = e->count; handle = e->handles[0];
+        tid = e->wine_tid; flags = e->flags;
+        __sync_synchronize();
+        if (e->seq != s0) continue;
+
+        blocked++;
+        if (flags & SELECT_ALERTABLE) alertable++;
+        if (count == 1) single++;
+        else if (count > 1) { multi++; continue; }
+        else { other_op++; continue; }
+
+        if (t0 && now_ns >= t0)
+        {
+            age_ms = (now_ns - t0) / 1000000ull;
+            if (age_ms > oldest_ms) { oldest_ms = age_ms; oldest_tid = tid; }
+        }
+
+        f.tid = tid; f.found = NULL;
+        enum_processes( ios_lw_match, &f );
+        if (!f.found) { n_unres++; continue; }
+        if (!(obj = get_handle_obj( f.found->process, handle, 0, NULL )))
+        {
+            clear_error();
+            n_unres++;
+            continue;
+        }
+        if (ios_lw_cell_of( obj, &kind, &manual ) < 0) n_nocell++;
+        else if (kind == MADEIRA_CELL_KIND_SEM) n_sem++;
+        else n_event++;
+
+        for (k = 0, slot = -1; k < (int)ntab; k++)
+            if (tab[k].obj == obj) { slot = k; break; }
+        if (slot < 0 && ntab < MADEIRA_CENSUS_OBJS)
+        {
+            slot = (int)ntab++;
+            tab[slot].obj = obj; tab[slot].proc = f.found->process;
+            tab[slot].handle = handle; tab[slot].waiters = 0;
+        }
+        if (slot >= 0) tab[slot].waiters++;
+        /* The pointer is kept only as a tally key; nothing can destroy it while
+         * this runs, because the server is single-threaded and no request is in
+         * flight. The top-3 pass below re-resolves the handle for a real
+         * reference before it touches anything. */
+        release_object( obj );
+    }
+
+    fprintf( stderr, "[wait-census] ml1060 blocked=%u (single=%u multi=%u other=%u alertable=%u) "
+             "objects: event=%u sem=%u no-cell=%u unresolved=%u | oldest=%llu.%03llus tid=%04x\n",
+             blocked, single, multi, other_op, alertable,
+             n_event, n_sem, n_nocell, n_unres,
+             oldest_ms / 1000ull, oldest_ms % 1000ull, oldest_tid );
+
+    for (k = 0; k < 3; k++)
+    {
+        int best = -1, j;
+        struct object *obj;
+        unsigned int kind = 0, manual = 0;
+        int idx;
+
+        for (j = 0; j < (int)ntab; j++)
+            if (tab[j].waiters && (best < 0 || tab[j].waiters > tab[best].waiters)) best = j;
+        if (best < 0 || !tab[best].waiters) break;
+
+        if ((obj = get_handle_obj( tab[best].proc, tab[best].handle, 0, NULL )))
+        {
+            fprintf( stderr, "[wait-census]   #%d waiters=%u handle=%08x obj=%p ",
+                     k + 1, tab[best].waiters, tab[best].handle, obj );
+            if ((idx = ios_lw_cell_of( obj, &kind, &manual )) >= 0)
+            {
+                uint64_t sg = __atomic_load_n( &madeira_sync_cells[idx].sg, __ATOMIC_SEQ_CST );
+                fprintf( stderr, "%s cell=%d gen=%u %s=%d waiters=%d srv_waiters=%d signalled=%d\n",
+                         kind == MADEIRA_CELL_KIND_SEM ? "sem" : "event", idx,
+                         MADEIRA_SG_GEN( sg ),
+                         kind == MADEIRA_CELL_KIND_SEM ? "count" : "state",
+                         MADEIRA_SG_STATE( sg ),
+                         __atomic_load_n( &madeira_sync_cells[idx].waiters, __ATOMIC_RELAXED ),
+                         __atomic_load_n( &madeira_sync_cells[idx].srv_waiters, __ATOMIC_RELAXED ),
+                         madeira_cell_signalled( kind, manual, MADEIRA_SG_STATE( sg ) ) );
+            }
+            else
+            {
+                unsigned int c;
+                fprintf( stderr, "no-cell type=" );
+                for (c = 0; c < obj->ops->type->name.len / sizeof(WCHAR); c++)
+                    fputc( (char)obj->ops->type->name.str[c], stderr );
+                fputc( '\n', stderr );
+            }
+            release_object( obj );
+        }
+        else clear_error();
+        tab[best].waiters = 0;
     }
     fflush( stderr );
 }

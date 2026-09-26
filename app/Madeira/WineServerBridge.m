@@ -66,12 +66,21 @@ extern int debug_level;
 
 // Stop flag checked by wineserver event loop (fd_ios.c)
 volatile int g_wineserver_should_stop = 0;
+int g_wineserver_session_stop = 0;
+int g_wineserver_root_retired = 0;
 
 static pthread_t g_wineserver_thread;
-static volatile int g_wineserver_running = 0;
+static int g_wineserver_running = 0;
 static char *g_prefix_path = NULL;
 
+static void wineserver_thread_finished(void *arg) {
+    (void)arg;
+    /* Server timeout/fatal paths use pthread_exit, skipping ordinary returns. */
+    __atomic_store_n(&g_wineserver_running, 0, __ATOMIC_RELEASE);
+}
+
 static void *wineserver_thread_func(void *arg) {
+    pthread_cleanup_push(wineserver_thread_finished, NULL);
     @autoreleasepool {
         // Set up file-based logging
         NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -124,13 +133,13 @@ static void *wineserver_thread_func(void *arg) {
         int ret = wineserver_main(argc, argv);
         wine_log_msg("wineserver_main returned: %d", ret);
 
-        g_wineserver_running = 0;
     }
+    pthread_cleanup_pop(1);
     return NULL;
 }
 
 int wineserver_start(const char *prefix_path) {
-    if (g_wineserver_running) {
+    if (__atomic_load_n(&g_wineserver_running, __ATOMIC_ACQUIRE)) {
         wine_log_msg("Wineserver already running");
         return 0;
     }
@@ -151,7 +160,21 @@ int wineserver_start(const char *prefix_path) {
         madeira_seed_prefix_if_needed(prefix_path);
     }
 
-    g_wineserver_running = 1;
+    __atomic_store_n(&g_wineserver_should_stop, 0, __ATOMIC_RELEASE);
+    /* Profiles have already been imported. Refresh both halves together;
+     * never flip the cell protocol underneath a running guest session. */
+    extern int wine_process_is_running(void);
+    const char *reload = getenv("MADEIRA_SESSION_SYNC_RELOAD");
+    if (!wine_process_is_running() && (!reload || strcmp(reload, "0"))) {
+        extern void madeira_fast_reload_session(void);
+        extern void madeira_fastsync_reload_session(void);
+        madeira_fast_reload_session();
+        madeira_fastsync_reload_session();
+        wine_log_msg("[session-policy] ml1170 synchronization settings refreshed before launch");
+    }
+    __atomic_store_n(&g_wineserver_session_stop, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wineserver_root_retired, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wineserver_running, 1, __ATOMIC_RELEASE);
 
     /* 2026-07-04 perf: the wineserver thread used to be created at LOWERED
      * priority (sched_priority 20, "so wineserver doesn't starve the main
@@ -170,7 +193,7 @@ int wineserver_start(const char *prefix_path) {
     pthread_attr_destroy(&attr);
     if (ret != 0) {
         wine_log_msg("Failed to create wineserver thread: %d", ret);
-        g_wineserver_running = 0;
+        __atomic_store_n(&g_wineserver_running, 0, __ATOMIC_RELEASE);
         return -1;
     }
 
@@ -180,19 +203,45 @@ int wineserver_start(const char *prefix_path) {
 }
 
 int wineserver_is_running(void) {
-    return g_wineserver_running;
+    return __atomic_load_n(&g_wineserver_running, __ATOMIC_ACQUIRE);
+}
+
+int wineserver_request_session_stop(void) {
+    const char *value = getenv("MADEIRA_SESSION_STOP");
+    if (!wineserver_is_running() || (value && !strcmp(value, "0"))) return 0;
+    __atomic_store_n(&g_wineserver_session_stop, 1, __ATOMIC_RELEASE);
+    wine_log_msg("[session-stop] ml1150 queued guest termination");
+    return 1;
 }
 
 void wineserver_stop(void) {
     wine_log_msg("Wineserver stop requested");
-    g_wineserver_should_stop = 1;
+    __atomic_store_n(&g_wineserver_should_stop, 1, __ATOMIC_RELEASE);
     // Join the wineserver thread to ensure it actually stops before we return.
     // This prevents iOS from killing us for excessive CPU from a spinning wineserver.
     pthread_t t = g_wineserver_thread;
     if (t) {
         wine_log_msg("Joining wineserver thread...");
         pthread_join(t, NULL);
+        g_wineserver_thread = 0;
         wine_log_msg("Wineserver thread joined");
     }
-    g_wineserver_running = 0;
+    __atomic_store_n(&g_wineserver_running, 0, __ATOMIC_RELEASE);
+}
+
+void wineserver_finish_session(void) {
+    const char *value = getenv("MADEIRA_SESSION_DESCENDANTS");
+    if (value && !strcmp(value, "0")) {
+        wine_log_msg("[session-handoff] ml1220 descendant retention disabled");
+        wineserver_stop();
+        return;
+    }
+    wine_log_msg("[session-handoff] ml1220 original client retired; waiting for applications");
+    __atomic_store_n(&g_wineserver_root_retired, 1, __ATOMIC_RELEASE);
+    pthread_t thread = g_wineserver_thread;
+    if (thread) {
+        pthread_join(thread, NULL);
+        g_wineserver_thread = 0;
+    }
+    wine_log_msg("[session-handoff] ml1220 session server joined");
 }
