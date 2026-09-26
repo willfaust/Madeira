@@ -95,12 +95,34 @@ echo "=== Building crypto/network unixlibs ==="
 compile_one "$CRYPTO_DIR/gnutls_symtab_ios.c" "gnutls_symtab_ios"
 compile_unixlib "$WINE_SRC/dlls/ws2_32/unixlib.c" "ws2_32_unixlib" "ws2_32" \
     -I"$WINE_SRC/dlls/ws2_32"
+# madeira-gnutls-unixlibs: the host configure cannot detect an iOS arm64 static
+# archive, so config.h leaves HAVE_GNUTLS_CIPHER_INIT and SONAME_LIBGNUTLS
+# undefined and all three sources below compile to empty objects. The iOS chain
+# links GnuTLS statically regardless (see ios_gnutls_shim.h), so define them
+# here -- on these three translation units only, because the host build really
+# does not have GnuTLS and config.h should keep saying so.
+#
+# Warns rather than fails when the prefix is absent, so a tree that has never
+# run build/gnutls-ios/build.sh still builds exactly as it does today -- it
+# just keeps getting the empty objects, and now says so instead of leaving it
+# to be discovered by a program whose HTTPS request goes nowhere.
+GNUTLS_DEFS=()
+if [ -f "$GNUTLS_PREFIX/lib/libgnutls.a" ]; then
+    GNUTLS_DEFS=(-DHAVE_GNUTLS_CIPHER_INIT '-DSONAME_LIBGNUTLS="libgnutls.so.30"')
+else
+    echo "WARNING: $GNUTLS_PREFIX/lib/libgnutls.a is missing, so bcrypt," >&2
+    echo "         secur32 and crypt32 compile to empty objects and guest-side" >&2
+    echo "         TLS will not work. Run build/gnutls-ios/build.sh to fix." >&2
+fi
+
 compile_unixlib "$WINE_SRC/dlls/bcrypt/gnutls.c" "bcrypt_unixlib" "bcrypt" \
     -I"$WINE_SRC/dlls/bcrypt" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
 compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "secur32" \
     -I"$WINE_SRC/dlls/secur32" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
 # iOS-Madeira ml494 (#61 text wall): dwrite had NO unixlib, so every
 # __wine_unix_call from dwrite.dll failed and get_glyph_bbox never ran —
 # every glyph run reported an EMPTY bbox and Chromium drew no text at all.
@@ -112,7 +134,8 @@ compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
     -I"$REPO_ROOT/wine/build-arm64ec/include"
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
