@@ -25,6 +25,34 @@ LLVM_INCLUDES="-I$LLVM_BUILD/include -I$LLVM_SRC/include"
 AIRCONV_DEFS="-D_FILE_OFFSET_BITS=64 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
 CXX_FLAGS="-std=c++20 -fno-exceptions -fno-rtti"
 
+# MADEIRA (WOW64_DESIGN.md section 8, `dxmt_madeira_native`): the D3D9
+# frontend and its DXMT substrate, compiled as NATIVE iOS-arm64 code into this
+# same archive.  Nothing about that code needs to be x86 (section 8 premise),
+# and natively the winemetal PE->unix boundary disappears: nativemetal's
+# wineunixlib.h turns WINE_UNIX_CALL into a table-indirect call, which on this
+# target is a plain function call into the objects built above instead of a
+# JIT exit (section 8.2(a)).
+#
+# -I ordering matters: src/nativemetal must come BEFORE src/winemetal so that
+# `#include <wineunixlib.h>` picks up the 13-line native one rather than the
+# ntdll-private PE one.  The table it names is renamed on iOS
+# (winemetal_unix.c:5084), so point it at the real symbol on the command line
+# rather than editing either file.
+MADEIRA_DEFS="-DDXMT_NATIVE=1 -DDXMT_MADEIRA=1 -DDXMT_IOS=1 -DDXMT_PAGE_SIZE=4096 -DNOMINMAX"
+MADEIRA_INCLUDES="-I$DXMT_SRC/nativemetal -I$DXMT_ROOT/include -I$DXMT_ROOT/libs \
+ -I$DXMT_SRC/winemetal -I$DXMT_SRC/airconv -I$DXMT_SRC/util -I$DXMT_SRC/dxmt \
+ -I$DXMT_SRC/d3d9 -I$DXMT_SRC/d3d9/unix -I$DXMT_SRC/d3d9shim"
+# The frontend throws (MTLD3DError) and the imported code uses dynamic_cast,
+# so it needs the two flags the rest of this archive is built without.
+MADEIRA_CXX_FLAGS="-std=c++20 -fexceptions -frtti"
+# The same suppressions research/dxmt/meson.build:48-62 applies to every DXMT
+# target; -Wno-extern-c-compat is the one that matters here (the imported
+# d3d11.h declares `struct CD3D11_DEFAULT {}`, which is size 0 in C and 1 in
+# C++).
+MADEIRA_WARNINGS="-Wno-unused-parameter -Wno-missing-field-initializers \
+ -Wno-missing-braces -Wno-extern-c-compat -Wno-unused-const-variable \
+ -Wno-unused-private-field -Wno-microsoft-exception-spec"
+
 SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
@@ -50,6 +78,31 @@ compile_cxx() {
     if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang++ $COMMON_FLAGS $CXX_FLAGS $INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $LLVM_INCLUDES $AIRCONV_DEFS $extra \
+        -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
+        echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
+    else
+        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+    fi
+}
+
+# MADEIRA: the native D3D9 frontend and its substrate (section 8.10 step 1).
+compile_madeira_cxx() {
+    local src=$1 name=$2 extra="${3:-}"
+    printf "  %-40s " "$name"
+    if xcrun -sdk iphoneos clang++ $COMMON_FLAGS $MADEIRA_CXX_FLAGS $MADEIRA_WARNINGS \
+        $MADEIRA_INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $MADEIRA_DEFS $extra \
+        -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
+        echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
+    else
+        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+    fi
+}
+
+compile_madeira_c() {
+    local src=$1 name=$2 extra="${3:-}"
+    printf "  %-40s " "$name"
+    if xcrun -sdk iphoneos clang $COMMON_FLAGS -std=c11 $MADEIRA_WARNINGS \
+        $MADEIRA_INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $MADEIRA_DEFS $extra \
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
@@ -108,7 +161,8 @@ echo "=== airconv (C++ 20, needs LLVM headers) ==="
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
            dxbc_converter_basicblock.cpp dxbc_converter_cfg.cpp \
-           dxbc_instructions.cpp dxbc_signature.cpp metallib_writer.cpp; do
+           dxbc_instructions.cpp dxbc_signature.cpp metallib_writer.cpp \
+           dxso_compile.cpp ffp_compile.cpp; do
     name=$(basename "$cpp" .cpp)
     compile_cxx "$DXMT_SRC/airconv/$cpp" "$name"
 done
@@ -129,6 +183,86 @@ for cpp in BlobContainer.cpp DXBCUtils.cpp ShaderBinary.cpp; do
         echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
     fi
 done
+
+echo "=== MADEIRA: dxmt_madeira_native -- generated headers ==="
+# meson produces version.h with vcs_tag (meson.build:176-180); dxmt_info.cpp
+# is the only consumer.  Same content, same `git describe --always`.
+mkdir -p "$BUILD_DIR/shader-headers"
+sed "s/@VCS_TAG@/$(git -C "$DXMT_ROOT" describe --always 2>/dev/null || echo unknown)/" \
+    "$DXMT_ROOT/version.h.in" > "$BUILD_DIR/shader-headers/version.h"
+echo "  version.h                                OK"
+
+echo "=== MADEIRA: dxmt_madeira_native -- internal command library ==="
+# dxmt_command.cpp embeds the compiled metallib as a C array; meson does this
+# with the metalir/metallib/xxd generator chain (src/dxmt/meson.build:24-32).
+# Same chain, same symbol names (xxd -n dxmt_command gives dxmt_command /
+# dxmt_command_len, which is what dxmt_command.cpp:16 expects).
+if [ ! -f "$BUILD_DIR/shader-headers/dxmt_command.h" ] \
+   || [ "$DXMT_SRC/dxmt/dxmt_command.metal" -nt "$BUILD_DIR/shader-headers/dxmt_command.h" ]; then
+    mkdir -p "$BUILD_DIR/shader-headers"
+    (cd "$BUILD_DIR/shader-headers" \
+     && xcrun -sdk macosx metal -o dxmt_command.air -c "$DXMT_SRC/dxmt/dxmt_command.metal" \
+     && xcrun -sdk macosx metallib -o dxmt_command.metallib dxmt_command.air \
+     && xxd -n dxmt_command -i dxmt_command.metallib dxmt_command.h)
+    echo "  dxmt_command.h                           OK"
+else
+    echo "  dxmt_command.h                           CACHED"
+fi
+
+echo "=== MADEIRA: dxmt_madeira_native -- util ==="
+# MADEIRA (WOW64_DESIGN.md, ml1070): util_futex.cpp carries dxmt::futex's
+# backend selection and the one line that names it.  On this (Darwin) target
+# it selects std::atomic wait/notify, which is already __ulock_wait -- but the
+# selection is a runtime branch so that both halves compile the same code, and
+# a runtime branch still needs the object.
+for cpp in util_env.cpp util_string.cpp util_bloom.cpp util_futex.cpp thread.cpp \
+           com/com_guid.cpp com/com_private_data.cpp config/config.cpp log/log.cpp \
+           sha1/sha1_util.cpp \
+           wsi_monitor_headless.cpp wsi_window_madeira.cpp wsi_platform_madeira.cpp; do
+    name=$(basename "$cpp" .cpp)
+    compile_madeira_cxx "$DXMT_SRC/util/$cpp" "$name"
+done
+compile_madeira_c "$DXMT_SRC/util/sha1/sha1.c" sha1
+
+echo "=== MADEIRA: dxmt_madeira_native -- winemetal thunks (now direct calls) ==="
+# The PE-side thunk bodies, compiled natively: WINE_UNIX_CALL resolves through
+# nativemetal/wineunixlib.h to the table winemetal_unix.c already defines in
+# this archive.  airconv_thunks.c is deliberately NOT built -- its SM50*/DXSO*
+# bodies are thunks for the same functions airconv_context.cpp and
+# dxso_compile.cpp define natively above, so building both would be a
+# duplicate-symbol error and the native definitions are the real ones.
+compile_madeira_c "$DXMT_SRC/winemetal/winemetal_thunks.c" winemetal_thunks \
+    "-D__wine_unix_call_funcs=dxmt_winemetal_unix_call_funcs"
+compile_madeira_c "$DXMT_SRC/winemetal/wmt_api_census.c" wmt_api_census
+
+echo "=== MADEIRA: dxmt_madeira_native -- dxmt ==="
+for cpp in dxmt_format.cpp dxmt_names.cpp dxmt_command_queue.cpp dxmt_command.cpp \
+           dxmt_capture.cpp dxmt_info.cpp dxmt_device.cpp dxmt_buffer.cpp \
+           dxmt_texture.cpp dxmt_context.cpp dxmt_dynamic.cpp dxmt_staging.cpp \
+           dxmt_hud_state.cpp dxmt_allocation.cpp dxmt_presenter.cpp dxmt_sampler.cpp \
+           dxmt_resource_initializer.cpp dxmt_mem_census.cpp dxmt_bcn.cpp \
+           dxmt_shader_cache.cpp; do
+    name=$(basename "$cpp" .cpp)
+    compile_madeira_cxx "$DXMT_SRC/dxmt/$cpp" "$name"
+done
+
+echo "=== MADEIRA: dxmt_madeira_native -- d3d9 frontend ==="
+for cpp in d3d9.cpp d3d9_buffer.cpp d3d9_census.cpp d3d9_clear_quad.cpp \
+           d3d9_cube_texture.cpp d3d9_device.cpp d3d9_format.cpp d3d9_fvf.cpp \
+           d3d9_interface.cpp d3d9_mem.cpp d3d9_query.cpp d3d9_shader.cpp \
+           d3d9_shader_scan.cpp d3d9_state_block.cpp d3d9_state_defaults.cpp \
+           d3d9_surface.cpp d3d9_swapchain.cpp d3d9_texture.cpp d3d9_validation.cpp \
+           d3d9_vertex_declaration.cpp d3d9_volume.cpp d3d9_volume_texture.cpp; do
+    name=$(basename "$cpp" .cpp)
+    compile_madeira_cxx "$DXMT_SRC/d3d9/$cpp" "$name"
+done
+
+echo "=== MADEIRA: dxmt_madeira_native -- d3d9 unix boundary ==="
+# d3d9_unix.c and d3d9_unix_table.c are GENERATED by
+# src/d3d9shim/gen_d3d9_thunks.py -- regenerate, do not edit.
+compile_madeira_c "$DXMT_SRC/d3d9/unix/d3d9_unix.c" d3d9_unix
+compile_madeira_c "$DXMT_SRC/d3d9/unix/d3d9_unix_table.c" d3d9_unix_table
+compile_madeira_cxx "$DXMT_SRC/d3d9/unix/d3d9_native_glue.cpp" d3d9_native_glue
 
 echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"

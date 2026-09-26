@@ -418,14 +418,31 @@ static void atomic_store_long(volatile LONG *ptr, LONG value)
 }
 
 /* ml731c: one place decides whether the shared-data clock is armed, so the
- * mapping and the periodic write can never disagree about it. */
+ * mapping and the periodic write can never disagree about it.
+ *
+ * ml1001: THE DEFAULT IS NOW ON, and the reason is a proven hang rather than a
+ * tidiness argument.  While this was opt-in, KUSER_SHARED_DATA.TickCount stayed
+ * at its SEC_COMMIT zero for the whole run, so GetTickCount() and
+ * GetTickCount64() returned 0 to every guest program, forever.  A 64-bit title
+ * whose HTTP stack keys an absolute-deadline timer tree on GetTickCount64
+ * therefore gave every timer the SAME key, and its "is this node already in the
+ * tree" sentinel is "the stored deadline is {0,0}" -- which a zero clock also
+ * produces.  The node was re-inserted while still linked, the equal-key path
+ * made it its own child, and a worker thread span in that tree at 100 % of a
+ * core for the rest of the run.  Three devices, three runs, byte-identical
+ * corruption.  See WOW64_DESIGN.md 2026-09-28.
+ *
+ * A clock that does not tick is not a missing optimisation, it is a wrong
+ * answer from an API, and it can only ever be found by the program that trips
+ * over it.  `MADEIRA_USD_TIME=0' is the kill switch and restores the frozen
+ * page exactly (mapping included -- see create_user_data_mapping). */
 int ios_usd_time_enabled(void)
 {
     static int env = -1;
     if (env < 0)
     {
         const char *e = getenv( "MADEIRA_USD_TIME" );
-        env = (e && e[0] == '1') ? 1 : 0;
+        env = (e && e[0] == '0') ? 0 : 1;
     }
     return env;
 }
@@ -1053,7 +1070,11 @@ static int add_poll_user( struct fd *fd )
     pollfd[ret].revents = 0;
     poll_users[ret] = fd;
     active_users++;
-    ws_log("[wineserver-fd] add_poll_user: user=%d unix_fd=%d active_users=%d", ret, fd->unix_fd, active_users);
+    {
+        static unsigned int ios_apu_calls;   /* capped like send_client_fd */
+        if (++ios_apu_calls <= 64 || !(ios_apu_calls & 4095))
+            ws_log("[wineserver-fd] add_poll_user: #%u user=%d unix_fd=%d active_users=%d", ios_apu_calls, ret, fd->unix_fd, active_users);
+    }
     return ret;
 }
 
@@ -1251,6 +1272,8 @@ void main_loop(void)
         static unsigned ios_syn_per_user[64];        /* rolling, low 6 bits of user */
         static int ios_post_inject = 0;  /* trace first N iters after injection */
         static int ios_client_fd_start = -1;  /* first poll index added by injection */
+        int session_processes = -1;
+        unsigned int session_notes = 0;
         unsigned long long ios_next_timer_ns = ~0ull;  /* ns until next timer (deadline-aware sleep) */
 
         /* iOS socketpair bypass: check for injected client fd from app bridge */
@@ -1269,8 +1292,28 @@ void main_loop(void)
         }
         while (active_users)
         {
+            extern int g_wineserver_session_stop;
+            extern int g_wineserver_root_retired;
+            extern int ios_server_user_process_count(void);
+            if (__atomic_load_n(&g_wineserver_root_retired, __ATOMIC_ACQUIRE))
+            {
+                int remaining = ios_server_user_process_count();
+                if (remaining != session_processes && session_notes++ < 8)
+                    ws_log("[session-handoff] ml1220 root retired; applications remaining=%d", remaining);
+                session_processes = remaining;
+                if (!remaining)
+                {
+                    ws_log("[session-handoff] ml1220 application processes drained");
+                    break;
+                }
+            }
+            if (__atomic_exchange_n(&g_wineserver_session_stop, 0, __ATOMIC_ACQ_REL))
+            {
+                ws_log("[session-stop] ml1150 terminating Wine processes on server thread");
+                shutdown_master_socket();
+            }
             /* Check stop flag */
-            if (g_wineserver_should_stop)
+            if (__atomic_load_n(&g_wineserver_should_stop, __ATOMIC_ACQUIRE))
             {
                 ws_log("[wineserver-fd] LOOP EXIT: stop requested at iter=%d", ios_iter);
                 break;
@@ -1326,6 +1369,57 @@ void main_loop(void)
                          * and NOT a synchronous all-thread stack sample,
                          * which would perturb the scheduler we are measuring. */
                         ios_dump_stuck_waits();
+                    }
+                }
+            }
+
+            /* ml1060: [lost-wake] — the lost-wakeup detector and its self-heal,
+             * and [wait-census].  UNCONDITIONAL, unlike the block above: the
+             * whole point of it is to be running during the event it exists
+             * for, and the games path unsets MADEIRA_DESKTOP, which is exactly
+             * why ml585's [srv-stuck] has never printed a line in a title log.
+             *
+             * It runs HERE, immediately after get_next_timeout() above, because
+             * that call refreshed current_time/monotonic_time and check_wait()
+             * reads both — and because calling wake_up() from this point is the
+             * same call from the same place as an expiring wait timeout.
+             *
+             * Cost when nothing is stuck: one pass over 512 registry slots, two
+             * loads each, every 5 s.  MADEIRA_LOSTWAKE=0 disables it entirely;
+             * MADEIRA_LOSTWAKE_SECS tunes the age threshold (see queue_ios.c). */
+            {
+                static int lw_on = -1;
+                static struct timespec lw_last, census_last;
+                if (lw_on < 0)
+                {
+                    const char *d = getenv("MADEIRA_LOSTWAKE");
+                    lw_on = !(d && (!strcmp(d, "0") || !strcmp(d, "off") || !strcmp(d, "no")));
+                }
+                if (lw_on)
+                {
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    if (now.tv_sec - lw_last.tv_sec >= 5)
+                    {
+                        extern void ios_scan_lost_wakeups(void);
+                        lw_last = now;
+                        ios_scan_lost_wakeups();
+                    }
+                    /* The census is a full report, so it follows MADEIRA_DIAG
+                     * and the 10 s cadence every other reporter uses. */
+                    {
+                        static int diag_on = -1;
+                        if (diag_on < 0)
+                        {
+                            const char *g = getenv("MADEIRA_DIAG");
+                            diag_on = (g && *g == '1');
+                        }
+                        if (diag_on && now.tv_sec - census_last.tv_sec >= 10)
+                        {
+                            extern void ios_wait_census(void);
+                            census_last = now;
+                            ios_wait_census();
+                        }
                     }
                 }
             }
@@ -3768,6 +3862,39 @@ DECL_HANDLER(get_volume_info)
     release_object( fd );
 }
 
+/* ml1490: which device paths a program opens through the server, sampled.
+ * Device log 193: with a game running, the Steam client's engine thread made
+ * about 1,600 of these opens per second (open_file_object from NtCreateFile,
+ * i.e. a pipe or other device path), with the server at 0.4 of a core. This
+ * names them: the first 24, then every 4096th, with the result and the
+ * running count. MADEIRA_OPEN_OBJECT_TRACE=0 disables it. */
+static void ios_open_object_trace( const struct unicode_str *name, int has_root )
+{
+    static int enabled = -1;
+    static unsigned int count;
+    char text[160];
+    data_size_t i, n;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_OPEN_OBJECT_TRACE" );
+        enabled = !(e && e[0] == '0');
+    }
+    if (!enabled) return;
+    count++;
+    if (count > 24 && (count & 4095)) return;
+    n = name->len / sizeof(WCHAR);
+    if (n > sizeof(text) - 1) n = sizeof(text) - 1;
+    for (i = 0; i < n; i++)
+    {
+        WCHAR c = name->str[i];
+        text[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    text[n] = 0;
+    fprintf( stderr, "[open-obj] ml1490 #%u tid=%04x pid=%04x status=%08x root=%d name=%s\n",
+             count, current->id, current->process->id, get_error(), has_root, text );
+}
+
 /* open a file object */
 DECL_HANDLER(open_file_object)
 {
@@ -3778,7 +3905,11 @@ DECL_HANDLER(open_file_object)
 
     obj = open_named_object( root, NULL, &name, req->attributes );
     if (root) release_object( root );
-    if (!obj) return;
+    if (!obj)
+    {
+        ios_open_object_trace( &name, req->rootdir != 0 );
+        return;
+    }
 
     if ((result = obj->ops->open_file( obj, req->access, req->sharing, req->options )))
     {
@@ -3786,6 +3917,7 @@ DECL_HANDLER(open_file_object)
         release_object( result );
     }
     release_object( obj );
+    ios_open_object_trace( &name, req->rootdir != 0 );
 }
 
 /* get the Unix name from a file handle */
