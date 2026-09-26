@@ -16,6 +16,16 @@ int  madeira_stdin_is_open(void);
 long madeira_stdin_write(const void *buf, unsigned long len);
 void madeira_stdin_close(void);
 
+/* Guest stdout. Closed until Documents/madeira-stdout.txt enables the
+ * pipe; with it, the guest's stdout is separated from the runtime's log.
+ *
+ * Deliberately a function rather than the extern global the stdin half also
+ * avoids: Swift 6 rejects a C global `var` as shared mutable state, so the
+ * global stays internal to the .m and callers ask through here. Read returns
+ * bytes read, 0 at EOF, or -1 with errno EAGAIN when nothing is pending. */
+int  madeira_stdout_is_open(void);
+long madeira_stdout_read(void *buf, unsigned long len);
+
 // Check if Wine process is running
 int wine_process_is_running(void);
 
