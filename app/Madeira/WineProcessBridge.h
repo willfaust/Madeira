@@ -10,6 +10,12 @@ extern "C" {
 // Returns 0 on success, -1 on error.
 int wine_process_start(const char *prefix_path);
 
+/* Guest stdin. -1 until the pipe is enabled via Documents/madeira-stdin.txt. */
+extern int madeira_stdin_master;
+int  madeira_stdin_is_open(void);
+long madeira_stdin_write(const void *buf, unsigned long len);
+void madeira_stdin_close(void);
+
 // Check if Wine process is running
 int wine_process_is_running(void);
 

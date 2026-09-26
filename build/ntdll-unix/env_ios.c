@@ -1445,6 +1445,31 @@ static void get_initial_console( RTL_USER_PROCESS_PARAMETERS *params )
         params->hStdOutput = (HANDLE)((UINT_PTR)params->hStdOutput | 1);
         output_fd = 1;
     }
+    /* iOS denies pty allocation, so isatty() above can never
+     * be true and every console-only session lands on
+     * CONSOLE_HANDLE_SHELL_NO_WINDOW -- the one value init_console excludes
+     * from every console-creating branch (kernelbase/console.c:2400).
+     *
+     * is_tty_handle() is only a pointer-tag test, and conhost --unix takes its
+     * tty from its own std handles, so tagging a pipe works as well as tagging
+     * a terminal. Opt-in because it makes Wine spawn conhost.exe, which is
+     * unproven in an ARM64EC session. */
+    if (!params->ConsoleHandle)
+    {
+        const char *force = getenv( "MADEIRA_FORCE_CONSOLE" );
+        if (force && *force == '1' && params->hStdInput && params->hStdOutput)
+        {
+            params->ConsoleHandle = CONSOLE_HANDLE_SHELL;
+            params->hStdInput  = (HANDLE)((UINT_PTR)params->hStdInput  | 1);
+            params->hStdOutput = (HANDLE)((UINT_PTR)params->hStdOutput | 1);
+            /* TIOCGWINSZ below fails on a pipe, and conhost --unix accepts 0,
+             * but a real size gives the guest something sane to render into. */
+            if (!params->dwXCountChars) params->dwXCountChars = 80;
+            if (!params->dwYCountChars) params->dwYCountChars = 24;
+            output_fd = 1;
+        }
+    }
+
     if (!params->ConsoleHandle)
         params->ConsoleHandle = CONSOLE_HANDLE_SHELL_NO_WINDOW;
 
