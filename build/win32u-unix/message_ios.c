@@ -45,28 +45,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #define QS_HARDWARE     0x40000000
 #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
 
-#ifdef WINE_IOS
-/* iOS: the canonical 0x7ffe0000 page can't be mapped (the app's 4GB
- * __PAGEZERO covers it), so every read through that address costs a Mach
- * exception round trip via the handler's USD redirect — and get_tick_count
- * below does THREE such loads per call, on every message-loop poll
- * (profiled as a top residual fault source in gameplay). Resolve the real
- * unix-side USD mapping once instead. */
-static const struct _KUSER_SHARED_DATA *get_user_shared_data(void)
-{
-    extern unsigned long long ios_get_real_usd(void);
-    static const struct _KUSER_SHARED_DATA *usd;
-    if (!usd)
-    {
-        unsigned long long real = ios_get_real_usd();
-        usd = (const struct _KUSER_SHARED_DATA *)(uintptr_t)(real ? real : 0x7ffe0000ULL);
-    }
-    return usd;
-}
-#define user_shared_data get_user_shared_data()
-#else
+#ifndef WINE_IOS
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
-#endif
 
 static LONG atomic_load_long( const volatile LONG *ptr )
 {
@@ -85,7 +65,51 @@ static ULONG atomic_load_ulong( const volatile ULONG *ptr )
     return __atomic_load_n( ptr, __ATOMIC_SEQ_CST );
 #endif
 }
+#endif  /* !WINE_IOS */
 
+#ifdef WINE_IOS
+#include <time.h>   /* ml951: clock_gettime_nsec_np (commpage, not a syscall) */
+
+/*
+ * iOS-Madeira ml951: get_tick_count() has exactly two consumers in this file,
+ * check_queue_bits() and check_queue_masks(), and both use it for the SAME
+ * comparison:
+ *
+ *     get_tick_count() - queue_shm->access_time / 10000 < 3000
+ *
+ * `access_time' is stamped by the wineserver from its `monotonic_time', which
+ * is monotonic_counter() = mach_continuous_time() in 100 ns units
+ * (build/wineserver/request_ios.c:548).  The left-hand side read
+ * KUSER_SHARED_DATA.TickCount -- and on iOS that page is NEVER WRITTEN unless
+ * MADEIRA_USD_TIME=1: create_user_data_mapping() maps the writable alias and
+ * returns early when the switch is off (build/wineserver/mapping_ios.c:1547),
+ * and set_current_time()'s seven stores are behind the same switch
+ * (build/wineserver/fd_ios.c:538).  A SEC_COMMIT mapping starts zeroed, so
+ * get_tick_count() returned 0 for the whole run.
+ *
+ * 0 - (a few million ms) in UINT64 is ~1.8e19, which is not < 3000, so `skip'
+ * was FALSE on EVERY empty peek and EVERY mask check: the shared-queue fast
+ * path could never fire, and each PeekMessage paid a full get_message round
+ * trip (243117 of them in one 10 s [srv-stats] window).  The same underflow
+ * is why check_queue_masks() never skipped, which is what the 2026-07-04
+ * once-per-second set_queue_mask heartbeat below was really working around.
+ *
+ * The fix is to read the clock the server actually stamped with, not the page
+ * it never wrote.  CLOCK_MONOTONIC_RAW is Darwin's mach_continuous_time (it
+ * keeps running across sleep, same as mach_continuous_time), and
+ * clock_gettime_nsec_np() is a commpage read, not a syscall -- cheaper than
+ * the three atomic loads it replaces.  Scaling: server ns/100 / 10000 = ms,
+ * here ns / 1000000 = ms, same epoch, same unit.
+ *
+ * This deliberately does NOT fix GetTickCount() for the guest (that is the
+ * USD clock and a separate, already-documented issue); it only stops win32u's
+ * own hung-queue heuristic from depending on a clock that does not tick.
+ */
+static UINT64 get_tick_count(void)
+{
+    return clock_gettime_nsec_np( CLOCK_MONOTONIC_RAW ) / 1000000ull;
+}
+#else
 static UINT64 get_tick_count(void)
 {
     ULONG high, low;
@@ -99,6 +123,7 @@ static UINT64 get_tick_count(void)
     /* note: we ignore TickCountMultiplier */
     return (UINT64)high << 32 | low;
 }
+#endif
 
 #define MAX_WINPROC_RECURSION  64
 
@@ -1939,7 +1964,11 @@ void pack_user_message( void *buffer, size_t size, UINT message,
                 memcpy( tmp_cds, cds, sizeof(*cds) );
 
                 extra_buffer_size = cds->cbData;
-                status = NtAllocateVirtualMemory( GetCurrentProcess(), ret_extra_buffer, zero_bits,
+                /* iOS-Madeira: per-pseudo-process ceiling — this buffer is
+                 * handed to the receiving process's WM_COPYDATA handler, so a
+                 * 32-bit one needs it inside its guest window
+                 * (build/win32u-unix/syscall_ios.c). */
+                status = NtAllocateVirtualMemory( GetCurrentProcess(), ret_extra_buffer, win32u_zero_bits(),
                                                   &extra_buffer_size, MEM_RESERVE | MEM_COMMIT,
                                                   PAGE_READWRITE );
                 if (!status)
@@ -2617,6 +2646,39 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
  *
  * returns TRUE if the contents of 'msg' should be passed to the application
  */
+static void ios_mouse_delivery_note( const char *stage, const MSG *msg, INT hit, BOOL remove )
+{
+    static unsigned count;
+    const char *enabled;
+    if (!remove || msg->message < WM_LBUTTONDOWN || msg->message > WM_MBUTTONDBLCLK) return;
+    enabled = getenv( "MADEIRA_MOUSE_DELIVERY" );
+    if (enabled && !strcmp( enabled, "0" )) return;
+    if (__atomic_fetch_add( &count, 1, __ATOMIC_RELAXED ) >= 32) return;
+    fprintf( stderr, "[mouse-delivery] ml1180 %s hwnd=%p msg=%04x hit=%d point=%ld,%ld lparam=%lx\n",
+             stage, msg->hwnd, msg->message, hit, (long)msg->pt.x, (long)msg->pt.y, (unsigned long)msg->lParam );
+}
+
+/* Record the actual activation target and outcome without changing Wine's
+ * foreground policy. A failed ancestor lookup must be repaired at its source. */
+static BOOL ios_activate_clicked_window( HWND hwnd, UINT mouse_activate )
+{
+    static unsigned int count;
+    const char *logging = getenv( "MADEIRA_MOUSE_DELIVERY" );
+    BOOL ret;
+    DWORD saved_error = RtlGetLastWin32Error(), error;
+
+    RtlSetLastWin32Error( 0 );
+    ret = set_foreground_window( hwnd, TRUE, FALSE );
+    error = RtlGetLastWin32Error();
+    if ((!logging || strcmp( logging, "0" )) &&
+        __atomic_fetch_add( &count, 1, __ATOMIC_RELAXED ) < 16)
+        fprintf( stderr, "[click-activation] ml1210 hwnd=%p reply=%u ok=%u error=%lu active=%p foreground=%p\n",
+                 hwnd, mouse_activate, ret, (unsigned long)error,
+                 get_active_window(), NtUserGetForegroundWindow() );
+    RtlSetLastWin32Error( saved_error );
+    return ret;
+}
+
 static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, HWND hwnd_filter,
                                    UINT first, UINT last, BOOL remove )
 {
@@ -2660,6 +2722,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
         accept_hardware_message( hw_id );
         return FALSE;
     }
+    ios_mouse_delivery_note( "candidate", msg, hittest, remove );
     update_current_mouse_window( msg->hwnd, hittest, msg->pt );
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
@@ -2797,6 +2860,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     hook.mouseData    = msg->wParam;
     if (call_hooks( WH_MOUSE, remove ? HC_ACTION : HC_NOREMOVE, message, (LPARAM)&hook, sizeof(hook) ))
     {
+        ios_mouse_delivery_note( "hook-consumed", msg, hittest, remove );
         hook.pt           = msg->pt;
         hook.hwnd         = msg->hwnd;
         hook.wHitTestCode = hittest;
@@ -2857,7 +2921,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                     /* fall through */
                 case MA_ACTIVATE:
                 case 0:
-                    if (!set_foreground_window( hwndTop, TRUE, FALSE )) eat_msg = TRUE;
+                    if (!ios_activate_clicked_window( hwndTop, ret )) eat_msg = TRUE;
                     break;
                 default:
                     WARN( "unknown WM_MOUSEACTIVATE code %d\n", ret );
@@ -2874,6 +2938,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
     send_message( msg->hwnd, WM_SETCURSOR, (WPARAM)msg->hwnd, MAKELONG( hittest, msg->message ));
 
     msg->message = message;
+    ios_mouse_delivery_note( eat_msg ? "activation-consumed" : "delivered", msg, hittest, remove );
     return !eat_msg;
 }
 
@@ -2917,6 +2982,102 @@ static BOOL process_hardware_message( MSG *msg, UINT hw_id, const struct hardwar
     return ret;
 }
 
+#ifdef WINE_IOS
+/***********************************************************************
+ *           [msgq] — is the shared-queue fast path actually firing?
+ *
+ * ml951.  check_queue_bits() is the whole reason an empty PeekMessage costs
+ * nothing on Linux, and it is a pure shared-memory read: if it returns FALSE
+ * the caller pays a get_message round trip.  There are six distinct ways for
+ * it to return FALSE and the [srv-stats] request counters cannot tell them
+ * apart, so count them here and print them on the same 10 s cadence.
+ *
+ * Emitted lines:
+ *   [msgq] shared queue: mapped shm=… wake_mask=… … access_age=…ms   (once)
+ *   [msgq] shared queue: NOT-MAPPED reason=…                          (once)
+ *   [msgq] 10s peek=… skipped=… served=… reasons: …                   (periodic)
+ *
+ * "peek" counts calls to check_queue_bits (non-internal), "skipped" the ones
+ * answered from shared memory, "served" the ones that fell through to the
+ * server.  A healthy idle pump is skipped≈peek with served≈1 per 3 s per
+ * thread (the hung-queue refresh).
+ */
+extern int dprintf( int fd, const char *fmt, ... );
+
+#define IOS_MSGQ_WHY(r)  (reason = (r))
+
+enum msgq_reason
+{
+    MSGQ_R_SKIP,            /* answered from shared memory, no server call  */
+    MSGQ_R_NOT_MAPPED,      /* get_shared_queue() failed                    */
+    MSGQ_R_WAKE_MASK,       /* stored wake_mask != requested                */
+    MSGQ_R_CHANGED_MASK,    /* stored changed_mask != requested             */
+    MSGQ_R_WAKE_BITS,       /* queue signalled: a real message is waiting   */
+    MSGQ_R_CHANGED_BITS,    /* changed bits need clearing                   */
+    MSGQ_R_STALE,           /* access_time older than the 3 s hung-queue cap*/
+    MSGQ_R_MAX
+};
+
+static unsigned int msgq_counts[MSGQ_R_MAX];
+static unsigned int msgq_peeks;
+
+static inline void msgq_count( enum msgq_reason r )
+{
+    __atomic_fetch_add( &msgq_counts[r], 1, __ATOMIC_RELAXED );
+}
+
+/* one-shot verdict on the shared session mapping */
+static void msgq_report_mapping( UINT status, const queue_shm_t *queue_shm )
+{
+    static int done;
+    UINT64 age;
+
+    if (__atomic_load_n( &done, __ATOMIC_RELAXED )) return;        /* hot path: one load */
+    if (__atomic_exchange_n( &done, 1, __ATOMIC_RELAXED )) return; /* first caller wins  */
+
+    if (status)
+    {
+        dprintf( 2, "[msgq] shared queue: NOT-MAPPED reason=get_shared_queue=%#x"
+                    " — every peek pays a get_message round trip\n", status );
+        return;
+    }
+    age = get_tick_count() - (UINT64)queue_shm->access_time / 10000;
+    dprintf( 2, "[msgq] shared queue: mapped shm=%p wake_mask=%#x changed_mask=%#x"
+                " wake_bits=%#x changed_bits=%#x internal_bits=%#x access_age=%llums\n",
+             (const void *)queue_shm, queue_shm->wake_mask, queue_shm->changed_mask,
+             queue_shm->wake_bits, queue_shm->changed_bits, queue_shm->internal_bits,
+             (unsigned long long)age );
+}
+
+/* periodic histogram; called from check_queue_bits every 1024 peeks so the
+ * clock read is amortised (the report itself is time-gated to 10 s). */
+static void msgq_report_tick(void)
+{
+    static unsigned long long next_ns;
+    unsigned long long now = clock_gettime_nsec_np( CLOCK_MONOTONIC_RAW );
+    unsigned int c[MSGQ_R_MAX], peeks, i, served = 0;
+
+    if (!next_ns) { next_ns = now + 10000000000ull; return; }
+    if (now < next_ns) return;
+    next_ns = now + 10000000000ull;
+
+    peeks = __atomic_exchange_n( &msgq_peeks, 0, __ATOMIC_RELAXED );
+    for (i = 0; i < MSGQ_R_MAX; i++)
+    {
+        c[i] = __atomic_exchange_n( &msgq_counts[i], 0, __ATOMIC_RELAXED );
+        if (i != MSGQ_R_SKIP) served += c[i];
+    }
+
+    dprintf( 2, "[msgq] 10s peek=%u skipped=%u served=%u reasons: not_mapped=%u"
+                " wake_mask=%u changed_mask=%u wake_bits=%u changed_bits=%u stale=%u\n",
+             peeks, c[MSGQ_R_SKIP], served, c[MSGQ_R_NOT_MAPPED], c[MSGQ_R_WAKE_MASK],
+             c[MSGQ_R_CHANGED_MASK], c[MSGQ_R_WAKE_BITS], c[MSGQ_R_CHANGED_BITS],
+             c[MSGQ_R_STALE] );
+}
+#else
+#define IOS_MSGQ_WHY(r)  ((void)0)
+#endif  /* WINE_IOS */
+
 /***********************************************************************
  *           check_queue_bits
  *
@@ -2927,26 +3088,40 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
                               UINT *wake_bits, UINT *changed_bits, BOOL internal )
 {
     struct object_lock lock = OBJECT_LOCK_INIT;
-    const queue_shm_t *queue_shm;
+    const queue_shm_t *queue_shm = NULL;
     BOOL skip = FALSE;
     UINT status;
+#ifdef WINE_IOS
+    enum msgq_reason reason = MSGQ_R_SKIP;
+#endif
 
     while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
     {
         if (internal) skip = !(queue_shm->internal_bits & QS_HARDWARE);
         /* if the masks need an update */
-        else if (queue_shm->wake_mask != wake_mask) skip = FALSE;
-        else if (queue_shm->changed_mask != changed_mask) skip = FALSE;
+        else if (queue_shm->wake_mask != wake_mask) { skip = FALSE; IOS_MSGQ_WHY( MSGQ_R_WAKE_MASK ); }
+        else if (queue_shm->changed_mask != changed_mask) { skip = FALSE; IOS_MSGQ_WHY( MSGQ_R_CHANGED_MASK ); }
         /* or if some bits need to be cleared, or queue is signaled */
-        else if (queue_shm->wake_bits & signal_bits) skip = FALSE;
-        else if (queue_shm->changed_bits & clear_bits) skip = FALSE;
+        else if (queue_shm->wake_bits & signal_bits) { skip = FALSE; IOS_MSGQ_WHY( MSGQ_R_WAKE_BITS ); }
+        else if (queue_shm->changed_bits & clear_bits) { skip = FALSE; IOS_MSGQ_WHY( MSGQ_R_CHANGED_BITS ); }
         else
         {
             *wake_bits = queue_shm->wake_bits;
             *changed_bits = queue_shm->changed_bits;
             skip = get_tick_count() - (UINT64)queue_shm->access_time / 10000 < 3000; /* avoid hung queue */
+            IOS_MSGQ_WHY( skip ? MSGQ_R_SKIP : MSGQ_R_STALE );
         }
     }
+
+#ifdef WINE_IOS
+    if (!internal)
+    {
+        unsigned int n = __atomic_fetch_add( &msgq_peeks, 1, __ATOMIC_RELAXED );
+        msgq_report_mapping( status, status ? NULL : queue_shm );
+        msgq_count( status ? MSGQ_R_NOT_MAPPED : reason );
+        if (!(n & 0x3FF)) msgq_report_tick();
+    }
+#endif
 
     if (status) return FALSE;
     return skip;
@@ -3350,11 +3525,76 @@ static BOOL check_internal_bits( UINT mask )
     return signaled;
 }
 
+#ifdef WINE_IOS
+/***********************************************************************
+ *           ios_adopt_orphaned_foreground
+ *
+ * There is no window manager on this platform.  On every other driver the
+ * host gives a newly mapped top-level window the focus and the driver turns
+ * that into SetForegroundWindow; here nothing does.  Most programs still end
+ * up foreground because showing a window activates it, or because the first
+ * click does (WM_MOUSEACTIVATE).  But a desktop can be left with NO foreground
+ * window at all -- the window that was active got destroyed (a splash or
+ * launcher window), or the program only ever showed its window with
+ * SWP_NOACTIVATE and is driven by keys, not clicks.  Device log of such a
+ * program: `foreground=0x0 fg_input=0x0 focus=00000000 active=00000000` for
+ * the whole run, and every key press was dropped, because a keyboard message
+ * has no target other than the foreground thread's focus window.
+ *
+ * So, from the message pump of a thread that owns windows, at most once a
+ * second: if the desktop has no foreground window, make this thread's topmost
+ * visible, enabled top-level window the foreground window, through the normal
+ * client path so WM_ACTIVATE / WM_SETFOCUS are delivered.  This can only ever
+ * fill a vacuum; it never takes the foreground away from anything.
+ */
+static void ios_adopt_orphaned_foreground(void)
+{
+    static LONGLONG last_check;     /* process-wide seconds; benign race */
+    static unsigned int adoptions;
+    LARGE_INTEGER counter, freq;
+    LONGLONG now;
+    HWND *list;
+    DWORD tid = GetCurrentThreadId();
+    int i;
+
+    NtQueryPerformanceCounter( &counter, &freq );
+    now = counter.QuadPart / freq.QuadPart;
+    if (now == last_check) return;
+    last_check = now;
+
+    if (NtUserGetForegroundWindow()) return;
+    if (!(list = list_window_children( 0 ))) return;
+
+    for (i = 0; list[i]; i++)
+    {
+        RECT rect;
+
+        if (get_window_thread( list[i], NULL ) != tid) continue;
+        if (!is_window_visible( list[i] ) || !is_window_enabled( list[i] )) continue;
+        if (get_window_long( list[i], GWL_EXSTYLE ) & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) continue;
+        if (!get_window_rect( list[i], &rect, get_thread_dpi() )) continue;
+        if (rect.right - rect.left < 32 || rect.bottom - rect.top < 32) continue;   /* helper windows */
+
+        if (set_foreground_window( list[i], FALSE, TRUE ) && adoptions < 8)
+        {
+            extern int dprintf( int fd, const char *fmt, ... );
+            adoptions++;
+            dprintf( 2, "[focus] desktop had no foreground window; adopted %p (tid %04x) #%u\n",
+                     list[i], (unsigned int)tid, adoptions );
+        }
+        break;
+    }
+    free( list );
+}
+#endif
+
 static BOOL process_driver_events( UINT events_mask, UINT wake_mask, UINT changed_mask )
 {
     BOOL drained = FALSE;
 
 #ifdef WINE_IOS
+    ios_adopt_orphaned_foreground();
+
     /* iOS: always call pProcessEvents on every PeekMessage poll, not just
      * when QS_DRIVER is set. The QS_DRIVER bit is normally raised when the
      * wineserver poll detects driver-side fd events, but winios.drv uses
@@ -3456,6 +3696,64 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
     return time;
 }
 
+#include <time.h>   /* iOS-Madeira ml940: clock_gettime_nsec_np (commpage) */
+
+/* ml — direct-launch overlay: how many ordinary GDI windows the app is
+ * currently showing over the game layer. Implemented in
+ * app/Madeira/Winios/Winios.m (weak, same pattern as the driver hooks in
+ * driver_ios.c — win32u links and runs without the app side, where this is
+ * NULL and the wait below keeps its plain unbounded form). Reads one atomic;
+ * see wait_message for why the blocking wait consults it at all. */
+extern unsigned winios_overlay_window_count(void) __attribute__((weak));
+
+/***********************************************************************
+ *           ios_pump_yield
+ *
+ * iOS-Madeira ml940: rate limit for the empty-queue yields in the message
+ * pump.  Both call sites (wait_message's zero-timeout WAIT_TIMEOUT and
+ * NtUserPeekMessage's empty peek) are UPSTREAM Wine, byte-identical to
+ * wine/dlls/win32u/message.c:3415 and :3561 - they are NOT Madeira
+ * additions, and there is no ml note behind them.  Upstream's reason is
+ * starvation, not a wineserver livelock: a program that polls its queue in a
+ * tight loop would never leave the CPU, and the thread that would post the
+ * next message - on iOS the wineserver thread lives in this same Mach task -
+ * would not get to run.  Correctness never depended on it (Darwin preempts
+ * on its own quantum), so the yield can be thinned out; dropping it entirely
+ * would let a spinning pump hold its core against the server thread, so it
+ * is kept for genuine spinners.
+ *
+ * The [prof] sampler put libsystem_kernel`swtch_pri - Darwin's sched_yield -
+ * at 10-22 % of all CPU in every window of a 32-bit run, and a pump that
+ * polls once per frame paid one syscall per frame for a yield nobody could
+ * observe.  So: yield on every IOS_PUMP_YIELD_EVERY'th CONSECUTIVE empty
+ * poll on this thread, and never more than once per IOS_PUMP_YIELD_MIN_NS.
+ * A once-per-frame pump on an empty queue now reaches the threshold once
+ * every 64 frames instead of every frame; a real spinner still yields
+ * thousands of times a second.  Any successful peek clears the streak, so
+ * the common "drain the queue, then one empty peek, then render" loop never
+ * accumulates one at all.
+ *
+ * Per-thread state: `static __thread' is the existing idiom on this side of
+ * win32u (syscall_ios.c:86, winstation_ios.c:128) - native TLS, not the
+ * mingw TLS that is NULL on early loader paths (ml412).
+ */
+#define IOS_PUMP_YIELD_EVERY   64
+#define IOS_PUMP_YIELD_MIN_NS  200000ull    /* 200 us -> <= 5000 yields/s */
+
+static void ios_pump_yield( BOOL empty )
+{
+    static __thread unsigned int streak;
+    static __thread unsigned long long last_ns;
+    unsigned long long now;
+
+    if (!empty) { streak = 0; return; }
+    if (++streak % IOS_PUMP_YIELD_EVERY) return;
+    now = clock_gettime_nsec_np( CLOCK_MONOTONIC_RAW );
+    if (last_ns && now - last_ns < IOS_PUMP_YIELD_MIN_NS) return;
+    last_ns = now;
+    NtYieldExecution();
+}
+
 /* wait for message or signaled handle */
 static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD wake_mask, DWORD changed_mask, DWORD flags )
 {
@@ -3489,14 +3787,27 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
      * so drags advanced only when winemine's 1Hz timer woke the queue.
      * Wake every 16ms to poll driver events; only surface WAIT_TIMEOUT
      * when the CALLER's own deadline expires. Games path unchanged. */
+    /* ml — the SAME starvation, in a DIRECT launch, is half of "the dialog is
+     * there but nothing happens when you tap it": a modal dialog runs its own
+     * message loop and BLOCKS here, exactly like the desktop menu loops above,
+     * and no touch can reach it because only pProcessEvents drains the ring
+     * and only this wait returning runs it. A game's render loop peeks rather
+     * than waits and never reaches this code at all, so the poll is armed only
+     * while the direct overlay actually has a visible GDI window on screen
+     * (winios_overlay_window_count, weak — 0 with no app side linked, and 0
+     * the moment the dialog closes). An idle game thread therefore keeps its
+     * plain unbounded wait. */
     {
         static int ios_slice = -1;
+        int slice_poll;
         if (ios_slice < 0)
         {
             const char *d = getenv( "MADEIRA_DESKTOP" );
             ios_slice = (d && *d == '1');
         }
-        if (!ios_slice)
+        slice_poll = ios_slice ||
+                     (winios_overlay_window_count && winios_overlay_window_count() != 0);
+        if (!slice_poll)
         {
             do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
             while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
@@ -3529,7 +3840,8 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
         ret = WAIT_FAILED;
     }
 
-    if (ret == WAIT_TIMEOUT && !count && !timeout) NtYieldExecution();
+    /* iOS-Madeira ml940: was an unconditional NtYieldExecution() here. */
+    ios_pump_yield( ret == WAIT_TIMEOUT && !count && !timeout );
     if (ret == count - 1) get_user_thread_info()->last_driver_time = get_driver_check_time();
 
     KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
@@ -3675,11 +3987,16 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
                 params.locks = *(DWORD *)ret_ptr;
                 params.restore = TRUE;
             }
-            NtYieldExecution();
+            /* iOS-Madeira ml940: was an unconditional NtYieldExecution().
+             * Once per empty peek is once per message-pump iteration; see
+             * ios_pump_yield above for why it is thinned and not removed. */
+            ios_pump_yield( TRUE );
             KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
         }
         return FALSE;
     }
+
+    ios_pump_yield( FALSE );    /* ml940: a real message - this thread is not spinning */
 
     check_for_driver_events();
 

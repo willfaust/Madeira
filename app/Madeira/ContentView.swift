@@ -893,6 +893,9 @@ struct ContentView: View {
             .navigationBarHidden(vSizeClass == .compact)
             .onAppear {
                 jit_install_trap_handler()
+                // ml1330: StikDebug is closed by iOS about a minute after it
+                // attaches; take the process-lifetime JIT pool while it is here.
+                StikJITHelper.prepareEarlyPool(trigger: "start")
                 entitlements = EntitlementStatus.check()
                 logEntitlementStatus()
             }
@@ -1995,6 +1998,60 @@ struct ContentView: View {
                 }
             }
 
+            // Native D3D9 frontend A/B. The i386 d3d9.dll a 32-bit program imports
+            // is DXMT's thin shim; with no setting its DllMain forwards every export
+            // to d3d9-emulated.dll (DXMT's D3D9 frontend running as i386 code under
+            // FEX), which is the default. "native" makes the same shim bind its unix
+            // side and run the frontend as native ARM64 code in libdxmt_combined.a.
+            // Both ship in the bundle, so the A/B is one madeira.cfg line
+            // (d3d9 = native) and a relaunch; "emulated" spells the default.
+            if let txt = MadeiraConfig.get("d3d9") {
+                let v = txt.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !v.isEmpty {
+                    setenv("MADEIRA_D3D9", v, 1)
+                    logStore.log("D3D9 frontend: MADEIRA_D3D9=\(v) via madeira.cfg d3d9")
+                }
+            }
+
+            // 2026-09-23: HOST FEATURES ARE PROBED, NOT ASSUMED.
+            //
+            // CPUFeatures.cpp (a PE module that cannot call sysctl) used to claim a
+            // fixed feature set that happens to be true of the newest phones. On an
+            // older core that is silent corruption, not a crash: with FEAT_AFP
+            // claimed but absent, FPCR.NEP is RES0, every scalar SSE operation
+            // zeroes the upper lanes of its destination instead of preserving them,
+            // and a 32-bit title rendered garbage text and geometry on a tablet
+            // while the same build was correct on a phone. The app CAN ask, so it
+            // does, and hands the answers over in one variable. A sysctl that does
+            // not exist is reported as "?" and left at the old assumption.
+            do {
+                let probes: [(key: String, sysctl: String)] = [
+                    ("AFP",    "hw.optional.arm.FEAT_AFP"),
+                    ("FLAGM",  "hw.optional.arm.FEAT_FlagM"),
+                    ("FLAGM2", "hw.optional.arm.FEAT_FlagM2"),
+                    ("FCMA",   "hw.optional.arm.FEAT_FCMA"),
+                    ("RCPC",   "hw.optional.arm.FEAT_LRCPC"),
+                    ("AES",    "hw.optional.arm.FEAT_AES"),
+                    ("PMULL",  "hw.optional.arm.FEAT_PMULL"),
+                    ("SHA",    "hw.optional.arm.FEAT_SHA256"),
+                    ("CRC",    "hw.optional.armv8_crc32"),
+                    ("ATOMICS", "hw.optional.arm.FEAT_LSE"),
+                ]
+                var parts: [String] = []
+                for p in probes {
+                    var v: Int32 = 0
+                    var sz: Int = MemoryLayout<Int32>.size
+                    if sysctlbyname(p.sysctl, &v, &sz, nil, 0) == 0 {
+                        parts.append(p.key + "=" + (v != 0 ? "1" : "0"))
+                    } else {
+                        parts.append(p.key + "=?")
+                    }
+                }
+                let joined: String = parts.joined(separator: ",")
+                setenv("FEX_MADEIRA_HOSTPROBE", joined, 1)
+                logStore.log("[fex-cfg] host feature probe: " + joined)
+            }
+
             // ml734: Theorafile call tracer. Documents/madeira-tf-trace.txt == "1"
             // redirects libtheorafile's tf_* exports through wrappers in
             // tftrace-x64.dll that call the original and report the RETURN
@@ -2234,17 +2291,20 @@ struct ContentView: View {
                 setenv("WINE_IOS_JIT_RX", String(format: "%lx", Int(bitPattern: pool.rx)), 1)
                 setenv("WINE_IOS_JIT_RW", String(format: "%lx", Int(bitPattern: pool.rw)), 1)
                 setenv("WINE_IOS_JIT_SIZE", String(format: "%lx", pool.size), 1)
+                // ml1330: the pool is allocated once per app run and reused, so this is
+                // the actual size, which the unix side records if a session runs it dry.
+                setenv("MADEIRA_POOL_MB", String(pool.size / 1024 / 1024), 1)
             } else {
                 // ml596: ABORT. "Continuing without it" produced ml595 — a run that
                 // looked like an ARM64EC/optimizer regression but was only Wine
                 // executing with no JIT pool, and it cost a diagnostic cycle plus a
                 // wrong conclusion I wrote into the source. A run without the pool can
                 // only manufacture misleading secondary crashes, so refuse to start one.
-                logStore.log("JIT pool allocation FAILED — not starting Wine.", level: .error)
-                logStore.log("  All placements landed in the forbidden guest 64G window.", level: .info)
-                logStore.log("  Force-quit and relaunch: placement is chosen by the kernel", level: .info)
-                logStore.log("  and depends on current memory layout, so a fresh process", level: .info)
-                logStore.log("  usually lands somewhere valid.", level: .info)
+                // ml962: the reason is printed by allocatePool itself, on the
+                // [jit-pool] lines directly above — it knows whether the debugger
+                // was gone, whether every placement was rejected, or whether a
+                // cached pool had been torn down.
+                logStore.log("JIT pool unavailable — not starting Wine (see the [jit-pool] lines above).", level: .error)
                 logStore.uiPaused = false
                 return
             }

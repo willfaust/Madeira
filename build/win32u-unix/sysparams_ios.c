@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <unistd.h>  /* iOS-Madeira: dprintf for BADMODE diagnostic */
+#include <sched.h>   /* iOS-Madeira ml1090: sched_yield in the USER-lock wait */
 #include <stdio.h>
 
 #include "ntstatus.h"
@@ -180,21 +181,54 @@ static struct monitor virtual_monitor =
 };
 
 #ifdef WINE_IOS
-/* S2 virtual desktop: screen size for the virtual monitor. The app sets
- * MADEIRA_SCREEN_W/H (device pixels, e.g. 1170x2532) in desktop mode so
- * the wine desktop covers the whole display; default stays 1024x768 for
- * the games path. */
+/* The size of the virtual monitor -- the single monitor this port reports in
+ * every regime (is_service_process() is unconditionally TRUE here, so
+ * lock_display_devices always takes the virtual-monitor branch).
+ *
+ * Two values, not one:
+ *
+ *  - the SESSION DEFAULT, which the app publishes in MADEIRA_SCREEN_W/H
+ *    before the first guest thread runs. MADEIRA_SCREEN_SRC names where it
+ *    came from: "view" (a standard mode chosen to match the device's
+ *    landscape shape), "knob" (Documents/madeira-screen.txt) or "desktop"
+ *    (explorer's own /desktop=WxH size). ChangeDisplaySettings(NULL,0) and
+ *    CDS_RESET restore it, exactly as they restore the registry mode on
+ *    Windows.
+ *
+ *  - the CURRENT mode, which is whatever a guest last selected through
+ *    ChangeDisplaySettings(Ex). This used to be impossible: the monitor was
+ *    a constant and a mode request was accepted-and-ignored, so a game that
+ *    asked for a mode of a different shape rendered content of that shape
+ *    into a screen of the old one. It is a real monitor now --
+ *    ios_virtual_change_display_settings() is the only writer and
+ *    ios_publish_screen_size() pushes a change out to everything that
+ *    mirrors the size.
+ *
+ * ios_screen_size() is called with display_lock held (monitor_get_rect,
+ * lock_display_devices), so it must never take a lock of its own; the two
+ * ints are written once by a mode change and read as single words.
+ */
+static int ios_screen_cur_w, ios_screen_cur_h;
+static int ios_screen_def_w, ios_screen_def_h;
+
 static void ios_screen_size( int *w, int *h )
 {
-    static int sw, sh;
-    if (!sw)
+    if (!ios_screen_cur_w)
     {
         const char *we = getenv( "MADEIRA_SCREEN_W" ), *he = getenv( "MADEIRA_SCREEN_H" );
-        sw = (we && atoi( we ) > 0) ? atoi( we ) : 1024;
-        sh = (he && atoi( he ) > 0) ? atoi( he ) : 768;
+        const char *src = getenv( "MADEIRA_SCREEN_SRC" );
+        int sw = (we && atoi( we ) > 0) ? atoi( we ) : 1024;
+        int sh = (he && atoi( he ) > 0) ? atoi( he ) : 768;
+
+        ios_screen_def_w = sw;
+        ios_screen_def_h = sh;
+        ios_screen_cur_w = sw;
+        ios_screen_cur_h = sh;
+        dprintf( STDERR_FILENO, "[display] virtual monitor %dx%d (source=%s)\n", sw, sh,
+                 (src && *src) ? src : ((we && he) ? "env" : "default") );
     }
-    *w = sw;
-    *h = sh;
+    *w = ios_screen_cur_w;
+    *h = ios_screen_cur_h;
 }
 #endif
 
@@ -323,25 +357,241 @@ static pthread_mutex_t display_dc_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t user_mutex;
 static unsigned int user_lock_thread, user_lock_rec;
 
+/* iOS-Madeira ml1090: THE USER LOCK IS PROCESS-WIDE HERE IN A WAY IT NEVER IS
+ * ON WINDOWS, SO LOSING IT IS FATAL TO THE WHOLE SESSION.
+ *
+ * Upstream win32u is loaded once per process, so `user_mutex` protects one
+ * process's window handles and a process that dies holding it takes only
+ * itself down. In this port every pseudo-process is a set of threads in ONE
+ * Mach task sharing ONE win32u, so this single mutex serialises the shell, the
+ * title, rpcss and every service. A thread that dies while holding it wedges
+ * everything that ever touches a user handle — which is every message pump.
+ *
+ * Device evidence (logs 75 and 78, two unrelated titles, same shape):
+ *
+ *   00b8:err:system:user_check_not_lock BUG: holding USER lock
+ *   Assertion failed: (0), function user_check_not_lock, ... line 376.
+ *   ... NtTerminateProcess ... MADEIRA-EXIT
+ *
+ * and then, for the rest of the run, three threads in three different
+ * pseudo-processes parked in __psynch_mutexwait on this mutex with no live
+ * owner anywhere in the thread dump — a black screen and [frame] n=0 forever.
+ * The abort is what makes the leak permanent: assert() cannot unwind a lock.
+ *
+ * The changes, each with its own kill switch:
+ *   - the owner is tracked by Mach port as well as by wine tid, so a report
+ *     can say whether the owner thread still EXISTS;
+ *   - user_check_not_lock() RELEASES a leaked lock and logs instead of
+ *     aborting (MADEIRA_USERLOCK_RECOVER=0 restores the assert);
+ *   - user_lock_abandon() lets the pseudo-process teardown path drop the lock
+ *     of a thread that is about to be killed (process_ios.c, thread_ios.c);
+ *   - a waiter that has been blocked more than five seconds prints one
+ *     [user-lock] line naming the owner and whether that thread still exists
+ *     (MADEIRA_USERLOCK_WATCH=0 restores the plain blocking
+ *     pthread_mutex_lock);
+ *   - and, for a kill this port cannot hook at all (the server's violent
+ *     kill_thread), a confirmed dead owner is repaired out from under the
+ *     waiters (MADEIRA_USERLOCK_REPAIR=0). */
+static unsigned int user_lock_port;   /* Mach port name of the current owner */
+
+/* Implemented in build/ntdll-unix/signal_arm64_ios.c. Weak: win32u links and
+ * runs without them, in which case the report degrades to the wine tid only. */
+extern unsigned int ios_mach_self_port(void) __attribute__((weak));
+extern int ios_mach_port_alive( unsigned int port ) __attribute__((weak));
+/* build/ntdll-unix/virtual_ios.c — gives [thread-stacks] a name for this lock
+ * instead of the bare address it printed in logs 75/78. */
+extern void ios_register_unix_lock( const void *lock, const char *name ) __attribute__((weak));
+
+static int ios_user_lock_knob( const char *name )
+{
+    const char *env = getenv( name );
+    return !(env && *env == '0');
+}
+
+#ifdef WINE_IOS
+/* ml1100 — the monitor-list repairs below (an empty `monitors` list is never
+ * accepted as an answer, and a work area computed from one is never cached).
+ * MADEIRA_MONITOR_HEAL=0 restores the pre-ml1100 behaviour exactly. */
+static int ios_monitor_heal(void)
+{
+    static int on = -1;
+    if (on < 0) on = ios_user_lock_knob( "MADEIRA_MONITOR_HEAL" );
+    return on;
+}
+#endif
+
+static int ios_user_lock_watch(void)
+{
+    static int on = -1;
+    if (on < 0) on = ios_user_lock_knob( "MADEIRA_USERLOCK_WATCH" );
+    return on;
+}
+
+static int ios_user_lock_repair(void)
+{
+    static int on = -1;
+    if (on < 0) on = ios_user_lock_knob( "MADEIRA_USERLOCK_REPAIR" );
+    return on;
+}
+
+/* Contended path only: poll for the lock so a wait that never ends can name
+ * its owner. Yields first (real contention on this lock is measured in
+ * microseconds and never reaches the sleep), then polls at 1 ms, then reports
+ * ONCE at five seconds and keeps waiting. */
+static void ios_user_lock_wait_slow(void)
+{
+    unsigned int waited_ms = 0, spins, confirm_ms = 0;
+    unsigned int owner, port, last_owner = 0, last_port = 0;
+    int reported = 0, alive;
+
+    for (spins = 0; spins < 256; spins++)
+    {
+        sched_yield();
+        if (!pthread_mutex_trylock( &user_mutex )) return;
+    }
+
+    for (;;)
+    {
+        usleep( 1000 );
+        waited_ms++;
+        if (!pthread_mutex_trylock( &user_mutex ))
+        {
+            if (reported)
+                dprintf( STDERR_FILENO, "[user-lock] ml1090 tid=%04x ACQUIRED after %u.%03us\n",
+                         (unsigned)GetCurrentThreadId(), waited_ms / 1000, waited_ms % 1000 );
+            return;
+        }
+        if (waited_ms < 5000) continue;
+        owner = user_lock_thread;
+        port = user_lock_port;
+        alive = !port ? -1 : (ios_mach_port_alive ? !!ios_mach_port_alive( port ) : -1);
+        if (!reported)
+        {
+            reported = 1;
+            dprintf( STDERR_FILENO, "[user-lock] ml1090 tid=%04x has waited %us for the USER lock — "
+                     "owner tid=%04x port=0x%x owner-thread-alive=%s rec=%u. An owner that no longer "
+                     "exists means a thread died holding it and every pseudo-process is now wedged\n",
+                     (unsigned)GetCurrentThreadId(), waited_ms / 1000, owner, port,
+                     alive < 0 ? "unknown" : (alive ? "yes" : "NO"), user_lock_rec );
+        }
+
+        /* LAST-RESORT REPAIR. Every path this port controls now drops the lock
+         * before a thread can die holding it (user_lock_abandon from the
+         * teardown paths, and user_check_not_lock's recovery), but a thread
+         * killed from OUTSIDE its own control flow — the server's violent
+         * kill_thread, a Mach exception that never reaches a handler — cannot
+         * be hooked at all. Without this the session is simply over.
+         *
+         * Repair only when the evidence is unambiguous and stable: the same
+         * dead owner seen twice, ten seconds apart. Re-initialising a held
+         * mutex is not something to do lightly, but the alternative here is a
+         * permanently wedged session, and the owner it belongs to no longer
+         * exists. Several waiters may repair concurrently; that is harmless
+         * (the second re-init finds an unheld mutex) and it is loud either
+         * way. MADEIRA_USERLOCK_REPAIR=0 leaves the waiter blocked instead,
+         * which is the pre-ml1090 behaviour. */
+        if (alive != 0 || owner != last_owner || port != last_port)
+        {
+            last_owner = owner;
+            last_port = port;
+            confirm_ms = waited_ms;
+            continue;
+        }
+        if (waited_ms - confirm_ms < 10000) continue;
+        if (!ios_user_lock_repair()) { confirm_ms = waited_ms; continue; }
+
+        dprintf( STDERR_FILENO, "[user-lock] ml1090 REPAIR: owner tid=%04x port=0x%x no longer "
+                 "exists and has held the USER lock for %us — reinitialising the mutex and "
+                 "handing it to tid=%04x (MADEIRA_USERLOCK_REPAIR=0 to wait instead)\n",
+                 owner, port, waited_ms / 1000, (unsigned)GetCurrentThreadId() );
+        {
+            pthread_mutexattr_t attr;
+            pthread_mutexattr_init( &attr );
+            pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
+            user_lock_rec = 0;
+            user_lock_thread = 0;
+            user_lock_port = 0;
+            pthread_mutex_init( &user_mutex, &attr );
+            pthread_mutexattr_destroy( &attr );
+        }
+        if (!pthread_mutex_trylock( &user_mutex )) return;
+        /* somebody else won the repaired lock: fall back to waiting for it */
+        confirm_ms = waited_ms;
+    }
+}
+
 void user_lock(void)
 {
-    pthread_mutex_lock( &user_mutex );
-    if (!user_lock_rec++) user_lock_thread = GetCurrentThreadId();
+    if (!ios_user_lock_watch()) pthread_mutex_lock( &user_mutex );
+    else if (pthread_mutex_trylock( &user_mutex )) ios_user_lock_wait_slow();
+    if (!user_lock_rec++)
+    {
+        user_lock_thread = GetCurrentThreadId();
+        user_lock_port = ios_mach_self_port ? ios_mach_self_port() : 0;
+    }
 }
 
 void user_unlock(void)
 {
-    if (!--user_lock_rec) user_lock_thread = 0;
+    if (!--user_lock_rec)
+    {
+        user_lock_thread = 0;
+        user_lock_port = 0;
+    }
     pthread_mutex_unlock( &user_mutex );
+}
+
+/***********************************************************************
+ *           user_lock_abandon          (iOS-Madeira ml1090)
+ *
+ * Drop the calling thread's whole hold on the USER lock, however deep the
+ * recursion. Called from the pseudo-process teardown paths so a thread that is
+ * about to stop existing cannot take the session's window handles with it, and
+ * from user_check_not_lock() below when a leak is detected. A no-op on any
+ * thread that does not own the lock, so it is safe to call unconditionally.
+ */
+void user_lock_abandon(void)
+{
+    if (!user_lock_rec || user_lock_thread != GetCurrentThreadId()) return;
+
+    dprintf( STDERR_FILENO, "[user-lock] ml1090 tid=%04x is going away while holding the USER "
+             "lock (rec=%u) — releasing it so the rest of the session keeps running\n",
+             (unsigned)GetCurrentThreadId(), user_lock_rec );
+
+    while (user_lock_rec)
+    {
+        if (!--user_lock_rec)
+        {
+            user_lock_thread = 0;
+            user_lock_port = 0;
+        }
+        pthread_mutex_unlock( &user_mutex );
+    }
 }
 
 void user_check_not_lock(void)
 {
-    if (user_lock_thread == GetCurrentThreadId())
+    static int strict = -1;
+
+    if (user_lock_thread != GetCurrentThreadId()) return;
+
+    if (strict < 0) strict = !ios_user_lock_knob( "MADEIRA_USERLOCK_RECOVER" );
+    if (strict)
     {
         ERR( "BUG: holding USER lock\n" );
         assert( 0 );
     }
+
+    /* A caller reached a blocking win32u entry point (message wait, winproc
+     * dispatch, inter-thread send) without releasing the lock — see this
+     * block's opening comment for why aborting here is worse than recovering:
+     * the abort cannot unwind the mutex, so it would hand a session-wide lock
+     * to a thread that is about to be killed. */
+    dprintf( STDERR_FILENO, "[user-lock] ml1090 LEAK tid=%04x reached a blocking win32u call "
+             "still holding the USER lock (rec=%u) — released here instead of aborting "
+             "(MADEIRA_USERLOCK_RECOVER=0 restores the upstream assert)\n",
+             (unsigned)GetCurrentThreadId(), user_lock_rec );
+    user_lock_abandon();
 }
 
 static HANDLE get_display_device_init_mutex( void )
@@ -2440,10 +2690,50 @@ static void monitor_get_info( struct monitor *monitor, MONITORINFO *info, UINT d
     intersect_rect( &info->rcWork, &info->rcWork, &info->rcMonitor );
     info->dwFlags = is_monitor_primary( monitor ) ? MONITORINFOF_PRIMARY : 0;
 
+#ifdef WINE_IOS
+    /* ml1100 — one always-on line, the first time anything asks a monitor for
+     * its rectangles. Everything that places a window off screen on this port
+     * has gone through here: GetMonitorInfo, SPI_GETWORKAREA and
+     * MonitorFromWindow's caller all read these two rects, and a sourceless
+     * (virtual) monitor answers from ios_screen_size() while a sourced one
+     * answers {0,0,0,0} the moment its source is not ATTACHED_TO_DESKTOP.
+     * `source=` and `attached=` say which of the two this is. */
+    if (is_monitor_primary( monitor ))
+    {
+        static int noted;
+        if (!noted++)
+            dprintf( STDERR_FILENO,
+                     "[monitor] ml1100 primary rc={%d,%d,%d,%d} work={%d,%d,%d,%d} source=%s "
+                     "attached=%s monitors=%u dpi=%u\n",
+                     (int)info->rcMonitor.left, (int)info->rcMonitor.top,
+                     (int)info->rcMonitor.right, (int)info->rcMonitor.bottom,
+                     (int)info->rcWork.left, (int)info->rcWork.top,
+                     (int)info->rcWork.right, (int)info->rcWork.bottom,
+                     monitor->source ? "yes" : "none(virtual)",
+                     !monitor->source ? "n/a" :
+                     (monitor->source->state_flags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) ? "yes" : "NO",
+                     (unsigned)list_count( &monitors ), dpi );
+    }
+#endif
+
     if (info->cbSize >= sizeof(MONITORINFOEXW))
     {
         char buffer[CCHDEVICENAME];
         if (monitor->source) snprintf( buffer, sizeof(buffer), "\\\\.\\DISPLAY%d", monitor->source->id + 1 );
+#ifdef WINE_IOS
+        /* iOS-Madeira 2026-09-16: the virtual monitor has no source, and
+         * upstream's sourceless name is "WinDisc" -- Windows' name for a
+         * DISCONNECTED monitor. Everything that goes looking for a display by
+         * name gets that string from GetMonitorInfo and then asks about it:
+         * DXMT's win32 wsi does GetMonitorInfoW -> EnumDisplaySettingsW(szDevice)
+         * (research/dxmt/src/util/wsi_monitor_win32.cpp), and wined3d compares
+         * an output's name against EnumDisplayDevices'. This driver advertises
+         * exactly one adapter, "\\.\DISPLAY1"; say so here too rather than
+         * handing out a name that reads as "nothing is plugged in".
+         * (Comparing against &virtual_monitor, not ios_virtual_monitor_active():
+         * display_lock is already held here.) */
+        else if (monitor == &virtual_monitor) strcpy( buffer, "\\\\.\\DISPLAY1" );
+#endif
         else strcpy( buffer, "WinDisc" );
         asciiz_to_unicode( ((MONITORINFOEXW *)info)->szDevice, buffer );
     }
@@ -2882,7 +3172,35 @@ static BOOL lock_display_devices( BOOL force )
     pthread_mutex_lock( &display_lock );
 
     serial = get_monitor_update_serial();
+#ifdef WINE_IOS
+    /* ml1100 — AN EMPTY MONITOR LIST IS NOT AN ANSWER.
+     *
+     * get_monitor_update_serial() returns 0 whenever get_shared_desktop()
+     * fails, which is the normal state of a thread that has not resolved a
+     * desktop yet -- i.e. the first win32u call any process makes in a direct
+     * launch, before get_desktop_window() has run. `monitor_update_serial`
+     * starts at 0 too, so `0 >= 0` took this early return and the
+     * virtual-monitor branch below never ran: `monitors` stayed EMPTY, and
+     * every consumer of it silently answered {0,0,0,0} --
+     * get_primary_monitor_rect (SM_CXVIRTUALSCREEN, and the desktop window's
+     * own synthesised rect), get_monitor_from_rect (so MonitorFromWindow
+     * returns NULL and GetMonitorInfoW FAILS, leaving the caller's MONITORINFO
+     * zeroed), NtUserEnumDisplayMonitors (FALSE, no callback) and
+     * SPI_GETWORKAREA -- which then CACHED the zero for the rest of the
+     * session (see its own note). A dialog centred on that lands at
+     * ((0+0-cx)/2, (0+0-cy)/2), which is the {-127,-43,128,43} of log 85.
+     *
+     * A desktop session never showed it because explorer runs first and
+     * populates the list long before any title asks.
+     *
+     * The list is never legitimately empty on this port (the branch below
+     * always adds the virtual monitor), so "empty" means "not built yet",
+     * never "no displays". */
+    if (!force && monitor_update_serial >= serial &&
+        (!ios_monitor_heal() || !list_empty( &monitors ))) return TRUE;
+#else
     if (!force && monitor_update_serial >= serial) return TRUE;
+#endif
 
     /* services do not have any adapters, only a virtual monitor */
     if (
@@ -3855,10 +4173,103 @@ static BOOL ios_virtual_monitor_active(void)
     return ret;
 }
 
+/* The mode table the virtual monitor advertises. These are the standard PC
+ * display modes a game's resolution list is built from -- a monitor that
+ * offers only "640x480, 800x600 and whatever you are already running" (which
+ * is what this used to be) leaves a game no way to ask for anything else, so
+ * it renders at whatever it defaulted to and the screen shape never matches.
+ *
+ * Every entry is 32 bpp / 60 Hz.
+ *
+ * ml1100 — THE LADDER HAD NO SMALL WIDESCREEN RUNGS, AND THE CAP MOVED.
+ *
+ * Two separate defects, both visible in device log 86:
+ *
+ *  - 960x540 (and 640x360, 854x480, 1024x576 — the whole lower half of the
+ *    16:9 ladder) was simply absent, so ChangeDisplaySettings(960x540) was
+ *    refused with DISP_CHANGE_BADMODE. The program then programmed 1024x768,
+ *    a 4:3 mode, and rendered its 16:9 content into it. Nothing downstream
+ *    can undo that: the aspect was decided inside the guest. A real GPU
+ *    answers this question with a list of dozens; ours answered it with
+ *    nineteen 4:3-and-up entries.
+ *  - the list was filtered against twice the CURRENT mode's pixel count, so
+ *    the set of modes a program could choose from SHRANK as soon as it chose
+ *    a small one, and a program that stepped down and wanted to step back up
+ *    found its own previous mode missing. A monitor's mode list does not
+ *    depend on the mode it is in. The cap now comes from the SESSION DEFAULT
+ *    (this port's stand-in for the panel's native size, and the one value a
+ *    mode change never moves) and is four times its pixel count, which keeps
+ *    the "do not offer what this device cannot drive" intent on a small
+ *    desktop while letting a 720p session reach the full standard ladder. */
+static const struct { short w, h; } ios_standard_modes[] =
+{
+    /* 16:9 and 16:10, low rungs first — the ones a windowed title actually
+     * asks for, and the ones that were missing */
+    {  640,  360 }, {  640,  400 }, {  640,  480 }, {  720,  480 },
+    {  720,  576 }, {  800,  480 }, {  800,  600 }, {  848,  480 },
+    {  854,  480 }, {  960,  540 }, {  960,  600 }, {  960,  720 },
+    { 1024,  576 }, { 1024,  600 }, { 1024,  640 }, { 1024,  768 },
+    { 1120,  832 }, { 1152,  648 }, { 1152,  864 }, { 1176,  664 },
+    { 1280,  720 }, { 1280,  768 }, { 1280,  800 }, { 1280,  960 },
+    { 1280, 1024 }, { 1360,  768 }, { 1366,  768 }, { 1400, 1050 },
+    { 1440,  900 }, { 1600,  900 }, { 1600, 1024 }, { 1600, 1200 },
+    { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 }, { 2048, 1536 },
+    { 2560, 1440 },
+};
+
+/* Index 0 is always the CURRENT mode: EnumDisplaySettings callers compare the
+ * list against ENUM_CURRENT_SETTINGS/ENUM_REGISTRY_SETTINGS and a current mode
+ * missing from the list reads as "this monitor cannot do what it is doing". */
+static BOOL ios_mode_at_index( UINT index, int *w, int *h )
+{
+    int sw, sh, cw, ch;
+    const char *extended = getenv( "MADEIRA_EXTENDED_MODES" );
+    BOOL high_modes = extended && !strcmp( extended, "1" );
+    static int announced;
+    UINT i, n = 0;
+
+    ios_screen_size( &sw, &sh );
+    if (!index)
+    {
+        *w = sw;
+        *h = sh;
+        return TRUE;
+    }
+
+    /* ml1100: the cap is measured against the SESSION DEFAULT, not the current
+     * mode, so the list a program sees does not change under it when it
+     * selects a mode. ios_screen_def_* is seeded by the same first
+     * ios_screen_size() call above, so it is always set by this point. */
+    cw = ios_screen_def_w ? ios_screen_def_w : sw;
+    ch = ios_screen_def_h ? ios_screen_def_h : sh;
+    /* ml1140: applications commonly choose the largest advertised mode on
+     * first launch. A 720p virtual display should not advertise four times its
+     * pixel budget by default. Users can choose a larger session resolution
+     * or restore the extended ladder; current/saved modes remain selectable. */
+    if (!announced)
+    {
+        announced = 1;
+        dprintf( STDERR_FILENO, "[mode-budget] ml1140 default=%dx%d extended=%d (MADEIRA_EXTENDED_MODES=1 restores high modes)\n",
+                 cw, ch, high_modes );
+    }
+
+    for (i = 0; i < ARRAY_SIZE(ios_standard_modes); i++)
+    {
+        int mw = ios_standard_modes[i].w, mh = ios_standard_modes[i].h;
+
+        if (mw == sw && mh == sh) continue;                     /* already index 0 */
+        if ((INT64)mw * mh > (high_modes ? 4 : 1) * (INT64)cw * ch) continue;
+        if (++n != index) continue;
+        *w = mw;
+        *h = mh;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL ios_virtual_enum_display_settings( DWORD index, DEVMODEW *devmode, DWORD flags )
 {
     int sw, sh;
-    UINT idx = index;
 
     ios_screen_size( &sw, &sh );
 
@@ -3886,25 +4297,200 @@ static BOOL ios_virtual_enum_display_settings( DWORD index, DEVMODEW *devmode, D
     if (index == WINE_ENUM_PHYSICAL_SETTINGS) return FALSE;
 
     {
-        /* Classic small modes + the desktop resolution (deduped). Nothing
-         * LARGER than the desktop — bigger modes crop on the virtual
-         * desktop surface. */
-        UINT widths[3]  = {640, 800, 0};
-        UINT heights[3] = {480, 600, 0};
-        UINT count = 2;
-        if (!((sw == 640 && sh == 480) || (sw == 800 && sh == 600)))
-        {
-            widths[2] = sw; heights[2] = sh; count = 3;
-        }
-        if (idx >= count)
+        int mw, mh;
+
+        if (!ios_mode_at_index( index, &mw, &mh ))
         {
             RtlSetLastWin32Error( ERROR_NO_MORE_FILES );
             return FALSE;
         }
-        devmode->dmPelsWidth = widths[idx];
-        devmode->dmPelsHeight = heights[idx];
+        devmode->dmPelsWidth = mw;
+        devmode->dmPelsHeight = mh;
     }
     return TRUE;
+}
+
+/* iOS-Madeira: does this device name refer to the single adapter that
+ * NtUserEnumDisplayDevices synthesizes in the virtual-monitor regime?
+ * That call hands out "\\.\DISPLAY1" for the adapter and
+ * "\\.\DISPLAY1\Monitor0" for its monitor, so both must be accepted here:
+ * an application that follows the documented
+ * EnumDisplayDevices -> EnumDisplaySettings -> ChangeDisplaySettingsEx
+ * sequence feeds exactly those strings back to us. */
+static BOOL ios_virtual_device_name( const UNICODE_STRING *name )
+{
+    static const WCHAR display1W[] = {'\\','\\','.','\\','D','I','S','P','L','A','Y','1'};
+    UINT len;
+
+    if (!name || !name->Length) return TRUE;                 /* NULL/empty = primary */
+    if (get_display_index( name ) == 1) return TRUE;         /* "\\.\DISPLAY1" */
+
+    /* "\\.\DISPLAY1\MonitorN" */
+    len = name->Length / sizeof(WCHAR);
+    if (len <= ARRAY_SIZE(display1W)) return FALSE;
+    if (wcsnicmp( name->Buffer, display1W, ARRAY_SIZE(display1W) )) return FALSE;
+    return name->Buffer[ARRAY_SIZE(display1W)] == '\\';
+}
+
+/* Implemented by the app (app/Madeira/IOSDisplayShim.m); weak so win32u still
+ * links in a process that does not host the UI. It tells the host view what
+ * the guest is rendering into NOW, which is the only way the presented
+ * surface can follow a mode change instead of a launch-time constant. */
+extern void winios_display_mode_changed( int w, int h ) __attribute__((weak));
+
+/* Make the current virtual-monitor size real everywhere it is mirrored.
+ *
+ *  - update_display_cache( TRUE ) re-runs the virtual-monitor branch of
+ *    lock_display_devices, which refreshes virtual_monitor.rc_work and pushes
+ *    the new monitor rectangle to the server (set_winstation_monitors). That
+ *    one push is what moves NtUserGetSystemMetrics(SM_C{X,Y}SCREEN),
+ *    EnumDisplayMonitors/GetMonitorInfo (monitor_get_rect reads
+ *    ios_screen_size directly) and the desktop window itself -- win32u
+ *    answers WND_DESKTOP rects from get_primary_monitor_rect()
+ *    (wine/dlls/win32u/window.c:1780), so the desktop window needs no
+ *    SetWindowPos of its own and none is attempted on a window whose thread
+ *    was detached at creation.
+ *  - the server clips absolute pointer input to desktop cursor.clip
+ *    (build/wineserver/queue_ios.c update_desktop_cursor_pos) and seeds that
+ *    rectangle with a fixed size before any monitor exists, so a monitor of a
+ *    different shape is unusable until the clip is reset.
+ *  - the app then resizes the presented surface, and WM_DISPLAYCHANGE tells
+ *    the guest.
+ *
+ * Must not be called with display_lock held. */
+static void ios_invalidate_work_area(void);   /* below, beside the spi_loaded cache */
+
+static void ios_publish_screen_size( BOOL broadcast )
+{
+    int w, h;
+
+    ios_screen_size( &w, &h );
+    update_display_cache( TRUE );
+    /* ml1100: the work area is a CACHED rectangle derived from the monitor, so
+     * a monitor that just changed size leaves a stale one behind -- the same
+     * failure as the never-computed one, only harder to see because the
+     * numbers look plausible. Windows recomputes it on a display change too,
+     * and a shell that reserves a taskbar strip re-applies SPI_SETWORKAREA
+     * from its own WM_DISPLAYCHANGE handler. */
+    ios_invalidate_work_area();
+    NtUserClipCursor( NULL );
+
+    if (winios_display_mode_changed) winios_display_mode_changed( w, h );
+
+    if (!broadcast) return;
+
+    send_notify_message( get_desktop_window(), WM_DISPLAYCHANGE, 32, MAKELPARAM( w, h ), FALSE );
+    send_message_timeout( HWND_BROADCAST, WM_DISPLAYCHANGE, 32, MAKELPARAM( w, h ),
+                          SMTO_ABORTIFHUNG, 2000, FALSE );
+    NtUserPostMessage( NtUserGetForegroundWindow(), WM_WINE_CLIPCURSOR, SET_CURSOR_FSCLIP, 0 );
+}
+
+/* The session default has to be published too, once, for the same cursor-clip
+ * reason -- the server's seed predates any monitor. It cannot happen at
+ * ios_screen_size() time (that runs under display_lock, and long before the
+ * desktop window exists), so it is driven from the first screen-size query
+ * made with no lock held: NtUserGetSystemMetrics( SM_CXSCREEN ), which every
+ * process asks early and which is by definition about this value. */
+static void ios_publish_screen_size_once(void)
+{
+    static int done;
+
+    if (done) return;
+    /* the cached handle, not get_desktop_window(): this runs on a path hot
+     * enough that a server round trip per query (and winstation_ios.c's ERR
+     * for every failed one) would be its own problem. Non-zero means this
+     * thread has already resolved the desktop window, which is exactly when
+     * there is something to publish to. */
+    if (!NtUserGetThreadInfo()->top_window) return;   /* too early; the next query retries */
+    done = 1;
+    ios_publish_screen_size( FALSE );
+}
+
+/* iOS-Madeira: NtUserChangeDisplaySettings for the virtual-monitor regime.
+ *
+ * The sources list is EMPTY here, so find_source() fails for every name --
+ * including the one this same driver advertises from
+ * NtUserEnumDisplayDevices and happily answers in
+ * NtUserEnumDisplaySettings. The result was DISP_CHANGE_BADPARAM for a mode
+ * the driver had just reported as CURRENT, which explorer logs as
+ * "Failed to initialize registry display settings" and which applications
+ * treat as a fatal video-init error (typically followed by sizing their
+ * fullscreen window from an uninitialised mode structure).
+ *
+ * Accept any mode the synthesized enumeration lists, and -- since 2026-09-14
+ * -- actually PROGRAM it: the virtual monitor really becomes that size, the
+ * way a monitor does on Windows. Reject a mode that is not in the list with
+ * BADMODE and an unknown device with BADPARAM -- never BADPARAM for our own
+ * device name. A NULL devmode, and CDS_RESET, restore the session default,
+ * which is this port's equivalent of the registry mode. */
+static LONG ios_virtual_change_display_settings( UNICODE_STRING *devname, const DEVMODEW *devmode,
+                                                 DWORD flags )
+{
+    static const DWORD size_fields = DM_PELSWIDTH | DM_PELSHEIGHT;
+    LONG ret = DISP_CHANGE_SUCCESSFUL;
+    const char *why = "no mode requested";
+    int sw, sh, want_w = 0, want_h = 0;
+    BOOL apply = FALSE;
+
+    ios_screen_size( &sw, &sh );
+
+    if (!ios_virtual_device_name( devname )) ret = DISP_CHANGE_BADPARAM, why = "unknown device name";
+    else if (!devmode || !(devmode->dmFields & size_fields))
+    {
+        /* ChangeDisplaySettings(NULL, 0) -- and any call that names no size --
+         * means "go back to the registry mode", which here is the size the
+         * session started at. */
+        want_w = ios_screen_def_w;
+        want_h = ios_screen_def_h;
+        apply = !(flags & (CDS_TEST | CDS_NORESET));
+        why = "restoring the session default";
+    }
+    else if ((devmode->dmFields & size_fields) == size_fields)
+    {
+        BOOL found = FALSE;
+        int mw, mh;
+        UINT i;
+
+        want_w = (int)devmode->dmPelsWidth;
+        want_h = (int)devmode->dmPelsHeight;
+
+        /* the session default is always acceptable even when the cap computed
+         * from a smaller current mode would have hidden it from the list */
+        if (want_w == ios_screen_def_w && want_h == ios_screen_def_h) found = TRUE;
+        /* A saved explicit request may exceed the conservative advertised
+         * ladder. Keep accepting the former supported set; enumeration is a
+         * first-launch preference, not a ban on user-selected resolutions. */
+        for (i = 0; !found && i < ARRAY_SIZE(ios_standard_modes); i++)
+        {
+            mw = ios_standard_modes[i].w;
+            mh = ios_standard_modes[i].h;
+            if ((INT64)mw * mh <= 4 * (INT64)ios_screen_def_w * ios_screen_def_h)
+                found = (mw == want_w && mh == want_h);
+        }
+
+        if (!found) ret = DISP_CHANGE_BADMODE, why = "mode is not in the virtual mode list";
+        else
+        {
+            apply = !(flags & (CDS_TEST | CDS_NORESET));
+            why = apply ? "mode accepted" : "mode supported (test/noreset)";
+        }
+    }
+
+    if (apply && (want_w != sw || want_h != sh))
+    {
+        ios_screen_cur_w = want_w;
+        ios_screen_cur_h = want_h;
+        ios_publish_screen_size( TRUE );
+        why = "mode programmed";
+    }
+
+    dprintf( STDERR_FILENO,
+             "[iOS ChangeDisplaySettings] virtual display %dx%d: req=%lux%lu flags=%#x -> %d (%s)\n",
+             sw, sh,
+             devmode ? (unsigned long)devmode->dmPelsWidth : 0ul,
+             devmode ? (unsigned long)devmode->dmPelsHeight : 0ul,
+             (unsigned)flags, (int)ret, why );
+    return ret;
 }
 
 static void monitor_get_interface_name( struct monitor *monitor, WCHAR *interface_name )
@@ -4094,15 +4680,78 @@ NTSTATUS WINAPI NtUserEnumDisplayDevices( UNICODE_STRING *device, DWORD index,
             else
                 info->StateFlags = DISPLAY_DEVICE_ATTACHED | DISPLAY_DEVICE_ACTIVE;
         }
+        /* DeviceID and DeviceKey used to be returned as EMPTY strings here,
+         * and an empty DeviceID is not a harmless omission: it is the field a
+         * title reads to find out WHICH GPU it is running on. The idiom that
+         * does it is
+         *
+         *     p = strstr( dd.DeviceID, "VEN_" );   // NULL on ""
+         *     vendor = strtoul( p + 4, NULL, 16 ); // reads byte at 0 + 4
+         *
+         * with no NULL check, because on Windows the string is never empty.
+         * That is a byte read of address 4, which is exactly the fault a
+         * 2008-era title took here immediately after this call returned. The
+         * empty DeviceKey has the same shape for the titles that go to the
+         * registry instead.
+         *
+         * So both are filled in, in the format the non-virtual path above
+         * produces, and the PCI ids are the SAME identity the rest of the
+         * port reports for this adapter: 0x106B / 0x0001, matching
+         * MTLD3D9Interface::GetAdapterIdentifier in
+         * research/dxmt/src/d3d9/d3d9_interface.cpp and the no3d adapter in
+         * wine/dlls/wined3d/directx.c. A title that cross-checks D3D9,
+         * DirectDraw and EnumDisplayDevices now sees one GPU rather than
+         * three, which is the case the vendor-table code paths were written
+         * for. */
         if (info->cb >= offsetof(DISPLAY_DEVICEW, DeviceID) + sizeof(info->DeviceID))
-            *info->DeviceID = 0;
+        {
+            if (is_adapter)
+            {
+                /* EDD_GET_DEVICE_INTERFACE_NAME has no meaning for an
+                 * adapter: it asks for a device INTERFACE path, and an
+                 * adapter is not an interface. Wine returns an empty string
+                 * for that combination and so does Windows. */
+                if (flags & EDD_GET_DEVICE_INTERFACE_NAME)
+                    *info->DeviceID = 0;
+                else
+                    asciiz_to_unicode( info->DeviceID,
+                                       "PCI\\VEN_106B&DEV_0001&SUBSYS_00000000&REV_00" );
+            }
+            else if (flags & EDD_GET_DEVICE_INTERFACE_NAME)
+            {
+                char buffer[MAX_PATH];
+                snprintf( buffer, sizeof(buffer), "\\\\?\\DISPLAY#Default_Monitor#4&madeira&0&UID0#%s",
+                          guid_devinterface_monitorA );
+                asciiz_to_unicode( info->DeviceID, buffer );
+            }
+            else
+            {
+                char buffer[MAX_PATH];
+                snprintf( buffer, sizeof(buffer), "MONITOR\\Default_Monitor\\%s\\0000",
+                          guid_devclass_monitorA );
+                asciiz_to_unicode( info->DeviceID, buffer );
+            }
+        }
         if (info->cb >= offsetof(DISPLAY_DEVICEW, DeviceKey) + sizeof(info->DeviceKey))
-            *info->DeviceKey = 0;
+        {
+            char buffer[MAX_PATH];
+            /* The adapter's video GUID is fixed rather than generated: the
+             * virtual monitor is one device that never changes across runs,
+             * and a stable key is what a title caching the string between
+             * sessions expects. */
+            if (is_adapter)
+                snprintf( buffer, sizeof(buffer), "%s\\Video\\%s\\0000", control_keyA,
+                          "{8C0C2A5B-0E7E-4B0E-9E3F-1D0A6B5C4D21}" );
+            else
+                snprintf( buffer, sizeof(buffer), "%s\\Class\\%s\\0000", control_keyA,
+                          guid_devclass_monitorA );
+            asciiz_to_unicode( info->DeviceKey, buffer );
+        }
         {
             static int logged;
             if (logged++ < 4)
-                dprintf(2, "[vmode] synthesized EnumDisplayDevices %s idx=%u\n",
-                        is_adapter ? "adapter" : "monitor", index);
+                dprintf(2, "[vmode] synthesized EnumDisplayDevices %s idx=%u flags=%#x\n",
+                        is_adapter ? "adapter" : "monitor", index, (unsigned)flags );
         }
         return STATUS_SUCCESS;
     }
@@ -4720,6 +5369,18 @@ LONG WINAPI NtUserChangeDisplaySettings( UNICODE_STRING *devname, DEVMODEW *devm
                 (unsigned long)devmode->dmBitsPerPel,
                 (unsigned)devmode->dmFields);
     }
+
+#ifdef WINE_IOS
+    /* iOS-Madeira: answer for the synthesized virtual display BEFORE the
+     * source lookup. In this regime the sources list is empty, so
+     * find_source() cannot succeed for ANY name -- not even "\\.\DISPLAY1",
+     * which NtUserEnumDisplayDevices hands out and NtUserEnumDisplaySettings
+     * answers. Letting the call fall through returned DISP_CHANGE_BADPARAM
+     * for the driver's own device name (see explorer's
+     * initialize_display_settings failing for L"\\\\.\\DISPLAY1"). */
+    if (ios_virtual_monitor_active())
+        return ios_virtual_change_display_settings( devname, devmode, flags );
+#endif
 
     if ((!devname || !devname->Length) && !devmode) return apply_display_settings( NULL, NULL, hwnd, flags, lparam );
 
@@ -6036,6 +6697,17 @@ enum spi_index
 /* indicators whether system parameter value is loaded */
 static char spi_loaded[SPI_INDEX_COUNT];
 
+#ifdef WINE_IOS
+/* ml1100 — see ios_publish_screen_size. Declared up there, defined here where
+ * the cache it drops actually lives. A plain word store; SPI_GETWORKAREA then
+ * recomputes under display_lock on the next query. */
+static void ios_invalidate_work_area(void)
+{
+    if (!ios_monitor_heal()) return;
+    spi_loaded[SPI_SETWORKAREA_IDX] = FALSE;
+}
+#endif
+
 static struct sysparam_rgb_entry system_colors[] =
 {
 #define RGB_ENTRY(name,val,reg) { { get_rgb_entry, set_rgb_entry, init_rgb_entry, COLORS_KEY, reg }, (val) }
@@ -6213,6 +6885,9 @@ void sysparams_init(void)
     pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
     pthread_mutex_init( &user_mutex, &attr );
     pthread_mutexattr_destroy( &attr );
+    /* ml1090: so [thread-stacks] prints "lock=win32u:user_mutex" instead of the
+     * bare address logs 75/78 had to be decoded by hand. */
+    if (ios_register_unix_lock) ios_register_unix_lock( &user_mutex, "win32u:user_mutex" );
 
     if ((hkey = reg_create_ascii_key( hkcu_key, "Keyboard Layout\\Preload", 0, NULL )))
     {
@@ -6678,19 +7353,52 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
         if (!spi_loaded[spi_idx])
         {
             struct monitor *monitor;
+            BOOL found = FALSE;
+            UINT count;
 
             if (!lock_display_devices( FALSE )) return FALSE;
 
+            count = list_count( &monitors );
             LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
             {
                 if (!is_monitor_primary( monitor )) continue;
                 monitor_get_info( monitor, &info, dpi );
                 work_area = info.rcWork;
+                found = !IsRectEmpty( &work_area );
                 break;
             }
 
             unlock_display_devices();
+#ifdef WINE_IOS
+            /* ml1100 — NEVER CACHE A WORK AREA THAT WAS NEVER COMPUTED.
+             *
+             * `work_area` and `spi_loaded` are statics, and on this port ONE
+             * win32u serves every pseudo-process in the Mach task, so this
+             * cache is session-wide. The loop above finds nothing when the
+             * monitor list has not been built yet (see lock_display_devices),
+             * and the unconditional `spi_loaded = TRUE` then latched
+             * {0,0,0,0} as THE work area for the whole session -- for every
+             * later process, on every later thread, with no line anywhere
+             * saying so. Every CenterWindow helper that asks for the work area
+             * then puts its window at ((0 - cx)/2, (0 - cy)/2): the
+             * {-127,-43,128,43} of log 85, entirely off screen.
+             *
+             * Latch only a real rectangle; an empty one means "ask again
+             * later", which costs one list walk per query until the display
+             * exists and nothing after that. */
+            if (ios_monitor_heal() && !found)
+            {
+                static int noted;
+                if (noted++ < 2)
+                    dprintf( STDERR_FILENO, "[monitor] ml1100 SPI_GETWORKAREA has no monitor yet "
+                                            "(monitors=%u) — answering {0,0,0,0} WITHOUT caching it; "
+                                            "a cached zero work area is what centres dialogs off "
+                                            "screen\n", (unsigned)count );
+            }
+            else spi_loaded[spi_idx] = TRUE;
+#else
             spi_loaded[spi_idx] = TRUE;
+#endif
         }
         *(RECT *)ptr = work_area;
         ret = TRUE;
@@ -7282,6 +7990,7 @@ int get_system_metrics( int index )
     case SM_CYMAXIMIZED:
     {
         int sw, sh;
+        ios_publish_screen_size_once();
         ios_screen_size( &sw, &sh );
         switch (index)
         {
@@ -7952,6 +8661,13 @@ ULONG_PTR WINAPI NtUserCallOneParam( ULONG_PTR arg, ULONG code )
         return 0;
     }
 }
+
+/* ml668: the gamepad slot reader, in build/win32u-unix/driver_ios.c (same
+ * unix library). Declared rather than headered for the same reason every other
+ * winios bridge symbol in that file is. */
+#ifdef WINE_IOS
+extern ULONG_PTR ios_gamepad_query( UINT index, UINT op, void *buffer );
+#endif
 
 /***********************************************************************
  *	     NtUserCallTwoParam    (win32u.@)

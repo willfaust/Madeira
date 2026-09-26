@@ -56,13 +56,136 @@ enum StikJITHelper {
         }
     }
 
-    /// Poll every 0.5s until CS_DEBUGGED is set, then call completion.
+    /// Poll every 0.5s until a debugger is attached, then call completion.
+    /// ml1330: waits for P_TRACED (jit_debugger_attached), not the sticky
+    /// CS_DEBUGGED flag, which stays set after StikDebug has gone and would
+    /// report success before any re-attach. Gives up after 60 s. On success the
+    /// JIT pool is allocated immediately, while StikDebug is certainly alive.
     private static func pollForJIT(completion: @escaping (Bool) -> Void) {
+        let started = Date()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
-            if jit_check_debugged() {
+            if jit_debugger_attached() {
                 timer.invalidate()
-                LogStore.shared.log("JIT enabled! (CS_DEBUGGED set)", level: .success)
-                completion(true)
+                // ml962: a fresh attach re-arms BRK servicing, so a pool CAN be
+                // allocated again after an earlier detach.
+                debuggerDetached = false
+                unsetenv("MADEIRA_DETACHED")
+                LogStore.shared.log("JIT enabled! (debugger attached)", level: .success)
+                prepareEarlyPool(trigger: "enable") { _ in completion(true) }
+            } else if Date().timeIntervalSince(started) > 60 {
+                timer.invalidate()
+                LogStore.shared.log("[jit-early] ml1330 no debugger attached within 60 s of opening StikDebug", level: .error)
+                completion(false)
+            }
+        }
+    }
+
+    // ── ml1330: allocate while the debugger is fresh ─────────────────────────
+    //
+    // Device logs 148 and 156: the first launch of a run died on the pool
+    // allocation BRK, 1 and 14 minutes after JIT was enabled (downloads ran in
+    // between). Every run that allocated within ~15 s succeeded (150, 153, 157).
+    // StikDebug is killed by iOS for CPU use ~52 s after attaching (see the
+    // ml524 early-detach note in ContentView), and nothing in this process
+    // catches a BRK before a Wine session installs its handlers, so a late BRK
+    // ended the app. The pool is a process-lifetime resource anyway (ml962), so
+    // take it the moment a debugger is observed, then detach cleanly.
+    // MADEIRA_JIT_EARLY_POOL=0 restores allocation at first launch.
+
+    /// Pool that the next launch will reuse without a debugger round trip.
+    /// Read without poolLock: that lock is held across the multi-second
+    /// allocation BRK, and the UI polls this every two seconds.
+    private static var poolAvailable = false
+    static var poolReady: Bool { poolAvailable }
+
+    /// Whether a launch can obtain its pool: one already exists, or a debugger
+    /// that can service the allocation BRK is attached now.
+    static var readyToLaunch: Bool {
+        poolReady || (!debuggerDetached && jit_debugger_attached())
+    }
+
+    private static var earlyInFlight = false
+
+    // ml2000: Wine writes Documents/madeira-pool-pressure.txt (the pool size in MB)
+    // when a session runs the early pool dry; the pool cannot grow in that app run.
+    // The next run takes one step more (512 -> 896 -> 1152) and keeps it as a floor.
+    // MADEIRA_POOL_FEEDBACK=0 ignores the record (Wine: MADEIRA_POOL_PRESSURE_MARK=0).
+    private static let pressurePoolKey = "madeiraPoolPressureMB"
+    static func consumePoolPressure() -> Int {
+        guard MadeiraConfig.flag("MADEIRA_POOL_FEEDBACK") else { return 0 }
+        var floor = UserDefaults.standard.integer(forKey: pressurePoolKey)
+        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let url = docs.appendingPathComponent("madeira-pool-pressure.txt")
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                try? FileManager.default.removeItem(at: url)
+                let used = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                let next = max(used, floor) < 896 ? 896 : 1152
+                if next > floor { floor = next; UserDefaults.standard.set(floor, forKey: pressurePoolKey) }
+                LogStore.shared.log("[pool-pressure] ml2000 last session ran a \(used)MB pool dry; early pool floor now \(floor)MB")
+            }
+        }
+        return (512...1152).contains(floor) ? floor : 0
+    }
+    static var poolPressureFloorMB: Int {
+        guard MadeiraConfig.flag("MADEIRA_POOL_FEEDBACK") else { return 0 }
+        let floor = UserDefaults.standard.integer(forKey: pressurePoolKey)
+        return (512...1152).contains(floor) ? floor : 0
+    }
+    /// ml2000: did the running session run the pool dry (file present, not yet consumed)?
+    static var poolPressureRecorded: Bool {
+        guard MadeiraConfig.flag("MADEIRA_POOL_FEEDBACK"),
+              let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
+        return FileManager.default.fileExists(atPath: docs.appendingPathComponent("madeira-pool-pressure.txt").path)
+    }
+    static var explicitPoolMB: Int? {
+        guard let text = MadeiraConfig.get("pool"),
+              let mb = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (256...1152).contains(mb) else { return nil }
+        return mb
+    }
+
+    /// Install the SIGTRAP fallback (skip a stray BRK, x0 = 0) once no debugger
+    /// is attached -- but only before any Wine session was set up, because
+    /// Wine installs and owns its own SIGTRAP handler from then on. Retried
+    /// once after a second: right after a detach P_TRACED can still read set.
+    private static func armTrapFallback() {
+        guard getenv("WINE_IOS_JIT_RX") == nil else { return }
+        jit_install_trap_handler()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            if getenv("WINE_IOS_JIT_RX") == nil { jit_install_trap_handler() }
+        }
+    }
+
+    /// Allocate the JIT pool now if a debugger is attached and no pool exists,
+    /// then detach. Size: madeira.cfg `pool` (madeira-pool.txt without a
+    /// madeira.cfg), else the session default ContentView asks for (896 MB),
+    /// raised to the pressure floor when an earlier session ran the pool dry.
+    static func prepareEarlyPool(trigger: String, completion: ((Bool) -> Void)? = nil) {
+        guard MadeiraConfig.flag("MADEIRA_JIT_EARLY_POOL"), !earlyInFlight, !poolReady, !debuggerDetached,
+              jit_debugger_attached(), wine_process_is_running() == 0 else {
+            completion?(poolReady); return
+        }
+        earlyInFlight = true
+        var sizeMB = 896
+        var source = "default"
+        if let mb = explicitPoolMB { sizeMB = mb; source = "madeira.cfg pool" }
+        let pressureMB = consumePoolPressure()
+        if explicitPoolMB == nil && pressureMB > sizeMB {
+            sizeMB = pressureMB; source = "an earlier session ran the pool dry, ml2000"
+        }
+        LogStore.shared.log("[jit-early] ml1330 trigger=\(trigger) allocating \(sizeMB)MB (\(source)) while the debugger is attached")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let t0 = CFAbsoluteTimeGetCurrent()
+            let pool = allocatePool(poolSize: sizeMB * 1024 * 1024)
+            if pool != nil { detachDebugger() }
+            let seconds = CFAbsoluteTimeGetCurrent() - t0
+            LogStore.shared.log(String(format: "[jit-early] ml1330 trigger=%@ pool=%@ size=%dMB seconds=%.2f detached=%d",
+                                       trigger, pool == nil ? "failed" : "ready", (pool?.size ?? 0) / 1024 / 1024,
+                                       seconds, debuggerDetached ? 1 : 0),
+                                level: pool == nil ? .error : .success)
+            DispatchQueue.main.async {
+                earlyInFlight = false
+                completion?(pool != nil)
             }
         }
     }
@@ -77,11 +200,149 @@ enum StikJITHelper {
         return result
     }
 
+    // ── ml962: the JIT pool is a PROCESS-LIFETIME resource ──────────────────
+    //
+    // m56 (2026-09-15) died launching a SECOND program inside one app run:
+    //
+    //   [task-exc] BREAKPOINT #1 ... jit26_prepare_region+0x28
+    //   [brk-f00d] skipped stray StikDebug BRK at pc=0x104e60510 (si_code=0)
+    //   [ERR] BAD POOL: no valid placement after retries. Killing in 10s
+    //
+    // Nothing was wrong with the address space. The FIRST session detaches
+    // StikDebug ~2s after the pool is granted ([early-detach], ml524), so on the
+    // second launch the allocation BRK reaches nobody: our own task-level Mach
+    // handler skips the stray BRK, x0 comes back 0, the loop breaks on attempt 0
+    // and the code printed a canned "all placements landed in the forbidden
+    // guest 64G window" that was simply false, then killed the app in 10s.
+    //
+    // The deeper point is that a second pool was never usable anyway. Wine's
+    // unix side reads WINE_IOS_JIT_RX/RW/SIZE exactly ONCE, behind
+    // `jit_pool_init_done` in virtual_ios.c, and that dylib is never unloaded —
+    // wine_process_start() just spawns another thread into __wine_main in the
+    // SAME process. So from session 2 onward Wine is already committed to the
+    // first pool: its bump pointer, freelist, image table, anon-alias table and
+    // the TEB trampoline at pool+8 all describe that exact mapping. Handing it a
+    // freshly allocated second pool would rewrite three env vars and change
+    // nothing else.
+    //
+    // Therefore: allocate once, cache here, hand the SAME pool to every later
+    // session. That is both the correct behaviour and the fast one — it removes
+    // a ~1.9s whole-process BRK suspension from every launch after the first.
+    //
+    // DELIBERATELY NOT SCRUBBED between sessions. Zeroing or madvise-ing the
+    // pool would destroy live state that ntdll-unix still owns and will never
+    // rebuild (jit_pool_init_done is already 1): the TEB restore trampoline at
+    // pool+0/+8, every image mapping the alias tables still point at, and the
+    // freelist's accounting. Reclaiming dead ranges is ntdll-unix's job and it
+    // already does it ([jit-pool] RECLAIM peb=... on pseudo-process death).
+    private struct CachedPool {
+        let rx: UnsafeMutableRawPointer
+        let rw: UnsafeMutableRawPointer
+        let size: Int
+    }
+    private static var cachedPool: CachedPool?
+    private static var poolSession = 0
+    /// Set when StikDebug has gone away. CS_DEBUGGED is sticky after detach, so
+    /// csops cannot answer "is anyone servicing BRK right now?" — this can.
+    private static var debuggerDetached = false
+    private static let poolLock = NSLock()
+    /// Bad placements, freed and then re-reserved so the kernel cannot hand back
+    /// the same hole on the next roll. Reserve-only (never written), so they
+    /// cost VA and no footprint. Kept for the process lifetime on purpose.
+    private static var blockedHoles: [(addr: vm_address_t, size: vm_size_t)] = []
+    /// ml1640: the executable window was given back so a pool could fit; later
+    /// attempts in this run must not re-reserve it or reject placements over it.
+    private static var exeWindowSurrendered = false
+    private static var earlyPlaceholderReleased = false
+
     /// Allocate a JIT memory pool via BRK #0xf00d WITHOUT detaching the debugger.
     /// The debugger stays attached so Wine can use BRK to prepare PE code pages.
-    static func allocatePool(poolSize requestedPoolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
+    ///
+    /// Idempotent per app run: the first call allocates, every later call returns
+    /// the same pool (see the CachedPool note above).
+    /// ml1440: the requested size, then smaller ones if no home is found. The
+    /// pool must be one contiguous range in [0x119000000, 64 GB) outside the
+    /// guest window, and that band is fragmented differently on every launch.
+    /// Device log 178: the largest usable holes were 697 and 608 MB, so the
+    /// 896 MB request (ml1420 asks for it whenever the library has Windows
+    /// Steam client entries) failed twice and Wine never started. A smaller
+    /// pool that starts beats none; 512 MB is the direct-launch default.
+    /// MADEIRA_POOL_FALLBACK=0 restores fail-at-the-requested-size.
+    static func allocatePool(poolSize: Int = 128 * 1024 * 1024) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
+        if let pool = allocatePoolSized(poolSize: poolSize) { return pool }
+        guard MadeiraConfig.flag("MADEIRA_POOL_FALLBACK"), !debuggerDetached, cachedPool == nil else { return nil }
+        let MiB = 1024 * 1024
+        for mb in [768, 640, 512] where mb * MiB < poolSize {
+            LogStore.shared.log("[jit-pool] ml1440 no home for \(poolSize / MiB)MB; trying \(mb)MB")
+            if let pool = allocatePoolSized(poolSize: mb * MiB) {
+                LogStore.shared.log("[jit-pool] ml1440 fell back to \(mb)MB (asked \(poolSize / MiB)MB)", level: .success)
+                return pool
+            }
+            if debuggerDetached { break }
+        }
+        return nil
+    }
+
+    private static func allocatePoolSized(poolSize requestedPoolSize: Int) -> (rx: UnsafeMutableRawPointer, rw: UnsafeMutableRawPointer, size: Int)? {
         var poolSize = requestedPoolSize      // ml1036: may shrink to fit, see the hole census below
-        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via debugger...")
+        poolLock.lock()
+        defer { poolLock.unlock() }
+        poolSession += 1
+        let session = poolSession
+
+        if let p = cachedPool {
+            // Validate rather than assume. Full-range mapped-ness catches a pool
+            // that was torn down under us; the protection probe is deliberately
+            // limited to the FIRST page of each alias, which holds the TEB
+            // trampoline and is never handed out (jit_pool_offset starts at
+            // 0x4000) — pages deeper in the pool legitimately change protection
+            // (W^X demotion, poisoned ranges) and must not fail this test.
+            let rxOK = jit_range_is_mapped(p.rx, p.size, 0)
+                    && jit_range_is_mapped(p.rx, 0x4000, VM_PROT_READ | VM_PROT_EXECUTE)
+            let rwOK = jit_range_is_mapped(p.rw, p.size, 0)
+                    && jit_range_is_mapped(p.rw, 0x4000, VM_PROT_READ | VM_PROT_WRITE)
+            if rxOK && rwOK {
+                LogStore.shared.log(String(format:
+                    "[jit-pool] reuse RX=%p RW=%p size=%dMB (session %d) — no debugger round trip",
+                    Int(bitPattern: p.rx), Int(bitPattern: p.rw), p.size / 1024 / 1024, session),
+                    level: .success)
+                if poolSize != p.size {
+                    LogStore.shared.log("[jit-pool] this session asked for \(poolSize / 1024 / 1024)MB; " +
+                        "keeping the \(p.size / 1024 / 1024)MB pool of session 1 — Wine's unix side " +
+                        "latched those addresses once and cannot be re-pointed in-process. " +
+                        "Force-quit and relaunch to change the pool size.")
+                }
+                return (rx: p.rx, rw: p.rw, size: p.size)
+            }
+            LogStore.shared.log(String(format:
+                "[jit-pool] cached pool RX=%p RW=%p is no longer intact (rx_ok=%d rw_ok=%d) — allocating a new one",
+                Int(bitPattern: p.rx), Int(bitPattern: p.rw), rxOK ? 1 : 0, rwOK ? 1 : 0), level: .error)
+            cachedPool = nil
+            poolAvailable = false
+        }
+
+        if debuggerDetached || getenv("MADEIRA_DETACHED") != nil {
+            // Only the debugger can bless pages for execution, and it is gone.
+            // Say so honestly instead of blaming the address space — and do not
+            // kill the app: the UI, the log and the 'Enable JIT' button all work.
+            LogStore.shared.log("[jit-pool] NO POOL: StikDebug already detached this run and there is " +
+                "no pool to reuse. Only the debugger can bless executable pages.", level: .error)
+            LogStore.shared.log("  Press 'Enable JIT' to re-attach StikDebug, then launch again. " +
+                "The app stays usable — nothing is being killed.")
+            return nil
+        }
+
+        // ml1330: a BRK with nobody attached ends the app before any Wine
+        // handler exists. CS_DEBUGGED cannot tell (sticky); P_TRACED can.
+        if !jit_debugger_attached() {
+            debuggerDetached = true
+            armTrapFallback()
+            LogStore.shared.log("[jit-early] ml1330 NO POOL: StikDebug is no longer attached (it is closed by iOS " +
+                "about a minute after attaching). Enable JIT again, then launch.", level: .error)
+            return nil
+        }
+
+        LogStore.shared.log("Allocating \(poolSize / 1024 / 1024)MB JIT pool via debugger... (session \(session))")
 
         // iOS-Madeira: FEX's dispatcher emit has a position-dependent encoding
         // bug — only works when the JIT pool lands at a high enough address
@@ -144,12 +405,15 @@ enum StikJITHelper {
         // kernel allows, otherwise kept alive as a pin.
         // ⚠️ ml596: the old claim that the next pick "must land elsewhere" is FALSE.
         // ml595 freed and re-requested three times and the kernel handed back the
-        // SAME 0x7000000000 hole each time, so the retry loop is not a strategy —
-        // it is three identical attempts. Failure is therefore deterministic within
-        // a launch and the caller must abort rather than run without a pool. A real
-        // fix needs explicit placement (hinted allocation / reserve-and-carve),
-        // not a re-roll; simply pinning the bad region to force a different address
-        // costs another 896MB against the 4096MB jetsam ceiling.
+        // SAME 0x7000000000 hole each time, so the retry loop was not a strategy —
+        // it was three identical attempts.
+        //
+        // ml962 makes each attempt actually make progress. A rejected placement is
+        // freed and then RE-RESERVED at the same VA with vm_allocate(FIXED), so the
+        // kernel cannot offer that hole again. The reservation is zero-fill and
+        // never touched, so — exactly like the pin chunks above — it costs address
+        // space and no footprint; only the rejected 896MB of DIRTY debugger pages
+        // would have cost jetsam budget, and those are handed back first.
         // ml1034: HOLD THE EXECUTABLE WINDOW BEFORE ALLOCATING RX.
         //
         // ml977 reserved [0x140000000,0x150000000) only AFTER the RX pool was
@@ -188,10 +452,12 @@ enum StikJITHelper {
         // against ends at +117MB; ntdll hands the window to the first fixed map
         // of >=64MB that fits, and reads the size from WINE_IOS_EXE_WINDOW.
         let exeWinSize: vm_address_t = 0x8000000           // 128MB
+        var exeWindowActive = !exeWindowSurrendered   // ml1640: see the census below
         func overlapsExeWindow(_ base: vm_address_t, _ len: vm_address_t) -> Bool {
-            return base < exeWinBase + exeWinSize && base + len > exeWinBase
+            return exeWindowActive && base < exeWinBase + exeWinSize && base + len > exeWinBase
         }
-        let skipWindow = (ProcessInfo.processInfo.environment["MADEIRA_NO_EXE_WINDOW"].map { $0 != "0" } ?? false)
+        let skipWindow = exeWindowSurrendered
+            || (ProcessInfo.processInfo.environment["MADEIRA_NO_EXE_WINDOW"].map { $0 != "0" } ?? false)
         var windowHeld = false
         if !skipWindow && madeira_early_window_base == UInt(exeWinBase) && madeira_early_window_size == UInt(exeWinSize) {
             // ml1040: already held since image load (JITAllocator.c constructor).
@@ -247,6 +513,10 @@ enum StikJITHelper {
         let goodLow = 0x119000000
         let guestLo = 0x7000000000
         let guestHi = 0x8000000000
+        func placementIsGood(_ a: Int) -> Bool {
+            return a >= goodLow && !(a + poolSize > guestLo && a < guestHi)
+                && !overlapsExeWindow(vm_address_t(a), vm_address_t(poolSize))
+        }
 
         // ml1036: HOLE CENSUS, then size the pool to what can actually be placed.
         //
@@ -269,10 +539,19 @@ enum StikJITHelper {
         let earlyPoolSize = vm_address_t(madeira_early_pool_size)
         if earlyPoolBase != 0 {
             vm_deallocate(mach_task_self_, earlyPoolBase, vm_size_t(earlyPoolSize))
+            // Released once: a fallback-size retry must not unmap whatever the
+            // debugger has since placed in this range.
+            madeira_early_pool_base = 0
+            earlyPlaceholderReleased = true
+            madeira_early_pool_size = 0
             LogStore.shared.log(String(format: "ml1040: released the early pool placeholder 0x%lx+%luMB for the debugger",
                                        Int(earlyPoolBase), Int(earlyPoolSize >> 20)))
         } else {
-            LogStore.shared.log("ml1040: no early pool placeholder was obtained — placement is left to chance", level: .error)
+            if earlyPlaceholderReleased {
+                LogStore.shared.log("ml1040: early pool placeholder already released by an earlier attempt")
+            } else {
+                LogStore.shared.log("ml1040: no early pool placeholder was obtained — placement is left to chance", level: .error)
+            }
             // ml1135: what was already mapped above the window at image load (user_tag
             // is the VM_MEMORY_* allocation tag; 0 = untagged anonymous memory).
             if madeira_early_intruder_base != 0 {
@@ -301,11 +580,73 @@ enum StikJITHelper {
                 prevEnd = max(prevEnd, addr + vm_address_t(rsize))
                 addr = prevEnd
             }
+            // ml1690: the walk ends when vm_region finds nothing above prevEnd, so
+            // the free space after the LAST mapping was never counted. On a 512 GB
+            // map that is the hundreds of GB above ~0x189000000 where every pool up
+            // to ml1620 was placed; without it the census saw only the small low
+            // holes and shrank an 896 MB pool to 608 MB. Count it, bounded by the
+            // task's real ceiling (a 63 GB map ends far below 0x7000000000).
+            // MADEIRA_POOL_CENSUS_TAIL=0 restores the old census.
+            if MadeiraConfig.flag("MADEIRA_POOL_CENSUS_TAIL") {
+                var vmi = task_vm_info_data_t()
+                var vcnt = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+                let vkr = withUnsafeMutablePointer(to: &vmi) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(vcnt)) {
+                        task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &vcnt)
+                    }
+                }
+                let ceiling = min(vm_address_t(guestLo), vkr == KERN_SUCCESS && vmi.max_address > 0 ? vm_address_t(vmi.max_address) : 0)
+                LogStore.shared.log(String(format: "[pool-census] ml1740 walk ended at 0x%lx; ceiling 0x%lx (task_info kr=%d max=0x%llx)",
+                                           Int(prevEnd), Int(ceiling), vkr, UInt64(vmi.max_address)))
+                if ceiling > prevEnd && ceiling - prevEnd >= 64 << 20 {
+                    holes.append((prevEnd, ceiling - prevEnd))
+                    LogStore.shared.log(String(format: "[pool-census] ml1690 tail hole 0x%lx+%luMB counted (ceiling 0x%lx)",
+                                               Int(prevEnd), Int((ceiling - prevEnd) >> 20), Int(ceiling)))
+                }
+            }
             let desc = holes.map { String(format: "0x%lx+%luMB", Int($0.base), Int($0.size >> 20)) }.joined(separator: " ")
             LogStore.shared.log("ml1036: free holes >=64MB in [0x119000000,0x7000000000) with the window held: "
                 + (desc.isEmpty ? "NONE" : desc))
             let largest = holes.map { $0.size }.max() ?? 0
-            if largest < vm_address_t(poolSize) {
+            // ml1640: THE POOL OUTRANKS THE WINDOW. On devices whose only large low
+            // gap is the one the window sits in, holding it split that gap and the
+            // shrink below cut the Steam client's 1152MB setup pool to 608MB; the
+            // web helper then ran the pool dry (FEX EC_CODE tail refused) and the
+            // login window never drew. The window only serves an x64 main image
+            // with no relocations, which is rare; a pool too small for the session
+            // fails every launch. So when giving the window back makes the
+            // requested size fit, give it back instead of shrinking.
+            // MADEIRA_POOL_OVER_EXE_WINDOW=0 keeps the window and shrinks.
+            var windowSurrenderedNow = false
+            if largest < vm_address_t(poolSize) && windowHeld
+                && MadeiraConfig.flag("MADEIRA_POOL_OVER_EXE_WINDOW") {
+                let below = holes.first { $0.base + $0.size == exeWinBase }?.size ?? 0
+                let above = holes.first { $0.base == exeWinBase + exeWinSize }?.size ?? 0
+                let merged = below + exeWinSize + above
+                if merged >= vm_address_t(poolSize) {
+                    vm_deallocate(mach_task_self_, exeWinBase, vm_size_t(exeWinSize))
+                    madeira_early_window_base = 0
+                    madeira_early_window_size = 0
+                    unsetenv("WINE_IOS_EXE_WINDOW")
+                    windowHeld = false
+                    exeWindowActive = false
+                    exeWindowSurrendered = true
+                    windowSurrenderedNow = true
+                    LogStore.shared.log("[exe-window] ml1640 released [0x140000000,+128MB) so the \(poolSize >> 20)MB pool fits "
+                        + "(\(merged >> 20)MB contiguous with it, largest hole \(largest >> 20)MB without); "
+                        + "an x64 main image with no relocations will load elsewhere this run", level: .info)
+                }
+            }
+            // ml1740: NO SHRINK BY DEFAULT. This fork's placement (the kernel's pick, then
+            // explicit 1 GB-stepped candidates below the guest band) always found room for
+            // the full pool above the shared cache before the merge; shrinking here first
+            // turned an unlucky low layout into a 608 MB pool that stalled the Steam client
+            // (device logs ml1640 and ml1730). MADEIRA_POOL_SHRINK=1 restores upstream's shrink.
+            if largest < vm_address_t(poolSize) && !windowSurrenderedNow
+                && !MadeiraConfig.flag("MADEIRA_POOL_SHRINK", fallback: false) {
+                LogStore.shared.log("[pool-census] ml1740 no low hole fits \(poolSize >> 20)MB (largest \(largest >> 20)MB); "
+                    + "keeping the size, placement looks higher")
+            } else if largest < vm_address_t(poolSize) && !windowSurrenderedNow {
                 let fit = Int(largest) & ~((16 << 20) - 1)
                 if fit >= 256 << 20 {
                     LogStore.shared.log("ml1036: no hole fits a \(poolSize >> 20)MB pool — SHRINKING to \(fit >> 20)MB "
@@ -345,39 +686,114 @@ enum StikJITHelper {
         }
 
         var rxPtrOpt: UnsafeMutableRawPointer? = nil
-        for attempt in 0..<3 {
+        var attempts = 0
+        let fastPlacement = getenv("MADEIRA_JIT_FAST_PLACEMENT").map { String(cString: $0) != "0" } ?? true
+        LogStore.shared.log("[jit-placement] ml1190 early fixed-address fallback=\(fastPlacement ? 1 : 0)")
+
+        // Phase 1: the kernel's own pick, via the debugger's _M (ANYWHERE-only).
+        for _ in 0..<8 {
+            attempts += 1
             guard let p = jit26_prepare_region(nil, poolSize), p != UnsafeMutableRawPointer(bitPattern: 0) else {
-                LogStore.shared.log("Debugger failed to allocate RX memory (attempt \(attempt))", level: .error)
+                LogStore.shared.log("[jit-pool] the allocation BRK returned nothing on attempt \(attempts) — " +
+                    "no debugger serviced it (look for '[brk-f00d] skipped stray StikDebug BRK' just above)",
+                    level: .error)
                 break
             }
             let a = Int(bitPattern: p)
-            let inGuestWindow = a + poolSize > guestLo && a < guestHi
-            // ml1034: a pool covering 0x140000000 displaces a non-relocatable
-            // main image, which is fatal later and unrecoverable.
-            let hitsExeWindow = overlapsExeWindow(vm_address_t(a), vm_address_t(poolSize))
-            if a >= goodLow && !inGuestWindow && !hitsExeWindow {
-                rxPtrOpt = p
-                break
-            }
-            LogStore.shared.log(String(format: "BAD POOL placement 0x%lx (%@) — re-rolling (attempt %d)",
-                                       a,
-                                       a < goodLow ? "mode A low"
-                                         : (hitsExeWindow ? "swallows the 0x140000000 executable window"
-                                                          : "guest 64G window"),
-                                       attempt), level: .error)
+            if placementIsGood(a) { rxPtrOpt = p; break }
+            LogStore.shared.log(String(format: "[jit-pool] rejected placement 0x%lx (%@) on attempt %d — blocking that hole and re-rolling",
+                                       a, a < goodLow ? "mode A low" : (overlapsExeWindow(vm_address_t(a), vm_address_t(poolSize)) ? "swallows the 0x140000000 executable window" : "guest 64G window"),
+                                       attempts), level: .error)
             let dkr = vm_deallocate(mach_task_self_, vm_address_t(a), vm_size_t(poolSize))
-            LogStore.shared.log(dkr == KERN_SUCCESS
-                ? "  bad region freed"
-                : "  bad region kept as pin (vm_deallocate kr=\(dkr))")
+            if dkr == KERN_SUCCESS {
+                var reserve = vm_address_t(a)
+                let rkr = vm_allocate(mach_task_self_, &reserve, vm_size_t(poolSize), VM_FLAGS_FIXED)
+                if rkr == KERN_SUCCESS && reserve == vm_address_t(a) {
+                    blockedHoles.append((addr: reserve, size: vm_size_t(poolSize)))
+                    LogStore.shared.log(String(format: "  hole 0x%lx+0x%lx freed and reserved (VA only) so the next roll cannot reuse it", a, poolSize))
+                } else {
+                    LogStore.shared.log("  hole freed but NOT reserved (vm_allocate kr=\(rkr)) — the next roll may land here again", level: .error)
+                }
+            } else {
+                LogStore.shared.log("  bad region kept as pin (vm_deallocate kr=\(dkr))")
+            }
+            // A large ANYWHERE allocation can keep walking the forbidden band.
+            // Each debugger round trip suspends the entire app for seconds.
+            // Try the existing verified fixed-address path after one rejection.
+            if fastPlacement { break }
         }
+
         // ml1040: the plugs existed only to steer first-fit; give the VA back.
         for (a, sz) in plugs { vm_deallocate(mach_task_self_, a, sz) }
-        guard let rxPtr = rxPtrOpt else {
-            LogStore.shared.log("BAD POOL: no valid placement after retries. Killing in 10s — please relaunch.", level: .error)
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 10) {
-                LogStore.shared.log("BAD POOL — exiting now. Relaunch the app.", level: .error)
-                exit(0)
+
+        // Phase 2 (ml962): EXPLICIT PLACEMENT. The debugger's allocator is
+        // ANYWHERE-only — madeira-jit.js says so in as many words ("_M<size>,<perms>
+        // — but doesn't support fixed addr") — so we place the range ourselves with
+        // vm_allocate(FIXED) at a hint and ask the debugger only to BLESS it
+        // (jit26_prepare_region with x0 != 0 skips _M and calls prepare_memory_region
+        // on the address we pass).
+        //
+        // Every candidate is VERIFIED EXECUTABLE afterwards. A blessing that
+        // silently did nothing yields non-executable pages, which is the exact
+        // failure mode that produced the ml78 black screen, so an unverified hint
+        // is worse than no hint at all — it is rejected and freed here instead.
+        //
+        // The band is [0x119000000, 0x7000000000): above FEX's mode-A emit floor and
+        // entirely below the guest 64G window. The proven pool addresses all sit
+        // just above the pin frontier (m56: 0x11bfe0000), so sweep there first on a
+        // 64MB stride, then coarsely on 1GB out to 64G. ml92's map says most of that
+        // is spoken for; a refused vm_allocate(FIXED) costs one syscall, so probing
+        // it is free and the log says exactly how far we got.
+        if rxPtrOpt == nil {
+            var hints: [Int] = []
+            var h = max(goodLow, pinChunks.last.map { Int($0) + chunkSize } ?? goodLow)
+            h = (h + 0x3FFF) & ~0x3FFF
+            for _ in 0..<64 { hints.append(h); h += 64 * 1024 * 1024 }
+            h = 0x200000000
+            while h + poolSize <= guestLo && hints.count < 160 { hints.append(h); h += 0x40000000 }
+
+            var probes = 0
+            var refused: [String] = []   // ml1440: first refusals, to tell "occupied" from "not allocatable"
+            for hint in hints {
+                guard placementIsGood(hint) else { continue }
+                probes += 1
+                var got = vm_address_t(hint)
+                let akr = vm_allocate(mach_task_self_, &got, vm_size_t(poolSize), VM_FLAGS_FIXED)
+                guard akr == KERN_SUCCESS, got == vm_address_t(hint) else {
+                    if refused.count < 6 && (refused.isEmpty || hint >= 0x200000000) {
+                        refused.append(String(format: "0x%lx:kr%d", hint, akr))
+                    }
+                    continue
+                }
+                attempts += 1
+                let blessed = jit26_prepare_region(UnsafeMutableRawPointer(bitPattern: hint), poolSize)
+                let ok = blessed != nil && Int(bitPattern: blessed!) == hint
+                    && jit_range_is_mapped(UnsafeMutableRawPointer(bitPattern: hint), 0x4000,
+                                           VM_PROT_READ | VM_PROT_EXECUTE)
+                if ok {
+                    LogStore.shared.log(String(format: "[jit-pool] hinted placement 0x%lx accepted (blessed and verified executable) after %d probes", hint, probes), level: .success)
+                    rxPtrOpt = UnsafeMutableRawPointer(bitPattern: hint)
+                    break
+                }
+                LogStore.shared.log(String(format: "[jit-pool] hint 0x%lx reserved but the debugger could not make it executable — releasing", hint))
+                vm_deallocate(mach_task_self_, got, vm_size_t(poolSize))
             }
+            if rxPtrOpt == nil {
+                LogStore.shared.log("[jit-pool] hinted placement found no home in [0x119000000, 0x7000000000) after \(probes) probes" +
+                                    " for \(poolSize / 1024 / 1024)MB; refused: \(refused.joined(separator: " "))")
+            }
+        }
+
+        guard let rxPtr = rxPtrOpt else {
+            // ml962: NEVER kill the app. The old path scheduled exit(0) in 10s,
+            // which destroyed the log the user was about to read and made a
+            // recoverable situation look like a crash. Wine simply does not start.
+            LogStore.shared.log("[jit-pool] NO POOL after \(attempts) attempts — Wine will not start. " +
+                                "The app stays usable; nothing is being killed.", level: .error)
+            LogStore.shared.log("  Every placement was either below 0x119000000 (FEX mode-A emit bug) or " +
+                                "inside the guest 64G window [0x70,0x80)G, and no hinted address could be blessed.")
+            LogStore.shared.log("  Press 'Enable JIT' to re-attach StikDebug and try again, or force-quit and " +
+                                "relaunch — placement depends on the current VM layout.")
             return nil
         }
         let rxAddr = Int(bitPattern: rxPtr)
@@ -506,8 +922,13 @@ enum StikJITHelper {
         // now needs. The alias has no placement requirement of its own (FEX
         // derives WriteOffset from the real distance), so send it high, where it
         // lived in every run before ml977, and keep the scarce low gap for RX.
-        rwAddr = 0x7000000000
-        let kr1 = vm_remap(
+        // ml1640: on this fork's devices [0x7000000000, 0x8000000000) is the guest
+        // band (the x64 and 32-bit windows live at 0x71.. and up), so the alias
+        // does not go there by default: the kernel places it, as in every run up
+        // to ml1620. MADEIRA_RW_ALIAS_HIGH=1 restores the high hint.
+        let rwHigh = MadeiraConfig.flag("MADEIRA_RW_ALIAS_HIGH", fallback: false)
+        rwAddr = rwHigh ? 0x7000000000 : 0
+        var kr1 = vm_remap(
             mach_task_self_,
             &rwAddr,
             vm_size_t(poolSize),
@@ -521,8 +942,24 @@ enum StikJITHelper {
             VM_INHERIT_NONE
         )
 
+        // ml1640: the 0x7000000000 hint is above the whole task map on a device
+        // whose map ends at 63 GB, and an ANYWHERE search that starts past the top
+        // never wraps: every alias failed with KERN_NO_SPACE and no pool was ever
+        // made. Let the kernel choose when the hint is out of reach.
+        // MADEIRA_RW_ALIAS_RETRY=0 restores fail-at-the-hint.
+        if kr1 == KERN_NO_SPACE && rwHigh && MadeiraConfig.flag("MADEIRA_RW_ALIAS_RETRY") {
+            rwAddr = 0
+            kr1 = vm_remap(mach_task_self_, &rwAddr, vm_size_t(poolSize), 0, VM_FLAGS_ANYWHERE,
+                           mach_task_self_, vm_address_t(bitPattern: rxPtr), 0,
+                           &curProt, &maxProt, VM_INHERIT_NONE)
+            LogStore.shared.log(String(format: "[rw-alias] ml1640 high hint out of reach; kernel placement kr=%d RW=0x%lx",
+                                       kr1, Int(rwAddr)), level: kr1 == KERN_SUCCESS ? .info : .error)
+        }
         guard kr1 == KERN_SUCCESS else {
             LogStore.shared.log("vm_remap failed: \(kr1)", level: .error)
+            // Give the debugger's RX pages back: a retry at a smaller size would
+            // otherwise keep every failed attempt's dirty pool alive.
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: rxPtr), vm_size_t(poolSize))
             return nil
         }
 
@@ -564,6 +1001,14 @@ enum StikJITHelper {
         // the UI view. Detail (kr / footprint delta) is in the jit_log lines.
         LogStore.shared.log("[no-footprint] pool applied=\(exempt)", level: exempt ? .success : .error)
 
+        // ml962: this pool now belongs to the APP RUN, not to this session. Every
+        // later launch gets it back from the cache above — see the CachedPool note.
+        cachedPool = CachedPool(rx: rxPtr, rw: rwPtr, size: poolSize)
+        poolAvailable = true   // ml1330: lock-free readiness for the UI
+        LogStore.shared.log(String(format:
+            "[jit-pool] placed at RX=%p RW=%p size=%dMB after %d attempt(s) (session %d) — held for the app's lifetime",
+            rxAddr, Int(bitPattern: rwPtr), poolSize / 1024 / 1024, attempts, session), level: .success)
+
         LogStore.shared.log("JIT pool ready (debugger still attached).", level: .success)
 
         return (rx: rxPtr, rw: rwPtr, size: poolSize)
@@ -571,8 +1016,26 @@ enum StikJITHelper {
 
     /// Detach the debugger. Call this after Wine is done loading PE DLLs.
     static func detachDebugger() {
+        // ml1330: the detach is itself a BRK. After an earlier detach (or after
+        // iOS closed StikDebug) nobody services it, and before a Wine session
+        // installs its handlers that ends the app. Only send it to a debugger
+        // that is attached now; otherwise record the detach and arm the SIGTRAP
+        // fallback so any later stray BRK is skipped.
+        if debuggerDetached || !jit_debugger_attached() {
+            let already = debuggerDetached
+            debuggerDetached = true
+            setenv("MADEIRA_DETACHED", "1", 1)
+            armTrapFallback()
+            LogStore.shared.log("[jit-early] ml1330 detach skipped: \(already ? "already detached" : "no debugger attached")")
+            return
+        }
         LogStore.shared.log("Detaching debugger...")
         jit26_detach()
+        armTrapFallback()
+        // ml962: remember it. CS_DEBUGGED stays SET after detach, so csops cannot
+        // tell a later caller that nobody is servicing BRK any more — this can, and
+        // that is what turns m56's mystery "BAD POOL" into an accurate message.
+        debuggerDetached = true
         // task #34: signal in-process waiters (share-probe poller). CS_DEBUGGED
         // is sticky post-detach, so an env flag is the reliable signal.
         setenv("MADEIRA_DETACHED", "1", 1)

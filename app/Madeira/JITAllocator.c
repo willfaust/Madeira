@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <mach-o/dyld.h>
 #include <os/log.h>
+#include <sys/sysctl.h>
 
 // csops syscall - used to check CS_DEBUGGED flag
 #ifndef CS_DEBUGGED
@@ -33,6 +34,24 @@ extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_
                                     mach_msg_type_number_t *, mach_port_t *);
 extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t, mach_vm_size_t,
                                      boolean_t, vm_prot_t);
+/* Same story for the recursing region walker and the fixed-address
+ * allocate/deallocate pair the va-probe (WOW64_DESIGN.md §9.2 step 0) needs:
+ * declared by hand rather than pulling in <mach/mach_vm.h>. The struct/const
+ * types below (vm_region_submap_info_data_64_t, VM_REGION_SUBMAP_INFO_COUNT_64,
+ * vm_region_recurse_info_t) live in <mach/vm_region.h>, already reachable
+ * here -- jit_test_mapping()/jit_range_is_mapped() use its BASIC_INFO sibling
+ * without any extra include. */
+extern kern_return_t mach_vm_region_recurse(vm_map_t, mach_vm_address_t *, mach_vm_size_t *,
+                                            natural_t *, vm_region_recurse_info_t,
+                                            mach_msg_type_number_t *);
+extern kern_return_t mach_vm_allocate(vm_map_t, mach_vm_address_t *, mach_vm_size_t, int);
+extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
+#ifndef VM_FLAGS_FIXED
+#define VM_FLAGS_FIXED 0x0000
+#endif
+#ifndef MACH_VM_MAX_ADDRESS
+#define MACH_VM_MAX_ADDRESS ((mach_vm_address_t)0x00007FFFFFE00000ULL)
+#endif
 
 // Page size on iOS is 16KB
 #define JIT_PAGE_SIZE 0x4000
@@ -209,6 +228,41 @@ JITRegion *jit_region_create(size_t size) {
     return region;
 }
 
+// ml962: does a range still exist, with the protections we expect?
+//
+// The pool is allocated once per APP RUN and reused by every later session
+// (StikJITHelper.cachedPool), so "is the thing I cached still there?" is now a
+// real question with a real answer, instead of an assumption. Walk the regions
+// the range spans: the first gap, or the first region missing a needed
+// protection bit, is a no.
+bool jit_range_is_mapped(void *addr, size_t size, int need_prot) {
+    if (!addr || !size) return false;
+
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t cur = (mach_vm_address_t)(uintptr_t)addr;
+    mach_vm_address_t end = cur + size;
+
+    while (cur < end) {
+        mach_vm_address_t r_addr = cur;
+        mach_vm_size_t    r_size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+
+        kern_return_t kr = mach_vm_region(task, &r_addr, &r_size,
+                                          VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info, &cnt, &obj);
+        if (obj != MACH_PORT_NULL) mach_port_deallocate(task, obj);
+        if (kr != KERN_SUCCESS) return false;   /* nothing at or above cur */
+        if (r_addr > cur) return false;         /* a hole starts at cur */
+        if (r_size == 0) return false;          /* no forward progress */
+        if (need_prot && (info.protection & need_prot) != need_prot) return false;
+
+        cur = r_addr + r_size;
+    }
+    return true;
+}
+
 // ml358: make an ALREADY-MAPPED region jetsam-exempt.
 //
 // jit_region_create() marks its memory entry NO_FOOTPRINT, but the production
@@ -377,11 +431,29 @@ static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
     uc->uc_mcontext->__ss.__x[0] = 0;
 }
 
+/* ml1330: is a debugger attached RIGHT NOW (P_TRACED)? CS_DEBUGGED is sticky:
+ * it stays set after StikDebug detaches or is killed by iOS (its CPU budget
+ * ends it ~52 s after attach), so it cannot tell whether a BRK will be
+ * serviced. MADEIRA_JIT_TRACE_GUARD=0 falls back to CS_DEBUGGED everywhere
+ * this is used. */
+bool jit_debugger_attached(void) {
+    const char *guard = getenv("MADEIRA_JIT_TRACE_GUARD");
+    if (guard && guard[0] == '0') return jit_check_debugged();
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+    memset(&info, 0, sizeof(info));
+    if (sysctl(mib, 4, &info, &size, NULL, 0) != 0) return jit_check_debugged();
+    return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
 void jit_install_trap_handler(void) {
     // Only install if no debugger is attached.
     // When StikDebug is attached, it handles BRK/SIGTRAP directly.
     // Our handler would steal signals from the debugger and break the protocol.
-    if (jit_check_debugged()) {
+    // ml1330: "attached" means traced now, not the sticky CS_DEBUGGED flag, so
+    // after StikDebug is gone a stray BRK is skipped instead of killing the app.
+    if (jit_debugger_attached()) {
         jit_log("Debugger attached — skipping SIGTRAP handler (debugger handles BRK)");
         return;
     }
@@ -833,6 +905,237 @@ void jit_wx_probe(void) {
     jit_log("[wx-probe] ml748 END");
 }
 
+/* ==========================================================================
+ * WOW64_DESIGN.md §9.2 step 0: address-space probe.
+ *
+ * Goal (upstream request, §9): every feature of this fork must eventually
+ * work without the extended-virtual-addressing entitlement, i.e. inside a
+ * stock 64 GB task rather than today's entitled 512 GB one. Before any of
+ * that design is written, §9.2 says to MEASURE: what does a stock task's
+ * free map actually look like, and does a 4 GB-aligned 4 GB hole (what the
+ * fork's identity-mapped guest windows need) exist at all.
+ *
+ * This is read-only data collection — it changes no allocation policy, and
+ * every probed range is released immediately. Must run once, from the app's
+ * startup path, before Wine/JIT touches the address space (so the map it
+ * sees is the task's natural starting shape) and before StikJITHelper's
+ * pool claims anything. Logged via va_log() below rather than jit_log(),
+ * because jit_log() prefixes every line with "[JIT] " and the point here is
+ * an unambiguous "[va-map]"/"[va-probe]" tag to grep the pulled log for. It
+ * still routes through the same g_log_callback (-> LogStore.appendToFile ->
+ * madeira-log.txt) so it is captured even though this runs before Wine's
+ * stderr dup2 is installed.
+ * ========================================================================== */
+
+#define VA_HOLE_MIN_BYTES   (256ULL * 1024 * 1024)
+#define VA_HOLE_LOG_CAP     64
+#define VA_REGION_TOP_N     12
+#define VA_FOURGB           (4ULL * 1024 * 1024 * 1024)
+#define VA_PROBE_CAP_BYTES  (1024ULL * 1024 * 1024 * 1024)   /* 1 TB, per spec */
+#define VA_WALK_GUARD       200000   /* region-walk safety cap; ~thousands expected */
+
+static void va_log(const char *fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    if (g_log_callback) g_log_callback(buf);
+    os_log(OS_LOG_DEFAULT, "%{public}s", buf);
+    fprintf(stderr, "%s\n", buf);
+}
+
+struct va_region_entry {
+    mach_vm_address_t base;
+    mach_vm_size_t size;
+    uint32_t tag;
+};
+
+struct va_hole_stats {
+    uint64_t total_free;    /* every free byte, not just holes >= 256MB */
+    uint64_t largest_hole;
+    bool fit_2x512mb;       /* two 512MB contiguous allocations fit */
+    bool fit_2x896mb;       /* two 896MB contiguous allocations fit */
+};
+
+/* (1) Walk the task map top to bottom via mach_vm_region_recurse, logging
+ * the top of the space, every free hole >= 256MB (capped at 64 lines so a
+ * heavily fragmented map can't flood the log), and the 12 largest MAPPED
+ * regions with their user_tag. */
+static void va_probe_log_map(uint64_t top, struct va_hole_stats *stats) {
+    mach_vm_address_t ra = 0;
+    natural_t depth = 0;
+    uint64_t last_end = 0;
+    uint64_t total_free = 0, largest_hole = 0;
+    uint64_t cap512 = 0, cap896 = 0;   /* how many 512/896MB chunks the free map holds */
+    int hole_lines = 0;
+    int guard = 0;
+    struct va_region_entry top_regions[VA_REGION_TOP_N];
+    int top_count = 0;
+
+    memset(top_regions, 0, sizeof(top_regions));
+
+    va_log("[va-map] top=0x%llx (%.1f GB)",
+           (unsigned long long)top, (double)top / (1024.0 * 1024.0 * 1024.0));
+
+    while (ra < (mach_vm_address_t)top && guard++ < VA_WALK_GUARD) {
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t icnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+        mach_vm_size_t rs = 0;
+        kern_return_t kr = mach_vm_region_recurse(mach_task_self(), &ra, &rs, &depth,
+                                                   (vm_region_recurse_info_t)&info, &icnt);
+        if (kr != KERN_SUCCESS) break;   /* nothing mapped at or above ra: rest is free */
+        if ((uint64_t)ra >= top) break;
+        if (info.is_submap) { depth++; continue; }
+
+        if ((uint64_t)ra > last_end) {
+            uint64_t hole = (uint64_t)ra - last_end;
+            total_free += hole;
+            if (hole > largest_hole) largest_hole = hole;
+            cap512 += hole / (512ULL * 1024 * 1024);
+            cap896 += hole / (896ULL * 1024 * 1024);
+            if (hole >= VA_HOLE_MIN_BYTES && hole_lines < VA_HOLE_LOG_CAP) {
+                va_log("[va-map] hole 0x%llx+0x%llx (%llu MB)",
+                       (unsigned long long)last_end, (unsigned long long)hole,
+                       (unsigned long long)(hole >> 20));
+                hole_lines++;
+            }
+        }
+
+        /* Replace-min tournament: keep the 12 largest mapped regions seen. */
+        if (top_count < VA_REGION_TOP_N) {
+            top_regions[top_count].base = ra;
+            top_regions[top_count].size = rs;
+            top_regions[top_count].tag = info.user_tag;
+            top_count++;
+        } else {
+            int mi = 0, i;
+            for (i = 1; i < VA_REGION_TOP_N; i++)
+                if (top_regions[i].size < top_regions[mi].size) mi = i;
+            if ((uint64_t)rs > (uint64_t)top_regions[mi].size) {
+                top_regions[mi].base = ra;
+                top_regions[mi].size = rs;
+                top_regions[mi].tag = info.user_tag;
+            }
+        }
+
+        last_end = (uint64_t)ra + (uint64_t)rs;
+        ra = (mach_vm_address_t)last_end;
+        depth = 0;
+    }
+
+    if (guard >= VA_WALK_GUARD)
+        va_log("[va-map] region walk TRUNCATED at %d regions", guard);
+
+    if (top > last_end) {
+        uint64_t hole = top - last_end;
+        total_free += hole;
+        if (hole > largest_hole) largest_hole = hole;
+        cap512 += hole / (512ULL * 1024 * 1024);
+        cap896 += hole / (896ULL * 1024 * 1024);
+        if (hole >= VA_HOLE_MIN_BYTES && hole_lines < VA_HOLE_LOG_CAP) {
+            va_log("[va-map] hole 0x%llx+0x%llx (%llu MB)",
+                   (unsigned long long)last_end, (unsigned long long)hole,
+                   (unsigned long long)(hole >> 20));
+            hole_lines++;
+        }
+    }
+
+    va_log("[va-map] total_free=%llu MB largest_hole=%llu MB",
+           (unsigned long long)(total_free >> 20), (unsigned long long)(largest_hole >> 20));
+
+    /* Sort the top-N mapped regions descending by size (N<=12: insertion sort). */
+    {
+        int i, j;
+        for (i = 1; i < top_count; i++) {
+            struct va_region_entry key = top_regions[i];
+            j = i - 1;
+            while (j >= 0 && (uint64_t)top_regions[j].size < (uint64_t)key.size) {
+                top_regions[j + 1] = top_regions[j];
+                j--;
+            }
+            top_regions[j + 1] = key;
+        }
+        for (i = 0; i < top_count; i++)
+            va_log("[va-map] region 0x%llx+0x%llx (%llu MB) tag=%u",
+                   (unsigned long long)top_regions[i].base,
+                   (unsigned long long)top_regions[i].size,
+                   (unsigned long long)((uint64_t)top_regions[i].size >> 20),
+                   top_regions[i].tag);
+    }
+
+    stats->total_free = total_free;
+    stats->largest_hole = largest_hole;
+    stats->fit_2x512mb = cap512 >= 2;
+    stats->fit_2x896mb = cap896 >= 2;
+}
+
+/* (2) For every 4GB-aligned base from 4GB up to the map top (capped at 1TB),
+ * ask the kernel to place a fixed 4GB PROT_NONE reservation there and
+ * release it immediately. mach_vm_allocate(..., VM_FLAGS_FIXED) is the
+ * Darwin equivalent of MAP_FIXED_NOREPLACE: it FAILS (KERN_NO_SPACE) rather
+ * than clobbering whatever is already there, so this is safe to run
+ * unconditionally. Returns the count of free slots found. */
+static int va_probe_4gb_slots(uint64_t top) {
+    uint64_t end = top < VA_PROBE_CAP_BYTES ? top : VA_PROBE_CAP_BYTES;
+    uint64_t base;
+    int n = 0, total = 0;
+    char list[2048];
+    size_t off = 0;
+    list[0] = '\0';
+
+    for (base = VA_FOURGB; base + VA_FOURGB <= end; base += VA_FOURGB) {
+        mach_vm_address_t addr = (mach_vm_address_t)base;
+        kern_return_t kr;
+        total++;
+        kr = mach_vm_allocate(mach_task_self(), &addr, (mach_vm_size_t)VA_FOURGB, VM_FLAGS_FIXED);
+        if (kr != KERN_SUCCESS) continue;
+        mach_vm_deallocate(mach_task_self(), addr, (mach_vm_size_t)VA_FOURGB);
+        if (off + 16 < sizeof(list)) {
+            int w = snprintf(list + off, sizeof(list) - off, n ? ",%llu" : "%llu",
+                              (unsigned long long)(base / VA_FOURGB));
+            if (w > 0) off += (size_t)w;
+        }
+        n++;
+    }
+
+    va_log("[va-probe] 4GB-aligned slots free: %s (of %d)", n ? list : "none", total);
+    return n;
+}
+
+/* Entry point: called once at startup, right after EntitlementStatus is
+ * logged and before any Wine/JIT allocation. `entitlement_present` is the
+ * already-checked extended-virtual-addressing bit (EntitlementStatus.extendedVA)
+ * so this file doesn't need its own copy of the entitlement lookup. */
+void mad_va_probe(bool entitlement_present) {
+    task_vm_info_data_t vmi;
+    mach_msg_type_number_t vmi_cnt = TASK_VM_INFO_COUNT;
+    uint64_t top = (uint64_t)MACH_VM_MAX_ADDRESS;
+    struct va_hole_stats stats;
+    int slot_count;
+    const char *verdict;
+
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vmi_cnt) == KERN_SUCCESS &&
+        vmi.max_address)
+        top = (uint64_t)vmi.max_address;
+
+    va_log("[va-probe] BEGIN entitlement=%s top=0x%llx",
+           entitlement_present ? "yes" : "no", (unsigned long long)top);
+
+    memset(&stats, 0, sizeof(stats));
+    va_probe_log_map(top, &stats);
+
+    slot_count = va_probe_4gb_slots(top);
+
+    va_log("[va-probe] largest-free=0x%llx (%llu MB) fit-2x512MB=%s fit-2x896MB=%s",
+           (unsigned long long)stats.largest_hole, (unsigned long long)(stats.largest_hole >> 20),
+           stats.fit_2x512mb ? "yes" : "no", stats.fit_2x896mb ? "yes" : "no");
+
+    verdict = (slot_count >= 1) ? "identity-layout-possible" : "needs-non-identity";
+    va_log("[va-probe] entitlement=%s top=0x%llx guest-slots=%d verdict=%s",
+           entitlement_present ? "yes" : "no", (unsigned long long)top, slot_count, verdict);
+}
 
 /* ml1040: CLAIM THE LOW GAP AT IMAGE LOAD.
  *

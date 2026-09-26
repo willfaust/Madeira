@@ -58,11 +58,13 @@
 #include "wine/condrv.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "ios_wow.h"
 #include "locale_private.h"
 #include "error.h"
 
 #ifdef WINE_IOS
 #include <os/log.h>
+#include <pthread.h>
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(environ);
@@ -1809,7 +1811,9 @@ static inline void dup_unicode_string( const UNICODE_STRING *src, WCHAR **dst, U
 #endif
 {
     if (!src->Buffer) return;
-    str->Buffer = PtrToUlong( *dst );
+    /* WoW64 guest window: *dst points into the 32-bit process parameter block,
+     * which lives in the window; the 32-bit field must hold a GUEST address. */
+    str->Buffer = ios_wow_guest_addr( *dst );
     str->Length = src->Length;
     str->MaximumLength = src->MaximumLength;
     memcpy( *dst, src->Buffer, src->MaximumLength );
@@ -1914,6 +1918,19 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
 
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, limit_2g - 1, &size,
                                       MEM_COMMIT, PAGE_READWRITE );
+#ifdef WINE_IOS
+    /* Device-run confirmation (one line): the 2GB ceiling must have been
+     * translated into this process's window, so the params block is host and
+     * in-window.  base=0 here means the window was not reserved for this
+     * pseudo-process and the allocation will fail below (the assert). */
+    {
+        static int reported;
+        if (!reported++)
+            dprintf( 2, "[wow-params] status=0x%x base=%p wow64_params=%p in_window=%d\n",
+                     (unsigned)status, (void *)ios_wow_base(), (void *)wow64_params,
+                     ios_wow_in_window( wow64_params ) );
+    }
+#endif
     assert( !status );
 
     wow64_params->AllocationSize  = size;
@@ -1946,7 +1963,7 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
     dup_unicode_string( &params->ShellInfo, &dst, &wow64_params->ShellInfo );
     dup_unicode_string( &params->RuntimeInfo, &dst, &wow64_params->RuntimeInfo );
 
-    wow64_params->Environment = PtrToUlong( dst );
+    wow64_params->Environment = ios_wow_guest_addr( dst );
     wow64_params->EnvironmentSize = params->EnvironmentSize;
     memcpy( dst, params->Environment, params->EnvironmentSize );
     return wow64_params;
@@ -2007,10 +2024,18 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module )
 
     if (wow_peb)
     {
-        void *wow64_params = build_wow64_parameters( params );
+        void *wow64_params;
 
-        wow_peb->ImageBaseAddress                = PtrToUlong( peb->ImageBaseAddress );
-        wow_peb->ProcessParameters               = PtrToUlong( wow64_params );
+        /* WoW64 guest window: the 32-bit view of KUSER_SHARED_DATA is a real
+         * read-only mapping at host B + 0x7ffe0000 — set it up before any
+         * 32-bit code runs.  No-op when this process has no window. */
+        ios_wow_map_user_shared_data();
+
+        wow64_params = build_wow64_parameters( params );
+
+        /* every 32-bit PEB field below is a GUEST address */
+        wow_peb->ImageBaseAddress                = ios_wow_guest_addr( peb->ImageBaseAddress );
+        wow_peb->ProcessParameters               = ios_wow_guest_addr( wow64_params );
         wow_peb->NumberOfProcessors              = peb->NumberOfProcessors;
         wow_peb->NtGlobalFlag                    = peb->NtGlobalFlag;
         wow_peb->CriticalSectionTimeout.QuadPart = peb->CriticalSectionTimeout.QuadPart;
@@ -2028,6 +2053,33 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module )
         wow_peb->SessionId                       = peb->SessionId;
     }
 }
+
+
+#ifdef WINE_IOS
+/*************************************************************************
+ *		ios_fatal_startup_error
+ *
+ * End THIS pseudo-process because it cannot boot.  Same pattern (and the same
+ * reason for it) as loader_ios.c's fatal_error(): pseudo-processes are threads
+ * in one Mach task, so exit()/abort() would take the whole app down with them,
+ * while pthread_exit() ends only this process's boot thread.  Not a
+ * replacement for NtTerminateProcess — that needs a live wineserver process
+ * and process parameters, neither of which is guaranteed this early.
+ */
+static void ios_fatal_startup_error( const char *err, ... ) __attribute__((noreturn, format(printf,1,2)));
+static void ios_fatal_startup_error( const char *err, ... )
+{
+    char buf[512];
+    va_list args;
+
+    va_start( args, err );
+    vsnprintf( buf, sizeof(buf), err, args );
+    va_end( args );
+    ERR( "%s", buf );
+    os_log_error( OS_LOG_DEFAULT, "[Wine ntdll] FATAL: %{public}s", buf );
+    pthread_exit( NULL );
+}
+#endif
 
 
 /*************************************************************************
@@ -2137,10 +2189,52 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
 
     if (status)  /* try launching it through start.exe */
     {
+#ifdef WINE_IOS
+        /* WOW64_DESIGN.md §2: never punt a 32-bit MAIN IMAGE that failed to map
+         * to the 64-bit launcher.  start.exe is an aarch64 builtin: it boots in
+         * THIS pseudo-process, which keeps the guest window it is bound to (the
+         * furniture band holds only a couple of 4 GB-aligned slots), so
+         * start.exe's NtCreateUserProcess of the very same exe then fails with
+         * "guest window reserve FAILED" and the real error — the status below —
+         * is never reported anywhere.  That is exactly what the third device run
+         * produced.  Fail this pseudo-process instead, naming the status.
+         *
+         * The discriminator is deliberately narrow: a window is bound, the PE
+         * header was read (Machine is set and is not 64-bit) and NOTHING was
+         * mapped (*module == NULL).  A main image that mapped fine and was
+         * rejected for another reason (an i386 DLL passed as the exe) still
+         * falls back, as upstream does. */
+        if (ios_wow_base() && !*module &&
+            main_image_info.Machine && !is_machine_64bit( main_image_info.Machine ))
+            ios_fatal_startup_error( "the 32-bit main image could not be mapped into its guest "
+                                     "window at %p: status %x (machine %04x characteristics %04x). "
+                                     "Not falling back to a 64-bit launcher — it would keep the "
+                                     "only window slot and hide this status.\n",
+                                     (void *)ios_wow_base(), (unsigned)status,
+                                     main_image_info.Machine, main_image_info.ImageCharacteristics );
+
+#endif
         dprintf(2, "[main-exe] falling back to start.exe (status=0x%x)\n", (unsigned)status);
         static const char *args[] = { "start.exe", "/exec" };
         free( nt_name.Buffer );
         if (*module) NtUnmapViewOfSection( GetCurrentProcess(), *module );
+#ifdef WINE_IOS
+        /* A genuine fallback (a non-PE main image, or one that was not found):
+         * the 64-bit launcher owns this pseudo-process from here on and must not
+         * look like a WoW process, so ABANDON its window (after the view above is
+         * gone) and drop the published guest ceiling.  Abandon, not release: this
+         * pseudo-process goes on LIVING inside the window — its first TEB/PEB
+         * pair is in there and no thread of it is ever joined — so the slot can
+         * never be handed to another 32-bit process and the VA is leaked on
+         * purpose.  ios_wow_window_retire_current() logs exactly what is lost. */
+        if (ios_wow_base())
+        {
+            ERR( "[wow-window] main image is not a mappable 32-bit PE (status %x) — abandoning the "
+                 "guest window before booting the 64-bit launcher\n", (unsigned)status );
+            ios_wow_window_retire_current();
+            user_space_wow_limit = 0;
+        }
+#endif
         load_start_exe( &nt_name, module );
         prepend_argv( args, 2 );
     }
@@ -2427,6 +2521,75 @@ void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
 
 
 /**************************************************************************
+ *      ios_wow_fixup_peb64_ptrs
+ *
+ * WOW64_DESIGN.md §3 invariant 2: every pointer the NATIVE side dereferences
+ * is a HOST address; §3 invariant 1: every pointer 32-bit code can observe is
+ * a GUEST address.  init_peb() maintains that split for the fields the unix
+ * side owns (peb host / wow_peb guest), but a handful of PEB64 fields are
+ * written by the 32-bit ntdll ITSELF, using the classic WoW64 identity
+ * `peb64->X = PtrToUlong( ptr )` — correct on Windows, where guest address ==
+ * host address, and wrong here: it stores the GUEST value in a field the
+ * native side dereferences.  The live instances are the three NLS table
+ * pointers written by locale_init() (wine/dlls/ntdll/locale.c:167-180), which
+ * is why win32u's font_init() (wine/dlls/win32u/font.c:3049-3054) handed
+ * RtlInitCodePageTable() a guest pointer and faulted.  The wine tree is
+ * upstream code we do not fork, so repair the fields on this side instead.
+ *
+ * The test is exact, not a heuristic: iOS's mandatory 4 GB __PAGEZERO means no
+ * host mapping can ever exist below 4 GB (WOW64_DESIGN.md §1), so a non-zero
+ * PEB64 pointer below 4 GB is necessarily a guest address whose host form is
+ * B + value.  One mapping, two views: the NLS sections stay inside the window
+ * (the 32-bit ntdll and kernelbase read them through wow_peb), and only the
+ * 64-bit PEB's view of the address changes.  Idempotent, and a no-op for a
+ * process with no window.  Nothing here touches wow_peb: those fields are
+ * guest by definition.
+ */
+void ios_wow_fixup_peb64_ptrs( void )
+{
+    PEB *proc_peb = NtCurrentTeb() ? NtCurrentTeb()->Peb : NULL;
+    ULONG_PTR base = ios_wow_base();
+
+    if (!base || !proc_peb) return;
+
+#define IOS_WOW_FIXUP_PEB64( field )                                            \
+    do {                                                                        \
+        ULONG_PTR v = (ULONG_PTR)proc_peb->field;                               \
+        if (v && v < IOS_WOW_WINDOW_SIZE)                                       \
+        {                                                                       \
+            proc_peb->field = (void *)(base + v);                               \
+            dprintf( 2, "[peb64-fixup] " #field " guest 0x%lx -> host %p\n",     \
+                     (unsigned long)v, proc_peb->field );                       \
+        }                                                                       \
+    } while (0)
+
+    IOS_WOW_FIXUP_PEB64( AnsiCodePageData );
+    IOS_WOW_FIXUP_PEB64( OemCodePageData );
+    IOS_WOW_FIXUP_PEB64( UnicodeCaseTableData );
+#undef IOS_WOW_FIXUP_PEB64
+}
+
+
+#ifdef WINE_IOS
+/* ml1270: map_section serves both guest and native helpers. The shared WoW
+ * ceiling remains nonzero after a guest starts, but a later native helper has
+ * no guest window. Passing that ceiling to its locale/API-set mapping forces
+ * an impossible sub-4-GB host allocation. Preserve guest limits only for the
+ * calling process that owns a window; never borrow another process's limit. */
+ULONG_PTR ios_section_zero_bits(void)
+{
+    const char *env = getenv( "MADEIRA_SECTION_PROCESS_LIMIT" );
+    ULONG_PTR limit = user_space_wow_limit;
+    static unsigned int reports;
+    if ((!env || strcmp( env, "0" )) && !ios_wow_base()) limit = 0;
+    if (limit != user_space_wow_limit && __atomic_fetch_add( &reports, 1, __ATOMIC_RELAXED ) < 8)
+        dprintf( 2, "[section-limits] ml1270 native mapping drops foreign WoW ceiling=%p\n",
+                 (void *)user_space_wow_limit );
+    return limit;
+}
+#endif
+
+/**************************************************************************
  *      NtGetNlsSectionPtr  (NTDLL.@)
  */
 NTSTATUS WINAPI NtGetNlsSectionPtr( ULONG type, ULONG id, void *unknown, void **ptr, SIZE_T *size )
@@ -2474,6 +2637,11 @@ NTSTATUS WINAPI NtGetNlsSectionPtr( ULONG type, ULONG id, void *unknown, void **
         status = map_section( handle, ptr, size, PAGE_READONLY );
         NtClose( handle );
     }
+    /* A 32-bit caller stores each table it gets here into BOTH PEBs; the
+     * 64-bit one gets the guest value (see ios_wow_fixup_peb64_ptrs).  Repair
+     * eagerly so the window in which PEB64 is inconsistent is as small as
+     * possible; the last write is caught by the consumer-side call. */
+    ios_wow_fixup_peb64_ptrs();
     return status;
 }
 
@@ -2579,6 +2747,26 @@ WCHAR WINAPI RtlDowncaseUnicodeChar( WCHAR wch )
 void WINAPI RtlInitCodePageTable( USHORT *ptr, CPTABLEINFO *info )
 {
     static const CPTABLEINFO utf8_cpinfo = { CP_UTF8, 4, '?', 0xfffd, '?', '?' };
+
+    /* Last line of defence at the point of dereference (WOW64_DESIGN.md §3
+     * invariant 2).  Nothing is ever mapped below iOS's 4 GB __PAGEZERO, so a
+     * non-NULL table pointer below 4 GB can only be a GUEST address that
+     * reached a native caller unconverted — convert it rather than fault, and
+     * say so.  Covers every native NLS consumer (win32u, display drivers), not
+     * just the PEB64 fields ios_wow_fixup_peb64_ptrs() repairs. */
+    if ((ULONG_PTR)ptr && (ULONG_PTR)ptr < IOS_WOW_WINDOW_SIZE)
+    {
+        ULONG_PTR base = ios_wow_base();
+
+        dprintf( 2, "[nls-guestptr] RtlInitCodePageTable got GUEST table 0x%lx, base=%p\n",
+                 (unsigned long)(ULONG_PTR)ptr, (void *)base );
+        if (!base)   /* no window: cannot convert, fall back to UTF-8 */
+        {
+            *info = utf8_cpinfo;
+            return;
+        }
+        ptr = (USHORT *)(base + (ULONG_PTR)ptr);
+    }
 
     if (ptr[1] == CP_UTF8) *info = utf8_cpinfo;
     else init_codepage_table( ptr, info );

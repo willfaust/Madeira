@@ -15,6 +15,11 @@ int wineserver_is_running(void);
 
 // Stop the wineserver (signals the thread to exit)
 void wineserver_stop(void);
+// Retire the original client, then join after all application clients exit.
+// Called only from the background Wine session thread.
+void wineserver_finish_session(void);
+// Queue guest-session termination on the wineserver thread. Never kills the app.
+int wineserver_request_session_stop(void);
 
 // iOS socketpair bypass: inject a pre-connected client fd into the wineserver.
 // Called from the app bridge after socketpair() — the wineserver event loop

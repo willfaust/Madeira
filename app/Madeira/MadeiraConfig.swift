@@ -25,6 +25,7 @@ enum MadeiraConfig {
         "arena", "arena-mb", "arena-test", "fexfail", "remote", "remote-batch", "d3d12",
         "apicensus", "shadow", "census", "wxprobe", "args", "valley-args",
         "jumbo-mb", "jumbo-keep-mb", "iat-noexec", "vmwatch", "no-local-read", "vsps-fill",
+        "d3d9",
     ]
 
     static var documents: URL? {
@@ -61,6 +62,26 @@ enum MadeiraConfig {
     static func bool(_ key: String, default dflt: Bool = false) -> Bool {
         guard let v = get(key) else { return dflt }
         return ["1", "on", "true", "yes"].contains(v)
+    }
+
+    /// A runtime kill switch read on the Swift side, spelled like the native
+    /// ones: `env.NAME = 0` in madeira.cfg (or `NAME=0` in madeira-env.txt when
+    /// there is no madeira.cfg), else the process environment, else `fallback`.
+    /// Any value other than "0" means on. The same line is also exported to the
+    /// guest by WineProcessBridge, so one switch covers both halves.
+    static func flag(_ name: String, fallback: Bool = true) -> Bool {
+        if present {
+            if let v = all()["env." + name] { return v != "0" }
+        } else if let d = documents,
+                  let text = try? String(contentsOf: d.appendingPathComponent("madeira-env.txt"), encoding: .utf8) {
+            for raw in text.split(whereSeparator: { $0.isNewline }).reversed() {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "="),
+                      line[..<eq].trimmingCharacters(in: .whitespaces) == name else { continue }
+                return line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces) != "0"
+            }
+        }
+        return getenv(name).map { String(cString: $0) != "0" } ?? fallback
     }
 
     /// One-time migration: with no madeira.cfg and at least one legacy file,
