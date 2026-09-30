@@ -26,6 +26,8 @@ remediation; steps marked UNVERIFIED have not yet been re-run from scratch.
 
 ## Native build chains (all in the repository)
 
+Optional Vulkan build: [MOLTENVK.md](MOLTENVK.md).
+
 Run in this order after the inputs above are in place. Outputs are
 git-ignored and consumed by the app project.
 

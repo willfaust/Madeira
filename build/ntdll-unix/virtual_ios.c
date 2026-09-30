@@ -8444,6 +8444,10 @@ static void ios_init_stub_tables(void)
  * winemetal_unix.c to avoid collision with our own ntdll table). */
 extern const void *dxmt_winemetal_unix_call_funcs[];
 
+#ifdef MADEIRA_MOLTENVK
+extern const void *winevulkan_unix_call_funcs[];
+#endif
+
 /* DXMT's winemetal_unix.c, linked into the same image, reports per-frame
  * statistics into a "[frame]" instrument through the symbols below.  That
  * instrument is a diagnostic and is not part of this port, so this is its off
@@ -8760,6 +8764,14 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             libname = "winemetal";
             funcs64 = (const void *)dxmt_winemetal_unix_call_funcs;
             funcs_wow64 = (const void *)dxmt_winemetal_unix_call_wow64_funcs;
+#ifdef MADEIRA_MOLTENVK
+        } else if (match && strstr(match, "winevulkan")) {
+            /* Vulkan's generated 32-bit thunks do not translate Madeira's
+             * guest window pointers yet. Refuse WOW64 rather than binding the
+             * incompatible 64-bit table or a success-looking generic stub. */
+            libname = "winevulkan (MoltenVK, 64-bit only)";
+            funcs64 = (const void *)winevulkan_unix_call_funcs;
+#endif
         } else if (wow && ((match && strstr(match, "d3d9shim")) ||
                            (modname && strstr(modname, "d3d9shim")))) {
             /* The i386 D3D9 shim, bound to the native ARM64 frontend.  A

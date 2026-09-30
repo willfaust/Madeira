@@ -199,6 +199,16 @@ static void my_view_release_metal_view(macdrv_metal_view v) {
     if (v) CFBridgingRelease((CFTypeRef)v);
 }
 
+/* Share the existing per-HWND/fullscreen layer selection and ownership rules.
+ * These are strong references from the optional Wine Vulkan driver. */
+void *madeira_vulkan_layer_lease_create(void *hwnd) {
+    return (void *)my_view_create_metal_view((macdrv_view)hwnd, NULL);
+}
+
+void madeira_vulkan_layer_lease_release(void *lease) {
+    my_view_release_metal_view((macdrv_metal_view)lease);
+}
+
 static void my_on_main_thread(dispatch_block_t b) {
     if ([NSThread isMainThread]) b();
     else dispatch_async(dispatch_get_main_queue(), b);
