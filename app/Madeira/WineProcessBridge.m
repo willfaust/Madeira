@@ -31,6 +31,45 @@
 #include "PrefixExtractor.h"
 #include "FEXBridge.h"  // fex_get_jit_write_offset()
 
+/* Write end of the pipe on fd 0, or -1 when stdin was left alone. The app's
+ * host writes the guest's keystrokes here. */
+int madeira_stdin_master = -1;
+/* madeira-stdout-pipe: read end of the guest's stdout, or -1 when the pipe is
+ * not enabled and stdout still goes to the shared log. */
+int madeira_stdout_master = -1;
+
+int madeira_stdout_is_open(void) { return madeira_stdout_master >= 0; }
+
+long madeira_stdout_read(void *buf, unsigned long len) {
+    if (madeira_stdout_master < 0 || !buf || !len) return -1;
+    return read(madeira_stdout_master, buf, (size_t)len);
+}
+
+long madeira_stdin_write(const void *buf, unsigned long len) {
+    if (madeira_stdin_master < 0) return -1;
+    return (long)write(madeira_stdin_master, buf, (size_t)len);
+}
+
+/* Whether the pipe exists. An accessor rather than letting callers read the
+ * global: it is written on the Wine thread and read from the UI thread, and
+ * Swift 6 refuses to import a mutable C global as concurrency-safe. */
+int madeira_stdin_is_open(void) {
+    return madeira_stdin_master >= 0;
+}
+
+/* Close the write end so the guest's stdin reaches EOF.
+ *
+ * Without this, anything that reads to EOF -- an interpreter fed a script,
+ * sort, the type/more family -- blocks forever after consuming what it was
+ * given. Combined with one-program-per-launch that costs the whole app launch,
+ * so the terminal must be able to signal "no more input". */
+void madeira_stdin_close(void) {
+    if (madeira_stdin_master < 0) return;
+    close(madeira_stdin_master);
+    madeira_stdin_master = -1;
+    dprintf(STDERR_FILENO, "[stdin-pipe] write end closed; guest stdin is at EOF\n");
+}
+
 // Thread-local globals for wine_ios_exit longjmp (used by wine_ios_exit.h shim in ntdll)
 // Each Wine "process" thread has its own jmpbuf so child processes can exit independently.
 _Thread_local jmp_buf wine_ios_exit_jmpbuf;
@@ -1094,6 +1133,98 @@ static void *wine_process_thread(void *arg) {
                 dup2(logfd, STDERR_FILENO);
                 dup2(logfd, STDOUT_FILENO);
                 close(logfd);
+            }
+        }
+
+        /* madeira-stdout-pipe: hand the guest's stdout to a pipe, and leave
+         * stderr on the log.
+         *
+         * The split is the one the code already has: Wine's err:/warn: channels
+         * and every dprintf(STDERR_FILENO, ...) go to stderr, the guest's printf
+         * goes to stdout. Separating the file descriptors separates program
+         * output from runtime narration by the kernel rather than by matching
+         * line prefixes after the fact -- which is the only way a terminal can
+         * interpret an escape sequence that a telemetry line would otherwise
+         * land in the middle of.
+         *
+         * Opt-in, because an unread pipe fills at 64 KB and blocks the guest
+         * forever on its next write. The reader creates the flag file. */
+        {
+            NSString *docs3 = NSSearchPathForDirectoriesInDomains(
+                NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            NSString *flag = [docs3 stringByAppendingPathComponent:@"madeira-stdout.txt"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:flag]) {
+                int fds[2];
+                if (pipe(fds) != 0) {
+                    dprintf(STDERR_FILENO, "[stdout-pipe] pipe() failed errno=%d\n", errno);
+                } else {
+                    dup2(fds[1], STDOUT_FILENO);
+                    if (fds[1] != STDOUT_FILENO) close(fds[1]);
+                    /* Non-blocking: the reader polls and must not stall while
+                     * the guest is quiet. */
+                    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
+                    madeira_stdout_master = fds[0];
+                    dprintf(STDERR_FILENO,
+                            "[stdout-pipe] guest stdout is a pipe, read end=%d\n", fds[0]);
+                }
+            }
+        }
+
+        // ---- Optional pipe on fd 0, and optional forced console ----
+        // Both opt-in via Documents files; absent, nothing here runs
+        // and fd 0 stays whatever iOS gave us (which the 2026-09-16 probe
+        // showed reads as immediate EOF).
+        //
+        // A pipe, not a pty: posix_openpt is EPERM under the iOS sandbox. It
+        // turns out not to matter -- Wine's is_tty_handle() is a pointer-tag
+        // test, not a tty test, so a tagged pipe reaches conhost the same way.
+        // See the generator for the full chain.
+        {
+            NSString *docs2 = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            NSData *seed = [NSData dataWithContentsOfFile:
+                            [docs2 stringByAppendingPathComponent:@"madeira-stdin.txt"]];
+            if (seed) {
+                int fds[2];
+                if (pipe(fds) != 0) {
+                    dprintf(STDERR_FILENO, "[stdin-pipe] pipe() failed errno=%d\n", errno);
+                } else {
+                    dup2(fds[0], STDIN_FILENO);
+                    if (fds[0] != STDIN_FILENO) close(fds[0]);
+                    madeira_stdin_master = fds[1];
+                    dprintf(STDERR_FILENO,
+                            "[stdin-pipe] fd 0 is a pipe, isatty=%d, write end=%d\n",
+                            isatty(STDIN_FILENO), fds[1]);
+                    // Non-blocking write end. XNU pipes start at 16KB and only
+                    // grow toward 64KB opportunistically, and nothing bounds the
+                    // size of madeira-stdin.txt -- a blocking write with no
+                    // reader yet would hang the Wine thread before __wine_main,
+                    // with the last log line being the one above.
+                    int fl = fcntl(fds[1], F_GETFL, 0);
+                    if (fl != -1) fcntl(fds[1], F_SETFL, fl | O_NONBLOCK);
+                    if (seed.length) {
+                        ssize_t w = write(fds[1], seed.bytes, seed.length);
+                        if (w < 0) {
+                            dprintf(STDERR_FILENO, "[stdin-pipe] seed write failed errno=%d\n", errno);
+                        } else if ((unsigned long)w < seed.length) {
+                            dprintf(STDERR_FILENO,
+                                    "[stdin-pipe] WARNING seed TRUNCATED: %zd of %lu bytes -- "
+                                    "the pipe buffer is full and nothing has read yet\n",
+                                    w, (unsigned long)seed.length);
+                        } else {
+                            dprintf(STDERR_FILENO, "[stdin-pipe] seeded %zd bytes\n", w);
+                        }
+                    }
+                }
+            }
+
+            // Separate knob: ask the guest to build a console anyway. Read here
+            // rather than in ContentView because this runs in the same process
+            // before __wine_main, so setenv is visible to env_ios.c.
+            if ([[NSFileManager defaultManager] fileExistsAtPath:
+                 [docs2 stringByAppendingPathComponent:@"madeira-console.txt"]]) {
+                setenv("MADEIRA_FORCE_CONSOLE", "1", 1);
+                dprintf(STDERR_FILENO,
+                        "[force-console] MADEIRA_FORCE_CONSOLE=1 via madeira-console.txt\n");
             }
         }
 
