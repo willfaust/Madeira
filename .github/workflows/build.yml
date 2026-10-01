@@ -1,0 +1,149 @@
+name: Build IPA
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# LLVM, FEX and the i386 Windows DLLs are the slow stages (hours on a hosted runner), so they build in
+# parallel jobs whose trimmed outputs are cached; the app job restores them and
+# runs scripts/build-ipa.sh, which skips any stage whose output already exists.
+# xcode-27: the ntdll unix side uses iOS 27 SDK fields (rusage_info_v6.ri_page_wait_time_mach).
+
+jobs:
+  llvm:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: llvm-ios-15.0.7-${{ hashFiles('scripts/build/build-llvm-ios.sh') }}
+          path: |
+            toolchains/llvm-ios-build/lib/*.a
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-project/llvm/include
+      - name: Build LLVM for iOS
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          brew install ninja || true
+          scripts/build/build-llvm-ios.sh
+
+  fex:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: key
+        run: echo "key=fex-ios-$(git rev-parse HEAD:FEX)-${{ hashFiles('scripts/build/build-fex-ios.sh', 'scripts/build/fex-ios.patch') }}" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            FEX/build-ios
+            !FEX/build-ios/**/*.o
+      - name: Build FEX for iOS
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          brew install ninja || true
+          git submodule update --init --recursive --depth 1 FEX
+          scripts/build/build-fex-ios.sh
+
+  i386:
+    runs-on: xcode-27
+    timeout-minutes: 360
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: key
+        run: echo "key=i386-windows-$(git rev-parse HEAD:wine)-$(git rev-parse HEAD:research/dxmt)-${{ hashFiles('build/wine-i386/build.sh', 'scripts/build/setup-llvm-mingw.sh', 'scripts/build/build-shader-headers.sh') }}" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: app/Madeira/i386-windows
+      - name: Build the 32-bit (i386) Windows DLLs
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          brew install meson ninja bison || true
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          git submodule update --init --depth 1 wine
+          git submodule update --init --recursive --depth 1 research/dxmt
+          scripts/build/setup-llvm-mingw.sh
+          # DXMT's i386 build compiles Metal shaders: it needs the Metal toolchain
+          # and the Xcode 27 atomic fix that build-shader-headers.sh applies.
+          xcodebuild -downloadComponent MetalToolchain
+          scripts/build/build-shader-headers.sh
+          build/wine-i386/build.sh
+      - if: failure()
+        run: tail -150 wine/build-i386/madeira-i386-build.log || true
+
+  app:
+    needs: [llvm, fex, i386]
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/cache/restore@v4
+        with:
+          key: llvm-ios-15.0.7-${{ hashFiles('scripts/build/build-llvm-ios.sh') }}
+          fail-on-cache-miss: true
+          path: |
+            toolchains/llvm-ios-build/lib/*.a
+            toolchains/llvm-ios-build/include
+            toolchains/llvm-project/llvm/include
+      - uses: actions/cache/restore@v4
+        with:
+          key: ${{ needs.fex.outputs.key }}
+          fail-on-cache-miss: true
+          path: |
+            FEX/build-ios
+            !FEX/build-ios/**/*.o
+      - uses: actions/cache/restore@v4
+        with:
+          key: ${{ needs.i386.outputs.key }}
+          fail-on-cache-miss: true
+          path: app/Madeira/i386-windows
+      # Third-party stages only change with their pins or build scripts. Each
+      # script skips when its output exists, so a cache hit leaves just
+      # Madeira's own code (wineserver, ntdll/win32u unix, the app) to build.
+      - id: pins
+        run: |
+          echo "wine=$(git rev-parse HEAD:wine)" >> "$GITHUB_OUTPUT"
+          echo "dxmt=$(git rev-parse HEAD:research/dxmt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          key: deps-v2-${{ hashFiles('build/gnutls-ios/**', 'build/ffmpeg/build.sh', 'build/ffmpeg/src/**', 'build/freetype-ios/build.sh', 'scripts/build/build-freetype-ios.sh', 'scripts/build/setup-llvm-mingw.sh') }}
+          path: |
+            toolchains/llvm-mingw-*
+            toolchains/gnutls-ios
+            toolchains/ffmpeg-ios
+            build/ffmpeg/obj
+            build/freetype-ios/build
+            research/freetype
+      - uses: actions/cache@v4
+        with:
+          key: wine-host-${{ steps.pins.outputs.wine }}-${{ hashFiles('scripts/build/build-wine.sh') }}
+          path: |
+            wine/build-macos
+            wine/build-arm64ec
+      - uses: actions/cache@v4
+        with:
+          key: dxmt-ios-${{ steps.pins.outputs.dxmt }}-${{ steps.pins.outputs.wine }}-${{ hashFiles('build/dxmt-ios/**', 'scripts/build/build-dxmt-ios.sh', 'scripts/build/build-shader-headers.sh', 'scripts/build/build-llvm-ios.sh') }}
+          path: |
+            app/Madeira/libdxmt_combined.a
+            build/dxmt-ios/shader-headers
+      - name: Build IPA
+        run: scripts/build-ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ipa
+          path: dist/Madeira.ipa
+          if-no-files-found: error

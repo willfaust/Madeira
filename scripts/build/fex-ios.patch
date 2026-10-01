@@ -1,0 +1,51 @@
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index be5431125..4c279239a 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -76,6 +76,7 @@ struct rpm_cas_snapshot {
+   unsigned int block_count, block_used, is_full, which_loop;
+ };
+ int rpm_cas_snapshot_take(struct rpm_cas_snapshot* out);
++__attribute__((weak)) int rpm_cas_snapshot_take(struct rpm_cas_snapshot*) { return 0; }
+ }
+ #include <condition_variable>
+ #include <fcntl.h>
+@@ -1488,6 +1489,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+    * reached via its x64 fast-forward sequence -- preserves the x4/x5 varargs contract that
+    * the emulation round trip destroys; see Module.S). Same change-detection pattern as
+    * [cb-entry] below: CompileBlock runs often enough to notice promptly. */
++#ifdef FEX_IOS_HOST
+   {
+     static uint64_t FfsLastCount = 0;
+     static uint32_t FfsReports = 0;
+@@ -1514,6 +1516,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+                         IosCbEntryLog[4], IosCbEntryLog[5], IosCbEntryLog[7]);
+     }
+   }
++#endif
+ 
+   /* iOS-Madeira: refuse to compile obviously-invalid guest RIPs. After a
+    * NULL-vtable virtual call (`call [rax+8]` with rax=0), control flow
+diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+index b2eca70f8..695d78ad0 100644
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -704,16 +704,8 @@ static void IosLogUnimplementedCASPAL(uint32_t Size, uint64_t* GPRs, uint32_t Ad
+    * which we DUAL-MAP (RW alias + RX alias). Aliased mappings are exactly where atomics
+    * can fault despite correct alignment. Report what the region actually is, so "guest
+    * data in a dual-mapped pool page" is distinguishable from ordinary private memory. */
+-  MEMORY_BASIC_INFORMATION mbi {};
+-  const char* type = "?";
+-  if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
+-    type = mbi.Type == MEM_IMAGE ? "MEM_IMAGE" : mbi.Type == MEM_MAPPED ? "MEM_MAPPED" : "MEM_PRIVATE";
+-  }
+-  LogMan::Msg::EFmt("[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={} "
+-                    "crosses16B={} | region base={} size={:#x} prot={:#x} type={} state={:#x}",
+-                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15,
+-                    (GPRs[AddressReg] & 15) ? "yes" : "no", mbi.BaseAddress, mbi.RegionSize,
+-                    mbi.Protect, type, mbi.State);
++  LogMan::Msg::EFmt("[caspal128] MISALIGNED-UNSUPPORTED Size={} addrReg=x{} addr={:#x} misalign={}",
++                    Size, AddressReg, GPRs[AddressReg], GPRs[AddressReg] & 15);
+ }
+ 
+ static bool HandleCASPAL(uint32_t Instr, uint64_t* GPRs, uint32_t* StrictSplitLockMutex) {

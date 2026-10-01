@@ -35,7 +35,11 @@ the native pieces; the app is built with `xcodebuild`.
 
 ```sh
 git clone --recurse-submodules <this repo>
+cd Madeira
+./scripts/build-ipa.sh   # produces dist/Madeira.ipa
 ```
+
+See [`BUILDING.md`](BUILDING.md) for prerequisites, timing, and re-run notes.
 
 Note that `FEX`, `wine` and `research/dxmt` are submodules pointing at forks
 containing the iOS work; upstream clones will not build here.
