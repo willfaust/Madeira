@@ -15,7 +15,28 @@ set -e
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 WINE_SRC="$REPO_ROOT/wine"
-GNUTLS_LIB="$REPO_ROOT/toolchains/gnutls-ios/lib/libgnutls.a"
+# madeira-gnutls-lib-search: find the archive the app actually links.
+#
+# The toolchains/ prefix is the layout a from-source GnuTLS build produces, but
+# the repository ships the built archive in app/Madeira/ instead. Looking only
+# at the first one made the intersection below empty, which emits a table with
+# no entries -- so nothing references libgnutls.a, the linker pulls in none of
+# it, ios_gnutls_dlsym returns NULL for every name, and guest-side TLS silently
+# does not work.
+GNUTLS_LIB=""
+for cand in "$REPO_ROOT/toolchains/gnutls-ios/lib/libgnutls.a" \
+            "$REPO_ROOT/app/Madeira/libgnutls.a"; do
+    if [ -f "$cand" ]; then GNUTLS_LIB="$cand"; break; fi
+done
+if [ -z "$GNUTLS_LIB" ]; then
+    echo "ERROR: no libgnutls.a found. Looked in:" >&2
+    echo "         $REPO_ROOT/toolchains/gnutls-ios/lib/" >&2
+    echo "         $REPO_ROOT/app/Madeira/" >&2
+    echo "       Generating an empty symbol table would disable guest TLS" >&2
+    echo "       without saying so, so this stops instead." >&2
+    exit 1
+fi
+echo "  gnutls symtab: using $GNUTLS_LIB"
 OUT="$BUILD_DIR/gnutls_symtab_ios.c"
 
 SOURCES=(
