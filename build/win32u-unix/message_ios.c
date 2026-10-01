@@ -3286,6 +3286,52 @@ static void process_sent_messages(void)
  *
  * Get a handle to the server message queue for the current thread.
  */
+#ifdef WINE_IOS
+/* Winios.m: the pipe the touch/key ring writes a byte to on every push. */
+extern int winios_input_wake_fd(void) __attribute__((weak));
+
+/* winios.drv has no event thread: the app's touch ring is drained by whichever
+ * Wine thread next runs pProcessEvents from here. A thread asleep on its queue
+ * never does, and the server's poll loop did not watch the ring, so a program
+ * blocked in GetMessage slept through every later touch (a game that polls
+ * only until its first click froze at the second). Register the ring's wake
+ * pipe with this thread's queue the way winex11 registers its display
+ * connection: the server polls it, a byte wakes the queue's waiters, and
+ * wait_message's process_driver_events drains ring and pipe. Each queue gets
+ * its own fd object on the same pipe; a thread woken for nothing goes back to
+ * sleep once the drain has emptied it. MADEIRA_INPUT_WAKE_FD=0 restores the
+ * previous behaviour. */
+static void ios_register_queue_wake_fd(void)
+{
+    static int disabled = -1, logged;
+    unsigned int status;
+    HANDLE handle;
+    int fd;
+
+    if (disabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_INPUT_WAKE_FD" );
+        disabled = e && *e == '0';
+    }
+    if (disabled || !winios_input_wake_fd) return;
+    if ((fd = winios_input_wake_fd()) < 0) return;
+    if ((status = wine_server_fd_to_handle( fd, GENERIC_READ | SYNCHRONIZE, 0, &handle )))
+    {
+        if (logged++ < 4) ERR( "[input-wake] fd_to_handle failed %#x\n", status );
+        return;
+    }
+    SERVER_START_REQ( set_queue_fd )
+    {
+        req->handle = wine_server_obj_handle( handle );
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    NtClose( handle );
+    if (logged++ < 4) ERR( "[input-wake] queue fd registered tid=%04x status=%#x\n",
+                           (unsigned int)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread, status );
+}
+#endif
+
 static HANDLE get_server_queue_handle(void)
 {
     struct user_thread_info *thread_info = get_user_thread_info();
@@ -3301,6 +3347,9 @@ static HANDLE get_server_queue_handle(void)
         }
         SERVER_END_REQ;
         if (!(ret = thread_info->server_queue)) ERR( "Cannot get server thread queue\n" );
+#ifdef WINE_IOS
+        else ios_register_queue_wake_fd();
+#endif
     }
     return ret;
 }
@@ -3353,7 +3402,7 @@ static BOOL check_internal_bits( UINT mask )
 
 static BOOL process_driver_events( UINT events_mask, UINT wake_mask, UINT changed_mask )
 {
-    BOOL drained = FALSE;
+    BOOL drained = FALSE, poll_events;
 
 #ifdef WINE_IOS
     /* iOS: always call pProcessEvents on every PeekMessage poll, not just
@@ -3364,11 +3413,17 @@ static BOOL process_driver_events( UINT events_mask, UINT wake_mask, UINT change
      * its buffer each PeekMessage iteration — slightly inefficient but
      * unblocks the chicken-and-egg without invasive wineserver changes. */
     drained = user_driver->pProcessEvents( events_mask );
+    /* The queue fd (the ring's wake pipe, get_server_queue_handle) raised
+     * QS_DRIVER and the server stopped polling it. The set_queue_mask below
+     * with poll_events clears the bit and re-arms the poll; without it the
+     * queue reads as signaled for good and every message wait spins. */
+    poll_events = drained || check_internal_bits( QS_DRIVER );
 #else
     if (check_internal_bits( QS_DRIVER )) drained = user_driver->pProcessEvents( events_mask );
+    poll_events = drained;
 #endif
 
-    if (drained || !check_queue_masks( wake_mask, changed_mask ))
+    if (poll_events || !check_queue_masks( wake_mask, changed_mask ))
     {
         BOOL skip_server = FALSE;
 #ifdef WINE_IOS
@@ -3383,7 +3438,7 @@ static BOOL process_driver_events( UINT events_mask, UINT wake_mask, UINT change
          * winios_drv_post_* calls do their own server requests). Keep a
          * ~1/s heartbeat so server-side is_queue_hung() (>5s without
          * queue access) never triggers for poll-only phases. */
-        if (!drained && !wake_mask && !changed_mask)
+        if (!poll_events && !wake_mask && !changed_mask)
         {
             static LONGLONG last_heartbeat; /* process-wide; benign race */
             LARGE_INTEGER counter, freq;
@@ -3406,7 +3461,7 @@ static BOOL process_driver_events( UINT events_mask, UINT wake_mask, UINT change
 #endif
         if (!skip_server) SERVER_START_REQ( set_queue_mask )
         {
-            req->poll_events = drained;
+            req->poll_events = poll_events;
             req->wake_mask = wake_mask;
             req->changed_mask = changed_mask;
             wine_server_call( req );

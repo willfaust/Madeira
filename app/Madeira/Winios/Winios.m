@@ -31,6 +31,8 @@
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 /* The window census struct is shared with Swift through this header;
  * including it here keeps both sides' definitions the same. */
@@ -678,6 +680,46 @@ static struct {
     pthread_mutex_t lock;
 } g_input_q = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
+/* The ring is drained by a Wine thread inside pProcessEvents, which runs
+ * from the message functions. A thread asleep on its queue (GetMessage with
+ * nothing to do) never gets there, and the server's poll loop does not watch
+ * the ring, so a touch posted while every thread slept woke nobody: a program
+ * that polls only until its first click froze at the second. Every push now
+ * writes a byte to this pipe; win32u registers its read end with each thread's
+ * message queue (set_queue_fd, as winex11 registers its display connection),
+ * the server polls it and wakes the waiters, and the drain empties it. */
+static int g_wake_pipe[2] = { -1, -1 };
+static pthread_once_t g_wake_once = PTHREAD_ONCE_INIT;
+
+static void winios_wake_init(void) {
+    if (pipe(g_wake_pipe) != 0) { g_wake_pipe[0] = g_wake_pipe[1] = -1; return; }
+    for (int i = 0; i < 2; i++) {
+        fcntl(g_wake_pipe[i], F_SETFL, fcntl(g_wake_pipe[i], F_GETFL) | O_NONBLOCK);
+        fcntl(g_wake_pipe[i], F_SETFD, FD_CLOEXEC);
+    }
+}
+
+/* win32u (message_ios.c): the fd each thread's queue watches; -1 if none. */
+int winios_input_wake_fd(void) {
+    pthread_once(&g_wake_once, winios_wake_init);
+    return g_wake_pipe[0];
+}
+
+static void winios_wake_waiters(void) {
+    char c = 1;
+    pthread_once(&g_wake_once, winios_wake_init);
+    if (g_wake_pipe[1] < 0) return;
+    /* A full pipe (no drain for 64K events) is still readable, so a failed
+     * write loses nothing. */
+    (void)!write(g_wake_pipe[1], &c, 1);
+}
+
+static void winios_wake_drain(void) {
+    char buf[256];
+    if (g_wake_pipe[0] < 0) return;
+    while (read(g_wake_pipe[0], buf, sizeof(buf)) > 0) {}
+}
+
 static void winios_q_push_ev(unsigned int type, int x, int y, unsigned int flags, unsigned int data) {
     pthread_mutex_lock(&g_input_q.lock);
     unsigned int next = (g_input_q.head + 1) % WINIOS_RING_SIZE;
@@ -688,6 +730,7 @@ static void winios_q_push_ev(unsigned int type, int x, int y, unsigned int flags
     /* If buffer is full we drop the oldest event by simply not advancing —
      * better than blocking the UI thread on a Wine event drain. */
     pthread_mutex_unlock(&g_input_q.lock);
+    winios_wake_waiters();
 }
 
 /* Public C entry points for Swift / UIKit gesture handlers.
@@ -767,6 +810,10 @@ BOOL winios_pProcessEvents(DWORD mask) {
             winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
         drained = TRUE;
     }
+    /* The ring is empty: the wake bytes it earned are consumed too, so the
+     * queue stops reading as signaled. A push that lands after this read
+     * writes its own byte. */
+    winios_wake_drain();
     return drained;
 }
 

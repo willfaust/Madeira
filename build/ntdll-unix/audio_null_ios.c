@@ -1320,6 +1320,15 @@ static NTSTATUS ios_release_render_buffer(void *args) {
                             "%04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x\n", slot, n,
                             w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
                 }
+                else if (time(NULL) - st[slot].last >= 10 && st[slot].frames && st[slot].peak > 0.02f && n >= 4) {
+                    /* a float stream: the same look, as raw words and as the values the
+                     * mixer reads (frame 0..3, channel 0), so garbage can be told from
+                     * a wrong sample format or a buffer that never advances */
+                    uint32_t w[4]; float v[4]; int k;
+                    for (k = 0; k < 4; k++) { memcpy(&w[k], s->render_scratch + (size_t)k * fb, 4); memcpy(&v[k], &w[k], 4); }
+                    fprintf(stderr, "[ios_audio] ml1067 slot=%d float stream, channel 0 of frames 0..3 (%u frames asked): "
+                            "%08x %08x %08x %08x = %.4f %.4f %.4f %.4f\n", slot, n, w[0], w[1], w[2], w[3], v[0], v[1], v[2], v[3]);
+                }
                 if (time(NULL) - st[slot].last >= 10 && st[slot].frames) {
                     fprintf(stderr, "[ios_audio] ml1065 slot=%d source: %llu samples, mean|x|=%.4f peak=%.3f clipped=%llu (rate %u ch %u float=%d bits=%d)\n",
                             slot, (unsigned long long)st[slot].frames, st[slot].sum_abs / (double)st[slot].frames, st[slot].peak,
