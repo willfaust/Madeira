@@ -112,6 +112,21 @@ physical input takes it over. Hiding the controls or disconnecting the pad then
 leaves player 1 connected at rest until the app exits. Without the switch,
 slot 0 connects only when a real source appears, as before.
 
+## Steam Input in Madeira Dock
+
+Before each Dock launch, Madeira sets the signed-in account's per-game
+`UseSteamControllerConfig` override to `2` (Enable Steam Input) in Steam's
+`userdata/<account-id>/config/localconfig.vdf`. This applies to every Steam game
+launched through Dock, including newly installed games and games whose override
+was disabled. Unrelated settings and other accounts are preserved. Missing
+entries are created; malformed or conflicting settings stop the launch rather
+than being overwritten. `[dock-launch] steam-input=forced` confirms the setting.
+
+This sets Steam's preference; it does not prove that Steam can discover the
+host controller or that its headless client can deliver mapped input. Physical
+controller and Steam Input integration still require device testing. Direct
+executable launches do not start Steam Input.
+
 ## Audio route with wired controllers
 
 Some controllers enumerate as a USB audio output when wired. iOS then routes all

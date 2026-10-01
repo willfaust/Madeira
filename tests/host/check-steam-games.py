@@ -200,6 +200,9 @@ enum SteamRuntimeFiles {
     static let windowsRoot = "C:\\Program Files (x86)\\Steam"
 }
 '''
+runtime = (app / 'SteamRuntime.swift').read_text()
+runtime_paths = runtime[runtime.index('    static func validPath('):runtime.index('    // Parse the central directory')]
+stubs = stubs.replace('enum SteamRuntimeFiles {', 'enum SteamRuntimeFiles {\n    enum Failure: Error { case conflict }\n' + runtime_paths)
 owned_game = owned_source[owned_source.index('struct SteamOwnedGame:'):owned_source.index('// MARK: - Playtime')]
 vdf = fetcher[fetcher.index('// MARK: - Simple VDF Binary Parser'):]
 checks = r'''
@@ -438,11 +441,12 @@ func record(_ appID: Int, _ name: String, _ folder: String, flags: Int) -> Strin
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-steam-games-') as tmp:
     tmp = Path(tmp)
-    (tmp / 'stubs.swift').write_text(stubs + head)
-    (tmp / 'dock.swift').write_text('import Foundation\nimport Glibc\n' + body)
+    native_import = 'import Darwin' if sys.platform == 'darwin' else 'import Glibc'
+    (tmp / 'stubs.swift').write_text(stubs.replace('import Glibc', native_import) + head)
+    (tmp / 'dock.swift').write_text('import Foundation\n' + native_import + '\n' + body)
     (tmp / 'rules.swift').write_text('import Foundation\n' + rules)
     (tmp / 'owned.swift').write_text('import Foundation\n' + owned_game + '\n' + vdf)
-    (tmp / 'checks.swift').write_text(checks)
+    (tmp / 'checks.swift').write_text(checks.replace('import Glibc', native_import))
     exe = tmp / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
                             str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'rules.swift'),

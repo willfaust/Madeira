@@ -5,7 +5,7 @@
 import Foundation
 
 // Valve's text KeyValues format is used for library folders and app manifests.
-// Keep this reader independent of the UI and never write Steam's own files.
+// Keep parsing and lossless settings edits independent of the UI.
 indirect enum SteamValue: Sendable {
     case text(String)
     case object([String: SteamValue])
@@ -22,6 +22,7 @@ enum SteamFileError: LocalizedError {
 struct SteamKeyValues {
     private var bytes: [UInt8]
     private var position = 0
+    private var tokenStart = 0
     private var tokens = 0
     init(_ data: Data) throws {
         guard data.count <= 4 * 1024 * 1024 else { throw SteamFileError.invalid("Steam metadata is too large.") }
@@ -41,6 +42,7 @@ struct SteamKeyValues {
         guard position < bytes.count else { return nil }
         tokens += 1
         guard tokens <= 100_000 else { throw SteamFileError.invalid("Steam metadata has too many entries.") }
+        tokenStart = position
         let first = bytes[position]; position += 1
         if first == 123 { return .open }; if first == 125 { return .close }
         var value: [UInt8] = []
@@ -62,8 +64,54 @@ struct SteamKeyValues {
         }
         return .word(String(decoding: value, as: UTF8.self))
     }
-    mutating func read() throws -> SteamValue { .object(try object(depth: 0)) }
-    private mutating func object(depth: Int) throws -> [String: SteamValue] {
+    /// Changes one scalar without reserializing unrelated settings, comments or duplicate keys.
+    static func setting(_ data: Data, path: [String], value: String) throws -> Data {
+        guard !path.isEmpty, path.count < 32,
+            (path + [value]).allSatisfy({ $0.utf8.count <= 16_384 && $0.unicodeScalars.allSatisfy { $0.value >= 32 } })
+        else {
+            throw SteamFileError.invalid("Steam's settings path is invalid.")
+        }
+        func quote(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        let target = path.map { $0.lowercased() }
+        var parser = try SteamKeyValues(data)
+        var changes: [(Range<Int>, Data)] = []
+        var conflict = false
+        _ = try parser.read { current, field, range in
+            guard target.starts(with: current) else { return }
+            if current == target {
+                guard let old = field.string else { conflict = true; return }
+                if old != value { changes.append((range, Data(quote(value).utf8))) }
+            } else {
+                guard case .object(let fields) = field else { conflict = true; return }
+                guard fields[target[current.count]] == nil else { return }
+                var text = quote(path.last!) + " " + quote(value) + "\n"
+                for key in path.dropFirst(current.count).dropLast().reversed() {
+                    text = quote(key) + "\n{\n" + text + "}\n"
+                }
+                let offset = current.isEmpty ? range.upperBound : range.upperBound - 1
+                changes.append((offset..<offset, Data(("\n" + text).utf8)))
+            }
+        }
+        guard !conflict else { throw SteamFileError.invalid("Steam's settings contain a conflicting entry.") }
+        var result = data
+        for (range, replacement) in changes.sorted(by: { $0.0.lowerBound > $1.0.lowerBound }) {
+            result.replaceSubrange(range, with: replacement)
+        }
+        var checked = try SteamKeyValues(result)
+        _ = try checked.read()
+        return result
+    }
+
+    mutating func read(visit: (([String], SteamValue, Range<Int>) -> Void)? = nil) throws -> SteamValue {
+        let root = SteamValue.object(try object(depth: 0, path: [], visit: visit))
+        visit?([], root, 0..<bytes.count)
+        return root
+    }
+    private mutating func object(depth: Int, path: [String], visit: (([String], SteamValue, Range<Int>) -> Void)?)
+        throws -> [String: SteamValue]
+    {
         guard depth < 32 else { throw SteamFileError.invalid("Steam metadata is nested too deeply.") }
         var result: [String: SteamValue] = [:]
         while let key = try token() {
@@ -74,11 +122,16 @@ struct SteamKeyValues {
             guard case .word(let name) = key, let value = try token(), value != .close else {
                 throw SteamFileError.invalid("Steam metadata is incomplete. Try refreshing it.")
             }
+            let start = tokenStart
+            let fieldPath = visit == nil ? [] : path + [name.lowercased()]
+            let field: SteamValue
             switch value {
-            case .open: result[name.lowercased()] = .object(try object(depth: depth + 1))
-            case .word(let text): result[name.lowercased()] = .text(text)
-            case .close: break
+            case .open: field = .object(try object(depth: depth + 1, path: fieldPath, visit: visit))
+            case .word(let text): field = .text(text)
+            case .close: throw SteamFileError.invalid("Steam metadata has an unexpected closing brace.")
             }
+            result[name.lowercased()] = field
+            visit?(fieldPath, field, start..<position)
         }
         guard depth == 0 else { throw SteamFileError.invalid("Steam metadata is incomplete. Try refreshing it.") }
         return result

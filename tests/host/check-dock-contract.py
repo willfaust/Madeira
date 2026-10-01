@@ -8,7 +8,7 @@ Synthetic data only: no Steam, Wine or credentials. Covers the JIT pool policy
 (opt-in, Dock-only), installed-game discovery from Steam's own app manifests and
 library list, launch validation, the one-use transfer envelope, the host's
 environment (including the Dock-only image-retire switch) and launch arguments,
-the one-launch request, and static rules:
+the one-launch request, lossless Steam Input overrides, and static rules:
 no program-name lists, no credential in a log line, the compact pool off by
 default, madeira.cfg `pool` still winning, and no built Dock binary tracked.
 """
@@ -52,6 +52,9 @@ require('DockPerformancePolicy.sessionPoolMB(standard: 896, dock: dockLaunch.doc
         'the standard 896 MB pool is unchanged outside a compact Dock launch')
 require(content.count('MadeiraDock.requestLaunch(') == 1, 'only the Dock launch requests the Dock pool policy')
 require('SteamSignIn.credentialsForDock()' in content, 'the launch uses the sign-in API')
+handoff = dock[dock.index('    @MainActor static func writeHandoff('):dock.index("    /// The host's environment for one launch.")]
+require(handoff.index('try forceSteamInput(') < handoff.index('setenv("MADEIRA_DOCK_AUTH_FILE"'),
+        'Steam Input is forced before the sign-in transfer is published')
 # Image retire is a Dock-session switch: only MadeiraDock.configure sets it, and
 # only the Dock launch calls configure.
 for name, text in [('ContentView.swift', content), ('MadeiraDockView.swift', view), ('SteamRuntime.swift', runtime)]:
@@ -83,7 +86,7 @@ if git.returncode == 0:
                               'app/Madeira/arm64ec-windows/dock-notices.txt'], capture_output=True, text=True).stdout.strip()
     require(tracked == '', 'no built Dock executable or notices are tracked')
     gitlink = subprocess.run(['git', '-C', str(root), 'ls-files', '-s', 'madeira-dock'], capture_output=True, text=True).stdout
-    require(gitlink.startswith('160000 0c5bbd1a854c4c63c47e074b72954aba5b36919d'), 'madeira-dock is pinned at 0c5bbd1')
+    require(gitlink.startswith('160000 3cadfbea700e4da4b04e331dd7ef1ba633dfacef'), 'madeira-dock is pinned at 3cadfbe')
 else:
     print('SKIP: not a usable git checkout here; tracked-binary and submodule-pin checks not run')
 
@@ -99,16 +102,19 @@ enum SteamSignIn {
 }
 enum SteamLog { static func event(_ m: String) {}; static func trace(_ m: @autoclosure () -> String) {} }
 enum SteamRuntimeFiles {
+    enum Failure: Error { case conflict }
     static let relativeRoot = "Program Files (x86)/Steam"
     static let windowsRoot = "C:\\Program Files (x86)\\Steam"
 }
 '''
+runtime_paths = runtime[runtime.index('    static func validPath('):runtime.index('    // Parse the central directory')]
+stubs = stubs.replace('enum SteamRuntimeFiles {', 'enum SteamRuntimeFiles {\n' + runtime_paths)
 checks = r'''
 import Foundation
 import Glibc
 var failures = 0
-func require(_ condition: @autoclosure () -> Bool, _ label: String) {
-    if condition() { print("PASS: " + label) } else { print("FAIL: " + label); failures += 1 }
+func require(_ condition: @autoclosure () throws -> Bool, _ label: String) {
+    if (try? condition()) == true { print("PASS: " + label) } else { print("FAIL: " + label); failures += 1 }
 }
 func env(_ name: String) -> String? { getenv(name).map { String(cString: $0) } }
 func manifest(_ body: String) -> Data { Data(("\"AppState\"\n{\n" + body + "\n}\n").utf8) }
@@ -182,6 +188,53 @@ func jwt(_ claims: String) -> String {
         require((try? MadeiraDock.validate(alpha, drive: drive, bundled: true)) != nil, "installed game with client: accepted")
         require(refused({ try MadeiraDock.validate(updating, drive: drive, bundled: true) }, "fully installed"), "a game whose folder is absent is refused")
 
+        // Steam Input: synthetic account settings, never a real Steam installation.
+        do {
+            let config = drive.appendingPathComponent("Program Files (x86)/Steam/userdata/1/config/localconfig.vdf")
+            func override(_ app: Int) throws -> String? {
+                var parser = try SteamKeyValues(Data(contentsOf: config))
+                return try parser.read()["UserLocalConfigStore"]?["Software"]?["Valve"]?["Steam"]?["apps"]?[String(app)]?["UseSteamControllerConfig"]?.string
+            }
+            try MadeiraDock.forceSteamInput(appID: 20, accountID: 1, drive: drive)
+            require(try override(20) == "2", "missing settings: explicit Steam Input enablement created")
+            let original = #"""
+            // preserve comments, key casing, escapes and other game settings
+            "UserLocalConfigStore" {
+              "Software" { "Valve" { "Steam" { "apps" {
+                "20" { "useSteamControllerConfig" "0" "LaunchOptions" "-name=\"quoted\"" }
+                "30" { "UseSteamControllerConfig" "0" }
+              } } } }
+              "Unknown" { "Duplicate" "first" "Duplicate" "second" }
+            }
+            "Unrelated" "keep"
+            """#
+            try write(config, original)
+            try MadeiraDock.forceSteamInput(appID: 20, accountID: 1, drive: drive)
+            let expected = Data(original.replacingOccurrences(of: #""useSteamControllerConfig" "0""#, with: #""useSteamControllerConfig" "2""#).utf8)
+            require(try Data(contentsOf: config) == expected, "disabled override changed; every unrelated byte preserved")
+            require(try override(30) == "0", "another game's settings are not rewritten prematurely")
+            try MadeiraDock.forceSteamInput(appID: 20, accountID: 1, drive: drive)
+            require(try Data(contentsOf: config) == expected, "repeated launch is idempotent")
+            try MadeiraDock.forceSteamInput(appID: 30, accountID: 1, drive: drive)
+            require(try override(30) == "2" && override(20) == "2", "each game receives the same forced override when launched")
+            try MadeiraDock.forceSteamInput(appID: 40, accountID: 1, drive: drive)
+            require(try override(40) == "2" && override(20) == "2", "future games get an override without losing existing entries")
+            let other = drive.appendingPathComponent("Program Files (x86)/Steam/userdata/2/config/localconfig.vdf")
+            try write(other, original)
+            for invalid in ["\"UserLocalConfigStore\" {", "\"UserLocalConfigStore\" { \"Software\" \"scalar\" }"] {
+                try write(config, invalid)
+                require((try? MadeiraDock.forceSteamInput(appID: 20, accountID: 1, drive: drive)) == nil, "malformed or conflicting settings refuse the launch")
+                require(try Data(contentsOf: config) == Data(invalid.utf8), "failed edit preserves the settings file")
+            }
+            require(try Data(contentsOf: other) == Data(original.utf8), "other accounts are untouched")
+            try FileManager.default.removeItem(at: config)
+            try FileManager.default.createSymbolicLink(at: config, withDestinationURL: other)
+            require((try? MadeiraDock.forceSteamInput(appID: 20, accountID: 1, drive: drive)) == nil, "symlinked settings are refused")
+            require(try Data(contentsOf: other) == Data(original.utf8), "symlink target is untouched")
+            let duplicate = Data(#""Root" { "Setting" "0" "Setting" "1" }"#.utf8)
+            require(try SteamKeyValues.setting(duplicate, path: ["Root", "Setting"], value: "2") == Data(#""Root" { "Setting" "2" "Setting" "2" }"#.utf8), "duplicate target keys are all forced")
+        }
+
         // Transfer envelope (synthetic account 1 SteamID).
         let steamID: UInt64 = 76561197960265729
         let data = try MadeiraDock.envelope(account: "fixture", token: "a.b-c_d", steamID: steamID, appID: 10)
@@ -235,9 +288,10 @@ func jwt(_ claims: String) -> String {
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-dock-contract-') as tmp:
     tmp = Path(tmp)
-    (tmp / 'stubs.swift').write_text(stubs + head)
-    (tmp / 'dock.swift').write_text('import Foundation\nimport Glibc\n' + body)
-    (tmp / 'checks.swift').write_text(checks)
+    native_import = 'import Darwin' if sys.platform == 'darwin' else 'import Glibc'
+    (tmp / 'stubs.swift').write_text(stubs.replace('import Glibc', native_import) + head)
+    (tmp / 'dock.swift').write_text('import Foundation\n' + native_import + '\n' + body)
+    (tmp / 'checks.swift').write_text(checks.replace('import Glibc', native_import))
     exe = tmp / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
                             str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'checks.swift'), str(app / 'SteamKeyValues.swift')])

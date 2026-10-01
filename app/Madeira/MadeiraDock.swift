@@ -192,6 +192,34 @@ enum MadeiraDock {
         (unixNamespace ? "\\\\?\\unix" : "Z:") + url.path.replacingOccurrences(of: "/", with: "\\")
     }
 
+    /// Force Steam Input for every game at launch, including an existing disabled override.
+    static func forceSteamInput(appID: Int, accountID: UInt32, drive: URL) throws {
+        guard validAppID(appID), accountID != 0 else {
+            throw DockError.message("Steam Input requires a valid Steam account and game.")
+        }
+        do {
+            let fm = FileManager.default
+            let url = try SteamRuntimeFiles.destination(
+                SteamRuntimeFiles.relativeRoot + "/userdata/\(accountID)/config/localconfig.vdf",
+                under: drive.resolvingSymlinksInPath())
+            let data = fm.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
+            let updated = try SteamKeyValues.setting(
+                data,
+                path: [
+                    "UserLocalConfigStore", "Software", "Valve", "Steam", "apps", String(appID),
+                    "UseSteamControllerConfig",
+                ], value: "2")
+            if updated != data {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try updated.write(to: url, options: .atomic)
+            }
+            SteamLog.event("[dock-launch] steam-input=forced")
+        } catch {
+            throw DockError.message(
+                "Steam Input could not be enabled. Check Steam's local controller settings file before trying again.")
+        }
+    }
+
     // MARK: Report
 
     /// The host's report: a bounded set of numeric fields, never arbitrary guest text.
@@ -365,8 +393,10 @@ enum MadeiraDock {
         let report = drive.appendingPathComponent("madeira-dock.txt")
         if FileManager.default.fileExists(atPath: report.path) { try FileManager.default.removeItem(at: report) }
         guard let url = transferURL else { throw DockError.message("Dock's private transfer folder is unavailable.") }
-        var data = try envelope(account: account, token: token, steamID: subject(token), appID: appID)
+        let steamID = try subject(token)
+        var data = try envelope(account: account, token: token, steamID: steamID, appID: appID)
         defer { data.resetBytes(in: data.startIndex..<data.endIndex) }
+        try forceSteamInput(appID: appID, accountID: UInt32(truncatingIfNeeded: steamID), drive: drive)
         let fm = FileManager.default
         var folder = url.deletingLastPathComponent()
         try fm.createDirectory(at: folder, withIntermediateDirectories: true,
