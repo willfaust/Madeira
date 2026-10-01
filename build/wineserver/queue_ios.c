@@ -3099,8 +3099,15 @@ DECL_HANDLER(set_queue_fd)
     {
         if ((unix_fd = dup( unix_fd )) != -1)
         {
+#ifdef WINE_IOS
+            extern void ios_fd_poll_with_fionread( struct fd *fd );
+#endif
             queue->fd = create_anonymous_fd( &msg_queue_fd_ops, unix_fd, &queue->obj, 0 );
             set_fd_events( queue->fd, POLLIN );
+#ifdef WINE_IOS
+            /* a pipe, not a request socket: the iOS loop must ask FIONREAD */
+            if (queue->fd) ios_fd_poll_with_fionread( queue->fd );
+#endif
         }
         else
             file_set_error();

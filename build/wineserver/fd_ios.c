@@ -1039,6 +1039,22 @@ static inline void main_loop_epoll(void) { }
 
 
 /* add a user in the poll array and return its index, or -1 on failure */
+#ifdef WINE_IOS
+/* The iOS loop below cannot poll AF_UNIX sockets in the sandbox, so every
+ * poll user added after the first client fd is dispatched as readable on
+ * every iteration ("always try"). That is right for the request sockets and
+ * wrong for a pipe registered with a message queue (set_queue_fd: the touch
+ * ring's wake pipe), which it reported readable while empty, raising
+ * QS_DRIVER on every iteration and spinning every message wait. A user with
+ * this flag is checked with FIONREAD instead, which works for pipes. */
+static unsigned char *ios_user_fionread;
+
+void ios_fd_poll_with_fionread( struct fd *fd )
+{
+    if (fd->poll_index >= 0 && ios_user_fionread) ios_user_fionread[fd->poll_index] = 1;
+}
+#endif
+
 static int add_poll_user( struct fd *fd )
 {
     int ret;
@@ -1065,6 +1081,16 @@ static int add_poll_user( struct fd *fd )
             }
             poll_users = newusers;
             pollfd = newpoll;
+#ifdef WINE_IOS
+            {
+                unsigned char *newflags = realloc( ios_user_fionread, new_count );
+                if (newflags)
+                {
+                    memset( newflags + allocated_users, 0, new_count - allocated_users );
+                    ios_user_fionread = newflags;
+                }
+            }
+#endif
             if (!allocated_users) init_epoll();
             allocated_users = new_count;
         }
@@ -1074,6 +1100,9 @@ static int add_poll_user( struct fd *fd )
     pollfd[ret].events = 0;
     pollfd[ret].revents = 0;
     poll_users[ret] = fd;
+#ifdef WINE_IOS
+    if (ios_user_fionread) ios_user_fionread[ret] = 0;
+#endif
     active_users++;
     ws_log("[wineserver-fd] add_poll_user: user=%d unix_fd=%d active_users=%d", ret, fd->unix_fd, active_users);
     return ret;
@@ -1089,6 +1118,9 @@ static void remove_poll_user( struct fd *fd, int user )
     pollfd[user].fd = -1;
     pollfd[user].events = 0;
     pollfd[user].revents = 0;
+#ifdef WINE_IOS
+    if (ios_user_fionread) ios_user_fionread[user] = 0;
+#endif
     poll_users[user] = (struct fd *)freelist;
     freelist = &poll_users[user];
     active_users--;
@@ -1549,7 +1581,8 @@ void main_loop(void)
 
                     if (pollfd[i].events & POLLIN)
                     {
-                        if (ios_client_fd_start >= 0 && i >= ios_client_fd_start)
+                        if (ios_client_fd_start >= 0 && i >= ios_client_fd_start
+                            && !(ios_user_fionread && ios_user_fionread[i]))
                         {
                             /* Client fd (socketpair/pipe from injection) —
                              * always try, ioctl broken for AF_UNIX on iOS */
