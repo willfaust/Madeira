@@ -17918,6 +17918,15 @@ NTSTATUS virtual_alloc_teb( TEB **ret_teb )
              * 4 GB would hand a non-LAA program a TEB32/PEB32 above 0x80000000
              * (the third device run's 0xFFFE0000/0xFFFF0000). */
             if (wow && !zbits) zbits = limit_2g - 1;
+            /* ml1210: user_space_wow_limit is session-wide and is set by the
+             * first 32-bit process (0xffffffff once one ran), but it is a
+             * GUEST ceiling: a 64-bit thread's next TEB block was being
+             * reserved below 4GB, where iOS maps nothing. Once the first 32-TEB
+             * block was used up, every new 64-bit thread failed (the server saw
+             * EOF on its request fd and killed it), and a 64-bit program whose
+             * worker thread could not be created stopped there. Upstream applies
+             * a limit to WoW TEB blocks only. */
+            if (!wow) zbits = 0;
 #endif
             status = STATUS_NO_MEMORY;
 #ifdef WINE_IOS
