@@ -195,6 +195,23 @@ ProMotionIntent.has30Cap = false; game.applyEnvironment()
 expect(vsync == 1, "a saved 30 FPS runs as 60 without DXMT's 30 FPS cap")
 ProMotionIntent.has30Cap = true; game.fpsMode = 1; game.applyEnvironment()
 expect(vsync == 1, "60 FPS applied")
+// "XInput and DirectInput": MADEIRA_DINPUT_PAD for that game's launch only; the
+// next launch without the choice clears it unless madeira.cfg sets it.
+game.controllerMode = "dinput"; game.applyEnvironment()
+expect(env("MADEIRA_DINPUT_PAD") == "1", "the DirectInput choice exports MADEIRA_DINPUT_PAD=1")
+game.controllerMode = nil; game.applyEnvironment()
+expect(env("MADEIRA_DINPUT_PAD") == nil, "a game without the choice does not inherit MADEIRA_DINPUT_PAD")
+game.controllerMode = "keys"; game.applyEnvironment()
+expect(env("MADEIRA_DINPUT_PAD") == nil, "keyboard-and-mouse mode exports no DirectInput pad")
+setenv("MADEIRA_DINPUT_PAD", "1", 1); MadeiraConfig.values["env.MADEIRA_DINPUT_PAD"] = "1"
+game.controllerMode = nil; game.applyEnvironment()
+expect(env("MADEIRA_DINPUT_PAD") == "1", "madeira.cfg's own MADEIRA_DINPUT_PAD is left alone")
+MadeiraConfig.values["env.MADEIRA_DINPUT_PAD"] = nil; unsetenv("MADEIRA_DINPUT_PAD")
+// Library files written before the controller choices decode with none.
+let older = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","relativePath":"a/b.exe","bits":64,"arguments":"","resolution":"944x656","fpsMode":1,"reducedX87":false,"liveLogs":false,"performance":false,"touchControls":false}"#
+let decodedOld = try? JSONDecoder().decode(LibraryEntry.self, from: Data(older.utf8))
+expect(decodedOld != nil && decodedOld?.controllerMode == nil && decodedOld?.controllerBinds == nil && decodedOld?.padMouseVertical == nil,
+       "an entry without controller keys decodes")
 
 // Validation.
 expect((try? game.validate()) != nil, "a normal profile validates")
@@ -357,6 +374,10 @@ check('LibraryView(play: launchLibraryEntry' in content, 'ContentView shows the 
 check('runWineFullSequence(profile: entry)' in content and 'profile.applyEnvironment()' in content,
       'library launches use the shared launch path with the profile applied')
 check('Button("Use New Interface")' in content, 'the developer interface can switch back to the library')
+loop = bridge.index('for (NSString *raw in [text componentsSeparatedByCharactersInSet:')
+snap = bridge.find('game_set[i] = getenv(per_launch[i]) != NULL;')
+check(0 <= snap < loop and 'getenv(per_launch[i])' not in bridge[loop:bridge.index('setenv(k.UTF8String, v.UTF8String, 1);', loop)],
+      "ml1184: the per-launch keys a game set are noted before madeira.cfg's env lines run, so a later cfg line still wins")
 check('LibraryController.shared' in gamepad and 'library.ownsInput' in gamepad,
       'player 1 pad drives the library and is neutral while the library owns input')
 

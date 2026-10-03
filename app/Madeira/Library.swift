@@ -309,7 +309,9 @@ struct LibraryEntry: Codable, Identifiable {
         if let cpuCount, (1..<64).contains(cpuCount) { setenv("MADEIRA_CPU_COUNT", String(cpuCount), 1) }
         // "dinput": the host pad also as a DirectInput joystick (wine/dlls/dinput/joystick_ios.c,
         // off by default because a game reading both APIs would see two controllers).
-        // Exported only for that choice; madeira.cfg's own MADEIRA_DINPUT_PAD still applies otherwise.
+        // Exported only for that choice, and it wins over madeira.cfg's MADEIRA_DINPUT_PAD
+        // (ml1240: in ml1184's per-launch list, unset when the session ends); the cfg's
+        // own value still applies to the other choices.
         if GamepadInput.keyboardMouseAvailable, controllerMode == "dinput" { setenv("MADEIRA_DINPUT_PAD", "1", 1) }
         else if MadeiraConfig.get("env.MADEIRA_DINPUT_PAD") == nil { unsetenv("MADEIRA_DINPUT_PAD") }
         if let anisotropyLimit, [1, 2, 4, 8].contains(anisotropyLimit) { setenv("DXMT_D9_ANISO_LIMIT", String(anisotropyLimit), 1) }
@@ -3246,6 +3248,10 @@ struct LibraryHUD: View {
                     ControllerModeChoice(mode: Binding(get: { model.controllerMode }, set: { model.controllerMode = $0; model.saveCurrentProfile() }))
                     if model.controllerMode == "keys" {
                         Button("Controller binds", systemImage: "gamecontroller") { bindsPage = true }
+                    } else if model.controllerMode == "dinput" {
+                        // ml1240: the DirectInput device exists only from the launch on.
+                        Text("XInput and DirectInput applies to the next launch.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Button("Keyboard", systemImage: "keyboard") { model.menu = false; LibraryKeyboard.show() }

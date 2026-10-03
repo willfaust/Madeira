@@ -1093,11 +1093,34 @@ static void *wine_process_thread(void *arg) {
                 } else {
                     text = [NSString stringWithContentsOfFile:[docs stringByAppendingPathComponent:@"madeira-env.txt"] encoding:NSUTF8StringEncoding error:nil];
                 }
+                /* iOS-Madeira ml1184: a library game's own settings (LibraryEntry.applyEnvironment,
+                 * which ran before this on the launch worker) win over the same key in
+                 * madeira.cfg, as its details page says; the cfg line used to replace them
+                 * (env.MADEIRA_FASTSYNC = auto undid "Fast synchronization: off"). Which of
+                 * them the game set is noted before the first cfg line is exported: madeira.cfg
+                 * is last-line-wins, and a later line for the same key must still replace an
+                 * earlier one instead of being taken for the game's own setting. */
+                static const char *const per_launch[] = {
+                    "MADEIRA_FASTSYNC", "MADEIRA_FASTSYNC_SEM", "MADEIRA_CPU_COUNT", "DXMT_D9_ANISO_LIMIT",
+                    "FEX_X87REDUCEDPRECISION",   /* ml1184: the game's "Reduced-precision x87" */
+                    "MADEIRA_DINPUT_PAD",        /* ml1240: the game's "XInput and DirectInput" */
+                };
+                enum { per_launch_count = sizeof(per_launch) / sizeof(per_launch[0]) };
+                BOOL game_set[per_launch_count];
+                for (size_t i = 0; i < per_launch_count; i++) game_set[i] = getenv(per_launch[i]) != NULL;
                 for (NSString *raw in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
                     NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     NSRange eq = [line rangeOfString:@"="];
                     if (!line.length || [line hasPrefix:@"#"] || eq.location == NSNotFound || eq.location == 0) continue;
                     NSString *k = [line substringToIndex:eq.location], *v = [line substringFromIndex:eq.location + 1];
+                    BOOL kept = NO;
+                    for (size_t i = 0; i < per_launch_count; i++)
+                        if (game_set[i] && !strcmp(k.UTF8String, per_launch[i])) kept = YES;
+                    if (kept) {
+                        fprintf(stderr, "[madeira-env] ml1184 %s=%s kept (the game's own setting); madeira.cfg's %s ignored\n",
+                                k.UTF8String, getenv(k.UTF8String), v.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
@@ -1520,6 +1543,12 @@ static void *wine_process_thread(void *arg) {
         }
 
         g_wine_running = 0;
+        /* ml1184: these belong to the launch that just ended; a later session in this app
+         * run gets its own from its game, or madeira.cfg's. */
+        unsetenv("MADEIRA_FASTSYNC"); unsetenv("MADEIRA_FASTSYNC_SEM");
+        unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
+        unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
+        unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */
 
         // Stop wineserver to prevent CPU spin (iOS kills for excessive CPU)
         dprintf(STDERR_FILENO, "[WineProc] stopping wineserver...\n");
