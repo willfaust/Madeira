@@ -135,7 +135,8 @@ in-game menu:
    Esc/Ctrl/Shift/Alt/Tab/Enter/arrow row; modifiers latch);
 2. the FPS limit, **Aspect & scaling**, and the mouse and pointer settings;
 3. the performance overlay and its fields (FPS, average frame time, memory
-   footprint, battery);
+   footprint, battery, and the thermal state: Cool, Warm, Hot or Critical; a
+   change is logged as `[thermal]` while the overlay is shown);
 4. **Quit game** in red. Quit asks the program to close with Alt+F4 through
    the normal input queue, so it can save; the session ends when it exits.
 

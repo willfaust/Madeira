@@ -40,15 +40,17 @@ enum DeviceLoadDiagnostics {
         guard now - lastReport >= 10 else { return }
         lastReport = now
         let process = ProcessInfo.processInfo
-        let thermal: String
-        switch process.thermalState {
-        case .nominal: thermal = "nominal"
-        case .fair: thermal = "fair"
-        case .serious: thermal = "serious"
-        case .critical: thermal = "critical"
-        @unknown default: thermal = "unknown"
-        }
+        let thermal = thermalName(process.thermalState)
         fputs("[device-load] thermal=\(thermal) low-power=\(process.isLowPowerModeEnabled ? 1 : 0) capture=\(UIScreen.main.isCaptured ? 1 : 0)\n", stderr)
+    }
+    static func thermalName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
     }
 }
 
@@ -3237,7 +3239,7 @@ struct LibraryHUD: View {
                 Divider()
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
-                    ForEach(["FPS", "Frame time", "RAM", "Battery"], id: \.self) { field in
+                    ForEach(["FPS", "Frame time", "RAM", "Battery", "Thermal"], id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
@@ -3287,6 +3289,9 @@ struct LibraryMetrics: View {
     @State private var fps = 0.0
     @State private var memory = 0
     @State private var battery = -1
+    /// iOS lowers clocks from .serious on, so a frame rate that sags after a few
+    /// minutes can be told apart from one the game or the runtime caused.
+    @State private var thermal = ProcessInfo.processInfo.thermalState
     private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     var body: some View {
         Text(parts.joined(separator: "  ·  "))
@@ -3301,6 +3306,11 @@ struct LibraryMetrics: View {
                 let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &size) } }
                 if result == KERN_SUCCESS { memory = Int(info.phys_footprint / 1048576) }
                 battery = UIDevice.current.batteryLevel < 0 ? -1 : Int(UIDevice.current.batteryLevel * 100)
+                let state = ProcessInfo.processInfo.thermalState
+                if state != thermal {
+                    LogStore.shared.log("[thermal] \(DeviceLoadDiagnostics.thermalName(thermal)) -> \(DeviceLoadDiagnostics.thermalName(state)) at \(String(format: "%.0f", fps)) FPS")
+                    thermal = state
+                }
             }
     }
     private var parts: [String] {
@@ -3309,6 +3319,15 @@ struct LibraryMetrics: View {
         if model.overlayFields.contains("Frame time") { result.append(fps > 0 ? String(format: "%.1f ms avg", 1000 / fps) : "— ms") }
         if model.overlayFields.contains("RAM") { result.append("\(memory) MB") }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
+        if model.overlayFields.contains("Thermal") {
+            switch thermal {
+            case .nominal: result.append("Cool")
+            case .fair: result.append("Warm")
+            case .serious: result.append("Hot")
+            case .critical: result.append("Critical")
+            @unknown default: break
+            }
+        }
         return result
     }
 }
