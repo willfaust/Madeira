@@ -191,6 +191,7 @@ struct mad_device {
     obj_handle_t mtl_queue;
     obj_handle_t dsso;          /* depth: less-equal, writes enabled */
     LONG device_lost;
+    LUID adapter_luid;          /* GetAdapterLuid: the DXGI adapter the device was created on */
     /* GPU addresses are resolved back to the resource that owns them rather
      * than dereferenced. The design is explicit that a D3D GPU address, a
      * descriptor handle and a backend object id are separate namespaces. */
@@ -5448,7 +5449,6 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
             CloseHandle(d->fence_thread); CloseHandle(d->fence_wake);
             d->fence_thread = NULL;
         }
-        if (d->gpu_event) NSObject_release(d->gpu_event);
         {   /* ml1072: the runtime's texture heaps die with the device */
             unsigned k;
             if (g_hp_dev == d) g_hp_dev = NULL;
@@ -5458,6 +5458,11 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
             free(d->theaps); free(d->hret);
             DeleteCriticalSection(&d->heap_lock);
         }
+        /* Only after the heap reclaim above, which reads the GPU timeline
+         * through it (mad_gpu_completed). Released first, a device created and
+         * dropped straight away (Ghost of Tsushima's adapter probe) sent
+         * signaledValue to a freed MTLSharedEvent. */
+        if (d->gpu_event) { NSObject_release(d->gpu_event); d->gpu_event = 0; }
         DeleteCriticalSection(&d->fence_lock); DeleteCriticalSection(&d->ring_lock);
         free(d->fence_jobs); free(d->ring_pool); free(d->ring_retired);
         /* These were retained on creation and were previously leaked. */
@@ -10338,6 +10343,19 @@ static void STDMETHODCALLTYPE device_RemoveDevice(ID3D12Device10 *This) {
     d3d12_log("[madeira-d3d12] RemoveDevice requested by the application\n");
     InterlockedExchange(&d->device_lost, 1);
 }
+/* Engines poll it; the stub's E_NOTIMPL read as "device removed" (Ghost of
+ * Tsushima logged "Device removed detected (0x80004001)" and quit). S_OK
+ * unless the device really is lost, the flag the rest of the runtime reports
+ * DXGI_ERROR_DEVICE_REMOVED from. */
+static HRESULT STDMETHODCALLTYPE device_GetDeviceRemovedReason(ID3D12Device10 *This) {
+    return ((struct mad_device *)This)->device_lost ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
+}
+/* Engines match the device to its DXGI adapter by this; the stub's zero LUID
+ * matches nothing. */
+static LUID * STDMETHODCALLTYPE device_GetAdapterLuid(ID3D12Device10 *This, LUID *ret) {
+    *ret = ((struct mad_device *)This)->adapter_luid;
+    return ret;
+}
 static HRESULT STDMETHODCALLTYPE device_SetBackgroundProcessingMode(ID3D12Device10 *This,
         D3D12_BACKGROUND_PROCESSING_MODE mode, D3D12_MEASUREMENTS_ACTION action, HANDLE event, WINBOOL *further) {
     (void)This; (void)mode; (void)action;
@@ -10584,6 +10602,8 @@ static void build_vtables(void) {
     g_device_vtbl.SetResidencyPriority               = device_SetResidencyPriority;
     g_device_vtbl.EnqueueMakeResident                = device_EnqueueMakeResident;
     g_device_vtbl.RemoveDevice                       = device_RemoveDevice;
+    g_device_vtbl.GetDeviceRemovedReason             = device_GetDeviceRemovedReason;
+    g_device_vtbl.GetAdapterLuid                     = device_GetAdapterLuid;
     g_device_vtbl.SetBackgroundProcessingMode        = device_SetBackgroundProcessingMode;
     g_device_vtbl.SetEventOnMultipleFenceCompletion  = device_SetEventOnMultipleFenceCompletion;
     g_device_vtbl.QueryInterface = (void *)device_QI;
@@ -10785,7 +10805,6 @@ __declspec(dllexport) void MadeiraD3D12GetQueueStats(ID3D12CommandQueue *queue,
 
 __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
         D3D_FEATURE_LEVEL min_feature_level, REFIID riid, void **device) {
-    (void)adapter;
     build_vtables();
 
     /* The design is explicit that accepting the controlled sample's requested
@@ -10801,6 +10820,14 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
     if (!d) return E_OUTOFMEMORY;
     d->vtbl = &g_device_vtbl; d->refs = 1; d->iid = &IID_ID3D12Device; d->name = "Device";
     g_last_device = d;
+    {   /* the adapter's LUID, for GetAdapterLuid */
+        IDXGIAdapter *a = NULL;
+        if (adapter && SUCCEEDED(IUnknown_QueryInterface(adapter, &IID_IDXGIAdapter, (void **)&a)) && a) {
+            DXGI_ADAPTER_DESC desc;
+            if (SUCCEEDED(IDXGIAdapter_GetDesc(a, &desc))) d->adapter_luid = desc.AdapterLuid;
+            IDXGIAdapter_Release(a);
+        }
+    }
 
     /* Whichever backend winemetal is configured for, local or remote. Failing
      * here is reported rather than deferred to the first draw. */
@@ -10820,6 +10847,12 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
     obj_handle_t devices = WMTCopyAllDevices();
     d->mtl_device = devices ? NSArray_object(devices, 0) : 0;
     if (d->mtl_device) NSObject_retain(d->mtl_device);   /* take our own reference */
+    if (!d->adapter_luid.LowPart && !d->adapter_luid.HighPart && d->mtl_device) {
+        /* No adapter given: DXMT's DXGI derives the LUID from the Metal
+         * registry ID (dxgi_adapter.cpp GetAdapterLuid); use the same. */
+        UINT64 id = __builtin_bswap64(MTLDevice_registryID(d->mtl_device));
+        memcpy(&d->adapter_luid, &id, sizeof id);
+    }
     if (devices) NSObject_release(devices);
     InitializeCriticalSection(&d->live_lock);
     InitializeCriticalSection(&d->view_lock);   /* ml1049 */
