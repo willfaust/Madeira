@@ -163,6 +163,8 @@ struct ios_jit_mapping {
                          * falling back to the NULL-owner (parent) entry. */
     unsigned short machine_cached;  /* ml349: PE machine word, read fault-safely once */
     unsigned char  machine_valid;   /* 0 = machine_cached not yet populated */
+    unsigned char  hybrid_cached;   /* ml1245: image carries ARM64EC metadata */
+    unsigned char  hybrid_valid;    /* 0 = hybrid_cached not yet populated */
 };
 static struct ios_jit_mapping ios_jit_mappings[IOS_JIT_MAX_MAPPINGS];
 static int ios_jit_mapping_count = 0;
@@ -3006,6 +3008,8 @@ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
         ios_jit_mappings[slot].owner_peb = NULL;
         ios_jit_mappings[slot].machine_cached = 0;   /* ml349: slot reuse invalidates memo */
         ios_jit_mappings[slot].machine_valid = 0;
+        ios_jit_mappings[slot].hybrid_cached = 0;    /* ml1245: same for the EC memo */
+        ios_jit_mappings[slot].hybrid_valid = 0;
         __sync_synchronize();
         ios_jit_mappings[slot].pe_base = pe_base;
         if (slot == ios_jit_mapping_count) ios_jit_mapping_count++;
@@ -4092,6 +4096,90 @@ unsigned long long ios_jit_module_base_for_va(unsigned long long va, unsigned lo
  * 100.0% "non-EC" — useless, because that bitmap reads 0 for plain data too,
  * so it lumped the correct case in with the poison one. Section bounds plus the
  * PE machine word separate them properly. */
+/* ml349: the header read must be FAULT-SAFE — a mapping whose PE header page is
+ * unmapped (freed private copy, decommitted image) wedged the [x86-ptr] scan
+ * thread forever (ml348: `ldr w1,[x0,#0x3c]` at 0x73e4a7003c, 8 identical
+ * faults, run killed). Read once per mapping slot via mach_vm_read_overwrite
+ * and memoize; ios_jit_add_mapping resets machine_valid on slot reuse. An
+ * unreadable header yields 0, which every caller treats as "not x86". */
+static unsigned short ios_jit_mapping_machine( int i )
+{
+    uintptr_t b  = (uintptr_t)ios_jit_mappings[i].pe_base;
+    size_t    sz = ios_jit_mappings[i].size;
+
+    if (!ios_jit_mappings[i].machine_valid)
+    {
+        unsigned int lfanew = 0;
+        unsigned short mach = 0;
+        mach_vm_size_t got = 0;
+        if (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(b + 0x3c), 4,
+                                   (mach_vm_address_t)&lfanew, &got) != KERN_SUCCESS || got != 4
+            || (size_t)lfanew + 6 > sz
+            || mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(b + lfanew + 4), 2,
+                                      (mach_vm_address_t)&mach, &got) != KERN_SUCCESS || got != 2)
+        {
+            static int hdr_unreadable_n;
+            if (hdr_unreadable_n < 8)
+                dprintf(2, "[x86-ptr] rev=ml349 mapping pe_base=%p+0x%lx header UNREADABLE"
+                        " — classifying non-x86 (#%d)\n",
+                        (void *)b, (unsigned long)sz, ++hdr_unreadable_n);
+            mach = 0;
+        }
+        ios_jit_mappings[i].machine_cached = mach;
+        ios_jit_mappings[i].machine_valid = 1;
+    }
+    return ios_jit_mappings[i].machine_cached;
+}
+
+/* ml1245: does mapping i run from its pool copy, i.e. is it ARM64EC or ARM64?
+ *
+ * The machine word cannot say: an ARM64EC image carries IMAGE_FILE_MACHINE_AMD64
+ * exactly like a plain x64 one (every DLL in arm64ec-windows reads 0x8664 on disk,
+ * and so did metro.exe). What marks it is a non-zero CHPEMetadataPointer in the
+ * load config, the same test update_arm64ec_ranges applies. Fault-safe and
+ * memoized per slot like ios_jit_mapping_machine; unreadable headers yield 0. */
+static int ios_safe_read( uintptr_t addr, void *out, size_t len )
+{
+    mach_vm_size_t got = 0;
+    return mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)addr, len,
+                                   (mach_vm_address_t)out, &got ) == KERN_SUCCESS && got == len;
+}
+
+static int ios_jit_mapping_is_hybrid( int i )
+{
+    if (!ios_jit_mappings[i].hybrid_valid)
+    {
+        uintptr_t b  = (uintptr_t)ios_jit_mappings[i].pe_base;
+        size_t    sz = ios_jit_mappings[i].size;
+        unsigned short mach = ios_jit_mapping_machine( i );
+        unsigned int lfanew = 0, cfg_size = 0;
+        IMAGE_NT_HEADERS64 nt;
+        IMAGE_DATA_DIRECTORY dir;
+        ULONGLONG chpe = 0;
+        int hybrid = 0;
+
+        if (mach == 0xaa64 || mach == 0xa641) hybrid = 1;   /* ARM64 / ARM64X headers */
+        else if (mach == 0x8664
+                 && ios_safe_read( b + 0x3c, &lfanew, 4 ) && (size_t)lfanew + sizeof(nt) <= sz
+                 && ios_safe_read( b + lfanew, &nt, sizeof(nt) )
+                 && nt.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC
+                 && nt.OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+        {
+            dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+            if (dir.VirtualAddress && (size_t)dir.VirtualAddress + dir.Size <= sz
+                && ios_safe_read( b + dir.VirtualAddress, &cfg_size, 4 )
+                && min( dir.Size, cfg_size ) > offsetof( IMAGE_LOAD_CONFIG_DIRECTORY64, CHPEMetadataPointer )
+                && ios_safe_read( b + dir.VirtualAddress
+                                  + offsetof( IMAGE_LOAD_CONFIG_DIRECTORY64, CHPEMetadataPointer ),
+                                  &chpe, sizeof(chpe) ))
+                hybrid = chpe != 0;
+        }
+        ios_jit_mappings[i].hybrid_cached = hybrid;
+        ios_jit_mappings[i].hybrid_valid = 1;
+    }
+    return ios_jit_mappings[i].hybrid_cached;
+}
+
 static int ios_va_is_x86_code( uint64_t va )
 {
     int i;
@@ -4102,8 +4190,6 @@ static int ios_va_is_x86_code( uint64_t va )
         size_t    sz = ios_jit_mappings[i].size;
         size_t    t_off, t_sz;
         uint64_t  off;
-        const unsigned char *img;
-        unsigned int e_lfanew;
 
         if (!b || sz < 0x40 || va < b || va >= b + sz) continue;
 
@@ -4112,37 +4198,9 @@ static int ios_va_is_x86_code( uint64_t va )
         off   = va - b;
         if (!t_sz || off < t_off || off >= t_off + t_sz) return 0;   /* data, not code */
 
-        /* ml349: the header read must be FAULT-SAFE — a mapping whose PE
-         * header page is unmapped (freed private copy, decommitted image)
-         * wedged the [x86-ptr] scan thread forever right here (ml348:
-         * `ldr w1,[x0,#0x3c]` at 0x73e4a7003c, 8 identical faults, run
-         * killed). Read once per mapping slot via mach_vm_read_overwrite and
-         * memoize; ios_jit_add_mapping resets machine_valid on slot reuse.
-         * Unreadable header → treat as non-x86 (translation stays on, which
-         * is the correct behavior for EC/data and harmless for a dead copy). */
-        (void)img; (void)e_lfanew;
-        if (!ios_jit_mappings[i].machine_valid)
-        {
-            unsigned int lfanew = 0;
-            unsigned short mach = 0;
-            mach_vm_size_t got = 0;
-            if (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(b + 0x3c), 4,
-                                       (mach_vm_address_t)&lfanew, &got) != KERN_SUCCESS || got != 4
-                || (size_t)lfanew + 6 > sz
-                || mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(b + lfanew + 4), 2,
-                                          (mach_vm_address_t)&mach, &got) != KERN_SUCCESS || got != 2)
-            {
-                static int hdr_unreadable_n;
-                if (hdr_unreadable_n < 8)
-                    dprintf(2, "[x86-ptr] rev=ml349 mapping pe_base=%p+0x%lx header UNREADABLE"
-                            " — classifying non-x86 (#%d)\n",
-                            (void *)b, (unsigned long)sz, ++hdr_unreadable_n);
-                mach = 0;
-            }
-            ios_jit_mappings[i].machine_cached = mach;
-            ios_jit_mappings[i].machine_valid = 1;
-        }
-        return ios_jit_mappings[i].machine_cached == 0x8664;  /* IMAGE_FILE_MACHINE_AMD64 */
+        /* Unreadable header → 0 → non-x86: translation stays on, which is the
+         * correct behavior for EC/data and harmless for a dead copy. */
+        return ios_jit_mapping_machine( i ) == 0x8664;  /* IMAGE_FILE_MACHINE_AMD64 */
     }
     return 0;
 }
@@ -4233,6 +4291,121 @@ static int ios_img_off_is_exec( const void *img, size_t img_size, size_t off )
         return (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) ? 1 : 0;
     }
     return 0;   /* outside every section: headers/padding, not code */
+}
+
+/* ml1244: bind an x64 importer's DATA imports to the copy that is actually live.
+ *
+ * An ARM64EC/ARM64 module executes from its pool copy and reaches its own
+ * globals ADRP-relative, so every write it makes lands in the POOL copy's .data;
+ * the PE-side .data keeps what the image file held. The iat-sync points an EC
+ * importer's (pool-side) IAT at the pool copy, but a pure x64 importer is run by
+ * FEX at its PE addresses, so it reads the PE-side IAT the loader filled with PE
+ * addresses. For a function import that is right (the EC call path translates
+ * it); for an exported VARIABLE it hands the guest a copy nothing ever writes.
+ *
+ * Metro 2033 Redux, 2026-09-27: metro.exe's VS2012 CRT startup reads `_acmdln`
+ * straight from msvcr110's data export. msvcr110's DllMain had set it in the pool
+ * copy, the PE copy was still NULL, and the command-line scan faulted on
+ * `cmp byte [rbx],0x20` with rbx=0. Every pre-UCRT runtime (msvcr80..msvcr120,
+ * msvcrt) exports its globals this way; UCRT apps go through __p__* getters.
+ *
+ * Called on the loader's restore call, while the thunks are still writable. Only
+ * the importer's IAT directory is touched, and only slots whose target is a
+ * non-executable section of an ARM64EC/ARM64 module. x64 targets keep PE
+ * addresses: FEX runs their code at PE VAs, so their PE copy is the live one. */
+static void ios_x64_iat_bind_live_data( char *base, size_t size )
+{
+    static int said, calls;
+    uintptr_t rs = (uintptr_t)base, re = rs + size, pe, lo, hi, page = 0;
+    IMAGE_NT_HEADERS64 nt;
+    IMAGE_DATA_DIRECTORY dir;
+    unsigned int lfanew = 0;
+    void *owner;
+    uint64_t *p;
+    int i, imp = -1, page_rd = 0, page_ok = 0, scanned = 0, bound = 0, unreadable = 0;
+
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        uintptr_t b = (uintptr_t)ios_jit_mappings[i].pe_base;
+        if (b && rs >= b && re <= b + ios_jit_mappings[i].size) { imp = i; break; }
+    }
+    /* ml1245: a pure x64 importer only; an EC module reads its pool-side IAT */
+    if (imp < 0 || ios_jit_mapping_machine( imp ) != 0x8664 || ios_jit_mapping_is_hybrid( imp )) return;
+
+    /* The importer's headers are read fault-safe too, like its IAT pages below:
+     * this runs on every protection change inside an x64 image, and a packer or
+     * DRM stub may have made its own header page PAGE_NOACCESS. */
+    pe = (uintptr_t)ios_jit_mappings[imp].pe_base;
+    if (!ios_safe_read( pe + offsetof( IMAGE_DOS_HEADER, e_lfanew ), &lfanew, sizeof(lfanew) )
+        || (size_t)lfanew + sizeof(nt) > ios_jit_mappings[imp].size
+        || !ios_safe_read( pe + lfanew, &nt, sizeof(nt) )) return;
+    if (nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return;
+    dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
+    lo = pe + dir.VirtualAddress > rs ? pe + dir.VirtualAddress : rs;
+    hi = pe + dir.VirtualAddress + dir.Size < re ? pe + dir.VirtualAddress + dir.Size : re;
+    if (!dir.Size || lo >= hi) return;
+
+    owner = ios_jit_current_peb();
+    for (p = (uint64_t *)((lo + 7) & ~(uintptr_t)7); (uintptr_t)(p + 1) <= hi; p++)
+    {
+        uint64_t val;
+        void *nv;
+        int t;
+
+        /* ml1169: look at the page BEFORE reading the slot. The restore call normally
+         * arrives while the thunks are still RW, but a packer or DRM stub can leave
+         * its IAT PAGE_NOACCESS/guarded, and reading that here would fault in unix
+         * code. Unreadable: skip the slot; not writable: log it and leave it. */
+        if (((uintptr_t)p & ~(uintptr_t)0x3fff) != page)
+        {
+            mach_vm_address_t a = (uintptr_t)p;
+            mach_vm_size_t rsz = 0;
+            vm_region_basic_info_data_64_t inf;
+            mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t obj = MACH_PORT_NULL;
+
+            page = (uintptr_t)p & ~(uintptr_t)0x3fff;
+            page_rd = mach_vm_region( mach_task_self(), &a, &rsz, VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&inf, &cnt, &obj ) == KERN_SUCCESS
+                      && a <= (uintptr_t)p && (inf.protection & VM_PROT_READ);
+            page_ok = page_rd && (inf.protection & VM_PROT_WRITE);
+        }
+        if (!page_rd) { unreadable++; continue; }
+        val = *p;
+        if (!val) continue;
+        scanned++;
+        for (t = 0; t < ios_jit_mapping_count; t++)
+        {
+            uintptr_t b = (uintptr_t)ios_jit_mappings[t].pe_base;
+            if (b && val >= b && val < b + ios_jit_mappings[t].size) break;
+        }
+        if (t == ios_jit_mapping_count) continue;
+        /* ml1245: only targets that run from the pool. ml1244 tested the machine
+         * word for 0xA641/0xAA64 here, which no EC DLL carries (they read 0x8664),
+         * so on device it never bound a single slot. */
+        if (!ios_jit_mapping_is_hybrid( t )) continue;
+        if (ios_img_off_is_exec( ios_jit_mappings[t].pe_base, ios_jit_mappings[t].size,
+                                 val - (uintptr_t)ios_jit_mappings[t].pe_base )) continue;
+        nv = ios_jit_translate_addr_for_owner( (void *)(uintptr_t)val, owner );
+        if ((uint64_t)(uintptr_t)nv == val) continue;
+
+        if (said < 24)
+        {
+            said++;
+            dprintf( 2, "[x64-data-imp] ml1245 %s slot %p: %#llx -> %p (data export of pe=%p)\n",
+                     page_ok ? "BOUND" : "SKIP (page not writable)", p,
+                     (unsigned long long)val, nv, ios_jit_mappings[t].pe_base );
+        }
+        if (page_ok) { *p = (uint64_t)(uintptr_t)nv; bound++; }
+    }
+
+    /* One line per x64 IAT window for the first few calls, then only windows
+     * that bound something: a silent log must mean "never reached", not "maybe". */
+    if (++calls <= 6 || (bound && calls <= 400))
+        dprintf( 2, "[x64-data-imp] ml1245 importer pe=%p IAT window %p+%#lx: %d slot(s), %d data import(s) bound%s\n",
+                 (void *)pe, (void *)lo, (unsigned long)(hi - lo), scanned, bound,
+                 unreadable ? " (ml1169: unreadable IAT page(s) skipped)" : "" );
 }
 
 /* ml1017: OPT-IN via `madeira-iat-noexec.txt` = 1.
@@ -13197,6 +13370,10 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
         ios_jit_mappings[slot].reloc_rva = m->reloc_rva;
         ios_jit_mappings[slot].reloc_size = m->reloc_size;
         ios_jit_mappings[slot].owner_peb = child_peb;
+        ios_jit_mappings[slot].machine_cached = 0;   /* a reused tombstone keeps no memo */
+        ios_jit_mappings[slot].machine_valid = 0;
+        ios_jit_mappings[slot].hybrid_cached = 0;
+        ios_jit_mappings[slot].hybrid_valid = 0;
         __sync_synchronize();
         ios_jit_mappings[slot].pe_base = m->pe_base;
         if (slot == ios_jit_mapping_count) ios_jit_mapping_count++;
@@ -22752,6 +22929,11 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
 
     size = ROUND_SIZE( addr, size, page_mask );
     base = ROUND_ADDR( addr, page_mask );
+
+#ifdef WINE_IOS
+    /* ml1244: the loader's IAT restore call; the thunks are still writable here */
+    ios_x64_iat_bind_live_data( base, size );
+#endif
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
