@@ -1578,11 +1578,19 @@ int wine_process_start(const char *prefix_path) {
     // Inject wineserver side — the event loop will pick this up
     wineserver_inject_client_fd(pair[0]);
 
-    // Lower priority so Wine init doesn't starve the main thread
+    /* ml1164: USER_INTERACTIVE through the attribute. This used to set an
+     * explicit sched_priority of 20 ("so Wine init doesn't starve the main
+     * thread"), and a thread with an explicit priority is opted out of QoS:
+     * the pthread_set_qos_class_self_np(USER_INTERACTIVE) at the top of
+     * wine_process_thread then failed silently. Harmless while the first
+     * process is explorer, but a direct launch (Games library, Thumper,
+     * Stray) runs the GAME's main thread on this pthread: Hollow Knight's sat
+     * on the efficiency cores for 8230 ms against 14 ms on performance cores
+     * while loading. Every other guest thread is USER_INTERACTIVE already
+     * (thread_ios.c). */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    struct sched_param sched = { .sched_priority = 20 };  // lower than default (31)
-    pthread_attr_setschedparam(&attr, &sched);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 
     int ret = pthread_create(&g_wine_thread, &attr, wine_process_thread, NULL);
     pthread_attr_destroy(&attr);
