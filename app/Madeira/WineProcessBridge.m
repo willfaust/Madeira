@@ -832,8 +832,12 @@ static void *wine_process_thread(void *arg) {
                  * done. It routes every OutputDebugStringA through an exception
                  * dispatch, which is real overhead in hot paths; re-add it only
                  * alongside MADEIRA_TF_TRACE. */
-                setenv("WINEDEBUG", "err+all,err-virtual", 1);
-                LOG("WINEDEBUG = err+all,err-virtual (perf default — set MADEIRA_DEBUG_VERBOSE=1 for full trace)");
+                /* fixme-d3dcompiler: Wine's shader reflection prints one
+                 * skip_u32_unknown line per unknown RDEF dword. Metro 2033
+                 * Redux reflects every shader at load: ~90,000 of a
+                 * 105,000-line log in six seconds, all of it parsed by LogStore. */
+                setenv("WINEDEBUG", "err+all,err-virtual,fixme-d3dcompiler", 1);
+                LOG("WINEDEBUG = err+all,err-virtual,fixme-d3dcompiler (perf default — set MADEIRA_DEBUG_VERBOSE=1 for full trace)");
             }
         }
 
