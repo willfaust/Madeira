@@ -2386,6 +2386,11 @@ struct ContentView: View {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
+        // This run's log under the program's name too (Documents/logs). A Steam game started
+        // through Madeira Dock above gets its own from ntdll, once Valve's client starts it.
+        let program = entry.desktop == true ? "explorer.exe"
+            : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
+        LogStore.shared.startSessionLog(program: program)
         library.begin(entry)
         runWineFullSequence(profile: entry)
     }

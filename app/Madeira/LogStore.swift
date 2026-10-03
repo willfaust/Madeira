@@ -119,6 +119,41 @@ final class LogStore: ObservableObject {
         }
     }
 
+    /// Keeps this session's log under the program's name as well:
+    /// Documents/logs/<exe>-<yyyy-MM-dd_HH-mm-ss>.txt, e.g.
+    /// Crysis64.exe-2026-09-26_12-05-00.txt, so a run can be found and sent
+    /// without renaming madeira-log.txt by hand.
+    ///
+    /// A hard link, not a copy: Wine, wineserver and the app all append to
+    /// madeira-log.txt through their own descriptors right up to a crash, and
+    /// both names see every line. The next app launch rotates madeira-log.txt
+    /// to a new file, which leaves this name holding the finished run. Keeps
+    /// the newest `keep` runs. A Steam game started through Madeira Dock is
+    /// named by ntdll instead (process_ios.c, madeira_steam_session_log).
+    func startSessionLog(program: String, keep: Int = 40) {
+        let fm = FileManager.default
+        let dir = logFileURL.deletingLastPathComponent().appendingPathComponent("logs")
+        try? fm.createDirectory(atPath: dir.path, withIntermediateDirectories: true, attributes: nil)
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let safe = program.map { "/\\:*?\"<>|".contains($0) ? "_" : $0 }
+        let url = dir.appendingPathComponent(String(safe) + "-" + stamp.string(from: Date()) + ".txt")
+        do {
+            try fm.linkItem(at: logFileURL, to: url)
+            log("Session log: logs/\(url.lastPathComponent)")
+        } catch {
+            log("Session log: could not link logs/\(url.lastPathComponent) (\(error.localizedDescription))", level: .error)
+        }
+        let runs = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.pathExtension == "txt" }
+            .sorted {
+                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return a > b
+            }
+        for old in runs.dropFirst(keep) { try? fm.removeItem(at: old) }
+    }
+
     private static let viaStderr = MadeiraConfig.flag("MADEIRA_LOG_VIA_STDERR")
 
     /// Is fd 2 the log file itself (same device and inode)?

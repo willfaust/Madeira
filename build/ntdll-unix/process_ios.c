@@ -63,6 +63,7 @@
 #ifdef WINE_IOS
 #include <pthread.h>
 #include <setjmp.h>
+#include <sys/stat.h>
 #endif
 
 #include "ntstatus.h"
@@ -838,6 +839,79 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
     return STATUS_SUCCESS;
 }
 
+#ifdef WINE_IOS
+/* A Steam game's session log under its own name.
+ *
+ * The app keeps each run's log as Documents/logs/<exe>-<yyyy-MM-dd_HH-mm-ss>.txt
+ * (LogStore.startSessionLog, a hard link to madeira-log.txt), but only knows
+ * the exe when it starts the program itself. A Steam game started through
+ * Madeira Dock runs explorer.exe first and Valve's client starts the game's
+ * program later, so its runs had no such file. When a process whose image lies
+ * under steamapps\common\ starts, link the log under that exe's name too, once
+ * per exe name. */
+static void madeira_steam_session_log( const UNICODE_STRING *image )
+{
+    static const char marker[] = "\\steamapps\\common\\";
+    static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
+    static char done[8][64];
+    static unsigned ndone;
+    const WCHAR *ip = image->Buffer;
+    int len = image->Length / sizeof(WCHAR), ml = sizeof(marker) - 1, k, j, base = 0, found = 0, seen = 0;
+    const char *docs = getenv( "MADEIRA_DOCS_DIR" );
+    char name[64], src[1024], dir[1024], dst[1200], stamp[32];
+    unsigned n = 0, i;
+    time_t now;
+    struct tm tmv;
+
+    if (!ip || !docs || !*docs) return;
+    for (k = 0; k + ml <= len && !found; k++)
+    {
+        for (j = 0; j < ml; j++)
+        {
+            WCHAR c = ip[k + j];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c != (WCHAR)marker[j]) break;
+        }
+        if (j == ml) found = 1;
+    }
+    if (!found) return;
+    for (k = 0; k < len; k++) if (ip[k] == '\\' || ip[k] == '/') base = k + 1;
+    for (k = base; k < len && n < sizeof(name) - 1; k++)
+    {
+        WCHAR c = ip[k];
+        name[n++] = (c < 0x20 || c > 0x7e || strchr( "/\\:*?\"<>|", (char)c )) ? '_' : (char)c;
+    }
+    name[n] = 0;
+    if (!n) return;
+    /* Helpers a game spawns (a shader compiler such as fxc.exe, installers,
+     * crash reporters) are not the game. */
+    {
+        static const char * const helpers[] = { "fxc", "redist", "dxsetup", "crash", "setup", "install" };
+        char lower[64];
+        for (i = 0; i <= n; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
+        for (i = 0; i < sizeof(helpers) / sizeof(helpers[0]); i++) if (strstr( lower, helpers[i] )) return;
+    }
+    pthread_mutex_lock( &done_lock );
+    for (i = 0; i < ndone && !seen; i++) if (!strcmp( done[i], name )) seen = 1;
+    if (!seen && ndone < sizeof(done) / sizeof(done[0])) strcpy( done[ndone++], name );
+    pthread_mutex_unlock( &done_lock );
+    if (seen) return;
+
+    now = time( NULL );
+    localtime_r( &now, &tmv );
+    strftime( stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tmv );
+    snprintf( src, sizeof(src), "%s/madeira-log.txt", docs );
+    snprintf( dir, sizeof(dir), "%s/logs", docs );
+    mkdir( dir, 0755 );
+    snprintf( dst, sizeof(dst), "%s/%s-%s.txt", dir, name, stamp );
+    if (link( src, dst ) == 0)
+        dprintf( 2, "[session-log] Steam game %s: logs/%s-%s.txt\n", name, name, stamp );
+    else
+        dprintf( 2, "[session-log] Steam game %s: could not link logs/%s-%s.txt (errno %d)\n",
+                 name, name, stamp, errno );
+}
+#endif
+
 /**********************************************************************
  *           NtCreateUserProcess  (NTDLL.@)
  */
@@ -1025,6 +1099,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         snprintf( pbuf, sizeof(pbuf), "spawn:%s", debugstr_us( &params->ImagePathName ) );
         winios_phase( pbuf );
     }
+    madeira_steam_session_log( &params->ImagePathName );
 
     /* task #34 single-process CEF: the 64GB VA window above the GPU carveout
      * can hold exactly ONE CEF instance's PartitionAlloc pools + one V8
