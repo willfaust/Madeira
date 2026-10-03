@@ -4401,6 +4401,8 @@ void server_init_process_done(void)
          * right after child startup-info init (see wine_ios_child_main). */
         extern const SECTION_IMAGE_INFORMATION *ios_cur_image_info(void);
         extern void *ios_subfloor_low_entry( void *entry, ULONG image_charact );
+        extern void ios_child_boot_unlock( void );
+        ios_child_boot_unlock();   /* ml1213: the child's unix boot is done */
         signal_start_thread( ios_subfloor_low_entry( ios_cur_image_info()->TransferAddress,
                                                      ios_cur_image_info()->ImageCharacteristics ),
                              peb, suspend, NtCurrentTeb() );

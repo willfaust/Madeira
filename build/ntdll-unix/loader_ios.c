@@ -3402,6 +3402,66 @@ static void check_command_line( int argc, char *argv[] )
  */
 extern size_t server_init_process_child( int child_fd_socket );
 
+/* iOS-Madeira ml1213: ONE CHILD BOOTS AT A TIME.
+ *
+ * wine_ios_child_main runs on the new process's own pthread and works through
+ * session-wide state (the global peb, main_image_info and its restore, the WoW
+ * window binding). Two children booting at once corrupted each other: a program
+ * started three 32-bit children within 3 ms, and the log shows
+ * `[init-peb] thread_peb=0x800310000 global_peb=0xa00310000 <-- MISMATCH`, the
+ * first child mapping its image into the SECOND child's window and starting with
+ * that child's PEB and entry point, the second starting at explorer's entry --
+ * both died in their 32-bit ntdll. The lock covers the unix boot, from entry to
+ * the jump into guest code (server_init_process_done).
+ *
+ * A booting child can also end through pthread_exit (fatal_error/fatal_perror
+ * during init, abort_thread -> pthread_exit_wrapper), which runs neither
+ * CHILD_BOOT_FAIL nor the unlock after wine_ios_child_main returns. The key's
+ * destructor runs on that thread as it exits and drops the lock it still holds;
+ * otherwise every later child boot of the session would wait forever. It only
+ * reads its argument: thread-local variables may already be gone by then. */
+static pthread_mutex_t ios_child_boot_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t ios_child_boot_once = PTHREAD_ONCE_INIT;
+static pthread_key_t ios_child_boot_key;
+static int ios_child_boot_key_ok;
+static __thread int ios_child_boot_held;
+
+static void ios_child_boot_key_dtor( void *held )
+{
+    if (!held) return;
+    dprintf( STDERR_FILENO, "[Wine child] ml1213: a booting child exited holding the boot lock; released\n" );
+    pthread_mutex_unlock( &ios_child_boot_mutex );
+}
+
+static void ios_child_boot_key_init( void )
+{
+    ios_child_boot_key_ok = !pthread_key_create( &ios_child_boot_key, ios_child_boot_key_dtor );
+}
+
+void ios_child_boot_unlock( void );
+void ios_child_boot_unlock( void )
+{
+    if (!ios_child_boot_held) return;
+    ios_child_boot_held = 0;
+    if (ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, NULL );
+    pthread_mutex_unlock( &ios_child_boot_mutex );
+}
+
+static void ios_child_boot_lock( const char *who )
+{
+    if (ios_child_boot_held) return;
+    pthread_once( &ios_child_boot_once, ios_child_boot_key_init );
+    if (pthread_mutex_trylock( &ios_child_boot_mutex ))
+    {
+        static int waits;
+        if (waits++ < 16)
+            dprintf( STDERR_FILENO, "[Wine child] ml1213 %s: another child is booting, waiting\n", who );
+        pthread_mutex_lock( &ios_child_boot_mutex );
+    }
+    ios_child_boot_held = 1;
+    if (ios_child_boot_key_ok) pthread_setspecific( ios_child_boot_key, (void *)1 );
+}
+
 DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_socket )
 {
     /* set by the spawner (process_ios.c) and updated as this child boots, so a
@@ -3426,9 +3486,11 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
                  ios_child_boot_stage, ##__VA_ARGS__ );                                  \
         ERR( "[Wine child] boot FAILED at stage '%s' for %s: " fmt,                      \
              ios_child_boot_stage, argc > 1 ? argv[1] : "?", ##__VA_ARGS__ );            \
+        ios_child_boot_unlock();                                                        \
         return;                                                                         \
     } while (0)
     CHILD_STAGE( "entry" );
+    ios_child_boot_lock( argc > 1 ? argv[1] : "?" );   /* ml1213 */
 
     /* X1 recon: EC-ness is currently session-wide (main_image_info /
      * current_machine are shared ntdll-unix globals). Log what this child
