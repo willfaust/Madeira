@@ -2846,8 +2846,10 @@ struct RuntimeMemorySyncSettings: View {
     /// The keys this section owns; All settings leaves them out.
     static let featuredKeys: Set<String> = ["pool", "vram-mb", "swap-mb", "env.MADEIRA_SWAP_COVERAGE", "inproc-sync",
                                             "env.MADEIRA_FASTSYNC", "eco"]
-    static let poolChoices = [0, 512, 640, 768, 1024, 1152]          // 0 = the standard 896 MB
-    static let vramChoices = [0, 1536, 2048, 3072, 4096, 4352, 4608, 5120, 6144]   // 0 = automatic
+    // ml1241: 256 (the launch's lower bound) for the pool, 512 and 1024 for video memory
+    // (winemetal accepts vram-mb >= 256), at the user's request.
+    static let poolChoices = [0, 256, 512, 640, 768, 1024, 1152]          // 0 = the standard 896 MB
+    static let vramChoices = [0, 512, 1024, 1536, 2048, 3072, 4096, 4352, 4608, 5120, 6144]   // 0 = automatic
     static let swapChoices = [0, 1024, 2048, 3072, 4096]
     /// The stored value "" (no key) and "classic" are the same rules, unless
     /// madeira.cfg has swap-mode = 2 (then no key means broad, ml1257).
