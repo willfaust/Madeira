@@ -2932,6 +2932,12 @@ uint64_t ios_jit_reverse_translate( uint64_t addr, uint64_t *module_base )
  * would have unregistered alias ranges and FEX would emit NoExecOp for
  * code in their copies. */
 static void (*ios_jit_alias_pushback_cb)(unsigned long long, unsigned long long, unsigned long long) = NULL;
+/* ml1205: the pseudo-process whose xtajit64 that callback belongs to. Each
+ * process maps its own FEX, and the callback is replaced by every process that
+ * starts, so a window owned by one process must never be pushed through
+ * another's callback (a child's 0x400000 window landed in its parent's FEX,
+ * both images having that fixed base). */
+static void *ios_jit_alias_pushback_peb;
 
 void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
 {
@@ -3034,7 +3040,7 @@ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
  * is safe on this side; it is NOT safe in FEX's early init (see the
  * ios_fex_band_base comment in libarm64ecfex.def). */
 void ios_push_subfloor_window( unsigned long long low_base, unsigned long long real_base,
-                               unsigned long long size )
+                               unsigned long long size, void *owner )
 {
     static int disabled = -1;
 
@@ -3046,8 +3052,13 @@ void ios_push_subfloor_window( unsigned long long low_base, unsigned long long r
         return;
     }
     if (!ios_jit_alias_pushback_cb) return;   /* pushed later by the catch-up loop */
-    fprintf( stderr, "ml951: pushing sub-floor window guest %#llx+%#llx -> real %#llx to FEX\n",
-             low_base, size, real_base );
+    /* ml1205: another process's FEX. The owner's catch-up loop delivers it when
+     * the owner's FEX starts later; a window the owner maps after another
+     * process has replaced the callback is not pushed to the owner (one global
+     * callback, a known gap). */
+    if (owner && owner != ios_jit_alias_pushback_peb) return;
+    fprintf( stderr, "ml951: pushing sub-floor window guest %#llx+%#llx -> real %#llx to FEX (owner %p)\n",
+             low_base, size, real_base, owner );
     ios_jit_alias_pushback_cb( low_base, real_base, size );
 }
 
@@ -3279,18 +3290,21 @@ NTSTATUS unixcall_ios_push_jit_aliases(void *args)
     int i;
     if (!params || !params->callback) return STATUS_INVALID_PARAMETER;
     ios_jit_alias_pushback_cb = params->callback;
+    ios_jit_alias_pushback_peb = ios_jit_current_peb();   /* ml1205 */
 
     /* ml951: any sub-floor window registered before xtajit64 loaded has not been
-     * pushed yet — the per-registration push above needs this callback. Catch up. */
+     * pushed yet — the per-registration push above needs this callback. Catch up,
+     * with this process's own windows and the shared ones only (ml1205). */
     {
         extern int ios_subfloor_enum( int idx, unsigned long long *low,
-                                      unsigned long long *real, unsigned long long *size );
-        extern void ios_push_subfloor_window( unsigned long long, unsigned long long,
-                                              unsigned long long );
+                                      unsigned long long *real, unsigned long long *size,
+                                      void **owner );
         unsigned long long lo, re, sz;
+        void *own;
         int i;
-        for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz ); i++)
-            ios_push_subfloor_window( lo, re, sz );
+        for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz, &own ); i++)
+            if (sz && (!own || own == ios_jit_alias_pushback_peb))
+                ios_push_subfloor_window( lo, re, sz, own );
     }
     /* Drain current table to the callback. Child-owned copies are skipped:
      * they share pe_base with the parent entry and pushing both would
@@ -15974,6 +15988,55 @@ static int ios_shared_section_private(void)
 }
 
 /***********************************************************************
+ *           ios_subfloor_window_held
+ *
+ * iOS-Madeira ml1204: does the ml938 window for `low` belong to a live
+ * RELOCS_STRIPPED image other than `real`? Such an image runs at its low
+ * addresses and cannot work without the window, while a relocatable image with
+ * the same preferred base has been relocated and runs high. A Delphi program
+ * (fixed 0x400000) loaded a relocatable plugin DLL with the same preferred base:
+ * the plugin re-pointed the window, FEX then ran the plugin's bytes at the
+ * program's RIPs and the program's data at 0x77e360 fell outside the window
+ * (c0000005). Otherwise the last registration in a process wins. The holder's
+ * headers are read fault-safe (mach_vm_read_overwrite): it may have made its
+ * header page PAGE_NOACCESS. virtual_mutex must be held.
+ */
+static BOOL ios_subfloor_window_held( ULONG_PTR low, ULONG_PTR real )
+{
+    extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,
+                                  unsigned long long *size, void **owner );
+    void *peb = ios_jit_current_peb(), *own;
+    unsigned long long lo, re, sz;
+    int i;
+
+    for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz, &own ); i++)
+    {
+        struct file_view *old;
+        IMAGE_DOS_HEADER dos;
+        IMAGE_FILE_HEADER fh;
+        mach_vm_size_t got = 0;
+
+        if (!sz || own != peb) continue;   /* ml1205: only this process's window */
+        if (lo != low || re == real) continue;
+        if (!(old = find_view( (void *)(ULONG_PTR)re, 0 ))) return FALSE;
+        if (old->base != (void *)(ULONG_PTR)re || !(old->protect & SEC_IMAGE)) return FALSE;
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)re, sizeof(dos),
+                                    (mach_vm_address_t)&dos, &got ) != KERN_SUCCESS || got != sizeof(dos))
+            return FALSE;
+        if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0 ||
+            (size_t)dos.e_lfanew + offsetof( IMAGE_NT_HEADERS, OptionalHeader ) > old->size)
+            return FALSE;
+        if (mach_vm_read_overwrite( mach_task_self(),
+                                    (mach_vm_address_t)(re + dos.e_lfanew + offsetof( IMAGE_NT_HEADERS, FileHeader )),
+                                    sizeof(fh), (mach_vm_address_t)&fh, &got ) != KERN_SUCCESS || got != sizeof(fh))
+            return FALSE;
+        return (fh.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) != 0;
+    }
+    return FALSE;
+}
+
+
+/***********************************************************************
  *           map_image_into_view
  *
  * Map an executable (PE format) image into an existing view.
@@ -16290,6 +16353,30 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
                 rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
         }
     }
+#ifdef WINE_IOS
+    /* ml1195: ml949's header rewrite, for a sub-floor image WITHOUT a dynamic base.
+     * ml949 runs only when the server handed out a map_addr (a DYNAMIC_BASE
+     * image). An executable with a fixed base below 4GB and RELOCS_STRIPPED (a
+     * 64-bit Delphi program at 0x400000, characteristics 0x223) has no
+     * map_addr; it was placed high by the fallback in
+     * map_image_view, its header still said 0x400000, and ntdll's
+     * perform_relocations refused it (STATUS_CONFLICTING_ADDRESSES, "failed to
+     * create main module"). The same reasoning as ml949 holds: RELOCS_STRIPPED
+     * promises a zero delta, so nothing is applied; the header names the real
+     * base, and the image's own low absolutes are serviced by the ml938
+     * sub-floor window registered just below. Only 64-bit images outside a WoW
+     * guest window: a 32-bit image in a window is at its own guest address. */
+    else if (!image_info->map_addr && image_info->base && image_info->base < 0x100000000ull &&
+             (ULONG_PTR)ptr != image_info->base &&
+             (nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) &&
+             nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && !ios_wow_in_window( ptr ))
+    {
+        ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase = (ULONG_PTR)ptr;
+        fprintf( stderr, "ml1195: sub-floor image RELOCS_STRIPPED without a dynamic base, mapped at "
+                 "%p (preferred %#llx): ImageBase rewritten, nothing relocated\n",
+                 ptr, (unsigned long long)image_info->base );
+    }
+#endif
 
 #ifdef WINE_IOS
     /* ml938: this image wanted a base iOS will never give us (the low 4GB is
@@ -16308,10 +16395,17 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     {
         extern void ios_register_subfloor_image( unsigned long long pref_base,
                                                  unsigned long long size,
-                                                 unsigned long long real_base );
+                                                 unsigned long long real_base, void *owner );
+        if (!(nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) &&
+            ios_subfloor_window_held( image_info->base, (ULONG_PTR)ptr ))
+            fprintf( stderr, "ml1204: sub-floor window %#llx stays on its RELOCS_STRIPPED image; "
+                     "relocatable image at %p (relocated) not registered\n",
+                     (unsigned long long)image_info->base, ptr );
+        else
         ios_register_subfloor_image( (unsigned long long)image_info->base,
                                      (unsigned long long)total_size,
-                                     (unsigned long long)(uintptr_t)ptr );
+                                     (unsigned long long)(uintptr_t)ptr,
+                                     ios_jit_current_peb() );   /* ml1205: owned by this process */
         /* ml966: record THIS pseudo-process as a candidate for low allocation,
          * but only for a relocs-stripped image -- see
          * ios_lowalloc_note_qualifying_image for why that pairing is the real
@@ -17703,9 +17797,10 @@ TEB *virtual_alloc_first_teb(void)
     {
         extern void ios_register_subfloor_image( unsigned long long pref_base,
                                                  unsigned long long size,
-                                                 unsigned long long real_base );
+                                                 unsigned long long real_base, void *owner );
         ios_register_subfloor_image( 0x7ffe0000ull, (unsigned long long)page_size,
-                                     (unsigned long long)(uintptr_t)user_shared_data );
+                                     (unsigned long long)(uintptr_t)user_shared_data,
+                                     NULL );   /* ml1205: shared by every process */
         fprintf( stderr, "ml952: KUSER_SHARED_DATA window guest 0x7ffe0000+%#llx -> real %p\n",
                  (unsigned long long)page_size, user_shared_data );
     }
@@ -17823,6 +17918,15 @@ NTSTATUS virtual_alloc_teb( TEB **ret_teb )
              * 4 GB would hand a non-LAA program a TEB32/PEB32 above 0x80000000
              * (the third device run's 0xFFFE0000/0xFFFF0000). */
             if (wow && !zbits) zbits = limit_2g - 1;
+            /* ml1210: user_space_wow_limit is session-wide and is set by the
+             * first 32-bit process (0xffffffff once one ran), but it is a
+             * GUEST ceiling: a 64-bit thread's next TEB block was being
+             * reserved below 4GB, where iOS maps nothing. Once the first 32-TEB
+             * block was used up, every new 64-bit thread failed (the server saw
+             * EOF on its request fd and killed it), and a 64-bit program whose
+             * worker thread could not be created stopped there. Upstream applies
+             * a limit to WoW TEB blocks only. */
+            if (!wow) zbits = 0;
 #endif
             status = STATUS_NO_MEMORY;
 #ifdef WINE_IOS
@@ -20035,7 +20139,7 @@ static uint64_t ios_lowalloc_reserve( uint64_t real_base, uint64_t size, void *p
 static int ios_lowalias_would_collide( uint64_t low, uint64_t size )
 {
     extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,
-                                  unsigned long long *size );
+                                  unsigned long long *size, void **owner );
     unsigned long long wl = 0, wr = 0, ws = 0;
     int i;
 
@@ -20044,9 +20148,8 @@ static int ios_lowalias_would_collide( uint64_t low, uint64_t size )
     /* must not shadow the arena, even though it is off by default */
     if (low < IOS_LOWALLOC_LIMIT && low + size > IOS_LOWALLOC_BASE) return 1;
 
-    for (i = 0; i < 8; i++)
-        if (ios_subfloor_enum( i, &wl, &wr, &ws ) && ws &&
-            low < wl + ws && low + size > wl)
+    for (i = 0; ios_subfloor_enum( i, &wl, &wr, &ws, NULL ); i++)   /* any process's */
+        if (ws && low < wl + ws && low + size > wl)
             return 1;                                  /* an image owns that range */
 
     for (i = 0; i < ios_lowalloc_count; i++)           /* caller holds the lock */
@@ -20122,6 +20225,86 @@ static int ios_lowalias_enabled(void)
                  dec ? "ENABLED (default)" : "DISABLED by MADEIRA_NO_LOW_ALIAS" );
     }
     return dec;
+}
+
+/* iOS-Madeira ml1201: the ml938 sub-floor IMAGE windows, for the VM calls.
+ *
+ * A 64-bit image with a fixed base below 4GB (a Delphi tool at 0x400000) is
+ * mapped high; its own absolute addresses stay low and only the fault path
+ * (ios_subfloor_service) and FEX's inline translation (ml1057) know the window.
+ * NtProtectVirtualMemory on such an address found no view and failed with
+ * STATUS_INVALID_PARAMETER: a Delphi program patching 5 bytes of its own code
+ * (VirtualProtect(0x44e730, 5, PAGE_EXECUTE_READWRITE)) got the failure, raised
+ * a Delphi exception and died (0x0eedfade). Translate a span that lies entirely
+ * inside one of this process's image windows to the real mapping, as ml966 does
+ * for low allocations. The KUSER_SHARED_DATA window (ml952, owner NULL) is not
+ * an image: VirtualQuery/VirtualProtect at 0x7ffe0000 keep their own answer
+ * (Windows refuses to make that page writable). MADEIRA_SUBFLOOR_VM=0 turns it
+ * off. */
+static int ios_subfloor_image_translate( unsigned long long addr, unsigned long long len,
+                                         unsigned long long *real_out )
+{
+    extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,
+                                  unsigned long long *size, void **owner );
+    static int on = -1;
+    unsigned long long lo, re, sz;
+    void *peb, *own;
+    int i;
+
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SUBFLOOR_VM" );   /* ml1201: 0 = VirtualProtect/VirtualQuery leave fixed-base image windows alone */
+        on = !(e && e[0] == '0');
+    }
+    if (!on || addr >= 0x100000000ull) return 0;
+    if (!len) len = 1;
+    peb = ios_jit_current_peb();
+    for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz, &own ); i++)
+    {
+        /* ml1205: another process's window. The KUSER_SHARED_DATA window (ml952,
+         * owner NULL) is no image: 0x7ffe0000 keeps its own answer. */
+        if (own ? own != peb : lo == 0x7ffe0000ull) continue;
+        if (!sz || !re || addr < lo || addr + len > lo + sz) continue;
+        *real_out = re + (addr - lo);
+        return 1;
+    }
+    return 0;
+}
+
+/* iOS-Madeira ml1206: start a RELOCS_STRIPPED sub-floor main image at its LOW
+ * entry point. TransferAddress is the real mapping's, so the code started high
+ * while every absolute pointer in the unrelocated image is low, and code that
+ * mixes the two broke: a MinGW pseudo-relocator took its base from a
+ * RIP-relative lea (real) and the pointer from .data (low), patched its own
+ * `call` to rel32 0xb063263d and jumped to 0x1004238b0. On Windows both are the
+ * same address; running at the low addresses keeps them equal here too. A
+ * relocated image keeps its real entry (its pointers were moved high).
+ * Called on the new process's own thread. MADEIRA_SUBFLOOR_LOWENTRY=0 turns it
+ * off. */
+void *ios_subfloor_low_entry( void *entry, ULONG image_charact )
+{
+    extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,
+                                  unsigned long long *size, void **owner );
+    static int on = -1;
+    unsigned long long lo, re, sz, e = (ULONG_PTR)entry;
+    void *peb, *own;
+    int i;
+
+    if (on < 0)
+    {
+        const char *v = getenv( "MADEIRA_SUBFLOOR_LOWENTRY" );   /* ml1206: 0 = a fixed-base exe starts at its real (high) entry */
+        on = !(v && v[0] == '0');
+    }
+    if (!on || !entry || !(image_charact & IMAGE_FILE_RELOCS_STRIPPED)) return entry;
+    if (!(peb = ios_jit_current_peb())) return entry;
+    for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz, &own ); i++)
+    {
+        if (!sz || own != peb || e < re || e >= re + sz) continue;
+        fprintf( stderr, "ml1206: RELOCS_STRIPPED sub-floor image starts at its low entry %#llx "
+                 "(real %p)\n", lo + (e - re), entry );
+        return (void *)(ULONG_PTR)(lo + (e - re));
+    }
+    return entry;
 }
 
 /* Translate a WHOLE access span, not just its start. Returns 1 only when
@@ -22677,6 +22860,17 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
             addr = (LPVOID)(ULONG_PTR)lo_real;
             *addr_ptr = addr;
         }
+        else if (ios_subfloor_image_translate( (unsigned long long)(ULONG_PTR)addr, size, &lo_real ))
+        {
+            static int sp_n;
+            if (sp_n++ < 16)
+                dprintf( 2, "ml1201: PROTECT on sub-floor image %p size=%#llx new_prot=%#x -> real %#llx\n",
+                         addr, (unsigned long long)size, (unsigned)new_prot, lo_real );
+            /* On success *addr_ptr comes back as the real page, so FEX registers
+             * that page; its low-RIP translations are dropped when the program
+             * flushes the instruction cache (ml1202). */
+            addr = (LPVOID)(ULONG_PTR)lo_real;
+        }
     }
     /* ml846: a marked request from the PE-side dispatcher arms the [tlswatch]
      * write watch on the thread's TLS block instead of changing protection. */
@@ -23651,6 +23845,10 @@ static unsigned int get_memory_image_info( HANDLE process, LPCVOID addr, MEMORY_
  * added to the public winternl.h enum, which this iOS tree does not own; the
  * value continues the MemoryWine* block (1000..1004 are taken). */
 #define MemoryWineIosJitPoolAddress ((MEMORY_INFORMATION_CLASS)1005)
+/* ml1203: the ml938 sub-floor image window holding addr, as three ULONG_PTRs
+ * {low base, real base, size}. Used by PE-side RtlLookupFunctionTable
+ * (wine/dlls/ntdll/unwind.c), which keeps the same value. */
+#define MemoryWineIosSubfloorWindow ((MEMORY_INFORMATION_CLASS)1006)
 
 /***********************************************************************
  *             NtQueryVirtualMemory   (NTDLL.@)
@@ -23663,6 +23861,35 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
     NTSTATUS status;
 
 #ifdef WINE_IOS
+    if (info_class == MemoryWineIosSubfloorWindow)
+    {
+        extern int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *real,
+                                      unsigned long long *size, void **owner );
+        static int on = -1;
+        unsigned long long lo, re, sz;
+        ULONG_PTR *out = buffer;
+        void *peb = ios_jit_current_peb(), *own;
+        int i;
+
+        if (on < 0)
+        {
+            const char *e = getenv( "MADEIRA_SUBFLOOR_SEH" );   /* ml1203: 0 = no unwind data for code at a fixed-base image's low addresses */
+            on = !(e && e[0] == '0');
+        }
+        if (!on || process != NtCurrentProcess()) return STATUS_INVALID_INFO_CLASS;
+        if (len < 3 * sizeof(ULONG_PTR)) return STATUS_INFO_LENGTH_MISMATCH;
+        for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz, &own ); i++)
+        {
+            if (own && own != peb) continue;   /* ml1205 */
+            if (!sz || !re || (ULONG_PTR)addr < lo || (ULONG_PTR)addr >= lo + sz) continue;
+            out[0] = lo;
+            out[1] = re;
+            out[2] = sz;
+            if (res_len) *res_len = 3 * sizeof(ULONG_PTR);
+            return STATUS_SUCCESS;
+        }
+        return STATUS_INVALID_ADDRESS;
+    }
     /* PE code in JIT pool computes addresses via ADRP relative to JIT PC.
      * Translate JIT addresses back to original PE addresses for VM queries. */
     addr = ios_jit_reverse_translate_addr(addr);
@@ -23678,6 +23905,13 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
                 lq_n++;
                 dprintf( 2, "ml966: QUERY on low guest %p -> backing %#llx\n", addr, lo_real );
             }
+            addr = (LPCVOID)(ULONG_PTR)lo_real;
+        }
+        else if (ios_subfloor_image_translate( (unsigned long long)(ULONG_PTR)addr, 1, &lo_real ))
+        {
+            static int sq_n;   /* ml1201: describe the sub-floor image's real mapping */
+            if (sq_n++ < 16)
+                dprintf( 2, "ml1201: QUERY on sub-floor image %p -> real %#llx\n", addr, lo_real );
             addr = (LPCVOID)(ULONG_PTR)lo_real;
         }
     }
@@ -24722,6 +24956,37 @@ NTSTATUS WINAPI NtSetInformationVirtualMemory( HANDLE process,
  */
 NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T size )
 {
+#ifdef WINE_IOS
+    /* ml1202: nothing is mapped below 4GB on iOS, and __clear_cache's `ic ivau`
+     * on such an address faults (the sub-floor service cannot emulate cache
+     * maintenance). A Delphi program at 0x400000 patched 5 bytes of its own
+     * code and flushed them by their low address: SEGV in
+     * sys_icache_invalidate, Delphi exception 0x0eedfade. Flush the real mapping
+     * of a sub-floor image or low allocation; skip any other low address. FEX's
+     * translations are dropped by the PE-side wrapper, which still gets the
+     * guest's own address. */
+    if (handle == GetCurrentProcess() && addr && (ULONG_PTR)addr < 0x100000000ull)
+    {
+        unsigned long long real = 0;
+        static int fl_n;
+
+        if (ios_subfloor_image_translate( (ULONG_PTR)addr, size, &real ) ||
+            ios_lowalloc_translate( (ULONG_PTR)addr, size, &real, NULL ))
+        {
+            if (fl_n++ < 16)
+                dprintf( 2, "ml1202: FLUSH-ICACHE on low guest %p size=%#lx -> real %#llx\n",
+                         addr, (unsigned long)size, real );
+            addr = (const void *)(ULONG_PTR)real;
+        }
+        else
+        {
+            if (fl_n++ < 16)
+                dprintf( 2, "ml1202: FLUSH-ICACHE on unmapped low %p size=%#lx skipped\n",
+                         addr, (unsigned long)size );
+            return STATUS_SUCCESS;
+        }
+    }
+#endif
 #if defined(__x86_64__) || defined(__i386__)
     /* no-op */
 #elif defined(HAVE___CLEAR_CACHE)

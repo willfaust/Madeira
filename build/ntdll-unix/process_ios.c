@@ -472,6 +472,10 @@ static void *ios_child_thread_entry( void *arg )
     } else {
         dprintf(STDERR_FILENO, "[Wine child thread] child exited with code %d\n", wine_ios_exit_code);
     }
+    {   /* ml1213: never leave the child-boot lock held by a dead boot */
+        extern void ios_child_boot_unlock( void );
+        ios_child_boot_unlock();
+    }
 
     dprintf(STDERR_FILENO, "[Wine child thread] thread exiting cleanly\n");
     /* the pseudo-process is over — give its guest window
