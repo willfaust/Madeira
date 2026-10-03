@@ -280,6 +280,7 @@ struct mad_device {
      * runtime-owned 64 MB placement heaps instead. The game's own heaps are NOT
      * backed (1,320 texture heaps totalling 1,985 MB for ~280 MB of textures). */
     CRITICAL_SECTION heap_lock;
+    obj_handle_t ds_scratch; UINT64 ds_scratch_size;   /* staging for depth/stencil aspect copies (exec_copy_aspect) */
     struct mad_texheap { obj_handle_t heap; UINT64 size; struct mad_hblk { UINT64 off, size; } *fl; unsigned nfl, fl_cap; } *theaps;
     unsigned ntheaps, theaps_cap;
     struct mad_hret { unsigned heap; UINT64 off, size, serial; } *hret; unsigned nhret, hret_cap;
@@ -1085,9 +1086,10 @@ struct mad_cmd {
         struct { UINT vcount, icount, vstart, istart; } draw;
         struct { UINT icount, inst, start; INT base; UINT istart; } drawi;
         struct { struct mad_resource *dst, *src; UINT64 doff, soff, len; } bb;
-        /* buffer<->texture: the buffer side is described by a footprint */
-        struct { struct mad_resource *tex, *buf; UINT64 off; UINT row, rows; UINT w, h, d; UINT level, slice; UINT x, y, z; } bt;
-        struct { struct mad_resource *dst, *src; UINT dlevel, dslice, slevel, sslice; UINT w, h, d; UINT dx, dy, dz, sx, sy, sz; } tt;
+        /* buffer<->texture: the buffer side is described by a footprint.
+         * plane = the depth-stencil plane (0 depth, 1 stencil), see mad_subresource_plane */
+        struct { struct mad_resource *tex, *buf; UINT64 off; UINT row, rows; UINT w, h, d; UINT level, slice; UINT x, y, z; UINT plane; } bt;
+        struct { struct mad_resource *dst, *src; UINT dlevel, dslice, slevel, sslice; UINT w, h, d; UINT dx, dy, dz, sx, sy, sz; UINT dplane, splane; } tt;
         struct { UINT x, y, z; } dispatch;
         struct { struct mad_resource *args; UINT64 off; UINT count; UINT stride; struct mad_resource *cnt; UINT64 cnt_off; } ind;
         struct { struct mad_resource *res; UINT64 off, len; UINT8 byte; obj_handle_t pattern; } fill;   /* ml1151: pattern = exact 32-bit source */
@@ -3988,6 +3990,71 @@ tess_go:
     }
 }
 
+/* Depth-stencil plane copies. Metal copies one plane of a combined
+ * depth-stencil texture only through a buffer, with
+ * MTLBlitOptionDepthFromDepthStencil (1) / StencilFromDepthStencil (2); a
+ * plane to or from a colour texture therefore goes through a staging buffer. */
+static UINT mad_aspect_opt(const struct mad_resource *r, UINT plane) {
+    if (!r->is_depth || !r->has_stencil) return 0;
+    return plane ? 2u : 1u;
+}
+static UINT mad_aspect_bpp(const struct mad_resource *r, UINT plane) {
+    UINT bytes = 0, block = 1;
+    if (r->is_depth) {
+        if (plane) return 1;
+        return r->tex_pf == WMTPixelFormatDepth16Unorm ? 2 : 4;
+    }
+    mad_format_info(r->desc.Format, &bytes, &block);
+    return block == 1 ? bytes : 0;
+}
+static void exec_copy_aspect(struct mad_exec *e, const struct mad_cmd *c) {
+    const struct mad_resource *s = c->u.tt.src, *d = c->u.tt.dst;
+    struct mad_device *dev = e->q->device;
+    UINT sb = mad_aspect_bpp(s, c->u.tt.splane), db = mad_aspect_bpp(d, c->u.tt.dplane);
+    UINT64 row = (UINT64)c->u.tt.w * sb, img = row * c->u.tt.h, need = img * (c->u.tt.d ? c->u.tt.d : 1);
+    struct wmtcmd_blit_copy_from_texture_to_buffer k1; struct wmtcmd_blit_copy_from_buffer_to_texture k2;
+    static LONG said;
+    if (!sb || sb != db || !need) {
+        if (InterlockedIncrement(&said) <= 16)
+            d3d12_log("[madeira-d3d12] plane copy '%s' plane %u (%u B/px) -> '%s' plane %u (%u B/px): sizes differ, skipped\n",
+                      s->name ? s->name : "?", c->u.tt.splane, sb, d->name ? d->name : "?", c->u.tt.dplane, db);
+        MAD_SKIP(e); return;
+    }
+    EnterCriticalSection(&dev->heap_lock);
+    if (dev->ds_scratch_size < need) {
+        struct WMTBufferInfo bi; UINT64 sz = need < (4u << 20) ? (4u << 20) : (need + 0xffff) & ~(UINT64)0xffff;
+        /* an in-flight command buffer keeps its own reference to the old one */
+        if (dev->ds_scratch) NSObject_release(dev->ds_scratch);
+        memset(&bi, 0, sizeof bi); bi.length = sz; bi.options = WMTResourceStorageModePrivate;
+        dev->ds_scratch = MTLDevice_newBuffer(dev->mtl_device, &bi);
+        dev->ds_scratch_size = dev->ds_scratch ? sz : 0;
+    }
+    LeaveCriticalSection(&dev->heap_lock);
+    if (!dev->ds_scratch) { MAD_SKIP(e); return; }
+    if (InterlockedIncrement(&said) <= 16)
+        d3d12_log("[madeira-d3d12] plane copy '%s' %s -> '%s' %s, %ux%u through a staging buffer\n",
+                  s->name ? s->name : "?", s->is_depth ? (c->u.tt.splane ? "stencil" : "depth") : "colour",
+                  d->name ? d->name : "?", d->is_depth ? (c->u.tt.dplane ? "stencil" : "depth") : "colour", c->u.tt.w, c->u.tt.h);
+    memset(&k1, 0, sizeof k1);
+    k1.type = WMTBlitCommandCopyFromTextureToBuffer;
+    k1.src = s->texture; k1.slice = c->u.tt.sslice; k1.level = c->u.tt.slevel;
+    k1.origin.x = c->u.tt.sx; k1.origin.y = c->u.tt.sy; k1.origin.z = c->u.tt.sz;
+    k1.size.width = c->u.tt.w; k1.size.height = c->u.tt.h; k1.size.depth = c->u.tt.d ? c->u.tt.d : 1;
+    k1.dst = dev->ds_scratch; k1.offset = 0; k1.bytes_per_row = (UINT32)row; k1.bytes_per_image = (UINT32)img;
+    k1.options = mad_aspect_opt(s, c->u.tt.splane);
+    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k1);
+    exec_end(e);   /* the staging buffer is written, then read: two encoders */
+    if (!exec_begin_blit(e)) { MAD_SKIP(e); return; }
+    memset(&k2, 0, sizeof k2);
+    k2.type = WMTBlitCommandCopyFromBufferToTexture;
+    k2.src = dev->ds_scratch; k2.src_offset = 0; k2.bytes_per_row = (UINT32)row; k2.bytes_per_image = (UINT32)img;
+    k2.size.width = c->u.tt.w; k2.size.height = c->u.tt.h; k2.size.depth = c->u.tt.d ? c->u.tt.d : 1;
+    k2.dst = d->texture; k2.slice = c->u.tt.dslice; k2.level = c->u.tt.dlevel;
+    k2.origin.x = c->u.tt.dx; k2.origin.y = c->u.tt.dy; k2.origin.z = c->u.tt.dz;
+    k2.reserved[0] = (uint16_t)mad_aspect_opt(d, c->u.tt.dplane);   /* the MTLBlitOption; winemetal honours it for a combined depth-stencil destination */
+    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k2);
+}
+
 #define MAD_FILLPAT_BYTES (256u << 10)   /* ml1151: one exact UAV-clear pattern buffer */
 static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
     if (!exec_begin_blit(e)) { MAD_SKIP(e); return; }
@@ -4039,6 +4106,7 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
         k.size.width = c->u.bt.w; k.size.height = c->u.bt.h; k.size.depth = c->u.bt.d;
         k.dst = c->u.bt.tex->texture; k.slice = c->u.bt.slice; k.level = c->u.bt.level;
         k.origin.x = c->u.bt.x; k.origin.y = c->u.bt.y; k.origin.z = c->u.bt.z;
+        k.reserved[0] = (uint16_t)mad_aspect_opt(c->u.bt.tex, c->u.bt.plane);   /* the MTLBlitOption, see exec_copy_aspect */
         MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
         return;
     }
@@ -4052,12 +4120,18 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
         k.size.width = c->u.bt.w; k.size.height = c->u.bt.h; k.size.depth = c->u.bt.d;
         k.dst = c->u.bt.buf->buffer; k.offset = c->u.bt.off;
         k.bytes_per_row = c->u.bt.row; k.bytes_per_image = c->u.bt.row * c->u.bt.rows;
+        k.options = mad_aspect_opt(c->u.bt.tex, c->u.bt.plane);
         MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
         return;
     }
     case MC_COPY_T2T: {
         struct wmtcmd_blit_copy_from_texture_to_texture k;
         if (!c->u.tt.dst->texture || !c->u.tt.src->texture) { MAD_SKIP(e); return; }
+        if ((c->u.tt.src->is_depth || c->u.tt.dst->is_depth) &&
+            (c->u.tt.src->tex_pf != c->u.tt.dst->tex_pf || c->u.tt.splane || c->u.tt.dplane)) {
+            exec_copy_aspect(e, c);   /* a depth or stencil plane to or from a colour texture */
+            return;
+        }
         memset(&k, 0, sizeof k);
         k.type = WMTBlitCommandCopyFromTextureToTexture;
         k.src = c->u.tt.src->texture; k.src_slice = c->u.tt.sslice; k.src_level = c->u.tt.slevel;
@@ -5455,6 +5529,7 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
             for (k = 0; k < d->ntheaps; k++) { if (d->theaps[k].heap) NSObject_release(d->theaps[k].heap); free(d->theaps[k].fl); }
             mad_mheap_reclaim(d, 1); free(d->mhret);   /* ml1148 */
             for (k = 0; k < d->nfillpat; k++) if (d->fillpat[k].buf) NSObject_release(d->fillpat[k].buf);   /* ml1151 */
+            if (d->ds_scratch) NSObject_release(d->ds_scratch);   /* exec_copy_aspect */
             free(d->theaps); free(d->hret);
             DeleteCriticalSection(&d->heap_lock);
         }
@@ -9672,6 +9747,17 @@ static void mad_subresource(const struct mad_resource *r, UINT sub, UINT *level,
     UINT mips = r->desc.MipLevels ? r->desc.MipLevels : 1;
     *level = sub % mips; *slice = sub / mips;
 }
+/* D3D12 numbers a depth-stencil resource's STENCIL plane after all of its
+ * depth subresources (sub = mip + slice * mips + plane * mips * layers). Read
+ * as an array slice, subresource 1 of a one-layer D32S8 texture became
+ * "slice 1" and a copy into it wrote past the texture, across its depth and
+ * stencil memory. */
+static void mad_subresource_plane(const struct mad_resource *r, UINT sub, UINT *level, UINT *slice, UINT *plane) {
+    UINT mips = r->desc.MipLevels ? r->desc.MipLevels : 1;
+    UINT layers = r->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : (r->desc.DepthOrArraySize ? r->desc.DepthOrArraySize : 1);
+    *level = sub % mips; *slice = sub / mips; *plane = 0;
+    if (r->is_depth && r->has_stencil) { *plane = *slice / layers; *slice %= layers; }
+}
 static void mad_mip_dims(const struct mad_resource *r, UINT level, UINT *w, UINT *h, UINT *d) {
     *w = (UINT)(r->desc.Width >> level); if (!*w) *w = 1;
     *h = r->desc.Height >> level; if (!*h) *h = 1;
@@ -10090,7 +10176,7 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
         UINT w, h, dd;
         c = mad_list_push(l, MC_COPY_B2T);
         if (!c) return;
-        mad_subresource(d, dst->SubresourceIndex, &c->u.bt.level, &c->u.bt.slice);
+        mad_subresource_plane(d, dst->SubresourceIndex, &c->u.bt.level, &c->u.bt.slice, &c->u.bt.plane);
         mad_mip_dims(d, c->u.bt.level, &w, &h, &dd);
         mad_format_info(d->desc.Format, &bytes, &block);
         c->u.bt.tex = d; c->u.bt.buf = s; c->u.bt.off = f->Offset;
@@ -10116,7 +10202,7 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
         UINT w, h, dd;
         c = mad_list_push(l, MC_COPY_T2B);
         if (!c) return;
-        mad_subresource(s, src->SubresourceIndex, &c->u.bt.level, &c->u.bt.slice);
+        mad_subresource_plane(s, src->SubresourceIndex, &c->u.bt.level, &c->u.bt.slice, &c->u.bt.plane);
         mad_mip_dims(s, c->u.bt.level, &w, &h, &dd);
         mad_format_info(s->desc.Format, &bytes, &block);
         c->u.bt.tex = s; c->u.bt.buf = d; c->u.bt.off = f->Offset;
@@ -10136,8 +10222,8 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
         UINT w, h, dd;
         c = mad_list_push(l, MC_COPY_T2T);
         if (!c) return;
-        mad_subresource(d, dst->SubresourceIndex, &c->u.tt.dlevel, &c->u.tt.dslice);
-        mad_subresource(s, src->SubresourceIndex, &c->u.tt.slevel, &c->u.tt.sslice);
+        mad_subresource_plane(d, dst->SubresourceIndex, &c->u.tt.dlevel, &c->u.tt.dslice, &c->u.tt.dplane);
+        mad_subresource_plane(s, src->SubresourceIndex, &c->u.tt.slevel, &c->u.tt.sslice, &c->u.tt.splane);
         mad_mip_dims(s, c->u.tt.slevel, &w, &h, &dd);
         c->u.tt.dst = d; c->u.tt.src = s;
         c->u.tt.dx = x; c->u.tt.dy = y; c->u.tt.dz = z;
