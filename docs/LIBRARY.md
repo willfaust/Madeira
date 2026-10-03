@@ -133,9 +133,13 @@ in-game menu:
    game), their **Opacity** and **Size**, **Edit controls**
    (the existing editor) and the **Keyboard** (its own key window, with an
    Esc/Ctrl/Shift/Alt/Tab/Enter/arrow row; modifiers latch);
-2. the FPS limit, **Aspect & scaling**, and the mouse and pointer settings;
+2. the FPS limit, **Aspect & scaling**, **Eco mode** (the developer overlay's
+   ECO pill: guest threads at a low priority while it is on), and the mouse and
+   pointer settings;
 3. the performance overlay and its fields (FPS, average frame time, memory
-   footprint, battery);
+   footprint, battery), then **Diagnostics**: **Capture the next frame** and
+   **GPU sync** F1/F6/F5/F0, the developer overlay's CAP and F pills (hidden
+   with `MADEIRA_SESSION_TOOLS=0`);
 4. **Quit game** in red. Quit asks the program to close with Alt+F4 through
    the normal input queue, so it can save; the session ends when it exits.
 
@@ -251,7 +255,7 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_UI_LOG_IDLE` | on | the log view keeps parsing while hidden |
 | `MADEIRA_LOG_VIA_STDERR` | on | Swift log lines use their own file handle |
 | `MADEIRA_RUNTIME_SETTINGS` | on | no Display and Memory & sync sections in Settings |
-| `MADEIRA_SESSION_TOOLS` | on | no Aspect & scaling in the in-game menu, and a session does not save it |
+| `MADEIRA_SESSION_TOOLS` | on | no Aspect & scaling (a session does not save it) and no Diagnostics in the in-game menu |
 | `MADEIRA_SCREEN_SHAPE_RESOLUTION` | on | no Screen shape resolution choice |
 | `MADEIRA_FRONTEND_KEYBOARD` | on | Keyboard opens the game view's own keyboard instead of the key window |
 | `MADEIRA_ONBOARDING` | on | first-run setup never opens, and Settings › JIT/Steam have no **Run setup again** |

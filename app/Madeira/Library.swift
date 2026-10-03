@@ -2899,7 +2899,7 @@ struct RuntimeMemorySyncSettings: View {
                 Text("Video memory is how much graphics memory games are told they have. Automatic sizes it from the memory free at launch. Too high can get Madeira closed for using too much memory; too low makes games keep reloading textures.")
                 Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Wider coverage saves more memory but can slow a game down.")
                 Text("Sync engine: Fastsync (the default) handles events and semaphores in-process; its per-game options are in each game's details. Madsync is the older in-process engine. Wine standard sync uses neither. Only one engine runs at a time.")
-                Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: the ECO pill in the performance overlay turns it on and off while a game runs.")
+                Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: Eco mode in the in-game menu turns it on and off while a game runs.")
                 if changed { Text("Restart Madeira (close it from the app switcher) for these changes to apply.").foregroundStyle(.orange) }
             }
         }
@@ -3026,6 +3026,10 @@ struct LibraryHUD: View {
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
     private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
+    /// The developer overlay's ECO and F pills, which a library session does not
+    /// show; read again each time the menu opens.
+    @State private var eco = madeira_get_eco() != 0
+    @State private var fenceMode = FPSOverlayFenceMode.current
     @State private var launchVisible = false
     /// The Session menu's Controller binds page (keyboard-and-mouse mode).
     @State private var bindsPage = false
@@ -3067,6 +3071,7 @@ struct LibraryHUD: View {
             LibraryController.shared.configure(enabled: model.enabled, ownsInput: open)
             if !open { bindsPage = false }
             if !open { model.saveCurrentProfile() }
+            if open { eco = madeira_get_eco() != 0; fenceMode = FPSOverlayFenceMode.current }
         }
         .onReceive(LibraryController.shared.commands) { command in
             if command == "menu" { if model.menu { model.menu = false } else { model.showMenu() } }
@@ -3239,6 +3244,12 @@ struct LibraryHUD: View {
                     }
                 }
                 Divider()
+                // ml1133's ECO switch, live: the same as the developer overlay's ECO pill.
+                Text("CPU").font(.headline)
+                Toggle("Eco mode", isOn: Binding(get: { eco }, set: { on in eco = on; madeira_set_eco(on ? 1 : 0) }))
+                Text("Runs the game's threads at a low priority, on the efficiency cores: cooler and slower. Use it while a game loads and turn it off to play.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Divider()
                 Text("Mouse & pointer").font(.headline)
                 LibraryPointerSettings()
                 Divider()
@@ -3249,6 +3260,30 @@ struct LibraryHUD: View {
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
                     }
+                }
+                // The developer overlay's CAP and F pills (FPSOverlay), for library
+                // sessions. MADEIRA_SESSION_TOOLS=0 hides them.
+                if sessionTools {
+                    Divider()
+                    Text("Diagnostics").font(.headline)
+                    Button("Capture the next frame", systemImage: "camera.viewfinder") {
+                        model.menu = false
+                        // After the menu has gone, so the frame shows what the player saw.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                            madeira_capture_request(1)
+                            LogStore.shared.log("[capture] frame capture requested from the in-game menu")
+                        }
+                    }
+                    LabeledContent("GPU sync") {
+                        Picker("GPU sync", selection: Binding(get: { fenceMode }, set: { mode in
+                            fenceMode = mode; FPSOverlayFenceMode.current = mode
+                            madeira_set_fence_mode(Int32(mode == 0 ? 7 : mode))
+                        })) {
+                            Text("F1").tag(1); Text("F6").tag(6); Text("F5").tag(5); Text("F0").tag(0)
+                        }.pickerStyle(.segmented).frame(maxWidth: 220)
+                    }
+                    Text("Capture writes the render passes of the next frame to Documents/capture and its draw list to the log. GPU sync applies to Direct3D 12 games: F1 makes every pass wait for the one before (the default), F6 waits only where the game's barriers ask, F5 makes render passes wait at the fragment stage, F0 has no sync at all (expect flicker; for tests).")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let appID = model.activeEntry?.steamAppID, SteamOwnedLibrary.cloudQuitEnabled {
                     Divider()
