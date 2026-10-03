@@ -75,7 +75,8 @@ OVERLAY = {
     "env.MADEIRA_TOUCH_XINPUT": {"title": "Touch controller as XInput player 1"},
     "env.MADEIRA_DINPUT_PAD": {"title": "DirectInput joystick from the host gamepad"},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
-    "dxmt": {"title": "DXMT options (a=b;c=d)"},
+    "dxmt": {"title": "DXMT options (a=b;c=d)",
+             "note": "Exported as DXMT_CONFIG, ';'-joined (ml1255): one line, e.g. d3d11.mipClampBC=1;d3d11.preferredMaxFrameRate=30, under 260 characters. A library entry's own DXMT options replace it for that game."},
 }
 
 

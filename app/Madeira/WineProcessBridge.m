@@ -1093,11 +1093,34 @@ static void *wine_process_thread(void *arg) {
                 } else {
                     text = [NSString stringWithContentsOfFile:[docs stringByAppendingPathComponent:@"madeira-env.txt"] encoding:NSUTF8StringEncoding error:nil];
                 }
+                /* iOS-Madeira ml1184: a library game's own settings (LibraryEntry.applyEnvironment,
+                 * which ran before this on the launch worker) win over the same key in
+                 * madeira.cfg, as its details page says; the cfg line used to replace them
+                 * (env.MADEIRA_FASTSYNC = auto undid "Fast synchronization: off"). Which of
+                 * them the game set is noted before the first cfg line is exported: madeira.cfg
+                 * is last-line-wins, and a later line for the same key must still replace an
+                 * earlier one instead of being taken for the game's own setting. */
+                static const char *const per_launch[] = {
+                    "MADEIRA_FASTSYNC", "MADEIRA_FASTSYNC_SEM", "MADEIRA_CPU_COUNT", "DXMT_D9_ANISO_LIMIT",
+                    "FEX_X87REDUCEDPRECISION",   /* ml1184: the game's "Reduced-precision x87" */
+                    "MADEIRA_DINPUT_PAD",        /* ml1240: the game's "XInput and DirectInput" */
+                };
+                enum { per_launch_count = sizeof(per_launch) / sizeof(per_launch[0]) };
+                BOOL game_set[per_launch_count];
+                for (size_t i = 0; i < per_launch_count; i++) game_set[i] = getenv(per_launch[i]) != NULL;
                 for (NSString *raw in [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
                     NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     NSRange eq = [line rangeOfString:@"="];
                     if (!line.length || [line hasPrefix:@"#"] || eq.location == NSNotFound || eq.location == 0) continue;
                     NSString *k = [line substringToIndex:eq.location], *v = [line substringFromIndex:eq.location + 1];
+                    BOOL kept = NO;
+                    for (size_t i = 0; i < per_launch_count; i++)
+                        if (game_set[i] && !strcmp(k.UTF8String, per_launch[i])) kept = YES;
+                    if (kept) {
+                        fprintf(stderr, "[madeira-env] ml1184 %s=%s kept (the game's own setting); madeira.cfg's %s ignored\n",
+                                k.UTF8String, getenv(k.UTF8String), v.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
@@ -1404,24 +1427,35 @@ static void *wine_process_thread(void *arg) {
             snprintf(exe_path, sizeof(exe_path), "C:\\windows\\system32\\%s", madeira_exe);
         }
 
-        // Optional MADEIRA_ARGS env var: space-separated args appended to argv.
-        // Tokenized in-place; max 16 extra tokens.
-        static char args_buf[1024];
-        char *extra_argv[16] = {0};
+        // Optional MADEIRA_ARGS env var: args appended to argv, split in place.
+        // ml1163: double quotes group a token, so a game path such as
+        // "C:\Program Files\Game\game.exe" (a library game started in the Wine
+        // desktop hands explorer one) stays ONE argument. The quotes themselves are
+        // dropped: Wine re-quotes any argv entry with a space when it builds the
+        // command line. Up to 64 extra tokens (was 16, split on spaces only).
+        static char args_buf[4096];
+        char *extra_argv[64] = {0};
         int extra_argc = 0;
         const char *madeira_args = getenv("MADEIRA_ARGS");
         if (madeira_args && *madeira_args) {
             strncpy(args_buf, madeira_args, sizeof(args_buf) - 1);
             args_buf[sizeof(args_buf) - 1] = 0;
-            char *saveptr = NULL;
-            for (char *tok = strtok_r(args_buf, " ", &saveptr);
-                 tok && extra_argc < 16;
-                 tok = strtok_r(NULL, " ", &saveptr)) {
-                extra_argv[extra_argc++] = tok;
+            char *r = args_buf, *w = args_buf;   /* w never passes r: tokens only shrink */
+            while (*r && extra_argc < 64) {
+                while (*r == ' ' || *r == '\t') r++;
+                if (!*r) break;
+                extra_argv[extra_argc++] = w;
+                int quoted = 0;
+                while (*r && (quoted || (*r != ' ' && *r != '\t'))) {
+                    if (*r == '"') { quoted = !quoted; r++; continue; }
+                    *w++ = *r++;
+                }
+                if (*r) r++;
+                *w++ = 0;
             }
         }
 
-        char *argv[24];
+        char *argv[72];
         int argc = 0;
         argv[argc++] = "wine";
         argv[argc++] = exe_path;
@@ -1440,17 +1474,21 @@ static void *wine_process_thread(void *arg) {
          * exist. Per GPT diagnosis 2026-05-12. Only chdir for full-path EXE
          * launches; bare-name launches (cube, hello-x64) use C:\windows\system32.
          *
-         * A Steam game started as its own program ("Start with: The game") may carry
-         * the working folder Steam's launch configuration names, in MADEIRA_WORKDIR
-         * (a C:\ folder of the prefix, for this launch only; cleared here). That folder
-         * is used instead of the exe's own. */
-        const char *launch_workdir = getenv("MADEIRA_WORKDIR");   /* set by the library for one launch: Steam's working folder; not a setting */
+         * A launch may carry its working folder in MADEIRA_WORKDIR (a C:\ folder of
+         * the prefix, for this launch only; cleared here), used instead of the exe's
+         * own: Steam's launch configuration for "Start with: The game", and ml1163's
+         * library working folder (LibraryEntry.launchDirectory: a chosen folder, or
+         * the program's own when explorer (desktop mode) or cmd.exe (a .bat, the
+         * services batch) is what starts). */
+        const char *launch_workdir = getenv("MADEIRA_WORKDIR");   /* set by the library for one launch: the working folder (Steam's, or the entry's); not a setting */
         char workdir[512] = "";
         if (launch_workdir && (launch_workdir[0] == 'C' || launch_workdir[0] == 'c') && launch_workdir[1] == ':' &&
             launch_workdir[2] == '\\' && launch_workdir[3] && !strstr(launch_workdir, "..") &&
             strlen(launch_workdir) < sizeof(workdir) - 2)
             snprintf(workdir, sizeof(workdir), "%s", launch_workdir);
         unsetenv("MADEIRA_WORKDIR");
+        /* ml1163: a typed folder may end in '\\'; MADEIRA_INITIAL_CWD gets exactly one. */
+        for (size_t n = strlen(workdir); n > 3 && workdir[n - 1] == '\\'; n--) workdir[n - 1] = 0;
         if (workdir[0]) {
             char unix_dir[1024], windir[512], wine_cwd[520];
             snprintf(windir, sizeof(windir), "%s", workdir + 3);
@@ -1520,6 +1558,12 @@ static void *wine_process_thread(void *arg) {
         }
 
         g_wine_running = 0;
+        /* ml1184: these belong to the launch that just ended; a later session in this app
+         * run gets its own from its game, or madeira.cfg's. */
+        unsetenv("MADEIRA_FASTSYNC"); unsetenv("MADEIRA_FASTSYNC_SEM");
+        unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
+        unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
+        unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */
 
         // Stop wineserver to prevent CPU spin (iOS kills for excessive CPU)
         dprintf(STDERR_FILENO, "[WineProc] stopping wineserver...\n");

@@ -147,10 +147,13 @@ While the right stick is the mouse, the page also has its **Vertical speed**
 scale the camera's pitch and yaw differently from a mouse, and a stick cannot
 be compensated by hand the way a wrist does.
 
-The Controller picker's third choice, **XInput and DirectInput**, is for games
+The Controller picker's second choice, **XInput and DirectInput**, is for games
 older than XInput: it exports `MADEIRA_DINPUT_PAD=1` for that launch only (the
 DirectInput device below), since a game reading both APIs may list two
-controllers.
+controllers. The game's choice wins over `env.MADEIRA_DINPUT_PAD` in madeira.cfg
+and is cleared when the session ends (ml1240); the cfg value still applies to
+games left on the other choices. Chosen from the Session menu, it takes effect at
+the next launch.
 
 A layout can also bind an input: in the control editor, a touch control with
 a key or mouse action has a **Controller button for this action** row, and a

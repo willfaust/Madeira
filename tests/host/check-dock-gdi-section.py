@@ -54,7 +54,8 @@ require(content.count('"MADEIRA_GDI_SHARED_SECTION"') == 1, 'nothing else in Con
 
 bridge = (app / 'WineProcessBridge.m').read_text(encoding='utf-8')
 export = bridge.index('if (![line hasPrefix:@"env."] || eq.location == NSNotFound) continue;')
-require('setenv(k.UTF8String, v.UTF8String, 1);' in bridge[export:export + 2500],
+# ml1184 grew the export loop (a game's own keys win), so look to the end of it.
+require('setenv(k.UTF8String, v.UTF8String, 1);' in bridge[export:export + 6000],
         'madeira.cfg env.* entries are exported with overwrite when the session starts')
 
 gdiobj = root / 'wine' / 'dlls' / 'win32u' / 'gdiobj.c'
