@@ -2,9 +2,9 @@
 # Build the ARM64EC PE ntdll from the wine submodule and post-process it the way
 # the app needs: strip, then pad with zeros to SizeOfImage + 0x50000 (the loader
 # maps the file image; the padding is the slack the iOS mapping path relies on).
-# Other PE modules: `make -C dlls/<name>` in the same build tree, then copy the
-# .dll from dlls/<name>/arm64ec-windows/ to app/Madeira/arm64ec-windows/ (no
-# strip/pad for those). Requires the llvm-mingw toolchain (docs/BUILDING.md).
+# Other PE modules: build/wine-pe/build-modules.sh (the same build tree; it
+# strips them with --strip-debug and does not pad). Requires the llvm-mingw
+# toolchain (docs/BUILDING.md).
 # --enable-winegstreamer keeps winegstreamer's PE rules although GStreamer is
 # absent (its unix side is build/ntdll-unix/winegstreamer_unixlib_ios.c); build
 # it as `make dlls/winegstreamer/arm64ec-windows/winegstreamer.dll`, never as
