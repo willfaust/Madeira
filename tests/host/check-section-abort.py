@@ -60,7 +60,13 @@ enter = function('void server_enter_uninterrupted_section( pthread_mutex_t *mute
 leave = function('void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )')
 
 # ------------------------------------------------------------------ static
-require(src.count('ios_defer_section_abort()') == 2, 'two deferral points: the EPIPE write and the EOF read')
+# ml1183 adds a third: wine_server_receive_fd's dead fd socket, read inside the
+# fd_cache_mutex section of server_get_unix_fd.
+require(src.count('ios_defer_section_abort()') == 3, 'three deferral points: the EPIPE write, the EOF read and the fd read')
+receive_fd = function('int wine_server_receive_fd( obj_handle_t *handle )')
+require('if (ios_defer_section_abort()) return -1;' in receive_fd
+        and receive_fd.index('ios_defer_section_abort()') < receive_fd.rindex('abort_thread(0)'),
+        'ml1183: a dead fd socket inside a section fails the read before abort_thread')
 require('if (ios_defer_section_abort()) return STATUS_THREAD_IS_TERMINATING;\n#endif\n        abort_thread(0);' in send_request,
         'send_request: EPIPE outside a section still exits at once')
 require('if (ios_defer_section_abort()) return FALSE;\n#endif\n    /* the server closed the connection; time to die... */\n    abort_thread(0);' in read_reply,
