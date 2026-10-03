@@ -3266,7 +3266,7 @@ struct LibraryHUD: View {
                 Divider()
                 Toggle("Performance overlay", isOn: $model.performance)
                 if model.performance {
-                    ForEach(["FPS", "Frame time", "RAM", "Battery"], id: \.self) { field in
+                    ForEach(["FPS", "Frame time", "CPU", "GPU", "RAM", "Battery"], id: \.self) { field in
                         Toggle(field, isOn: Binding(get: { model.overlayFields.contains(field) }, set: { on in
                             model.overlayFields.removeAll { $0 == field }; if on { model.overlayFields.append(field) }
                         })).font(.subheadline)
@@ -3316,29 +3316,116 @@ struct LibraryMetrics: View {
     @State private var fps = 0.0
     @State private var memory = 0
     @State private var battery = -1
+    @State private var cpuMeter = CPUMeter()
+    @State private var cpu: (total: Double, top: Double)?
+    @State private var lastGPUBusy = 0.0
+    @State private var lastGPUBuffers: UInt64 = 0
+    @State private var gpu = -1.0
+    @State private var gpuFrameMs = 0.0
     private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     var body: some View {
         Text(parts.joined(separator: "  ·  "))
             .font(.caption.monospacedDigit().weight(.medium)).padding(.horizontal, 12).padding(.vertical, 8)
             .background(.black.opacity(0.8), in: Capsule()).foregroundStyle(.white)
-            .onAppear { lastCount = madeira_get_present_count(); lastTime = Date(); UIDevice.current.isBatteryMonitoringEnabled = true }
-            .onDisappear { UIDevice.current.isBatteryMonitoringEnabled = false }
+            .onAppear {
+                lastCount = madeira_get_present_count(); lastTime = Date(); UIDevice.current.isBatteryMonitoringEnabled = true
+                applyGPUMeter()
+            }
+            .onDisappear { UIDevice.current.isBatteryMonitoringEnabled = false; madeira_gpu_meter_enable(0) }
+            .onChange(of: model.overlayFields) { _, _ in applyGPUMeter() }
             .onReceive(ticks) { now in
                 let count = madeira_get_present_count(); let dt = now.timeIntervalSince(lastTime)
-                fps = count >= lastCount ? Double(count - lastCount) / max(0.001, dt) : 0; lastCount = count; lastTime = now
+                let frames = count >= lastCount ? count - lastCount : 0
+                fps = Double(frames) / max(0.001, dt); lastCount = count; lastTime = now
                 var info = task_vm_info_data_t(); var size = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
                 let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &size) } }
                 if result == KERN_SUCCESS { memory = Int(info.phys_footprint / 1048576) }
                 battery = UIDevice.current.batteryLevel < 0 ? -1 : Int(UIDevice.current.batteryLevel * 100)
+                if model.overlayFields.contains("CPU") { cpu = cpuMeter.sample() }
+                if model.overlayFields.contains("GPU") {
+                    let busy = madeira_gpu_meter_busy_seconds(), buffers = madeira_gpu_meter_cmdbufs()
+                    let used = max(0, busy - lastGPUBusy)
+                    gpu = buffers > lastGPUBuffers ? min(100, used / max(0.001, dt) * 100) : -1
+                    gpuFrameMs = frames > 0 ? used * 1000 / Double(frames) : 0
+                    lastGPUBusy = busy; lastGPUBuffers = buffers
+                }
             }
+    }
+    /// ml1174: command buffers get a GPU-time handler only while GPU is shown.
+    private func applyGPUMeter() {
+        madeira_gpu_meter_enable(model.overlayFields.contains("GPU") ? 1 : 0)
+        lastGPUBusy = madeira_gpu_meter_busy_seconds(); lastGPUBuffers = madeira_gpu_meter_cmdbufs(); gpu = -1
     }
     private var parts: [String] {
         var result: [String] = []
         if model.overlayFields.contains("FPS") { result.append(String(format: "%.0f FPS", fps)) }
         if model.overlayFields.contains("Frame time") { result.append(fps > 0 ? String(format: "%.1f ms avg", 1000 / fps) : "— ms") }
+        if model.overlayFields.contains("CPU") {
+            result.append(cpu.map { String(format: "CPU %.0f%% (top %.0f%%)", $0.total, $0.top) } ?? "CPU —")
+        }
+        if model.overlayFields.contains("GPU") {
+            if gpu < 0 { result.append("GPU —") }
+            else if gpuFrameMs > 0 { result.append(String(format: "GPU %.0f%% (%.1f ms)", gpu, gpuFrameMs)) }
+            else { result.append(String(format: "GPU %.0f%%", gpu)) }
+        }
         if model.overlayFields.contains("RAM") { result.append("\(memory) MB") }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         return result
+    }
+}
+
+/// ml1174: CPU load for the performance overlay, from the process's thread
+/// times. `total` is the CPU time since the previous sample as a share of all
+/// cores; `top` is the busiest thread's share of one core, which shows a game
+/// held back by one thread while the total stays low.
+final class CPUMeter {
+    private var last: [UInt64: Double] = [:]
+    private var lastWall = 0.0
+    private let cores = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+
+    /// nil on the first call, and when the threads cannot be read.
+    func sample() -> (total: Double, top: Double)? {
+        var list: thread_act_array_t?
+        var count: mach_msg_type_number_t = 0
+        guard task_threads(mach_task_self_, &list, &count) == KERN_SUCCESS, let list else { return nil }
+        defer {
+            vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: list)),
+                          vm_size_t(Int(count) * MemoryLayout<thread_t>.stride))
+        }
+        let wall = CACurrentMediaTime()
+        var now: [UInt64: Double] = [:]
+        var sum = 0.0, top = 0.0
+        for i in 0..<Int(count) {
+            let thread = list[i]
+            defer { mach_port_deallocate(mach_task_self_, thread) }
+            var ident = thread_identifier_info_data_t()
+            var identCount = mach_msg_type_number_t(MemoryLayout<thread_identifier_info_data_t>.size / MemoryLayout<natural_t>.size)
+            var basic = thread_basic_info_data_t()
+            var basicCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<natural_t>.size)
+            let identResult = withUnsafeMutablePointer(to: &ident) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(identCount)) {
+                    thread_info(thread, thread_flavor_t(THREAD_IDENTIFIER_INFO), $0, &identCount)
+                }
+            }
+            let basicResult = withUnsafeMutablePointer(to: &basic) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(basicCount)) {
+                    thread_info(thread, thread_flavor_t(THREAD_BASIC_INFO), $0, &basicCount)
+                }
+            }
+            guard identResult == KERN_SUCCESS, basicResult == KERN_SUCCESS else { continue }
+            let seconds = Double(basic.user_time.seconds + basic.system_time.seconds)
+                + Double(basic.user_time.microseconds + basic.system_time.microseconds) / 1e6
+            now[ident.thread_id] = seconds
+            if let before = last[ident.thread_id] {
+                let used = max(0, seconds - before)
+                sum += used; top = max(top, used)
+            }
+        }
+        let interval = wall - lastWall
+        let first = last.isEmpty
+        last = now; lastWall = wall
+        guard !first, interval > 0 else { return nil }
+        return (min(100, sum / interval / cores * 100), min(100, top / interval * 100))
     }
 }
 
