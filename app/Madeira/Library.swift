@@ -243,6 +243,9 @@ struct LibraryEntry: Codable, Identifiable {
     /// library files decode; the fork's files carry the same keys.
     var fastSync: Bool?
     var semaphoreFastPath: Bool?
+    /// Experimental MetalFX frame interpolation between the game's frames
+    /// (DXMT's present path, MADEIRA_FRAMEGEN); nil = off.
+    var frameGeneration: Bool?
 
     var displayMode: DisplayMode { display.flatMap(DisplayMode.init(rawValue:)) ?? .fit }
 
@@ -313,6 +316,8 @@ struct LibraryEntry: Codable, Identifiable {
         if GamepadInput.keyboardMouseAvailable, controllerMode == "dinput" { setenv("MADEIRA_DINPUT_PAD", "1", 1) }
         else if MadeiraConfig.get("env.MADEIRA_DINPUT_PAD") == nil { unsetenv("MADEIRA_DINPUT_PAD") }
         if let anisotropyLimit, [1, 2, 4, 8].contains(anisotropyLimit) { setenv("DXMT_D9_ANISO_LIMIT", String(anisotropyLimit), 1) }
+        // Set or unset, so a previous session's choice never stays.
+        if frameGeneration == true { setenv("MADEIRA_FRAMEGEN", "1", 1) } else { unsetenv("MADEIRA_FRAMEGEN") }
         // Fastsync's per-game switches, only when Settings chose Fastsync; with Madsync
         // (the default) or Wine's standard sync nothing is exported here.
         if SyncEngine.current == .fastsync {
@@ -2397,6 +2402,13 @@ struct LibraryDetail: View {
                         ForEach(DisplayMode.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
                     }
                     FPSChoice(mode: $entry.fpsMode)
+                    if entry.desktop != true {
+                        Toggle("Frame generation (experimental)", isOn: Binding(get: { entry.frameGeneration ?? false }, set: { entry.frameGeneration = $0 ? true : nil }))
+                        if entry.frameGeneration == true {
+                            Text("Shows a MetalFX-generated frame between every two game frames: twice the frames on screen, at the cost of GPU time, some latency and artifacts at edges and on the HUD. FPS limits do not apply while it is on.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 Section {
                     Toggle("Reduced-precision x87", isOn: $entry.reducedX87)

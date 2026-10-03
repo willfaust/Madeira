@@ -97,8 +97,12 @@ starting screen takes over (or an error is shown). A profile holds:
 - **CPU cores reported** (Automatic, 1, 2, 4 or 6) and **D3D9 anisotropic
   filtering** (Application default, up to 1×, 2×, 4× or 8×): only a choice
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or
-  `DXMT_D9_ANISO_LIMIT` (DXMT); the defaults export nothing. The library
-  exports no other engine switch;
+  `DXMT_D9_ANISO_LIMIT` (DXMT); the defaults export nothing. Frame generation
+  below is the only other engine switch the library exports;
+- **Frame generation (experimental)**, off by default: exports
+  `MADEIRA_FRAMEGEN=1`, and DXMT's present path (D3D11 and D3D12 alike) shows a
+  MetalFX-interpolated frame between every two game frames; FPS limits do not
+  apply while it is on;
 - launch arguments (double-quoted tokens, at most 64 and 4 KB in total; not
   for Steam games, which Madeira Dock starts with Steam's own launch option);
 - performance overlay, live logs and touch controls for the session, with the
