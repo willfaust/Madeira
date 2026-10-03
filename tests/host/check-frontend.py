@@ -11,7 +11,11 @@ exit report.
    30 FPS fallback without DXMT's 30 FPS cap, profile validation, decoding of
    library files that carry unknown or fork-written keys (display mode,
    control opacity and size), the layout and touch-mapping math of every
-   Aspect & scaling mode, and the pad-to-command mapping.
+   Aspect & scaling mode, the pad-to-command mapping, and (ml1163) a game in
+   the Wine desktop or direct, .bat/.cmd targets through cmd, the working
+   folder (MADEIRA_WORKDIR, exported when it differs from the folder of what
+   starts; the same variable as a Steam game's "The game"), the services batch,
+   per-game DXMT options, and which of them a Steam game takes.
 2. C: compiles the session exit hook from app/Madeira/WineProcessBridge.m and
    checks that only an NTSTATUS error of the launched program is recorded and
    that a reset clears it.
@@ -210,8 +214,8 @@ MadeiraConfig.values["env.MADEIRA_DINPUT_PAD"] = nil; unsetenv("MADEIRA_DINPUT_P
 // Library files written before the controller choices decode with none.
 let older = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","relativePath":"a/b.exe","bits":64,"arguments":"","resolution":"944x656","fpsMode":1,"reducedX87":false,"liveLogs":false,"performance":false,"touchControls":false}"#
 let decodedOld = try? JSONDecoder().decode(LibraryEntry.self, from: Data(older.utf8))
-expect(decodedOld != nil && decodedOld?.controllerMode == nil && decodedOld?.controllerBinds == nil && decodedOld?.padMouseVertical == nil,
-       "an entry without controller keys decodes")
+expect(decodedOld != nil && decodedOld?.controllerMode == nil && decodedOld?.controllerBinds == nil && decodedOld?.padMouseVertical == nil
+       && decodedOld?.launchMode == nil, "an entry without controller or ml1163 keys decodes")
 
 // Validation.
 expect((try? game.validate()) != nil, "a normal profile validates")
@@ -224,6 +228,72 @@ expect((try? bad.validate()) == nil, "invalid size refused")
 bad = game; bad.fpsMode = 7
 expect((try? bad.validate()) == nil, "invalid frame limit refused")
 
+// ml1163: a game's launch options (desktop or direct, .bat/.cmd, working
+// folder, services batch, per-game DXMT).
+game.configureLaunch()
+expect(env("MADEIRA_WORKDIR") == nil, "a game started directly in its own folder: the bridge's default, nothing exported")
+expect(game.dxmtOverride == nil && game.launchMode == nil && game.servicesScript == nil, "new entries: no ml1163 options")
+var inDesk = game; inDesk.launchMode = "desktop"; inDesk.arguments = "-windowed"
+inDesk.configureLaunch()
+expect(env("MADEIRA_EXE") == "explorer.exe" && env("MADEIRA_DESKTOP") == "1"
+       && env("MADEIRA_ARGS") == "/desktop=shell,1280x720 \"C:\\Games\\Some Game\\bin\\game.exe\" -windowed",
+       "desktop mode: explorer with the quoted exe and its arguments (\(env("MADEIRA_ARGS") ?? "nil"))")
+inDesk.workingDirectory = "C:\\Games\\Some Game"; inDesk.configureLaunch()
+expect(env("MADEIRA_WORKDIR") == "C:\\Games\\Some Game", "a chosen working folder is exported")
+var bat = LibraryEntry(title: "Run", relativePath: "Games/Tool/run game.bat", bits: 0)
+bat.resolution = "1280x720"; bat.arguments = "fast"
+expect(bat.isBatch && LibraryEntry(title: "C", relativePath: "a/b.CMD", bits: 0).isBatch && !game.isBatch, ".bat and .cmd are batch files")
+bat.configureLaunch()
+expect(env("MADEIRA_EXE") == "C:\\windows\\system32\\cmd.exe" && env("MADEIRA_ARGS") == "/c \"C:\\Games\\Tool\\run game.bat\" fast"
+       && env("MADEIRA_DESKTOP") == nil && env("MADEIRA_WORKDIR") == "C:\\Games\\Tool", "direct .bat: cmd.exe /c, in its folder")
+bat.launchMode = "desktop"; bat.configureLaunch()
+expect(env("MADEIRA_ARGS") == "/desktop=shell,1280x720 cmd /c \"C:\\Games\\Tool\\run game.bat\" fast", "desktop .bat: cmd /c inside the desktop")
+var svc = inDesk; svc.startServices = true
+let script = svc.servicesScript ?? ""
+expect(script.hasPrefix("@echo off\r\n") && script.contains("start \"\" \"C:\\windows\\system32\\services.exe\"\r\n")
+       && script.contains("cd /d \"C:\\Games\\Some Game\"\r\n")
+       && script.hasSuffix("start \"\" \"C:\\Games\\Some Game\\bin\\game.exe\" -windowed\r\n"), "services batch: services, cd, start the game")
+expect(svc.launchArguments == "/desktop=shell,1280x720 cmd /c \"C:\\madeira-games\\\(svc.id.uuidString).bat\"",
+       "services: the desktop runs the batch, which carries the arguments")
+var svcBat = bat; svcBat.startServices = true; svcBat.launchMode = nil
+expect(svcBat.servicesScript?.hasSuffix("call \"C:\\Games\\Tool\\run game.bat\" fast\r\n") == true
+       && svcBat.launchArguments == "/c \"C:\\madeira-games\\\(svcBat.id.uuidString).bat\"", "services + .bat: CALLed from the batch")
+// cmd expands '%' in a batch file, and CALL expands its line once more.
+var pct = svc; pct.title = "50%~ off"; pct.workingDirectory = "C:\\Games\\100% Juice"; pct.arguments = "-zoom=100%"
+let pctScript = pct.servicesScript ?? ""
+expect(pctScript.contains("rem Generated by Madeira (ml1163) for 50%%~ off;") && pctScript.contains("cd /d \"C:\\Games\\100%% Juice\"\r\n")
+       && pctScript.hasSuffix("start \"\" \"C:\\Games\\Some Game\\bin\\game.exe\" -zoom=100%%\r\n"), "services batch: every '%' doubled")
+var pctBat = svcBat; pctBat.arguments = "100%"
+expect(pctBat.servicesScript?.hasSuffix("call \"C:\\Games\\Tool\\run game.bat\" 100%%%%\r\n") == true, "services + .bat: '%' doubled twice on the CALL line")
+var desktopSvc = LibraryEntry.desktopEntry; desktopSvc.startServices = true; desktopSvc.launchMode = "desktop"
+expect(desktopSvc.servicesScript == nil && desktopSvc.launchArguments.hasSuffix(" C:\\windows\\system32\\services.exe"),
+       "the Desktop entry ignores the game launch options")
+desktopSvc.configureLaunch()
+expect(env("MADEIRA_WORKDIR") == nil, "the Desktop entry keeps explorer's default directory")
+inDesk.workingDirectory = nil; inDesk.configureLaunch()
+expect(env("MADEIRA_WORKDIR") == "C:\\Games\\Some Game\\bin", "desktop mode: the program's own folder is exported (explorer's is elsewhere)")
+// ml1163's options on Steam games: "The game" takes them; a Madeira Dock start does not.
+var steamDesk = steamGame; steamDesk.steamProgram = "bin/game.exe"; steamDesk.steamProgramFolder = nil; steamDesk.launchMode = "desktop"
+steamDesk.configureLaunch()
+expect(env("MADEIRA_EXE") == "explorer.exe" && env("MADEIRA_DESKTOP") == "1"
+       && env("MADEIRA_ARGS") == "/desktop=shell,\(steamDesk.resolution) \"" + steamFolder + "\\bin\\game.exe\" -dx11 \"-name=a b\""
+       && env("MADEIRA_WORKDIR") == steamFolder + "\\bin" && env("MADEIRA_STEAM_APPID") == "4242",
+       "The game in the Wine desktop: its program, Steam's arguments, its folder, its identity (\(env("MADEIRA_ARGS") ?? "nil"))")
+var steamDock = steamGame; steamDock.steamStart = nil; steamDock.launchMode = "desktop"; steamDock.startServices = true
+steamDock.workingDirectory = "D:\\nowhere"
+expect(!steamDock.usesLaunchOptions && !steamDock.runsInDesktop && steamDock.servicesScript == nil
+       && (try? steamDock.validate()) != nil, "a Madeira Dock start ignores the ml1163 launch options")
+var dx = game; dx.dxmtOptions = "  "
+expect(dx.dxmtOverride == nil, "blank DXMT options fall back to madeira.cfg")
+dx.dxmtOptions = " d3d11.mipClampBC=1 "
+expect(dx.dxmtOverride == "d3d11.mipClampBC=1", "a game's DXMT options")
+bad = game; bad.launchMode = "sideways"
+expect((try? bad.validate()) == nil, "an unknown launch mode is refused")
+bad = game; bad.workingDirectory = "D:\\Games"
+expect((try? bad.validate()) == nil, "a working folder off drive C: is refused")
+bad = game; bad.workingDirectory = "C:\\madeira-no-such-folder-\(UUID().uuidString)"
+expect((try? bad.validate()) == nil, "a missing working folder is refused")
+
 // Library files: unknown keys (fields a newer or older build wrote) are ignored.
 let json = """
 {"id":"AF046C35-C32A-497B-92BC-0BBD14F8CB62","title":"T","relativePath":"a/b.exe","bits":64,"arguments":"",
@@ -234,6 +304,8 @@ let decoded = try? JSONDecoder().decode(LibraryEntry.self, from: Data(json.utf8)
 expect(decoded?.fpsMode == 3 && decoded?.reducedX87 == true && decoded?.touchControls == true,
        "decodes a file with unknown keys (including the fork's cpuCount and fastSync)")
 expect(decoded?.displayMode == .fit && decoded?.controlOpacity == nil, "older files: Fit, default controls")
+expect(decoded?.launchMode == nil && decoded?.workingDirectory == nil && decoded?.startServices == nil && decoded?.dxmtOptions == nil,
+       "older files: no ml1163 launch options (a direct start in the program's folder)")
 // Written by the fork's app: display mode, control opacity/size (anisotropy is ignored).
 let fork = """
 {"id":"AF046C35-C32A-497B-92BC-0BBD14F8CB63","title":"T","relativePath":"a/b.exe","bits":32,"arguments":"",
@@ -376,6 +448,9 @@ check('runWineFullSequence(profile: entry)' in content and 'profile.applyEnviron
 check('Button("Use New Interface")' in content, 'the developer interface can switch back to the library')
 loop = bridge.index('for (NSString *raw in [text componentsSeparatedByCharactersInSet:')
 snap = bridge.find('game_set[i] = getenv(per_launch[i]) != NULL;')
+bat_add = lib[lib.index('if ["bat", "cmd"].contains(url.pathExtension.lowercased())'):]
+bat_add = bat_add[:bat_add.index('let h = try FileHandle(forReadingFrom: url)')]
+check('launchMode' not in bat_add, 'an added .bat/.cmd starts directly by default, like every entry (upstream has no other mode)')
 check(0 <= snap < loop and 'getenv(per_launch[i])' not in bridge[loop:bridge.index('setenv(k.UTF8String, v.UTF8String, 1);', loop)],
       "ml1184: the per-launch keys a game set are noted before madeira.cfg's env lines run, so a later cfg line still wins")
 check('LibraryController.shared' in gamepad and 'library.ownsInput' in gamepad,
@@ -405,6 +480,14 @@ check('displayMode = entry.displayMode' in begin and 'controls.sizeScale =' in b
       "a session starts with the game's display mode, opacity and size")
 check('GuestDisplay.configureSessionDefault(' in block(lib, 'func configureLaunch('),
       'every launch sets the virtual monitor from the Resolution')
+# ml1163: a game's launch options in its details page.
+check('Picker("Start"' in detail and 'entry.launchMode = $0 == "desktop"' in detail and 'entry.workingDirectory = ' in detail
+      and 'Toggle("Start Windows services first"' in detail and 'entry.dxmtOptions = ' in detail,
+      'game details: start mode, working folder, services and DXMT options')
+check('let gameDXMT = profile?.dxmtOverride' in content, "a session uses the game's DXMT options")
+check('programExtensions: Set<String> = ["exe", "bat", "cmd"]' in model
+      and 'LibraryModel.programExtensions.contains(' in block(lib, 'struct ExecutableBrowser: View'),
+      'the executable picker and the launch check accept .bat and .cmd')
 check('GameSurfaceLayout.rect(' in content and 'GameSurfaceLayout.map(' in content and 'effectiveDisplayMode()' in content
       and '* 1024 / r.width' not in content, 'the game view lays out and maps touches through GameSurfaceLayout')
 check('if touchPointerMode { touchModeBegan(touches); return }' in content, 'the game view handles the Touch pointer mode')

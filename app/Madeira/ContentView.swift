@@ -2428,7 +2428,9 @@ struct ContentView: View {
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
             return
         }
-        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 1024 else {
+        // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
+        // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
+        guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
@@ -2661,7 +2663,9 @@ struct ContentView: View {
             // is no integer, fell back to 0, and the later keys were never set at all.
             // Pass the options ';'-joined, one trimmed "key=value" each; newlines (a
             // legacy multi-line madeira-dxmt.txt) separate options too.
-            if let txt = MadeiraConfig.get("dxmt") {
+            // ml1163: a library entry's own DXMT options (LibraryEntry.dxmtOptions) replace the cfg line.
+            let gameDXMT = profile?.dxmtOverride
+            if let txt = gameDXMT ?? MadeiraConfig.get("dxmt") {
                 let opts = txt.split(whereSeparator: { $0 == ";" || $0.isNewline })
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -2672,7 +2676,7 @@ struct ContentView: View {
                 let v = opts.joined(separator: ";")
                 if !v.isEmpty {
                     setenv("DXMT_CONFIG", v, 1)
-                    logStore.log("DXMT config: \(v) via madeira.cfg dxmt (\(opts.count) option\(opts.count == 1 ? "" : "s"))")
+                    logStore.log("DXMT config: \(v) via \(gameDXMT != nil ? "the game entry" : "madeira.cfg dxmt") (\(opts.count) option\(opts.count == 1 ? "" : "s"))")
                     // ml1255: DXMT reads the variable into a MAX_PATH buffer (util_env.cpp
                     // getEnvVar); anything longer comes back EMPTY and every option is lost.
                     if v.utf16.count > 259 {

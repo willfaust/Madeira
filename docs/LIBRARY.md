@@ -15,9 +15,11 @@ touch mapping).
 ## Adding games
 
 Copy a game's whole folder into **Madeira › wine › drive_c** with the Files app,
-tap **+** and choose its `.exe`. Only x86 and x64 PE executables inside drive_c
-can be added; the library stores the path relative to drive_c, so a changed
-app container path does not break entries. Adding an entry installs nothing.
+tap **+** and choose its `.exe`, or a `.bat`/`.cmd` batch file (ml1163). Only x86
+and x64 PE executables and batch files inside drive_c can be added; the library
+stores the path relative to drive_c, so a changed app container path does not
+break entries. Adding an entry installs nothing. A batch file gets a **Batch**
+badge and, like every entry, starts directly by default (see **Launch** below).
 
 The library reads the executable's PE imports (and those of the DLLs next to
 it, plus bounded scans for dynamically loaded renderer DLL names) to show a
@@ -26,7 +28,9 @@ API only when exactly one is found: it describes what the files import, not
 which renderer a game picks at run time.
 
 Library data is written atomically to `Documents/madeira-library.json`
-(version 1); covers chosen from Files are stored as thumbnails in
+(version 1; the ml1163 fields `launchMode`, `workingDirectory`,
+`startServices` and `dxmtOptions` are optional, so older files still load);
+covers chosen from Files are stored as thumbnails in
 `Documents/madeira-art/`. A library file that cannot be read, or that has a
 newer version, is left untouched and cannot be overwritten from the UI.
 Removing an entry never removes the game's files or saves.
@@ -99,13 +103,47 @@ starting screen takes over (or an error is shown). A profile holds:
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or
   `DXMT_D9_ANISO_LIMIT` (DXMT); the defaults export nothing. The library
   exports no other engine switch;
-- launch arguments (double-quoted tokens, at most 64 and 4 KB in total; not
-  for Steam games, which Madeira Dock starts with Steam's own launch option);
+- launch arguments (double-quoted tokens, at most 64 and 4 KB in total, the
+  whole command included; not for Steam games, which start with Steam's own
+  launch option, through Madeira Dock or as **The game**);
+- **DXMT options** (`dxmtOptions`, ml1163): `a=b;c=d` options that replace
+  madeira.cfg's `dxmt` line for this game's sessions (empty uses that line; the
+  log says `via the game entry`). Offered for the Desktop entry and Steam games
+  too (a Dock start passes them to its session);
 - performance overlay, live logs and touch controls for the session, with the
   controls' **opacity** and overall **size**. The touch layout itself is saved
   per game from the in-game editor.
 
-A game you added starts directly. A Steam game's page (`docs/STEAM_LIBRARY.md`)
+**Launch** (ml1163). Shown for the games you added and for a Steam game that
+starts as **The game**; not for the Desktop entry, nor for a Steam game started
+through Madeira Dock, whose desktop and command are Dock's:
+
+- **Start** (`launchMode`): **Directly** (nil, the default) makes the program
+  Wine's first process, with no desktop and no compositor; DXMT draws straight
+  to the screen and windows drawn with GDI (launchers, dialogs, consoles) stay
+  invisible. **In the Wine desktop** (`"desktop"`) runs
+  `explorer.exe /desktop=shell,<Resolution> "<exe>" <args>`, so those windows
+  show. A `.bat`/`.cmd` runs as `cmd.exe /c "<file>"` directly, or
+  `cmd /c "<file>"` inside the desktop. For **The game** the program is Steam's
+  (or the one chosen under **Program**) with Steam's arguments.
+- **Working folder** (`workingDirectory`): a `C:\` folder; empty means Steam's
+  working folder for **The game**, else the program's own folder. It is
+  exported as `MADEIRA_WORKDIR` (the bridge reads and clears it) whenever what
+  starts lives elsewhere: a desktop game would otherwise inherit explorer's
+  folder, and a batch file cmd.exe's. It must exist on drive C:.
+- **Start Windows services first** (`startServices`): Play writes
+  `C:\madeira-games\<entry id>.bat` (`start "" services.exe`, `cd /d` the
+  working folder, then `start "" "<exe>" <args>` or `call "<file>" <args>`),
+  and that batch is what starts, directly or in the desktop. It is for
+  launchers that need the SCM and rpcss (Steam-style COM). A batch that cannot
+  be written stops the launch with a message.
+- **Risk:** Wine stops when its first process exits. Started directly, a batch
+  file (or the services batch) that starts the game and exits closes the game
+  too, as does a launcher exe that starts the real game and exits. The details
+  page says so; start such programs in the Wine desktop, where explorer is the
+  first process.
+
+A Steam game's page (`docs/STEAM_LIBRARY.md`)
 adds a **Steam** section under the library details: **Start with** Madeira
 Dock (the default) or **The game** (its own program without Steam, from Steam's
 launch configuration or chosen under **Program**), Dock's per-launch pool
@@ -274,13 +312,15 @@ Opt-in (`env.NAME = 1`), off by default:
 | `MADEIRA_PROMOTE` | the display link also holds the panel at its maximum rate in the 60 FPS cap (Settings › Display) |
 | `MADEIRA_DEVICE_STATS` | a `[device-load]` line (thermal state, low power, screen capture) every 10 s while Wine runs |
 
-Log tags: `[frontend]`, `[display]`, `[display-shape]`, `[frontend-pointer]`, `[launch-view]`, `[startup-log]`, `[exit-report]`,
+Log tags: `[frontend]`, `[library]` (ml1163: each game's start mode, batch, services, working folder and DXMT source), `[display]`, `[display-shape]`, `[frontend-pointer]`, `[launch-view]`, `[startup-log]`, `[exit-report]`,
 `[session-once]`, `[library-surface]`, `[library-metadata]`, `[onboarding]`,
 `[frontend-controller]`, `[frontend-keyboard]`, `[device-load]`, `[promote]`.
 
 ## Tests
 
 `tests/host/check-frontend.py` (profiles incl. resolution and scaling,
+the ml1163 launch options (desktop or direct, batch files, working folder, the
+services batch, DXMT options),
 the engine switches a profile exports, the 30 FPS fallback, the display layout
 math, controller commands, the exit hook, and the presence of the details and
 in-game menu options), `tests/host/check-runtime-settings.py`
