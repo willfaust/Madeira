@@ -567,6 +567,7 @@ struct mad_resource {
     enum WMTTextureType tex_type; enum WMTPixelFormat tex_pf; UINT tex_mips, tex_layers; UINT tex_depth;   /* ml924: 3D depth */
     struct mad_xview { UINT type, lvl0, nlvl, sl0, nsl, pf, swz; obj_handle_t tex; UINT64 id; } *xview;
     unsigned nxview, xview_cap;
+    UINT64 reserved_bytes;   /* d3d12-tiled-resources: created by CreateReservedResource (fully backed), its tiles x 64 KB */
 };
 
 DEFINE_GUID(IID_IMTLDXGIDevice, 0x6bfa1657, 0x9cb1, 0x471a, 0xa4, 0xfb, 0x7c, 0xac, 0xf8, 0xa8, 0x12, 0x07);
@@ -759,6 +760,7 @@ struct mad_device;
 static void mad_mheap_reclaim(struct mad_device *d, int all);   /* ml1148 */
 struct mad_rootsig;
 static UINT mad_root_layout(const struct mad_rootsig *rs, UINT offsets[32]);
+static int mad_tiled_on(void);   /* d3d12-tiled-resources (opt-in), see TILED RESOURCES */
 
 static HRESULT mad_creation_failure(struct mad_device *d, const char *what) {
     if (d && !d->device_lost && MTLDevice_recommendedMaxWorkingSetSize(d->mtl_device) == 0) {
@@ -5204,6 +5206,17 @@ static UINT mad_clamp_sample_count(UINT requested)
     return 2;                       /* 3 -> 2 */
 }
 
+/* ARCHITECTURE(1).TileBasedRenderer; madeira.cfg d3d12-tile-based = 0 reports
+ * FALSE, as desktop GPUs and vkd3d-proton do (see D3D12_FEATURE_ARCHITECTURE). */
+static BOOL mad_tile_based_answer(void) {
+    static int v = -1;
+    if (v < 0) {
+        v = mad_cfg_int_pe("d3d12-tile-based", 1) ? 1 : 0;   /* 0: TileBasedRenderer FALSE, as desktop GPUs report */
+        if (!v) d3d12_log("[d3d12-caps] tile-based=0 (d3d12-tile-based): ARCHITECTURE reports TileBasedRenderer FALSE\n");
+    }
+    return v ? TRUE : FALSE;
+}
+
 static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
         D3D12_FEATURE feature, void *data, UINT size) {
     (void)This;
@@ -5234,6 +5247,10 @@ static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
             }
             if (typed) o->TypedUAVLoadAdditionalFormats = TRUE;
         }
+        if (mad_tiled_on()) {   /* opt-in, see TILED RESOURCES; 12_0 requires Tier 2 */
+            o->TiledResourcesTier = D3D12_TILED_RESOURCES_TIER_2;
+            o->MaxGPUVirtualAddressBitsPerResource = 40;   /* what GPU_VIRTUAL_ADDRESS_SUPPORT already says */
+        }
         return S_OK;
     }
     case D3D12_FEATURE_ARCHITECTURE: {
@@ -5258,15 +5275,18 @@ static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
          * already implements. It costs staging copies. The proper long-term fix
          * is mappable textures (a CPU shadow per subresource, uploaded at Unmap /
          * first GPU use), after which these can go back to TRUE.
-         * TileBasedRenderer stays TRUE: it is a hint and promises nothing. */
-        a->TileBasedRenderer = TRUE; a->UMA = FALSE; a->CacheCoherentUMA = FALSE;
+         * TileBasedRenderer stays TRUE: it is a hint and promises nothing.
+         * d3d12-tile-based = 0 answers FALSE, as desktop GPUs and vkd3d-proton
+         * do: GTA V Enhanced reads ARCHITECTURE right before it decides about
+         * the device. */
+        a->TileBasedRenderer = mad_tile_based_answer(); a->UMA = FALSE; a->CacheCoherentUMA = FALSE;
         return S_OK;
     }
     case D3D12_FEATURE_ARCHITECTURE1: {
         D3D12_FEATURE_DATA_ARCHITECTURE1 *a = data;
         if (size < sizeof *a) return E_INVALIDARG;
         /* ml1038: see D3D12_FEATURE_ARCHITECTURE above. */
-        a->TileBasedRenderer = TRUE; a->UMA = FALSE; a->CacheCoherentUMA = FALSE; a->IsolatedMMU = TRUE;
+        a->TileBasedRenderer = mad_tile_based_answer(); a->UMA = FALSE; a->CacheCoherentUMA = FALSE; a->IsolatedMMU = TRUE;
         return S_OK;
     }
     case D3D12_FEATURE_FEATURE_LEVELS: {
@@ -5354,6 +5374,16 @@ static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
             f->Support1 = D3D12_FORMAT_SUPPORT1_BUFFER | D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER | D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER;
             return S_OK;
         }
+        if ((f->Format == DXGI_FORMAT_R32G32B32_FLOAT || f->Format == DXGI_FORMAT_R32G32B32_UINT || f->Format == DXGI_FORMAT_R32G32B32_SINT) &&
+            mad_tiled_on()) {
+            /* Opt-in with d3d12-tiled-resources: every 11_0+ device takes these
+             * as vertex formats, and so do the input layouts here (float3 /
+             * uint3 / int3 attributes); Metal has no 96-bit texture or
+             * texture-buffer format, so nothing else is claimed. Without the
+             * key: E_FAIL as before. */
+            f->Support1 = D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER;
+            return S_OK;
+        }
         if (!mad_map_texture_format(f->Format, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL, &pf, &is_depth)) return E_FAIL;
         if (is_depth) {
             f->Support1 = D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_SHADER_LOAD |
@@ -5389,6 +5419,19 @@ static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
          * unsupported here and then handing that same count to Metal is what
          * cost 28 pipelines. */
         m->NumQualityLevels = (m->SampleCount == mad_clamp_sample_count(m->SampleCount)) ? 1 : 0;
+        /* madeira.cfg d3d12-msaa8 = 1 reports 8x as supported (one quality
+         * level); resources and pipelines asking for it still get 4x through
+         * mad_clamp_sample_count, so the answer never reaches Metal. Every
+         * FL 11_0+ GPU has 8x for R8G8B8A8_UNORM, and GTA V Enhanced gives up
+         * on the device when it is missing. */
+        if (m->SampleCount == 8 && !m->NumQualityLevels) {
+            static int msaa8 = -1;
+            if (msaa8 < 0) {
+                msaa8 = mad_cfg_int_pe("d3d12-msaa8", 0) ? 1 : 0;   /* 1: report 8x MSAA (rendered at 4x) */
+                if (msaa8) d3d12_log("[d3d12-caps] msaa8=1 (d3d12-msaa8): 8x MSAA reported, rendered at 4x\n");
+            }
+            if (msaa8) m->NumQualityLevels = 1;
+        }
         return S_OK;
     }
     case D3D12_FEATURE_FORMAT_INFO: {
@@ -10238,6 +10281,230 @@ static HRESULT STDMETHODCALLTYPE device_CreateCommittedResource3(ID3D12Device10 
     mad_desc1_to_desc(desc1, &d);
     return device_CreateCommittedResource((ID3D12Device *)This, hp, hf, &d, D3D12_RESOURCE_STATE_COMMON, clear, riid, out);
 }
+
+/* ---- TILED RESOURCES (opt-in, madeira.cfg d3d12-tiled-resources = 1) -----
+ * Feature level 12_0 requires TiledResourcesTier 2 on Windows. An engine that
+ * checks its feature-level survey for consistency (GTA V Enhanced, "feature
+ * level 12_0" in its ERR_GFX_D3D_NOD3D12 box) refuses a device that claims
+ * 12_0 but answers OPTIONS.TiledResourcesTier 0,
+ * OPTIONS.MaxGPUVirtualAddressBitsPerResource 0 (while
+ * GPU_VIRTUAL_ADDRESS_SUPPORT says 40) and fails FORMAT_SUPPORT for the
+ * R32G32B32 vertex formats. With the key set:
+ *   - OPTIONS reports TiledResourcesTier 2 and 40 address bits per resource,
+ *     FORMAT_SUPPORT gives R32G32B32_FLOAT/UINT/SINT IA_VERTEX_BUFFER;
+ *   - CreateReservedResource(1,2) create the resource FULLY BACKED, exactly as
+ *     a committed resource in a DEFAULT heap, so every tile has memory of its
+ *     own; d3d12-reserved-max-mb (default 1024) refuses larger ones with
+ *     E_OUTOFMEMORY before anything is allocated;
+ *   - GetResourceTiling answers D3D12's standard tiling (64 KB tiles, standard
+ *     shapes, Tier 2 mip packing, per-slice packed mips);
+ *   - UpdateTileMappings / CopyTileMappings are no-ops.
+ * Deviation from Tier 2: a tile the application never mapped reads what the
+ * backing holds, not zeros, and writes to it are kept. Without the key every
+ * method here is the generated stub and every answer above is unchanged.
+ * Real residency could later come from Metal sparse textures or Metal 4
+ * placement sparse resources, whose mappings take tiles of a heap. */
+static int g_tiled = -1;
+static UINT64 g_tiled_cap = 1024ull << 20;
+static int mad_tiled_on(void) {
+    if (g_tiled < 0) {
+        long long cap = mad_cfg_int_pe("d3d12-reserved-max-mb", 1024);   /* d3d12-tiled-resources: largest reserved resource backed in full, in MB (larger ones are refused with E_OUTOFMEMORY) */
+        int on = mad_cfg_int_pe("d3d12-tiled-resources", 0) ? 1 : 0;   /* opt-in: TiledResourcesTier 2, 40 VA bits per resource, R32G32B32 vertex formats, fully backed reserved resources */
+        g_tiled_cap = (UINT64)(cap < 1 ? 1 : cap) << 20;
+        if (on)
+            d3d12_log("[d3d12-caps] tiled-resources=1 (opt-in): TiledResourcesTier 2, MaxGPUVirtualAddressBitsPerResource 40, "
+                      "R32G32B32 vertex formats; reserved resources fully backed, at most %llu MB each; tile mappings are no-ops\n",
+                      (unsigned long long)(g_tiled_cap >> 20));
+        MemoryBarrier();
+        g_tiled = on;
+    }
+    return g_tiled;
+}
+
+/* tiled-test:begin -- cut out and run on the host by tests/host/check-d3d12-tiled.py */
+#define MAD_TILE_BYTES 65536u
+struct mad_tiling {
+    unsigned tw, th, td;                  /* standard tile shape in texels (a buffer: 65536 x 1 x 1 bytes) */
+    unsigned mips, slices;                /* subresources = mips x slices */
+    unsigned nstd, npacked;               /* standard and packed mips of each slice */
+    unsigned packed_tiles;                /* tiles holding ONE slice's packed mips */
+    unsigned per_slice;                   /* tiles of one slice: its standard mips, then its packed mips */
+    unsigned long long total;             /* tiles of the whole resource */
+    unsigned mw[16], mh[16], md[16];      /* standard mip i, in tiles */
+    unsigned mstart[16];                  /* its first tile within its slice */
+};
+/* D3D12's standard 64 KB tile shapes (the same table as Vulkan's standard
+ * sparse image block shapes). bytes / block: element size and block edge (4
+ * for BC formats, whose element is a block). Each doubling of the sample count
+ * halves the width, then the height, alternately. 0 = no standard shape
+ * (96-bit formats, MSAA block-compressed or 3D). */
+static int mad_tile_shape(int is3d, unsigned bytes, unsigned block, unsigned samples, unsigned *tw, unsigned *th, unsigned *td) {
+    static const unsigned w2[5] = { 256, 256, 128, 128, 64 }, h2[5] = { 256, 128, 128, 64, 64 };
+    static const unsigned w3[5] = { 64, 32, 32, 32, 16 }, h3[5] = { 32, 32, 32, 16, 16 }, d3[5] = { 32, 32, 16, 16, 16 };
+    unsigned k;
+    switch (bytes) { case 1: k = 0; break; case 2: k = 1; break; case 4: k = 2; break; case 8: k = 3; break; case 16: k = 4; break; default: return 0; }
+    if (block != 1 && block != 4) return 0;
+    if (samples == 0) samples = 1;
+    if (samples > 1 && (is3d || block != 1)) return 0;
+    *tw = is3d ? w3[k] : w2[k]; *th = is3d ? h3[k] : h2[k]; *td = is3d ? d3[k] : 1;
+    switch (samples) {
+    case 1: break;
+    case 2: *tw /= 2; break;
+    case 4: *tw /= 2; *th /= 2; break;
+    case 8: *tw /= 4; *th /= 2; break;
+    case 16: *tw /= 4; *th /= 4; break;
+    default: return 0;
+    }
+    *tw *= block; *th *= block;
+    return 1;
+}
+/* dim: 1 buffer, 2 texture 1D, 3 texture 2D, 4 texture 3D (D3D12_RESOURCE_DIMENSION).
+ * Tier 2 packing: a mip is standard while it fills at least one whole tile in
+ * every dimension; the first one that does not and all smaller ones are packed,
+ * per array slice, into whole tiles (their linear size rounded up). Tiles are
+ * numbered subresource by subresource: slice 0's standard mips (each in X, Y,
+ * Z tile order), slice 0's packed mips, slice 1's, and so on. */
+static int mad_tiling_compute(unsigned dim, unsigned long long width, unsigned height, unsigned depth_or_array, unsigned mip_levels,
+                              unsigned bytes, unsigned block, unsigned samples, struct mad_tiling *t) {
+    unsigned i, run = 0, is3d = dim == 4, d0 = is3d ? (depth_or_array ? depth_or_array : 1) : 1;
+    unsigned long long packed_bytes = 0;
+    memset(t, 0, sizeof *t);
+    if (dim == 1) {
+        unsigned long long n = (width + MAD_TILE_BYTES - 1) / MAD_TILE_BYTES;
+        if (!width || n > 0xffffffffull) return 0;
+        t->tw = MAD_TILE_BYTES; t->th = t->td = 1; t->mips = t->slices = 1; t->nstd = 1;
+        t->mw[0] = (unsigned)n; t->mh[0] = t->md[0] = 1; t->per_slice = (unsigned)n; t->total = n;
+        return 1;
+    }
+    if ((dim != 3 && dim != 4) || !width || !height || width > 0xffffffffull) return 0;
+    if (!mad_tile_shape((int)is3d, bytes, block, samples, &t->tw, &t->th, &t->td)) return 0;
+    t->slices = is3d ? 1 : (depth_or_array ? depth_or_array : 1);
+    if (mip_levels) t->mips = mip_levels;
+    else {   /* 0 = the full chain */
+        unsigned long long m = width > height ? width : height;
+        if (d0 > m) m = d0;
+        while (m) { t->mips++; m >>= 1; }
+    }
+    if (t->mips > 16) return 0;
+    for (i = 0; i < t->mips; i++) {
+        unsigned w = (unsigned)(width >> i), h = height >> i, d = d0 >> i;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (!d) d = 1;
+        if (t->nstd == i && w >= t->tw && h >= t->th && d >= t->td) {
+            t->mw[i] = (w + t->tw - 1) / t->tw; t->mh[i] = (h + t->th - 1) / t->th; t->md[i] = (d + t->td - 1) / t->td;
+            t->mstart[i] = run; run += t->mw[i] * t->mh[i] * t->md[i]; t->nstd++;
+        } else {
+            unsigned long long bw = (w + block - 1) / block, bh = (h + block - 1) / block;
+            packed_bytes += bw * bh * d * bytes * (samples ? samples : 1);
+            t->npacked++;
+        }
+    }
+    t->packed_tiles = t->npacked ? (unsigned)((packed_bytes + MAD_TILE_BYTES - 1) / MAD_TILE_BYTES) : 0;
+    if (t->npacked && !t->packed_tiles) t->packed_tiles = 1;
+    t->per_slice = run + t->packed_tiles;
+    t->total = (unsigned long long)t->per_slice * t->slices;
+    return 1;
+}
+/* tiled-test:end */
+static int mad_tiling_of_desc(const D3D12_RESOURCE_DESC *desc, struct mad_tiling *t) {
+    UINT bytes = 0, block = 1;
+    if (desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) mad_format_info(desc->Format, &bytes, &block);
+    return mad_tiling_compute((unsigned)desc->Dimension, desc->Width, desc->Height, desc->DepthOrArraySize, desc->MipLevels,
+                              bytes, block, desc->SampleDesc.Count, t);
+}
+static HRESULT mad_create_reserved(struct mad_device *d, const D3D12_RESOURCE_DESC *desc, REFIID riid, void **out, const char *api) {
+    static LONG said_refused;
+    struct mad_tiling t;
+    UINT64 bytes;
+    HRESULT hr;
+    if (!desc) return E_INVALIDARG;
+    if (desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D || !mad_tiling_of_desc(desc, &t)) {
+        if (InterlockedIncrement(&said_refused) <= 16)
+            d3d12_log("[d3d12-tiled] %s refused: dimension %u format %u %llux%ux%u samples %u has no standard tiling\n", api, (unsigned)desc->Dimension,
+                      (unsigned)desc->Format, (unsigned long long)desc->Width, desc->Height, (unsigned)desc->DepthOrArraySize, desc->SampleDesc.Count);
+        return E_INVALIDARG;
+    }
+    bytes = t.total * MAD_TILE_BYTES;
+    if (bytes > g_tiled_cap) {
+        if (InterlockedIncrement(&said_refused) <= 16)
+            d3d12_log("[d3d12-tiled] %s refused: %llu MB (%llu tiles) is above d3d12-reserved-max-mb = %llu; E_OUTOFMEMORY\n", api,
+                      (unsigned long long)(bytes >> 20), t.total, (unsigned long long)(g_tiled_cap >> 20));
+        return E_OUTOFMEMORY;
+    }
+    if (!out) return S_FALSE;   /* the documented capability test: valid, nothing created */
+    hr = mad_create_resource(d, D3D12_HEAP_TYPE_DEFAULT, desc, riid, out);
+    if (SUCCEEDED(hr) && *out)
+        ((struct mad_resource *)*out)->reserved_bytes = bytes;   /* every resource interface is the object itself (ml886) */
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE device_CreateReservedResource(ID3D12Device10 *This, const D3D12_RESOURCE_DESC *desc,
+        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE *clear, REFIID riid, void **out) {
+    if (!mad_tiled_on()) return stub_ID3D12Device10_CreateReservedResource(This, desc, state, clear, riid, out);
+    return mad_create_reserved((struct mad_device *)This, desc, riid, out, "CreateReservedResource");
+}
+static HRESULT STDMETHODCALLTYPE device_CreateReservedResource1(ID3D12Device10 *This, const D3D12_RESOURCE_DESC *desc,
+        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE *clear, ID3D12ProtectedResourceSession *session, REFIID riid, void **out) {
+    if (!mad_tiled_on()) return stub_ID3D12Device10_CreateReservedResource1(This, desc, state, clear, session, riid, out);
+    if (session) return E_NOTIMPL;   /* as CreateCommittedResource1 */
+    return mad_create_reserved((struct mad_device *)This, desc, riid, out, "CreateReservedResource1");
+}
+static HRESULT STDMETHODCALLTYPE device_CreateReservedResource2(ID3D12Device10 *This, const D3D12_RESOURCE_DESC *desc,
+        D3D12_BARRIER_LAYOUT layout, const D3D12_CLEAR_VALUE *clear, ID3D12ProtectedResourceSession *session,
+        UINT32 ncast, DXGI_FORMAT *cast, REFIID riid, void **out) {
+    if (!mad_tiled_on()) return stub_ID3D12Device10_CreateReservedResource2(This, desc, layout, clear, session, ncast, cast, riid, out);
+    if (session || ncast) return E_NOTIMPL;   /* as CreateCommittedResource3 */
+    return mad_create_reserved((struct mad_device *)This, desc, riid, out, "CreateReservedResource2");
+}
+/* A resource that was not created reserved has no tiling: zeros, as nothing
+ * else could be meaningful. */
+static void STDMETHODCALLTYPE device_GetResourceTiling(ID3D12Device10 *This, ID3D12Resource *res, UINT *total,
+        D3D12_PACKED_MIP_INFO *pm, D3D12_TILE_SHAPE *shape, UINT *nsub, UINT first, D3D12_SUBRESOURCE_TILING *tilings) {
+    struct mad_resource *r = (struct mad_resource *)res;
+    struct mad_tiling t;
+    int ok;
+    if (!mad_tiled_on()) { stub_ID3D12Device10_GetResourceTiling(This, res, total, pm, shape, nsub, first, tilings); return; }
+    ok = r && r->reserved_bytes && mad_tiling_of_desc(&r->desc, &t);
+    if (!ok) memset(&t, 0, sizeof t);
+    if (total) *total = (UINT)t.total;
+    if (shape) { shape->WidthInTexels = t.tw; shape->HeightInTexels = t.th; shape->DepthInTexels = t.td; }
+    if (pm) {
+        memset(pm, 0, sizeof *pm);
+        if (ok && r->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+            pm->NumStandardMips = (UINT8)t.nstd; pm->NumPackedMips = (UINT8)t.npacked;
+            pm->NumTilesForPackedMips = t.packed_tiles;
+            pm->StartTileIndexInOverallResource = t.npacked ? t.per_slice - t.packed_tiles : 0;
+        }
+    }
+    if (nsub) {
+        UINT nres = ok ? t.mips * t.slices : 0, n = 0;
+        while (n < *nsub && first + n < nres) {
+            UINT s = first + n, mip = s % t.mips, slice = s / t.mips;
+            if (tilings) {
+                if (mip < t.nstd) {
+                    tilings[n].WidthInTiles = t.mw[mip]; tilings[n].HeightInTiles = (UINT16)t.mh[mip]; tilings[n].DepthInTiles = (UINT16)t.md[mip];
+                    tilings[n].StartTileIndexInOverallResource = slice * t.per_slice + t.mstart[mip];
+                } else {
+                    tilings[n].WidthInTiles = 0; tilings[n].HeightInTiles = 0; tilings[n].DepthInTiles = 0;
+                    tilings[n].StartTileIndexInOverallResource = D3D12_PACKED_TILE;
+                }
+            }
+            n++;
+        }
+        *nsub = n;
+    }
+}
+/* Every tile of a reserved resource is backed, so a mapping changes nothing. */
+static void STDMETHODCALLTYPE queue_UpdateTileMappings(ID3D12CommandQueue *This, ID3D12Resource *res, UINT nreg,
+        const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes, ID3D12Heap *heap, UINT nrange,
+        const D3D12_TILE_RANGE_FLAGS *rflags, const UINT *heap_offs, const UINT *counts, D3D12_TILE_MAPPING_FLAGS flags) {
+    if (!mad_tiled_on()) { stub_ID3D12CommandQueue_UpdateTileMappings(This, res, nreg, starts, sizes, heap, nrange, rflags, heap_offs, counts, flags); return; }
+}
+static void STDMETHODCALLTYPE queue_CopyTileMappings(ID3D12CommandQueue *This, ID3D12Resource *dst, const D3D12_TILED_RESOURCE_COORDINATE *dst_start,
+        ID3D12Resource *src, const D3D12_TILED_RESOURCE_COORDINATE *src_start, const D3D12_TILE_REGION_SIZE *size, D3D12_TILE_MAPPING_FLAGS flags) {
+    if (!mad_tiled_on()) { stub_ID3D12CommandQueue_CopyTileMappings(This, dst, dst_start, src, src_start, size, flags); return; }
+}
+
 static HRESULT STDMETHODCALLTYPE device_CreateHeap1(ID3D12Device10 *This, const D3D12_HEAP_DESC *desc,
         ID3D12ProtectedResourceSession *session, REFIID riid, void **out) {
     if (session) return E_NOTIMPL;
@@ -10575,6 +10842,10 @@ static void build_vtables(void) {
     g_device_vtbl.CreateCommittedResource2           = device_CreateCommittedResource2;
     g_device_vtbl.CreateCommittedResource3           = device_CreateCommittedResource3;
     g_device_vtbl.CreateHeap1                        = device_CreateHeap1;
+    g_device_vtbl.CreateReservedResource             = device_CreateReservedResource;   /* d3d12-tiled-resources (each falls back to its stub when the key is off) */
+    g_device_vtbl.CreateReservedResource1            = device_CreateReservedResource1;
+    g_device_vtbl.CreateReservedResource2            = device_CreateReservedResource2;
+    g_device_vtbl.GetResourceTiling                  = device_GetResourceTiling;
     g_device_vtbl.CreatePlacedResource1              = device_CreatePlacedResource1;
     g_device_vtbl.CreatePlacedResource2              = device_CreatePlacedResource2;
     g_device_vtbl.GetResourceAllocationInfo1         = device_GetResourceAllocationInfo1;
@@ -10649,6 +10920,8 @@ static void build_vtables(void) {
     g_queue_vtbl.ExecuteCommandLists    = queue_ExecuteCommandLists;
     g_queue_vtbl.Signal                 = queue_Signal;
     g_queue_vtbl.Wait                   = queue_Wait;
+    g_queue_vtbl.UpdateTileMappings     = queue_UpdateTileMappings;   /* d3d12-tiled-resources */
+    g_queue_vtbl.CopyTileMappings       = queue_CopyTileMappings;
     g_queue_vtbl.GetTimestampFrequency  = queue_GetTimestampFrequency;
     g_queue_vtbl.GetClockCalibration    = queue_GetClockCalibration;
     g_queue_vtbl.GetDesc                = queue_GetDesc;
