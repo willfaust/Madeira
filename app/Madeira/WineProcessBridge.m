@@ -1576,11 +1576,15 @@ int wine_process_start(const char *prefix_path) {
     // Inject wineserver side — the event loop will pick this up
     wineserver_inject_client_fd(pair[0]);
 
-    // Lower priority so Wine init doesn't starve the main thread
+    /* The guest main thread runs on this pthread. Give it its QoS class
+     * through the attribute, as wineserver_start does for the server thread:
+     * a thread created with pthread_attr_setschedparam has a fixed priority,
+     * and Darwin then refuses pthread_set_qos_class_self_np (EPERM), so the
+     * USER_INTERACTIVE promotion in wine_process_thread never took effect and
+     * the game's main thread ran at priority 20 on the efficiency cores. */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    struct sched_param sched = { .sched_priority = 20 };  // lower than default (31)
-    pthread_attr_setschedparam(&attr, &sched);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 
     int ret = pthread_create(&g_wine_thread, &attr, wine_process_thread, NULL);
     pthread_attr_destroy(&attr);
