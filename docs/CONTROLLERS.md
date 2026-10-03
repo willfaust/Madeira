@@ -152,6 +152,17 @@ Vibration, battery telemetry, controller-driven navigation of the app itself,
 binding physical buttons to keyboard/mouse controls, shaped (non-round) controls,
 a layout-wide size slider and a movable top bar remain outside this contribution.
 
+## Foreground window
+
+Nothing on iOS activates a window, so a game whose windows are shown with
+`SWP_NOACTIVATE` is never the foreground window. A game that ignores input
+unless `GetForegroundWindow()` is its own window (Dark Souls Remastered) then
+reads the controller and drops it. While a process polls XInput and the
+foreground window is not one of its own, win32u makes the process's largest
+top-level window foreground and active, checking at most once a second; a
+window of the same process already in front is left alone. `[fg]` logs the first
+activations. `env.MADEIRA_FOREGROUND_FIX = 0` turns this off.
+
 ## Integration prerequisite
 
 The XInput path needs [the Wine change](https://github.com/willfaust/wine/pull/1),
