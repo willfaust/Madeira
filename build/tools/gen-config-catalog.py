@@ -74,6 +74,24 @@ OVERLAY = {
     "env.MADEIRA_XINPUT": {"title": "Physical controllers (XInput)"},
     "env.MADEIRA_TOUCH_XINPUT": {"title": "Touch controller as XInput player 1"},
     "env.MADEIRA_DINPUT_PAD": {"title": "DirectInput joystick from the host gamepad"},
+    # ml2100: the HID controller (build/wineserver/hidpad_ios.c, docs/CONTROLLERS.md).
+    "env.MADEIRA_PAD_MODE": {"category": "Controllers", "title": "Controller API (player 1)", "kind": "choice",
+                "note": "XInput (default): every controller is an Xbox pad. hid: player 1 becomes a HID game controller, "
+                        "a DualSense (054C:0CE6) when it is a PlayStation pad, else a generic HID gamepad, and leaves "
+                        "XInput. dualsense/generic force the identity. Read at session start.",
+                "choices": [("", "XInput (default)"), ("hid", "DirectInput / HID"), ("dualsense", "HID, always a DualSense"),
+                            ("generic", "HID, always a generic gamepad")],
+                "sources": ["app/Madeira/GamepadInput.swift"]},
+    "env.MADEIRA_HIDPAD": {"category": "Controllers",
+                "note": "Set by the app at session start from env.MADEIRA_PAD_MODE (dualsense or generic) for the "
+                        "wineserver and ntdll; not meant to be set by hand."},
+    "env.MADEIRA_HIDPAD_NAME": {"category": "Controllers",
+                "note": "Set by the app: the product string a generic HID gamepad reports (the physical pad's name)."},
+    "env.MADEIRA_HIDPAD_XINPUT": {"category": "Controllers", "title": "HID mode: keep player 1 on XInput too", "kind": "bool",
+                "default": "0",
+                "note": "1: with the HID controller on, player 1 also stays an XInput pad. Off by default, so a game "
+                        "that reads both APIs does not see the same pad twice.",
+                "sources": ["app/Madeira/GamepadInput.swift"]},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
     "dxmt": {"title": "DXMT options (a=b;c=d)"},
 }

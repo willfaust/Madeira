@@ -106,6 +106,11 @@ PATCHED_FILES=(
     # forensics were reading three-week-old mystery code. The submodule
     # copy adds the [srv-conn]/[tcp-state]/[tcp-enum] probes.
     "sock:$WINE_SRC/server/sock.c:sock.o"
+    # ml2101: the opt-in HID controller (MADEIRA_PAD_MODE = hid) and Wine's
+    # hidparse.sys parser it builds its preparsed data with. New objects, not
+    # replacements: both lists, as for every entry here.
+    "hidpad_ios:hidpad_ios.c:hidpad_ios.o"
+    "hidparse_ios:$REPO_ROOT/build/hidpad/hidparse_ios.c:hidparse_ios.o"
 )
 
 echo "=== Building kill wrapper (without kill macro) ==="
@@ -181,6 +186,8 @@ REPLACEMENTS=(
     "semaphore.o:semaphore.o"
     "handle.o:handle.o"
     "inproc_sync.o:inproc_sync.o"   # ml1058
+    "hidpad_ios.o:hidpad_ios.o"     # ml2101
+    "hidparse_ios.o:hidparse_ios.o" # ml2101
 )
 
 for entry in "${REPLACEMENTS[@]}"; do

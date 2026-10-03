@@ -49,6 +49,53 @@ final class GamepadInput: @unchecked Sendable {
         LogStore.shared.log("[xinput] ml1990 slot=0 reserved for the session touch=\(touch ? 1 : 0) paired=\(paired ? 1 : 0)")
     }
 
+    /// ml2100: how player 1 reaches Windows, `env.MADEIRA_PAD_MODE` from
+    /// madeira.cfg, else the process environment. Unset or "xinput": the XInput
+    /// path above, unchanged (the default). "hid": player 1 becomes a HID game
+    /// controller served by the wineserver (build/wineserver/hidpad_ios.c) -- a
+    /// DualSense when the pad is a PlayStation one, a generic HID gamepad
+    /// otherwise -- and leaves XInput. "dualsense" / "generic" force that
+    /// identity. Read once, at session start (beginPadSession): the device
+    /// exists before the game enumerates, so a change applies at the next start.
+    static let padModeKey = "env.MADEIRA_PAD_MODE"
+    static func configuredPadMode() -> (value: String, source: String) {
+        if let v = MadeiraConfig.get(padModeKey), !v.isEmpty { return (v.lowercased(), "cfg") }
+        if let v = ProcessInfo.processInfo.environment["MADEIRA_PAD_MODE"], !v.isEmpty { return (v.lowercased(), "env") }
+        return ("xinput", "default")
+    }
+
+    /// ml2100: decide this session's controller path. Called once, before the
+    /// wineserver starts (ContentView.runWineFullSequence): the wineserver and
+    /// the first Wine process read MADEIRA_HIDPAD to create the device and its
+    /// registry entries. In XInput mode it only unsets that and logs.
+    @MainActor func beginPadSession() {
+        let mode = Self.configuredPadMode()
+        unsetenv("MADEIRA_HIDPAD"); unsetenv("MADEIRA_HIDPAD_NAME")
+        guard ["hid", "dualsense", "generic"].contains(mode.value) else {
+            LogStore.shared.log("[hid-pad] ml2100 session mode=xinput source=\(mode.source)")
+            return
+        }
+        guard Self.enabled else {
+            LogStore.shared.log("[hid-pad] ml2100 session mode=\(mode.value) ignored: MADEIRA_XINPUT=0 turns every controller off")
+            return
+        }
+        // Player 1 is the first paired extended gamepad, as refreshControllers assigns slots.
+        let first = GCController.controllers().first { $0.extendedGamepad != nil }
+        let sony = first?.extendedGamepad is GCDualSenseGamepad || first?.extendedGamepad is GCDualShockGamepad
+        let kind: String
+        switch mode.value {
+        case "dualsense", "generic": kind = mode.value
+        // No pad yet: a DualSense, the identity this mode exists for.
+        default: kind = first == nil || sony ? "dualsense" : "generic"
+        }
+        setenv("MADEIRA_HIDPAD", kind, 1)
+        if kind == "generic", let name = first?.vendorName { setenv("MADEIRA_HIDPAD_NAME", name, 1) }
+        let keepXInput = Self.optIn("MADEIRA_HIDPAD_XINPUT")
+        queue.async { [self] in hidActive = true; hidKeepsXInput = keepXInput; sample() }
+        LogStore.shared.log("[hid-pad] ml2100 session mode=\(mode.value) source=\(mode.source) kind=\(kind) "
+                            + "pad=\(first?.productCategory ?? "none") xinput-slot0=\(keepXInput ? "kept" : "off")")
+    }
+
     /// Documents/madeira.cfg `env.NAME`, else the process environment; only "0" disables.
     static func flag(_ name: String) -> Bool {
         (MadeiraConfig.get("env.\(name)") ?? ProcessInfo.processInfo.environment[name]) != "0"
@@ -102,6 +149,12 @@ final class GamepadInput: @unchecked Sendable {
     private var profiles = [GCExtendedGamepad?](repeating: nil, count: 4)
     private var timer: DispatchSourceTimer?
     private var active = false
+    /// ml2100: player 1 goes to the HID controller (beginPadSession); queue-owned.
+    private var hidActive = false
+    /// MADEIRA_HIDPAD_XINPUT=1: player 1 stays an XInput pad as well.
+    private var hidKeepsXInput = false
+    private var hidBattery: (level: UInt8, charging: UInt8) = (UInt8(WINIOS_HIDPAD_BATTERY_UNKNOWN), 0)
+    private var hidBatteryCountdown = 0
     private var touchState = TouchGamepadState()
     @MainActor private var observers: [NSObjectProtocol] = []
     @MainActor private var started = false
@@ -208,15 +261,21 @@ final class GamepadInput: @unchecked Sendable {
             if i == 0, pad == nil, keyboardMouse != nil, PadKeyboardMouse.shared.holding {
                 PadKeyboardMouse.shared.releaseAll("controller disconnected")
             }
+            let hid = i == 0 && hidActive
             guard pad != nil || touchConnected else {
                 winios_gamepad_set_state(Int32(i), nil)
+                if hid { winios_hidpad_set_state(nil) }
                 continue
             }
             var state = winios_gamepad()
             state.connected = 1
+            // ml2100: the pad whose HID-only inputs (touchpad click) this sample
+            // carries; nil while the app is inactive or the library owns input.
+            var hidLive: GCExtendedGamepad?
             // Keep the connected identity, but release all controls while the
             // app is inactive. A delayed callback cannot republish a held key.
             if active, let pad {
+                hidLive = hid ? pad : nil
                 let buttons: [(GCControllerButtonInput?, UInt16)] = [
                     (pad.dpad.up, 0x0001), (pad.dpad.down, 0x0002),
                     (pad.dpad.left, 0x0004), (pad.dpad.right, 0x0008),
@@ -242,16 +301,20 @@ final class GamepadInput: @unchecked Sendable {
                     if library.ownsInput {
                         state = winios_gamepad()
                         state.connected = 1
+                        hidLive = nil
                         if keyboardMouse != nil { PadKeyboardMouse.shared.releaseAll("library menu") }
                     } else if let kbm = keyboardMouse {
                         // Keyboard-and-mouse mode: the pad becomes keys and mouse
                         // motion; XInput sees no physical player 1 (touch may still
-                        // connect it below).
+                        // connect it below). The HID controller, when on, likewise
+                        // stays but gets none of the physical pad's input.
                         PadKeyboardMouse.shared.feed(buttons: state.buttons, lt: state.left_trigger, rt: state.right_trigger,
                                                      lx: state.lx, ly: state.ly, rx: state.rx, ry: state.ry,
                                                      bindings: kbm, focused: HardwareInput.shared.baseFocused)
+                        hidLive = nil
                         guard touchConnected else {
                             winios_gamepad_set_state(Int32(i), nil)
+                            if hid { winios_hidpad_set_state(nil) }
                             continue
                         }
                         state = winios_gamepad()
@@ -268,8 +331,50 @@ final class GamepadInput: @unchecked Sendable {
                 state.left_trigger = merged.lt; state.right_trigger = merged.rt
                 state.lx = merged.lx; state.ly = merged.ly; state.rx = merged.rx; state.ry = merged.ry
             }
+            if hid {
+                publishHID(state, live: hidLive, pad: pad)
+                // One controller, one API: player 1 is not also an XInput pad,
+                // as a DualSense on Windows is not (MADEIRA_HIDPAD_XINPUT=1 keeps both).
+                if !hidKeepsXInput {
+                    winios_gamepad_set_state(Int32(i), nil)
+                    continue
+                }
+            }
             winios_gamepad_set_state(Int32(i), &state)
         }
+    }
+
+    /// ml2100: player 1 as the HID controller reports it: the XInput sample above
+    /// (touch merge and library ownership included) plus what only a HID report
+    /// carries. L2/R2's digital bits follow the merged analogue value, so touch
+    /// triggers set them too. The battery is read once a second.
+    private func publishHID(_ state: winios_gamepad, live: GCExtendedGamepad?, pad: GCExtendedGamepad?) {
+        var hid = winios_hidpad()
+        hid.connected = 1
+        hid.buttons = UInt32(state.buttons)
+        hid.lx = state.lx; hid.ly = state.ly; hid.rx = state.rx; hid.ry = state.ry
+        hid.left_trigger = state.left_trigger; hid.right_trigger = state.right_trigger
+        if state.left_trigger > 25 { hid.buttons |= WINIOS_HIDPAD_L2 }
+        if state.right_trigger > 25 { hid.buttons |= WINIOS_HIDPAD_R2 }
+        if let live {
+            let touchpad = (live as? GCDualSenseGamepad)?.touchpadButton ?? (live as? GCDualShockGamepad)?.touchpadButton
+            if touchpad?.isPressed == true { hid.buttons |= WINIOS_HIDPAD_TOUCHPAD }
+        }
+        if hidBatteryCountdown <= 0 {
+            hidBatteryCountdown = 250
+            if let battery = pad?.controller?.battery {
+                let fraction = battery.batteryLevel.isFinite ? battery.batteryLevel : 0
+                let level = UInt8(max(0, min(100, (fraction * 100).rounded())))
+                let charging: UInt8 = battery.batteryState == .charging ? 1 : battery.batteryState == .full ? 2 : 0
+                hidBattery = battery.batteryState == .unknown ? (UInt8(WINIOS_HIDPAD_BATTERY_UNKNOWN), 0) : (level, charging)
+            } else {
+                hidBattery = (UInt8(WINIOS_HIDPAD_BATTERY_UNKNOWN), 0)
+            }
+        }
+        hidBatteryCountdown -= 1
+        hid.battery = hidBattery.level
+        hid.charging = hidBattery.charging
+        winios_hidpad_set_state(&hid)
     }
 }
 
