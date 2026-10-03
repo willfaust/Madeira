@@ -618,7 +618,18 @@ struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, vo
     struct list *ptr;
 
     if (!(user = mem_alloc( sizeof(*user) ))) return NULL;
-    user->when     = timeout_to_abstime( when );
+    /* ml1229: a relative timeout too far away for "when - monotonic_time" to fit
+     * in 64 bits means "never". Wine's threadpool timer queue re-arms its idle
+     * relative timer with rel_now - MAXLONGLONG; the subtraction overflowed, and
+     * clang (-O2, signed overflow is undefined) picks the list from the true sign
+     * (negative: relative) but stores the wrapped, positive value, which
+     * get_next_timeout() then sees as long expired. The timer fired at once, the
+     * timer-queue thread woke, re-armed it and waited again: 15-40k set_timer
+     * and 8-20k select requests a second in Ori and the Will of the Wisps, a P-core of server time. */
+    if (when <= 0 && when < LLONG_MIN + 1 + monotonic_time)
+        user->when = LLONG_MIN + 1;   /* relative, expires at monotonic MAXLONGLONG */
+    else
+        user->when = timeout_to_abstime( when );
     user->callback = func;
     user->private  = private;
 

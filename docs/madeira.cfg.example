@@ -13,6 +13,9 @@ swap-canary = 0
 # emulator environment (FEX reads FEX_* from the process environment)
 env.FEX_TSOENABLED = 1
 env.FEX_EXTENDEDVOLATILEMETADATA = oo2core_5_win64.dll:bink2w64.dll
+# ml1231: the 64-bit (ARM64EC) FEX module uses LRCPC2 when the device reports it and runs
+# without AFP (no FPCR write per x64->native call). For an A/B, one or both of:
+# env.FEX_HOSTFEATURES = enableafp,disablelrcpc2
 
 # ml1127: virtual desktop size for the "Wine Virtual Desktop" button (WxH, default 960x540)
 # desktop-size = 1280x720

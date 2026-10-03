@@ -740,9 +740,10 @@ static void madeira_seed_winsxs_x86(NSFileManager *fm, NSString *prefix, NSStrin
  * newest cores' feature set. A wrong "present" is silent corruption, not a
  * crash (FEAT_AFP claimed on a core without it leaves FPCR.NEP RES0, so every
  * scalar SSE operation zeroes the upper lanes of its destination), so the app
- * asks and passes the answers in FEX_MADEIRA_HOSTPROBE. Only the WOW64 module
- * reads it (FEX Source/Windows/Common/CPUFeatures.cpp, !ARCHITECTURE_arm64ec);
- * "?" means the sysctl does not exist and keeps FEX's assumption. */
+ * asks and passes the answers in FEX_MADEIRA_HOSTPROBE. The WOW64 module reads
+ * all of it (FEX Source/Windows/Common/CPUFeatures.cpp, !ARCHITECTURE_arm64ec);
+ * the ARM64EC module only LRCPC2 and AFP (ml1231). "?" means the sysctl does not
+ * exist and keeps FEX's assumption. */
 static void madeira_publish_host_probe(void)
 {
     static const struct { const char *key, *sysctl; } probes[] = {
@@ -751,6 +752,7 @@ static void madeira_publish_host_probe(void)
         { "FLAGM2",  "hw.optional.arm.FEAT_FlagM2" },
         { "FCMA",    "hw.optional.arm.FEAT_FCMA" },
         { "RCPC",    "hw.optional.arm.FEAT_LRCPC" },
+        { "LRCPC2",  "hw.optional.arm.FEAT_LRCPC2" },   /* ml1231: the ARM64EC module needs an explicit 1 */
         { "AES",     "hw.optional.arm.FEAT_AES" },
         { "PMULL",   "hw.optional.arm.FEAT_PMULL" },
         { "SHA",     "hw.optional.arm.FEAT_SHA256" },
@@ -830,8 +832,12 @@ static void *wine_process_thread(void *arg) {
                  * done. It routes every OutputDebugStringA through an exception
                  * dispatch, which is real overhead in hot paths; re-add it only
                  * alongside MADEIRA_TF_TRACE. */
-                setenv("WINEDEBUG", "err+all,err-virtual", 1);
-                LOG("WINEDEBUG = err+all,err-virtual (perf default — set MADEIRA_DEBUG_VERBOSE=1 for full trace)");
+                /* fixme-d3dcompiler: Wine's shader reflection prints one
+                 * skip_u32_unknown line per unknown RDEF dword. Metro 2033
+                 * Redux reflects every shader at load: ~90,000 of a
+                 * 105,000-line log in six seconds, all of it parsed by LogStore. */
+                setenv("WINEDEBUG", "err+all,err-virtual,fixme-d3dcompiler", 1);
+                LOG("WINEDEBUG = err+all,err-virtual,fixme-d3dcompiler (perf default — set MADEIRA_DEBUG_VERBOSE=1 for full trace)");
             }
         }
 
@@ -1576,11 +1582,19 @@ int wine_process_start(const char *prefix_path) {
     // Inject wineserver side — the event loop will pick this up
     wineserver_inject_client_fd(pair[0]);
 
-    // Lower priority so Wine init doesn't starve the main thread
+    /* ml1164: USER_INTERACTIVE through the attribute. This used to set an
+     * explicit sched_priority of 20 ("so Wine init doesn't starve the main
+     * thread"), and a thread with an explicit priority is opted out of QoS:
+     * the pthread_set_qos_class_self_np(USER_INTERACTIVE) at the top of
+     * wine_process_thread then failed silently. Harmless while the first
+     * process is explorer, but a direct launch (Games library, Thumper,
+     * Stray) runs the GAME's main thread on this pthread: Hollow Knight's sat
+     * on the efficiency cores for 8230 ms against 14 ms on performance cores
+     * while loading. Every other guest thread is USER_INTERACTIVE already
+     * (thread_ios.c). */
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    struct sched_param sched = { .sched_priority = 20 };  // lower than default (31)
-    pthread_attr_setschedparam(&attr, &sched);
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 
     int ret = pthread_create(&g_wine_thread, &attr, wine_process_thread, NULL);
     pthread_attr_destroy(&attr);
