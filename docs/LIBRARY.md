@@ -100,7 +100,10 @@ starting screen takes over (or an error is shown). A profile holds:
   `DXMT_D9_ANISO_LIMIT` (DXMT); the defaults export nothing. The library
   exports no other engine switch;
 - launch arguments (double-quoted tokens, at most 64 and 4 KB in total; not
-  for Steam games, which Madeira Dock starts with Steam's own launch option);
+  for Steam games, which Madeira Dock starts with Steam's own launch option),
+  in their own section with chips for common flags (`-dx11`, `-dx12`, `-dx10`,
+  `-dx9`, `-windowed`, `-fullscreen`, `-nosplash`; the renderer flags exclude
+  each other, as do the window flags) and the command line the next start runs;
 - performance overlay, live logs and touch controls for the session, with the
   controls' **opacity** and overall **size**. The touch layout itself is saved
   per game from the in-game editor.

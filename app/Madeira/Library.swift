@@ -2401,6 +2401,20 @@ struct LibraryDetail: View {
                     }
                     FPSChoice(mode: $entry.fpsMode)
                 }
+                // A Steam game starts with Steam's own launch option through Madeira Dock.
+                if entry.desktop != true && entry.steamAppID == nil {
+                    Section {
+                        TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
+                            .font(.body.monospaced()).lineLimit(1...4)
+                            .autocorrectionDisabled().textInputAutocapitalization(.never)
+                        LaunchFlagChips(arguments: $entry.arguments)
+                        // What the next start runs.
+                        Text(([(entry.relativePath as NSString).lastPathComponent] + (entry.arguments.isEmpty ? [] : [entry.arguments])).joined(separator: " "))
+                            .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    } header: { Text("Launch arguments") } footer: {
+                        Text("Passed to the program on every start; the line above is the command that runs. The flags add or remove themselves; the renderer flags exclude each other, as do -windowed and -fullscreen.")
+                    }
+                }
                 Section {
                     Toggle("Reduced-precision x87", isOn: $entry.reducedX87)
                     // Exported for this game only when chosen (applyEnvironment).
@@ -2423,10 +2437,6 @@ struct LibraryDetail: View {
                     if syncEngine != .fastsync {
                         Text("Fast synchronization and fast semaphore waits are Fastsync options. Choose Fastsync in Settings › Memory & sync to use them.")
                             .font(.caption).foregroundStyle(.secondary)
-                    }
-                    // A Steam game starts with Steam's own launch option through Madeira Dock.
-                    if entry.desktop != true && entry.steamAppID == nil {
-                        TextField("Launch arguments", text: $entry.arguments, axis: .vertical).autocorrectionDisabled().textInputAutocapitalization(.never)
                     }
                 } header: { Text("Compatibility & performance") } footer: {
                     Text("Reduced-precision x87 can make older games faster at some cost in accuracy; it is off by default. With Fastsync, fast synchronization (on by default) handles events without a server round trip, and fast semaphore waits (off by default) does the same for semaphores. Settings apply to the next launch; a precision change may still require restarting Madeira.")
@@ -2720,6 +2730,59 @@ struct ControllerModeChoice: View {
                 Text("XInput and DirectInput").tag("dinput")
                 Text("Keyboard and mouse").tag("keys")
             }.pickerStyle(.menu).labelsHidden()
+        }
+    }
+}
+
+/// Game details › Launch arguments: one chip per common flag, highlighted when
+/// the arguments contain it; a tap adds or removes it. -dx9 to -dx12 exclude each
+/// other, as do -windowed and -fullscreen. Quoted arguments are kept whole.
+struct LaunchFlagChips: View {
+    @Binding var arguments: String
+    static let flags = ["-dx11", "-dx12", "-dx10", "-dx9", "-windowed", "-fullscreen", "-nosplash"]
+
+    /// The arguments split at unquoted spaces and tabs, quotes kept.
+    static func tokens(_ text: String) -> [String] {
+        var out: [String] = [], current = "", quoted = false
+        for character in text {
+            if character == "\"" { quoted.toggle() }
+            if !quoted && (character == " " || character == "\t") {
+                if !current.isEmpty { out.append(current); current = "" }
+            } else {
+                current.append(character)
+            }
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
+    }
+    static func contains(_ text: String, _ flag: String) -> Bool {
+        tokens(text).contains { $0.caseInsensitiveCompare(flag) == .orderedSame }
+    }
+    static func toggled(_ text: String, _ flag: String) -> String {
+        var parts = tokens(text)
+        if contains(text, flag) {
+            parts.removeAll { $0.caseInsensitiveCompare(flag) == .orderedSame }
+        } else {
+            let renderers = ["-dx9", "-dx10", "-dx11", "-dx12"]
+            if renderers.contains(flag) { parts.removeAll { renderers.contains($0.lowercased()) } }
+            if flag == "-windowed" { parts.removeAll { $0.lowercased() == "-fullscreen" } }
+            if flag == "-fullscreen" { parts.removeAll { $0.lowercased() == "-windowed" } }
+            parts.append(flag)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Self.flags, id: \.self) { flag in
+                    let on = Self.contains(arguments, flag)
+                    Button(flag) { arguments = Self.toggled(arguments, flag) }
+                        .buttonStyle(.bordered).tint(on ? Color.accentColor : Color.gray)
+                        .font(.caption.monospaced())
+                        .accessibilityValue(on ? "On" : "Off")
+                }
+            }
         }
     }
 }
