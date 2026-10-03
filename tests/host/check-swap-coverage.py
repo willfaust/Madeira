@@ -150,6 +150,9 @@ static int test_fcntl( int fd, int cmd, struct fpunchhole *ph )
 
 harness = r'''
 static unsigned long long ios_swap_footprint_mb( void ) { return 4321; }
+/* ml1257: defined after the core in virtual_ios.c (madeira.cfg and fstat); classic cfg, no disk use here */
+static void ios_swap_cfg( int *mode, int *min_mb ) { *mode = 1; *min_mb = 0; }
+static unsigned long long ios_swap_disk_used( void ) { return 0; }
 static int bad;
 #define CHECK(c, what) do { if (!(c)) { printf("FAIL: %s (line %d)\n", what, __LINE__); bad++; } } while (0)
 
@@ -468,7 +471,7 @@ with tempfile.TemporaryDirectory() as tmp:
     print(r.stdout.strip())
     check(r.returncode == 0, 'swap-tier core run failed:\n' + r.stdout + r.stderr)
     err = r.stderr
-    check('[swap] coverage=blocks min=1024KB reserve-max=256MB' in err, 'coverage line printed at tier start')
+    check('[swap] coverage=classic: 8 MB commits in the guest band, no census' in err, 'coverage line printed at tier start (classic is the default since 046af3e)')
     census = [l for l in err.splitlines() if l.startswith('[swap] census file-backed now=')]
     check(len(census) >= 1, 'census line printed')
     if census:

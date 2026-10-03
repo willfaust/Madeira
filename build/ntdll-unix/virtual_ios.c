@@ -13304,13 +13304,17 @@ static NTSTATUS set_protection( struct file_view *view, void *base, SIZE_T size,
         if ((view->protect & access) != access) return STATUS_INVALID_PAGE_PROTECTION;
     }
 
+    /* ml1077: never execute from the tier. ml1257: BEFORE set_vprot, not after --
+     * the copy-back maps anonymous RW, which used to overwrite the protection
+     * set_vprot had just applied (a guard page came back writable), and an EXEC
+     * mprotect on the shared file mapping must not be what decides the outcome. */
+    if (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD)) ios_swap_release_range( base, size, 1 );
     if (!set_vprot( view, base, size, vprot | VPROT_COMMITTED ))
     {
         dprintf(2, "[vmem-denied] set_vprot failed: base=%p size=%p protect=0x%x\n",
                 base, (void *)size, (unsigned)protect);
         return STATUS_ACCESS_DENIED;
     }
-    if (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD)) ios_swap_release_range( base, size, 1 );   /* ml1077: never execute from the tier */
 
     /* iOS-Madeira ml638 A/B: NEVER MAKE AN ANON-JIT-ALIASED PAGE PHYSICALLY WRITABLE.
      *
@@ -14572,7 +14576,11 @@ static void ios_dc_census_take( const void *addr, size_t len, struct ios_dc_cens
 /* swap-tier core begin (tests/host/check-swap-coverage.py compiles the code up to "core end") */
 static int      ios_swap_fd = -1;
 static uint64_t ios_swap_cap, ios_swap_bump;
-static struct { char *va; size_t len; uint64_t off; } ios_swap_ext[16384];
+/* resv: the extent maps a whole reservation (wide at reserve time, broad), so a
+ * decommit inside it punches the file in place (ml1257). key: the size asked for
+ * (reservation or commit), the churn filter's unit; born: ns when it was backed
+ * (ml1258). */
+static struct { char *va; size_t len; uint64_t off; int resv; size_t key; uint64_t born; } ios_swap_ext[16384];
 static unsigned ios_swap_n;
 static struct { uint64_t off, len; } ios_swap_free[8192];
 static unsigned ios_swap_nfree;
@@ -14586,7 +14594,8 @@ static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swa
  * never approached. Its growth arrived as 1-4.5 MB MEM_RESERVE|MEM_COMMIT
  * blocks (every Wine heap block above ~508 KB is its own reserve+commit) and
  * as heaps committing 64 KB at a time. MADEIRA_SWAP_COVERAGE (madeira.cfg
- * env.MADEIRA_SWAP_COVERAGE) picks the rules:
+ * env.MADEIRA_SWAP_COVERAGE) picks the rules; when it is unset, madeira.cfg
+ * swap-mode = 2 means broad and anything else classic:
  *  - classic (default): the ml1077 rules, see below.
  *  - blocks: a commit request of at least 1 MB is enough.
  *    MADEIRA_SWAP_MIN_KB=N sets that floor (64 KB .. 4 GB).
@@ -14595,9 +14604,30 @@ static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swa
  *    reservations up to MADEIRA_SWAP_RESERVE_MAX_MB (default 256) mapped from
  *    the file PROT_NONE at reserve time, so that a heap committing 64 KB at a
  *    time commits file pages (a hole reads as zero).
+ *  - broad (ml1257, device-verified: Metro 2033 Redux 3.3 -> 2.7 GB footprint):
+ *    every fresh reservation of at least the floor (default 4 MB) up to 8 GB is
+ *    backed WHOLE when it is made, committed or not (PROT_NONE where not), so
+ *    every later commit inside it -- any size -- is an mprotect of file pages.
+ *    Red Dead Redemption 2 reserves big and commits in small pieces; Metro 2033 Redux's heap never reaches
+ *    the guest band at all. Commits of at least the floor elsewhere are backed
+ *    too. Any address below FEX's band [0x7c, 0x80) except the JIT pool and the
+ *    FEX arena. The file is a 128 GB sparse offset space and swap-mb caps the
+ *    DISK it occupies (st_blocks), checked before each new backing. The cap is
+ *    soft: dirty pages not yet written back are not in st_blocks, and a
+ *    reservation backed before the cap was reached goes on committing.
+ *    ml1258 churn filter (rule of ml1226): a size whose backed blocks die
+ *    within 3 s of backing at least 8 times, and in at least half of its
+ *    backings, stays anonymous from then on (Metro 2033 Redux reserved and freed 4 and
+ *    16 MB blocks ~9 times a second: 1834 backings against ~170 lasting ones,
+ *    every touched page a file fault and every free a 4-16 MB F_PUNCHHOLE).
  *  - classic (the default, spelled out): a single commit of at least 8 MB in the
  *    guest band, exactly as ml1077, including the plain free list and no census.
- * blocks and wide never back the FEX arena, the JIT pool, placeholders or
+ *    madeira.cfg swap-min-mb = N moves that floor (ml1257).
+ * madeira.cfg swap-min-mb also sets the floor of blocks, wide and broad unless
+ * MADEIRA_SWAP_MIN_KB does. A decommit wholly inside a reservation extent (wide
+ * or broad) punches the file range in place instead of replacing it with
+ * anonymous memory, so the backing survives decommit/recommit (ml1257).
+ * blocks, wide and broad never back the FEX arena, the JIT pool, placeholders or
  * ARM64EC views, return freed file ranges merged with their free neighbours
  * (a range ending at the bump pointer lowers it), and print a [swap] census
  * line at most every 30 s while anything changed: file-backed now/peak, file
@@ -14605,17 +14635,35 @@ static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swa
  * not backed, and phys_footprint. The line is built in a stack buffer and
  * written with write(2); nothing here allocates. */
 enum { IOS_SW_BACKED, IOS_SW_SMALL, IOS_SW_BAND, IOS_SW_FEXJIT, IOS_SW_PROT, IOS_SW_VIEW,
-       IOS_SW_RECOMMIT, IOS_SW_PRESENT, IOS_SW_REFUSED, IOS_SW_MAPFAIL, IOS_SW_REASONS };
+       IOS_SW_RECOMMIT, IOS_SW_PRESENT, IOS_SW_REFUSED, IOS_SW_MAPFAIL, IOS_SW_CHURN, IOS_SW_REASONS };
 static const char * const ios_swap_reason_name[IOS_SW_REASONS] =
-    { "backed", "small", "band", "fex/jit", "prot", "view", "recommit", "present", "refused", "mapfail" };
-static int         ios_swap_v2;               /* blocks or wide; 0 = classic */
+    { "backed", "small", "band", "fex/jit", "prot", "view", "recommit", "present", "refused", "mapfail", "churn" };
+static int         ios_swap_v2;               /* blocks, wide or broad; 0 = classic */
 static int         ios_swap_wide;
+static int         ios_swap_broad;            /* ml1257 */
 static size_t      ios_swap_min = 8u << 20;
 static size_t      ios_swap_resv_max = 256u << 20;
 static const char *ios_swap_mode = "classic";
+static uint64_t    ios_swap_logical;          /* file offset space: the cap, or 128 GB sparse in broad */
 static unsigned long long ios_swap_why_bytes[IOS_SW_REASONS];
 static unsigned long long ios_swap_resv_bytes, ios_swap_resv_n, ios_swap_merges, ios_swap_bump_back, ios_swap_free_drop;
+static unsigned long long ios_swap_holes, ios_swap_disk_refused, ios_swap_churn_skips;   /* ml1257 / ml1258 */
+#define IOS_SWAP_CHURN_NS (3ull * 1000000000ull)
+/* ml1226: hits = young deaths, backs = backings of the size; see ios_swap_churny */
+static struct { size_t size; unsigned hits; unsigned backs; } ios_swap_churn[64];
+static unsigned ios_swap_nchurn;    /* sizes tracked */
+static unsigned ios_swap_nchurny;   /* sizes left anonymous */
+#define IOS_SWAP_CHURN_MIN_YOUNG 8
+/* ml1221: broad, the bytes of fresh reservations NOT taken whole, by reason (the
+ * commit and reserve rules may still back parts of them). In the census. */
+enum { IOS_SWK_PROT, IOS_SWK_VIEW, IOS_SWK_SMALL, IOS_SWK_BIG, IOS_SWK_FEXJIT, IOS_SWK_OVERLAP, IOS_SWK_CHURN, IOS_SWK_REASONS };
+static const char * const ios_swap_skip_name[IOS_SWK_REASONS] =
+    { "prot", "view", "small", "big", "fex/jit/band", "overlap", "churn" };
+static unsigned long long ios_swap_skip_bytes[IOS_SWK_REASONS];
+static void ios_swap_tick( int force );
 static unsigned long long ios_swap_footprint_mb( void );   /* after the core: Mach */
+static unsigned long long ios_swap_disk_used( void );      /* after the core: fstat of the file (ml1257) */
+static void ios_swap_cfg( int *mode, int *min_mb );        /* after the core: madeira.cfg swap-mode / swap-min-mb */
 
 static size_t ios_swap_env_size( const char *name, size_t def, unsigned shift, size_t lo, size_t hi )
 {
@@ -14631,16 +14679,35 @@ static size_t ios_swap_env_size( const char *name, size_t def, unsigned shift, s
 static void ios_swap_config( void )
 {
     const char *cov = getenv( "MADEIRA_SWAP_COVERAGE" );
-    ios_swap_v2 = 0; ios_swap_wide = 0; ios_swap_min = 8u << 20; ios_swap_mode = "classic";
-    /* classic is the default: blocks and wide back far more of a game's memory with
-     * the file, and a game can run slower for it, so they are opt-in. Any other
-     * value also means classic. */
-    if (!cov || ((cov[0] | 0x20) != 'b' && (cov[0] | 0x20) != 'w')) return;
+    int cfg_mode = 1, cfg_min_mb = 0;
+    size_t cfg_min;
+    char c;
+    ios_swap_cfg( &cfg_mode, &cfg_min_mb );
+    cfg_min = cfg_min_mb > 0 ? (size_t)cfg_min_mb << 20 : 0;
+    ios_swap_v2 = 0; ios_swap_wide = 0; ios_swap_broad = 0; ios_swap_min = 8u << 20; ios_swap_mode = "classic";
+    ios_swap_resv_max = 256u << 20;
+    /* the env names the coverage when set; otherwise madeira.cfg swap-mode = 2
+     * (ml1257) means broad. classic is the default: the wider modes back far more
+     * of a game's memory with the file, and a game can run slower for it, so
+     * they are opt-in. Any other value also means classic. */
+    if (cov && *cov) c = (char)(cov[0] | 0x20);
+    else c = cfg_mode >= 2 ? 'r' : 'c';
+    if (c == 'b' && cov && cov[1] && (cov[1] | 0x20) == 'r') c = 'r';   /* "broad", not "blocks" */
+    if (c != 'b' && c != 'w' && c != 'r')
+    {
+        if (cfg_min) ios_swap_min = cfg_min;   /* ml1257: swap-min-mb applies to classic too */
+        return;
+    }
     ios_swap_v2 = 1;
-    ios_swap_wide = cov && (cov[0] | 0x20) == 'w';
-    ios_swap_mode = ios_swap_wide ? "wide" : "blocks";
-    ios_swap_min = ios_swap_env_size( "MADEIRA_SWAP_MIN_KB", 1u << 20, 10, 64u << 10, (size_t)1 << 32 );
-    ios_swap_resv_max = ios_swap_env_size( "MADEIRA_SWAP_RESERVE_MAX_MB", 256u << 20, 20, 1u << 20, (size_t)1 << 32 );
+    ios_swap_wide = c == 'w';
+    ios_swap_broad = c == 'r';
+    ios_swap_mode = ios_swap_broad ? "broad" : ios_swap_wide ? "wide" : "blocks";
+    ios_swap_min = ios_swap_env_size( "MADEIRA_SWAP_MIN_KB", cfg_min ? cfg_min : ios_swap_broad ? 4u << 20 : 1u << 20,
+                                      10, 64u << 10, (size_t)1 << 32 );
+    if (ios_swap_broad)
+        ios_swap_resv_max = ios_swap_env_size( "MADEIRA_SWAP_RESERVE_MAX_MB", (size_t)8 << 30, 20, 1u << 20, (size_t)8 << 30 );
+    else
+        ios_swap_resv_max = ios_swap_env_size( "MADEIRA_SWAP_RESERVE_MAX_MB", 256u << 20, 20, 1u << 20, (size_t)1 << 32 );
 }
 
 static void ios_swap_init( void )
@@ -14655,15 +14722,23 @@ static void ios_swap_init( void )
     if (ios_swap_cap < (64ull << 20)) return;
     ios_swap_fd = open( f, O_RDWR | O_CLOEXEC );
     if (ios_swap_fd < 0) { dprintf( 2, "[swap] ml1077 cannot open %s (errno %d): tier OFF\n", f, errno ); return; }
-    if (ftruncate( ios_swap_fd, (off_t)ios_swap_cap )) { dprintf( 2, "[swap] ml1077 ftruncate failed (errno %d): tier OFF\n", errno ); close( ios_swap_fd ); ios_swap_fd = -1; return; }
-    dprintf( 2, "[swap] ml1077 file-backed guest data tier ON: %s, cap %llu MB\n", f, (unsigned long long)(ios_swap_cap >> 20) );
     ios_swap_config();
+    ios_swap_logical = ios_swap_cap;
+    if (ios_swap_broad && ios_swap_logical < (128ull << 30))
+    {
+        /* ml1257: sparse, so the size costs nothing; whole reservations draw on it */
+        if (!ftruncate( ios_swap_fd, (off_t)(128ull << 30) )) ios_swap_logical = 128ull << 30;
+        else dprintf( 2, "[swap] ml1257 cannot size the sparse file to 128 GB (errno %d): offset space = cap\n", errno );
+    }
+    if (ios_swap_logical == ios_swap_cap && ftruncate( ios_swap_fd, (off_t)ios_swap_cap )) { dprintf( 2, "[swap] ml1077 ftruncate failed (errno %d): tier OFF\n", errno ); close( ios_swap_fd ); ios_swap_fd = -1; return; }
+    dprintf( 2, "[swap] ml1077 file-backed guest data tier ON: %s, cap %llu MB\n", f, (unsigned long long)(ios_swap_cap >> 20) );
     if (ios_swap_v2)
-        dprintf( 2, "[swap] coverage=%s min=%zuKB reserve-max=%zuMB (MADEIRA_SWAP_COVERAGE=classic|blocks|wide, "
-                    "MADEIRA_SWAP_MIN_KB, MADEIRA_SWAP_RESERVE_MAX_MB)\n",
-                 ios_swap_mode, ios_swap_min >> 10, ios_swap_resv_max >> 20 );
+        dprintf( 2, "[swap] coverage=%s min=%zuKB reserve-max=%zuMB (MADEIRA_SWAP_COVERAGE=classic|blocks|wide|broad, "
+                    "MADEIRA_SWAP_MIN_KB, MADEIRA_SWAP_RESERVE_MAX_MB; madeira.cfg swap-mode, swap-min-mb)%s\n",
+                 ios_swap_mode, ios_swap_min >> 10, ios_swap_resv_max >> 20,
+                 ios_swap_broad ? " -- ml1257 broad: whole reservations below FEX, holes on decommit, swap-mb caps the disk" : "" );
     else
-        dprintf( 2, "[swap] coverage=classic: 8 MB commits in the guest band, no census\n" );
+        dprintf( 2, "[swap] coverage=classic: %zu MB commits in the guest band, no census\n", ios_swap_min >> 20 );
 }
 static uint64_t ios_swap_take( size_t len )
 {
@@ -14677,11 +14752,11 @@ static uint64_t ios_swap_take( size_t len )
         else ios_swap_free[best] = ios_swap_free[--ios_swap_nfree];
         return off;
     }
-    if (ios_swap_bump + len > ios_swap_cap) return (uint64_t)-1;
+    if (ios_swap_bump + len > ios_swap_logical) return (uint64_t)-1;
     ios_swap_bump += len;
     return ios_swap_bump - len;
 }
-/* Return a file range to the free list. blocks/wide: merged with the free
+/* Return a file range to the free list. blocks/wide/broad: merged with the free
  * ranges it touches, and a range ending at the bump pointer lowers it. */
 static void ios_swap_free_add( uint64_t off, uint64_t len )
 {
@@ -14722,6 +14797,68 @@ static void ios_swap_give( uint64_t off, size_t len )
     }
     ios_swap_free_add( off, len );
 }
+static uint64_t ios_swap_now_ns( void )
+{
+    struct timespec ts;
+#ifdef CLOCK_UPTIME_RAW
+    clock_gettime( CLOCK_UPTIME_RAW, &ts );   /* ml1258: what the filter was measured with */
+#else
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+/* ml1258, broad only: a size whose backed blocks die young stays anonymous.
+ * ml1226: "twice" was too eager. Ori and the Will of the Wisps freed 13 backed
+ * blocks in a 4.5-minute run, and two early young deaths each took 0x410000,
+ * 0xfd0000, 0x1010000 and 0x4010000 out of the tier for good: 689 later blocks
+ * of those sizes, ~1 GB of long-lived Unity heap, stayed anonymous and the game
+ * was jetsammed. A size is churny now only after IOS_SWAP_CHURN_MIN_YOUNG young
+ * deaths that are also at least half of its backings -- Metro 2033 Redux's 4 and 16 MB
+ * blocks (~9 deaths a second, 1834 backings against ~170 lasting) still qualify
+ * within a second. Once churny a size gets no more backings, so it stays so. */
+static int ios_swap_churn_find( size_t size, int add )
+{
+    unsigned i;
+    for (i = 0; i < ios_swap_nchurn; i++) if (ios_swap_churn[i].size == size) return (int)i;
+    if (!add || ios_swap_nchurn == 64) return -1;
+    ios_swap_churn[ios_swap_nchurn].size = size;
+    ios_swap_churn[ios_swap_nchurn].hits = 0;
+    ios_swap_churn[ios_swap_nchurn].backs = 0;
+    return (int)ios_swap_nchurn++;
+}
+static int ios_swap_churn_is( unsigned i )
+{
+    return ios_swap_churn[i].hits >= IOS_SWAP_CHURN_MIN_YOUNG &&
+           ios_swap_churn[i].hits * 2 >= ios_swap_churn[i].backs;
+}
+static int ios_swap_churny( size_t size )
+{
+    int i;
+    if (!ios_swap_broad) return 0;
+    i = ios_swap_churn_find( size, 0 );
+    return i >= 0 && ios_swap_churn_is( (unsigned)i );
+}
+static void ios_swap_churn_backed( size_t size )
+{
+    int i;
+    if (!ios_swap_broad) return;
+    if ((i = ios_swap_churn_find( size, 1 )) >= 0) ios_swap_churn[i].backs++;
+}
+static void ios_swap_churn_note( size_t size, uint64_t lived_ns )
+{
+    int i = ios_swap_churn_find( size, 1 ), was;
+    if (i < 0) return;
+    was = ios_swap_churn_is( (unsigned)i );
+    ios_swap_churn[i].hits++;
+    if (!was && ios_swap_churn_is( (unsigned)i ))
+    {
+        ios_swap_nchurny++;
+        dprintf( 2, "[swap] ml1226 churn: %u of %u backed blocks of 0x%zx were freed young (the last within %llu ms) -- "
+                    "that size stays anonymous from now on (%u sizes)\n",
+                 ios_swap_churn[i].hits, ios_swap_churn[i].backs, size,
+                 (unsigned long long)(lived_ns / 1000000), ios_swap_nchurny );
+    }
+}
 static int ios_swap_eligible( const void *base, size_t size, unsigned int vprot, struct file_view *view )
 {
     uintptr_t b = (uintptr_t)base;
@@ -14729,10 +14866,10 @@ static int ios_swap_eligible( const void *base, size_t size, unsigned int vprot,
     if (!(vprot & VPROT_WRITE) || (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD | VPROT_WRITEWATCH))) return 0;
     if (!view || !is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM))) return 0;
     if (b < 0x7000000000ULL || b >= 0x7c00000000ULL) return 0;   /* the guest band only */
-    if (size < (8u << 20)) return 0;
+    if (size < ios_swap_min) return 0;   /* 8 MB unless madeira.cfg swap-min-mb (ml1257) */
     return 1;
 }
-/* blocks/wide: why a range is (not) eligible; the census counts by this. */
+/* blocks/wide/broad: why a range is (not) eligible; the census counts by this. */
 static int ios_swap_is_fexjit( uintptr_t b, size_t size )
 {
     uintptr_t e = b + size, rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
@@ -14750,10 +14887,13 @@ static int ios_swap_why( const void *base, size_t size, unsigned int vprot, stru
         (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM | VPROT_PLACEHOLDER |
                           VPROT_FREE_PLACEHOLDER | VPROT_ARM64EC | VPROT_WRITEWATCH))) return IOS_SW_VIEW;
     if (ios_swap_is_fexjit( b, size )) return IOS_SW_FEXJIT;
-    if (!ios_swap_wide && (b < 0x7000000000ULL || b >= 0x7c00000000ULL)) return IOS_SW_BAND;
+    if (ios_swap_broad) { if (b + size > 0x7c00000000ULL) return IOS_SW_BAND; }   /* ml1257: FEX's band and above */
+    else if (!ios_swap_wide && (b < 0x7000000000ULL || b >= 0x7c00000000ULL)) return IOS_SW_BAND;
     if (size < ios_swap_min) return IOS_SW_SMALL;
+    if (ios_swap_churny( size )) { ios_swap_churn_skips++; return IOS_SW_CHURN; }   /* ml1258 */
     return IOS_SW_BACKED;
 }
+static const char *ios_swap_map_tag = "";   /* ml1257: the "backed" log line names whole reservations */
 /* Map the host-page interior of [base, base+size) from the file with
  * unix_prot. Returns IOS_SW_BACKED, IOS_SW_SMALL, IOS_SW_REFUSED or IOS_SW_MAPFAIL. */
 static int ios_swap_map( void *base, size_t size, int unix_prot )
@@ -14763,6 +14903,8 @@ static int ios_swap_map( void *base, size_t size, int unix_prot )
     size_t len; uint64_t off; void *p;
     if (he <= hs) return IOS_SW_SMALL;
     if (ios_swap_n >= 16384) { if (ios_swap_v2) ios_swap_refused++; return IOS_SW_REFUSED; }
+    /* ml1257: in broad the cap is the disk the sparse file really occupies */
+    if (ios_swap_broad && ios_swap_disk_used() >= ios_swap_cap) { ios_swap_disk_refused++; ios_swap_refused++; return IOS_SW_REFUSED; }
     len = he - hs;
     off = ios_swap_take( len );
     if (off == (uint64_t)-1) { ios_swap_refused++; return IOS_SW_REFUSED; }
@@ -14774,7 +14916,10 @@ static int ios_swap_map( void *base, size_t size, int unix_prot )
         ios_swap_give( off, len );
         return IOS_SW_MAPFAIL;
     }
-    ios_swap_ext[ios_swap_n].va = hs; ios_swap_ext[ios_swap_n].len = len; ios_swap_ext[ios_swap_n].off = off; ios_swap_n++;
+    ios_swap_ext[ios_swap_n].va = hs; ios_swap_ext[ios_swap_n].len = len; ios_swap_ext[ios_swap_n].off = off;
+    ios_swap_ext[ios_swap_n].resv = 0; ios_swap_ext[ios_swap_n].key = size;
+    ios_swap_ext[ios_swap_n].born = ios_swap_broad ? ios_swap_now_ns() : 0; ios_swap_n++;
+    ios_swap_churn_backed( size );   /* ml1226 */
     ios_swap_bytes += len; if (ios_swap_bytes > ios_swap_peak) ios_swap_peak = ios_swap_bytes;
     ios_swap_backs++;
     /* ml1081: NO page touches under virtual_mutex. ml1078's first-touch timing loop
@@ -14784,9 +14929,10 @@ static int ios_swap_map( void *base, size_t size, int unix_prot )
      * measured the touch cost anyway: 2-40 us/page, no throttle up to 1.5 GB dirty
      * (6-9 GB/s then 2.6 GB/s). Whatever blocked that page-in, nothing that can
      * block may run while this lock is held. */
-    if (ios_swap_backs <= 16 || (ios_swap_backs % 64) == 0)
-        dprintf( 2, "[swap] ml1077 backed %p+0x%zx (file off %llu MB): %llu MB in %u extents, peak %llu MB, %llu refused\n",
-                 hs, len, (unsigned long long)(off >> 20), ios_swap_bytes >> 20, ios_swap_n, ios_swap_peak >> 20, ios_swap_refused );
+    /* ml1221: and every extent of 64 MB or more, so the big heaps are always named */
+    if (ios_swap_backs <= 16 || (ios_swap_backs % 64) == 0 || len >= (64u << 20))
+        dprintf( 2, "[swap] ml1077 backed %p+0x%zx%s (file off %llu MB): %llu MB in %u extents, peak %llu MB, %llu refused\n",
+                 hs, len, ios_swap_map_tag, (unsigned long long)(off >> 20), ios_swap_bytes >> 20, ios_swap_n, ios_swap_peak >> 20, ios_swap_refused );
     return IOS_SW_BACKED;
 }
 static void ios_swap_back( void *base, size_t size, unsigned int vprot )
@@ -14809,15 +14955,18 @@ static void ios_swap_back( void *base, size_t size, unsigned int vprot )
  * granular, the extents are host-page (16 KB) aligned, and one host page can
  * only be mapped from one object: an edge inside a backed host page moves that
  * whole host page to anonymous memory, contents of its other guest pages
- * included, and the pages' own protections are re-applied afterwards (the
- * caller has already set them; a guard request leaves them PROT_NONE, so the
- * source is made readable for the copy). Without a copy buffer or a fresh
- * anonymous mapping the range stays file-backed instead of losing its data. */
+ * included, and the pages' own protections are re-applied afterwards.
+ * set_protection() calls this BEFORE set_vprot (ml1257), so those are still the
+ * old protections and set_vprot then applies the new ones to anonymous memory;
+ * a source page that is not readable (uncommitted inside a reservation extent,
+ * or a guard page) is made readable for the copy. Without a copy buffer or a
+ * fresh anonymous mapping the range stays file-backed instead of losing its data. */
 static void ios_swap_release_range( void *base, size_t size, int copy_back )
 {
     char *lo = (char *)base, *hi = (char *)base + size;
     unsigned i = 0;
     unsigned long long releases_before = ios_swap_releases;
+    uint64_t noted_born = 0;   /* ml1258: pieces of one split extent are one death */
     if (ios_swap_fd < 0 || !ios_swap_n) return;
     if (copy_back)
     {
@@ -14864,11 +15013,22 @@ static void ios_swap_release_range( void *base, size_t size, int copy_back )
             ios_swap_bytes -= olen;
             ios_swap_releases++;
             /* trim the extent: up to two remaining pieces */
-            if (oa == a && ob == b) { ios_swap_ext[i] = ios_swap_ext[--ios_swap_n]; continue; }
+            if (oa == a && ob == b)
+            {
+                if (!copy_back && ios_swap_broad && ios_swap_ext[i].born != noted_born)   /* ml1258: freed whole; how long did it live? */
+                {
+                    uint64_t lived = ios_swap_now_ns() - ios_swap_ext[i].born;
+                    noted_born = ios_swap_ext[i].born;
+                    if (lived < IOS_SWAP_CHURN_NS) ios_swap_churn_note( ios_swap_ext[i].key, lived );
+                }
+                ios_swap_ext[i] = ios_swap_ext[--ios_swap_n];
+                continue;
+            }
             if (oa == a) { ios_swap_ext[i].va = ob; ios_swap_ext[i].off += olen; ios_swap_ext[i].len -= olen; i++; continue; }
             if (ob == b) { ios_swap_ext[i].len = oa - a; i++; continue; }
             if (ios_swap_n < 16384)
             {
+                ios_swap_ext[ios_swap_n] = ios_swap_ext[i];   /* resv, key, born carry over */
                 ios_swap_ext[ios_swap_n].va = ob; ios_swap_ext[ios_swap_n].off = ios_swap_ext[i].off + (ob - a);
                 ios_swap_ext[ios_swap_n].len = b - ob; ios_swap_n++;
             }
@@ -14878,6 +15038,37 @@ static void ios_swap_release_range( void *base, size_t size, int copy_back )
     if (ios_swap_releases != releases_before && (ios_swap_releases <= 16 || (ios_swap_releases % 64) == 0))
         dprintf( 2, "[swap] ml1077 released %p+0x%zx%s: %llu MB in %u extents, %llu releases, %llu unbacks\n",
                  base, size, copy_back ? " (copied back to anonymous)" : "", ios_swap_bytes >> 20, ios_swap_n, ios_swap_releases, ios_swap_unbacks );
+}
+/* ml1257: decommit inside a reservation extent. Punch the file range -- the
+ * mapping stays, and a hole reads as zero -- instead of replacing it with
+ * anonymous memory, which would leave every recommit anonymous. RW afterwards,
+ * exactly like decommit_pages' anonymous mmap-over. 0 = not wholly inside one
+ * reservation extent (or the punch failed): the caller releases as before.
+ * [lo, lo+len) is host-page aligned (decommit_pages' host interior). */
+static int ios_swap_punch_resv( char *lo, size_t len )
+{
+    unsigned i;
+    if (ios_swap_fd < 0 || !ios_swap_n) return 0;
+    for (i = 0; i < ios_swap_n; i++)
+    {
+        char *a = ios_swap_ext[i].va;
+        struct fpunchhole ph;
+        if (!ios_swap_ext[i].resv || lo < a || lo + len > a + ios_swap_ext[i].len) continue;
+        memset( &ph, 0, sizeof(ph) );
+        ph.fp_offset = (off_t)(ios_swap_ext[i].off + (lo - a));
+        ph.fp_length = (off_t)len;
+        if (fcntl( ios_swap_fd, F_PUNCHHOLE, &ph ))
+        {
+            static int said;
+            if (said++ < 8) dprintf( 2, "[swap] ml1257 hole %p+0x%zx failed errno=%d: releasing instead\n", lo, len, errno );
+            return 0;
+        }
+        mprotect( lo, len, PROT_READ | PROT_WRITE );
+        if (++ios_swap_holes <= 8 || (ios_swap_holes % 1024) == 0)
+            dprintf( 2, "[swap] ml1257 decommit %p+0x%zx punched in place (%llu holes)\n", lo, len, ios_swap_holes );
+        return 1;
+    }
+    return 0;
 }
 static int ios_swap_overlaps( const void *base, size_t size )
 {
@@ -14889,10 +15080,19 @@ static int ios_swap_overlaps( const void *base, size_t size )
 int ios_swap_overlaps_probe( const void *base, size_t size ) { return ios_swap_overlaps( base, size ); }
 void ios_swap_stats_line( void )
 {
+    unsigned long long disk;
     if (ios_swap_fd < 0) return;
-    dprintf( 2, "[swap] ml1077 stats: %llu MB file-backed now (peak %llu), %u extents, file used %llu of %llu MB, backs %llu releases %llu unbacks %llu refused %llu\n",
+    disk = ios_swap_disk_used();
+    dprintf( 2, "[swap] ml1077 stats: %llu MB file-backed now (peak %llu), %u extents, file used %llu of %llu MB, backs %llu releases %llu unbacks %llu refused %llu"
+             " | coverage %s: disk %llu MB of %llu cap, reservations %llu, holes %llu, disk-full refusals %llu"
+             " | ml1258 churn: %u sizes, %llu blocks left anonymous\n",
              ios_swap_bytes >> 20, ios_swap_peak >> 20, ios_swap_n, (unsigned long long)(ios_swap_bump >> 20),
-             (unsigned long long)(ios_swap_cap >> 20), ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused );
+             (unsigned long long)(ios_swap_logical >> 20), ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused,
+             ios_swap_mode, disk >> 20, (unsigned long long)(ios_swap_cap >> 20), ios_swap_resv_n, ios_swap_holes,
+             ios_swap_disk_refused, ios_swap_nchurny, ios_swap_churn_skips );
+    /* ml1221: the census (bytes by reason) with every stats line, ~10 s, not only
+     * after its own 30 s: Ori and the Will of the Wisps was jetsammed at 26 s and never printed one. */
+    ios_swap_tick( 1 );
 }
 /* The census line, formatted by hand into a stack buffer (no stdio, no heap). */
 static char *ios_swap_put( char *p, char *end, const char *s )
@@ -14908,14 +15108,14 @@ static char *ios_swap_put_u( char *p, char *end, unsigned long long v )
     while (n && p < end) *p++ = t[--n];
     return p;
 }
-/* blocks/wide: print the census when 30 s have passed since the last check
+/* blocks/wide/broad: print the census when 30 s have passed since the last check
  * and anything changed (or 5 min passed); force prints now. */
 static void ios_swap_tick( int force )
 {
     static unsigned long long next_s, last_sum, last_print_s;
     struct timespec ts;
-    unsigned long long now_s, sum = ios_swap_bytes + ios_swap_backs + ios_swap_releases + ios_swap_refused + ios_swap_resv_n;
-    char line[640], *p = line, *end = line + sizeof(line) - 1;
+    unsigned long long now_s, sum = ios_swap_bytes + ios_swap_backs + ios_swap_releases + ios_swap_refused + ios_swap_resv_n + ios_swap_holes;
+    char line[768], *p = line, *end = line + sizeof(line) - 1;
     int i;
     if (ios_swap_fd < 0 || !ios_swap_v2) return;
     clock_gettime( CLOCK_MONOTONIC, &ts );
@@ -14941,7 +15141,19 @@ static void ios_swap_tick( int force )
     }
     p = ios_swap_put( p, end, " | reserve-backed " ); p = ios_swap_put_u( p, end, ios_swap_resv_n );
     p = ios_swap_put( p, end, " (" );                 p = ios_swap_put_u( p, end, ios_swap_resv_bytes >> 20 );
-    p = ios_swap_put( p, end, "MB) | footprint=" );   p = ios_swap_put_u( p, end, ios_swap_footprint_mb() );
+    p = ios_swap_put( p, end, "MB) holes=" );         p = ios_swap_put_u( p, end, ios_swap_holes );
+    if (ios_swap_broad)
+    {
+        p = ios_swap_put( p, end, " disk=" );         p = ios_swap_put_u( p, end, ios_swap_disk_used() >> 20 );
+        p = ios_swap_put( p, end, "MB churn-sizes=" ); p = ios_swap_put_u( p, end, ios_swap_nchurny );
+        p = ios_swap_put( p, end, " | reservations not taken whole MB:" );   /* ml1221 */
+        for (i = 0; i < IOS_SWK_REASONS; i++)
+        {
+            p = ios_swap_put( p, end, " " ); p = ios_swap_put( p, end, ios_swap_skip_name[i] );
+            p = ios_swap_put( p, end, "=" ); p = ios_swap_put_u( p, end, ios_swap_skip_bytes[i] >> 20 );
+        }
+    }
+    p = ios_swap_put( p, end, " | footprint=" );      p = ios_swap_put_u( p, end, ios_swap_footprint_mb() );
     p = ios_swap_put( p, end, "MB coverage=" );       p = ios_swap_put( p, end, ios_swap_mode );
     p = ios_swap_put( p, end, " min=" );              p = ios_swap_put_u( p, end, ios_swap_min >> 10 );
     p = ios_swap_put( p, end, "KB\n" );
@@ -14961,7 +15173,7 @@ static void ios_swap_commit( void *base, size_t size, unsigned int vprot, struct
     int why;
     if (ios_swap_fd < 0) return;
     if (!ios_swap_v2) { if (ios_swap_eligible( base, size, vprot, view )) ios_swap_back( base, size, vprot ); return; }
-    if (ios_swap_wide && ios_swap_n && ios_swap_overlaps( base, size )) { ios_swap_note( IOS_SW_PRESENT, size ); return; }
+    if ((ios_swap_wide || ios_swap_broad) && ios_swap_n && ios_swap_overlaps( base, size )) { ios_swap_note( IOS_SW_PRESENT, size ); return; }
     why = ios_swap_why( base, size, vprot, view );
     if (why == IOS_SW_BACKED) why = ios_swap_map( base, size, get_unix_prot( vprot | VPROT_COMMITTED ) );   /* ml1082 */
     ios_swap_note( why, size );
@@ -14975,9 +15187,50 @@ static void ios_swap_reserve( void *base, size_t size, unsigned int vprot, struc
     if ((vprot & VPROT_COMMITTED) || size > ios_swap_resv_max) return;
     if (ios_swap_why( base, size, vprot, view ) != IOS_SW_BACKED) return;
     if (ios_swap_map( base, size, get_unix_prot( vprot ) ) != IOS_SW_BACKED) return;
+    /* ml1257: decommit inside it punches in place, like broad's reservations, so a
+     * small recommit stays file-backed instead of splitting the extent (wide has not
+     * run on a device yet). */
+    ios_swap_ext[ios_swap_n - 1].resv = 1;
     ios_swap_resv_n++;
     ios_swap_resv_bytes += size;
     ios_swap_tick( 0 );
+}
+/* ml1257 broad: back a whole NEW reservation when it is made, committed or not,
+ * with the protection its pages have now (PROT_NONE where not committed), so
+ * every commit inside it is an mprotect of file pages and a decommit a hole.
+ * Returns 1 when it handled the view (backed, or refused by the file), 0 to let
+ * the caller apply the commit/reserve rules. The caller has already excluded
+ * ARM64EC code reservations and force_exec_prot. */
+static int ios_swap_whole_resv( struct file_view *view, unsigned int vprot )
+{
+    uintptr_t b;
+    int why;
+    if (ios_swap_fd < 0 || !ios_swap_broad) return 0;
+    b = (uintptr_t)view->base;
+    if (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD | VPROT_WRITEWATCH | VPROT_PLACEHOLDER))
+    { ios_swap_skip_bytes[IOS_SWK_PROT] += view->size; return 0; }
+    if (!is_view_valloc( view ) || (view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | VPROT_SYSTEM | VPROT_WRITEWATCH |
+                                                     VPROT_PLACEHOLDER | VPROT_FREE_PLACEHOLDER | VPROT_ARM64EC)))
+    { ios_swap_skip_bytes[IOS_SWK_VIEW] += view->size; return 0; }
+    if (view->size < ios_swap_min) { ios_swap_skip_bytes[IOS_SWK_SMALL] += view->size; return 0; }
+    if (view->size > ios_swap_resv_max) { ios_swap_skip_bytes[IOS_SWK_BIG] += view->size; return 0; }
+    if (ios_swap_is_fexjit( b, view->size ) || b + view->size > 0x7c00000000ULL)
+    { ios_swap_skip_bytes[IOS_SWK_FEXJIT] += view->size; return 0; }
+    if (ios_swap_n && ios_swap_overlaps( view->base, view->size )) { ios_swap_skip_bytes[IOS_SWK_OVERLAP] += view->size; return 0; }
+    if (ios_swap_churny( view->size ))   /* ml1258 */
+    { ios_swap_churn_skips++; ios_swap_skip_bytes[IOS_SWK_CHURN] += view->size; return 0; }
+    ios_swap_map_tag = " (whole reservation, ml1257)";
+    why = ios_swap_map( view->base, view->size, get_unix_prot( vprot ) );
+    ios_swap_map_tag = "";
+    if (why == IOS_SW_BACKED)
+    {
+        ios_swap_ext[ios_swap_n - 1].resv = 1;
+        ios_swap_resv_n++;
+        ios_swap_resv_bytes += view->size;
+    }
+    if (vprot & VPROT_COMMITTED) ios_swap_note( why, view->size );
+    else ios_swap_tick( 0 );
+    return 1;
 }
 /* swap-tier core end */
 static unsigned long long ios_swap_footprint_mb( void )
@@ -14986,6 +15239,21 @@ static unsigned long long ios_swap_footprint_mb( void )
     mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
     if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &c ) != KERN_SUCCESS) return 0;
     return (unsigned long long)vmi.phys_footprint >> 20;
+}
+/* ml1257: the disk the sparse file really occupies (fstat: no page touches) */
+static unsigned long long ios_swap_disk_used( void )
+{
+    struct stat st;
+    if (ios_swap_fd < 0 || fstat( ios_swap_fd, &st )) return 0;
+    return (unsigned long long)st.st_blocks * 512;
+}
+
+/* ml1257: madeira.cfg swap-mode = 2 selects broad coverage (when
+ * env.MADEIRA_SWAP_COVERAGE is unset); swap-min-mb = N sets the floor. */
+static void ios_swap_cfg( int *mode, int *min_mb )
+{
+    *mode = (int)madeira_cfg_int( "swap-mode", 1 );       /* ml1257: madeira.cfg swap-mode = 2 */
+    *min_mb = (int)madeira_cfg_int( "swap-min-mb", 0 );   /* ml1257: madeira.cfg swap-min-mb = N */
 }
 
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
@@ -15081,11 +15349,16 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
         }
         else if (host_start < host_end)
         {
-            ios_swap_release_range( host_start, host_end - host_start, 0 );   /* ml1077 */
-            anon_mmap_fixed( host_start, host_end - host_start, PROT_READ | PROT_WRITE, 0 );
-            dc_branch = "mmap-over";
-            dc_verify = host_start;
-            dc_vsize  = host_end - host_start;
+            if (ios_swap_punch_resv( host_start, host_end - host_start ))   /* ml1257 */
+                dc_branch = "swap-hole";   /* no read-back: no file-page touches under the lock (ml1081) */
+            else
+            {
+                ios_swap_release_range( host_start, host_end - host_start, 0 );   /* ml1077 */
+                anon_mmap_fixed( host_start, host_end - host_start, PROT_READ | PROT_WRITE, 0 );
+                dc_branch = "mmap-over";
+                dc_verify = host_start;
+                dc_vsize  = host_end - host_start;
+            }
             /* Zero the guest sub-ranges on partial host pages the mmap-over
              * couldn't cover — FEX relies on decommit-as-bzero, and stale
              * LookupCache entries surviving at the edges would run wrong
@@ -15156,6 +15429,15 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
                                  dc_lo, dc_hi, dcbad_lo, dcbad_hi,
                                  b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7] );
                     }
+                }
+                else if (!strcmp( dc_branch, "swap-hole" ))
+                {
+                    /* ml1258: a punched hole reads as zero; it is not read back only
+                     * because that would fault file pages in under the lock. Rate-
+                     * limited like the OK lines (swap log 1 had one per decommit). */
+                    if (dc_n <= 8 || (dc_n % 4096) == 0)
+                        dprintf( 2, "[decommit-zero] #%lu base=%p size=0x%lx branch=swap-hole "
+                                 "(zero by hole, not read back)\n", dc_n, base, (unsigned long)size );
                 }
                 else
                     dprintf( 2, "[decommit-zero] #%lu base=%p size=0x%lx branch=%s "
@@ -19576,9 +19858,13 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
                 if (vprot & VPROT_EXEC || force_exec_prot) mprotect_range( base, size, 0, 0 );
                 ios_swap_init();
                 /* ml1077 commit-time backing (classic runs it unchanged); wide also backs a
-                 * writable reservation, never one for ARM64EC code */
-                if (type & MEM_COMMIT) ios_swap_commit( base, size, vprot, view );
-                else if (!(attributes & MEM_EXTENDED_PARAMETER_EC_CODE)) ios_swap_reserve( base, size, vprot, view );
+                 * writable reservation, never one for ARM64EC code. ml1257 broad backs the
+                 * whole new reservation, committed or not, so commits inside it are mprotects */
+                if (force_exec_prot || (attributes & MEM_EXTENDED_PARAMETER_EC_CODE) || !ios_swap_whole_resv( view, vprot ))
+                {
+                    if (type & MEM_COMMIT) ios_swap_commit( base, size, vprot, view );
+                    else if (!(attributes & MEM_EXTENDED_PARAMETER_EC_CODE)) ios_swap_reserve( base, size, vprot, view );
+                }
 
                 /* iOS-Madeira ml308 (task #54): DETECT VA HANDED OUT TWICE.
                  *

@@ -4,7 +4,21 @@
 # Environment exports: env.NAME = value. DXMT options: dxmt = a=b;c=d.
 
 # memory
+# ml1077 file-backed "swap": guest memory mapped from tmp/madeira-swap.bin, which
+# iOS does not charge to the jetsam footprint. OFF unless swap-mb >= 64 (MB cap).
+# Which allocations it backs: env.MADEIRA_SWAP_COVERAGE (Settings, "Swap tier coverage"):
+#   classic (default): single fresh commits >= 8 MB in the guest band.
+#   blocks / wide: upstream's 1 MB+ coverage, wide also backs overflow and reservations.
+#   broad (ml1257, device-verified on Metro 2033 Redux): whole reservations >= 4 MB anywhere below
+#     FEX's band; decommit punches holes in place; swap-mb caps the file's real disk use
+#     (a soft cap, checked when a block is backed); the churn filter (ml1258, ml1226)
+#     leaves block sizes that are mostly freed within 3 s anonymous.
+# With the env key unset, swap-mode = 2 still selects broad. swap-min-mb = N sets the
+# floor of every coverage (MADEIRA_SWAP_MIN_KB overrides it for blocks/wide/broad).
 swap-mb = 3072
+# env.MADEIRA_SWAP_COVERAGE = broad
+# swap-mode = 2
+# swap-min-mb = 4
 vram-mb = 1536
 pool = 640
 totalphys = 4096
