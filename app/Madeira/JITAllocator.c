@@ -370,10 +370,24 @@ void *jit_region_write(JITRegion *region, size_t offset, const void *code, size_
 
 // SIGTRAP handler: skips BRK instruction (PC += 4) and zeros x0.
 // This prevents crashes when BRK is executed without a debugger attached.
+// ml1233: only the JIT protocol's BRK #0xf00d (as Wine's handler does). Any other
+// trap is not ours -- a Swift runtime trap (precondition, force unwrap, overflow)
+// is BRK #1 -- and was skipped too, running on past it with x0 = 0. The handler
+// stays installed for the rest of the app run (from start-up without CS_DEBUGGED,
+// or from jit_arm_trap_fallback before a launch that then fails and keeps the app
+// up), so put the default action back and return: the instruction traps again and
+// the app crashes with a report.
 static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
-    (void)sig;
     (void)info;
     ucontext_t *uc = (ucontext_t *)context;
+    uint64_t pc = uc->uc_mcontext->__ss.__pc;
+    if ((pc & 3) || *(const uint32_t *)(uintptr_t)pc != 0xd43e01a0u /* brk #0xf00d */) {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigaction(sig, &dfl, NULL);
+        return;
+    }
     uc->uc_mcontext->__ss.__pc += 4;
     uc->uc_mcontext->__ss.__x[0] = 0;
 }
@@ -929,4 +943,42 @@ __attribute__((constructor(101), used)) static void madeira_early_va_claim(void)
             madeira_early_intruder_tag = info.user_tag; madeira_early_intruder_prot = (unsigned)info.protection;
         }
     }
+}
+
+/* ml1249: METAL API VALIDATION ON DEMAND.
+ *
+ * `metal-validation = 1` in Documents/madeira.cfg turns on Metal's own debug
+ * layer for this launch, reporting instead of aborting, and routes NSLog to
+ * stderr so the reports land in the Madeira log. It has to be in the
+ * environment before the first MTLDevice exists, and the app makes one for its
+ * CAMetalLayer long before madeira.cfg is otherwise read -- hence a
+ * constructor. Expensive: diagnostic runs only. */
+__attribute__((constructor(102), used)) static void madeira_metal_validation_opt_in(void)
+{
+    const char *home = getenv("HOME");
+    char path[1024], line[256];
+    FILE *f;
+    int on = 0;
+
+    if (!home) return;
+    snprintf(path, sizeof(path), "%s/Documents/madeira.cfg", home);
+    if (!(f = fopen(path, "r"))) return;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line, *k, *v;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#') continue;
+        if (strncmp(p, "metal-validation", 16) != 0) continue;
+        k = p + 16;
+        while (*k == ' ' || *k == '\t') k++;
+        if (*k != '=') continue;
+        v = k + 1;
+        while (*v == ' ' || *v == '\t') v++;
+        on = (*v == '1');          /* last line wins, like the rest of the file */
+    }
+    fclose(f);
+    if (!on) return;
+    setenv("MTL_DEBUG_LAYER", "1", 1);
+    setenv("MTL_DEBUG_LAYER_ERROR_MODE", "nslog", 1);
+    setenv("MTL_DEBUG_LAYER_WARNING_MODE", "nslog", 1);
+    setenv("CFLOG_FORCE_STDERR", "1", 1);
 }

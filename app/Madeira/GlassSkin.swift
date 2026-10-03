@@ -189,6 +189,8 @@ final class GlassSkin: NSObject {
                 for search in Self.searchBars(in: bar) { skinGlass(in: [search.layer], rimEverywhere: true) }
             }
         }
+        // ml1216: the link draws only while a pill is skinned (renderAll pauses it).
+        link?.isPaused = skins.isEmpty
     }
 
     /// A context menu from a bar button (the sort menu) grows out of the pill and, closing,
@@ -373,6 +375,10 @@ final class GlassSkin: NSObject {
         // render server clips the shape to that layer's bounds, and during a morph the
         // elements alone can be much wider than the pill.
         let fill = fillClass.init()
+        // ml1218: the fill effect is a plain NSObject, not a CALayer, so an unknown key
+        // throws NSUnknownKeyException (uncatchable in Swift) rather than being stored. If
+        // an iOS update drops the property, the pill keeps its glass instead.
+        guard fill.responds(to: NSSelectorFromString("setColor:")) else { return }
         fill.setValue(UIColor.white.cgColor, forKey: "color")
         guard let shape = sdfLayer(effect: fill, highlight: highlight, highlightPortal: highlightPortal, source: source) else { return }
 
@@ -484,6 +490,9 @@ final class GlassSkin: NSObject {
     // MARK: Rendering
 
     @objc private func renderAll() {
+        // ml1216: nothing skinned (no bar found yet): pause until attach() skins a pill,
+        // instead of a 60 Hz wakeup that only queued another commit handler.
+        guard !skins.isEmpty else { link?.isPaused = true; return }
         // A press can change the pill in a commit the run-loop observer does not precede.
         attachAgainAfterLayout()
         skins.removeAll { $0.container?.superlayer == nil || $0.group.superlayer == nil }

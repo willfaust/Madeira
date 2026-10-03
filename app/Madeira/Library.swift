@@ -1544,7 +1544,8 @@ struct AmbientGlow: View {
             .hueRotation(.degrees(f.hue))
             // In the dark the light adds to the page (plusLighter): a very bright artwork's
             // light is brought down at the top (AmbientGlow.metal) so it does not glare.
-            .colorEffect(ShaderLibrary.ambientKnee(.float(dark ? 0.3 : 0)))
+            // ml1219: off on a light page, where a knee of 0 left every pixel as it was.
+            .colorEffect(ShaderLibrary.ambientKnee(.float(0.3)), isEnabled: dark)
             .mask { AmbientMovie.mask(f.light) }
             .mask {
                 let turn = reduceMotion ? 0 : 1.2 * sin(t * 0.12 + Double(seed % 97))
@@ -1965,6 +1966,12 @@ struct LibraryView: View {
         .onAppear {
             LogStore.shared.log("[library-sections] native-steam=\(SteamOwnedLibrary.enabled ? 1 : 0) sections=\(SteamGamesSection.shown ? 1 : 0) collapse=\(SteamGamesSection.collapsible ? 1 : 0)")
         }
+        // ml1216: a session replaces the library (ContentView), and the skin's run-loop
+        // observer, display link and view walks kept running on the main thread through
+        // the whole game. Stop with the library; it starts again when the library returns
+        // on either tab (start() does nothing while liquid metal is off).
+        .onAppear { GlassSkin.shared.start() }
+        .onDisappear { GlassSkin.shared.stop() }
         .onReceive(controller.commands) { command in
             if selected == nil, !browser, !onboarding.presented, command == "tab" { switchTab(to: 1 - tab) }
         }
@@ -2100,6 +2107,9 @@ struct LibraryView: View {
                                 .shadow(color: (light ? Color.white : .black).opacity(0.75), radius: 2.5)
                                 .padding(.horizontal, 14).frame(minHeight: 44)
                                 .background(LiquidMetalFill())
+                                // ml1217: the fill does not hit-test, so without this only the
+                                // glyphs took a tap (the plain fill's Capsule did).
+                                .contentShape(Capsule())
                         } else {
                             Label("Desktop", systemImage: "desktopcomputer")
                                 .font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(minHeight: 44)

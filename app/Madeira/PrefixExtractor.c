@@ -70,8 +70,19 @@ int madeira_extract_prefix_tgz(const char *tgz_path, const char *dest_dir) {
         for (int i = 0; i < BLOCK; i++) if (header[i]) { all_zero = 0; break; }
         if (all_zero) break;
 
-        char name[101] = {0};
+        // ustar stores a path longer than 100 bytes as prefix (offset 345, up to
+        // 155 bytes) + '/' + name. Without the prefix every leading directory of
+        // such a path is lost and the file lands in the wrong place. Only POSIX
+        // headers ("ustar\0") have the field; old GNU ones ("ustar  ") keep
+        // other data there.
+        char name[257] = {0};
         memcpy(name, header, 100);
+        if (memcmp(header + 257, "ustar", 6) == 0 && header[345]) {
+            char pfx[156] = {0}, base[101] = {0};
+            memcpy(pfx, header + 345, 155);
+            memcpy(base, header, 100);
+            snprintf(name, sizeof(name), "%s/%s", pfx, base);
+        }
         int size = parse_octal(header + 124, 12);
         char type = header[156];
 

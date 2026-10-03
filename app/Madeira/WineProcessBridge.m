@@ -368,6 +368,10 @@ static void madeira_ensure_locallow(NSString *prefix)
 {
     /* 0 leaves the profile's AppData\LocalLow folder missing, as before. */
     const char *off = getenv( "MADEIRA_PROFILE_LOCALLOW" );
+    /* ml1236: this runs from wineserver_start, before wine_process_thread exports
+     * madeira.cfg's env.* lines, so the cfg line is read here directly. */
+    char cfg_off[16];
+    if (!off && madeira_cfg_get( "env.MADEIRA_PROFILE_LOCALLOW", cfg_off, sizeof(cfg_off) )) off = cfg_off;
     if (off && off[0] == '0') return;
 
     const char *name = getenv( "USER" );
@@ -378,6 +382,7 @@ static void madeira_ensure_locallow(NSString *prefix)
     }
     const char *slash = strrchr( name, '/' );
     if (slash) name = slash + 1;
+    if ((slash = strrchr( name, '\\' ))) name = slash + 1;   /* ml1236: as ntdll's set_home_dir */
     if (!name[0]) return;
 
     NSString *path = [prefix stringByAppendingPathComponent:
