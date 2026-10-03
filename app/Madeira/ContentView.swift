@@ -79,6 +79,36 @@ final class MetalHostView: UIView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// Touches on the game view outside the on-screen controls reach the program as
+/// a mouse. Some games (Dark Souls Remastered) switch to keyboard and mouse
+/// prompts on any mouse event and then ignore the controller, so a stray tap
+/// next to a touch button costs the player the controller. MADEIRA_TOUCH_MOUSE
+/// (madeira.cfg `env.NAME`, else the process environment): "1" always sends
+/// them (the previous behaviour), "0" never does, and by default they are not
+/// sent while the landscape overlay shows at least one controller mapping,
+/// unless touch is set to work as a trackpad. A hardware mouse or trackpad is
+/// not affected.
+@MainActor enum TouchMouseGate {
+    enum Mode: String { case auto, on, off }
+    static let mode: Mode = {
+        let v = MadeiraConfig.get("env.MADEIRA_TOUCH_MOUSE")  // 1: touches always reach the program as a mouse, 0: never; default: not while touch controller mappings are shown
+            ?? ProcessInfo.processInfo.environment["MADEIRA_TOUCH_MOUSE"]
+        let m: Mode = v == "1" ? .on : (v == "0" ? .off : .auto)
+        LogStore.shared.log("[touch-mouse] mode=\(m.rawValue)")
+        return m
+    }()
+    /// Set by TouchControlsOverlay.configureGamepad: the landscape overlay is
+    /// visible, not editing, and has at least one controller mapping.
+    static var padOverlay = false
+    static func suppressing(touchpad: Bool) -> Bool {
+        switch mode {
+        case .on: return false
+        case .off: return true
+        case .auto: return padOverlay && !touchpad
+        }
+    }
+}
+
 // SwiftUI-hosted placeholder: geometry + touch input only.
 final class MetalBackedView: UIView {
     private static var layerRegistered = false
@@ -503,8 +533,33 @@ final class MetalBackedView: UIView {
         (event?.allTouches ?? []).filter { $0.phase != .ended && $0.phase != .cancelled }
     }
 
+    // Direct touches that began while TouchMouseGate was suppressing stay
+    // swallowed until they lift, so a change of the gate never leaves a button held.
+    private var tmgSwallowed: Set<ObjectIdentifier> = []
+    /// Returns the touches that should still be handled (nil = nothing left).
+    private func tmgFilter(_ touches: Set<UITouch>, _ phase: UITouch.Phase) -> Set<UITouch>? {
+        if phase == .began {
+            _ = TouchMouseGate.mode   // logs the mode once
+            guard TouchMouseGate.suppressing(touchpad: touchPointerMode) else { return touches }
+            let direct = touches.filter { $0.type == .direct }
+            guard !direct.isEmpty else { return touches }
+            for t in direct { tmgSwallowed.insert(ObjectIdentifier(t)) }
+            let rest = touches.subtracting(direct)
+            return rest.isEmpty ? nil : rest
+        }
+        guard !tmgSwallowed.isEmpty else { return touches }
+        let mine = touches.filter { tmgSwallowed.contains(ObjectIdentifier($0)) }
+        guard !mine.isEmpty else { return touches }
+        if phase == .ended || phase == .cancelled {
+            for t in mine { tmgSwallowed.remove(ObjectIdentifier(t)) }
+        }
+        let rest = touches.subtracting(mine)
+        return rest.isEmpty ? nil : rest
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .began) { return }
+        guard let touches = tmgFilter(touches, .began) else { return }
         if touchPointerMode { touchModeBegan(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -551,6 +606,7 @@ final class MetalBackedView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .moved) { return }
+        guard let touches = tmgFilter(touches, .moved) else { return }
         if touchPointerMode { touchModeMoved(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -632,6 +688,7 @@ final class MetalBackedView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .ended) { return }
+        guard let touches = tmgFilter(touches, .ended) else { return }
         if touchPointerMode { touchModeEnded(touches, event); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -675,6 +732,7 @@ final class MetalBackedView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .cancelled) { return }
+        guard let touches = tmgFilter(touches, .cancelled) else { return }
         if touchPointerMode { touchModeCancelled(touches); return }
         guard desktopMode else {
             guard let t = touches.first else { return }
@@ -3700,7 +3758,7 @@ struct TouchControlsOverlay: View {
             .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
-            .onDisappear { GamepadInput.shared.configureTouch(controls: []) }
+            .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
         .ignoresSafeArea()
     }
@@ -3731,6 +3789,7 @@ struct TouchControlsOverlay: View {
         let ids = landscape && m.visible && !m.editing && !library.blocksGameplayTouch
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
         GamepadInput.shared.configureTouch(controls: Set(ids))
+        TouchMouseGate.padOverlay = !ids.isEmpty
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller

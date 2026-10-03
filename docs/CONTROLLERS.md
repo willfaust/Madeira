@@ -43,6 +43,13 @@ stick. Otherwise a deflected touch stick takes priority; resting touch preserves
 the physical value. Touch updates are event-driven and require no polling timer.
 Keyboard/mouse mappings and the existing layout format are retained.
 
+While such a layout shows at least one controller mapping, a touch on the game
+view that misses every control is not sent to the program as a mouse. Some
+games (Dark Souls Remastered) switch to keyboard and mouse prompts on any mouse
+event and then ignore the controller. Touch used as a
+trackpad and a hardware mouse are not affected. `env.MADEIRA_TOUCH_MOUSE = 1`
+always sends such touches, as before; `0` never does.
+
 ## Layouts
 
 While touch controls are shown, the landscape top bar has a layout button
