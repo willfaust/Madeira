@@ -2169,6 +2169,13 @@ static void load_ntdll_functions( HMODULE module )
             }
             else dprintf( 2, "XLATE-HOOK-REV export NOT FOUND\n" );
         }
+        /* RtlPcToFileHeader must map JIT-pool aliases (virtual_ios.c). */
+        if (is_arm64ec())
+        {
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
+        }
     }
 
     /* Sync dispatcher pointers to JIT pool .data copy.
@@ -2510,6 +2517,12 @@ static int ios_load_child_ec_ntdll( PEB *child_peb )
             }
             else dprintf( 2, "[ec-child-ntdll] p_ios_jit_reverse_translate_addr NOT FOUND"
                              " -- unwind will run in pool space\n" );
+        }
+        /* RtlPcToFileHeader must map JIT-pool aliases (virtual_ios.c). */
+        {
+            extern int ios_patch_rtl_pc_to_file_header( void *module, const void *export_addr );
+            void *f = (void *)find_named_export( module, exports, "RtlPcToFileHeader" );
+            if (f) ios_patch_rtl_pc_to_file_header( module, f );
         }
 
         /* Sync all written slots into the pool copy (PE code reads there). */
@@ -3776,6 +3789,13 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
                         ios_jit_sync_write(ios_ntdll_unixlib_handle_ptr, sizeof(UINT_PTR));
                         dprintf(STDERR_FILENO, "[Wine child]   -> repaired unixlib handle slot\n");
                     }
+                }
+                /* The copy is fresh from the PE image: give it the same
+                 * RtlPcToFileHeader pool-alias patch as the session's copy
+                 * (virtual_ios.c, logs a [pc2fh] line). */
+                {
+                    extern int ios_patch_rtl_pc_to_file_header_current( const void *pe_addr );
+                    ios_patch_rtl_pc_to_file_header_current( pLdrInitializeThunk );
                 }
             }
         }
