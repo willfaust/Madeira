@@ -2849,9 +2849,11 @@ struct RuntimeMemorySyncSettings: View {
     static let poolChoices = [0, 512, 640, 768, 1024, 1152]          // 0 = the standard 896 MB
     static let vramChoices = [0, 1536, 2048, 3072, 4096, 4352, 4608, 5120, 6144]   // 0 = automatic
     static let swapChoices = [0, 1024, 2048, 3072, 4096]
-    /// The stored value "" (no key) and "classic" are the same rules.
+    /// The stored value "" (no key) and "classic" are the same rules, unless
+    /// madeira.cfg has swap-mode = 2 (then no key means broad, ml1257).
     static let coverageChoices: [(String, String)] = [
         ("", "Large allocations (8 MB+)"), ("blocks", "All allocations of 1 MB+"), ("wide", "1 MB+ and overflow"),
+        ("broad", "Whole reservations 4 MB+ (broad)"),
     ]
     @State private var poolMB = Self.intKey("pool")
     @State private var vramMB = Self.intKey("vram-mb")
@@ -2865,8 +2867,12 @@ struct RuntimeMemorySyncSettings: View {
     static func intKey(_ key: String) -> Int { Int(MadeiraConfig.get(key) ?? "") ?? 0 }
     static func currentCoverage() -> String {
         let v = (MadeiraConfig.get("env.MADEIRA_SWAP_COVERAGE") ?? "").lowercased()
+        if v.isEmpty { return swapModeBroad ? "broad" : "" }
         return v == "classic" ? "" : v
     }
+    /// ml1257: madeira.cfg swap-mode = 2 selects broad coverage when
+    /// env.MADEIRA_SWAP_COVERAGE is unset (virtual_ios.c ios_swap_config).
+    static var swapModeBroad: Bool { (Int(MadeiraConfig.get("swap-mode") ?? "") ?? 1) >= 2 }
     static func gb(_ mb: Int) -> String {
         String(format: "%g GB", Double(mb) / 1024)   // 1.5, 4, 4.25 ...
     }
@@ -2893,7 +2899,8 @@ struct RuntimeMemorySyncSettings: View {
                      zero: "Off", label: Self.gb)
             Picker("Swap coverage", selection: Binding(get: { coverage }, set: { mode in
                 coverage = mode; changed = true
-                MadeiraConfig.set("env.MADEIRA_SWAP_COVERAGE", mode.isEmpty ? nil : mode)
+                // With swap-mode = 2 no key means broad, so classic is written out.
+                MadeiraConfig.set("env.MADEIRA_SWAP_COVERAGE", mode.isEmpty ? (Self.swapModeBroad ? "classic" : nil) : mode)
                 LogStore.shared.log("[runtime-settings] swap-coverage=\(mode.isEmpty ? "classic" : mode)")
             })) {
                 ForEach(Self.coverageChoices, id: \.0) { Text($0.1).tag($0.0) }
@@ -2919,7 +2926,7 @@ struct RuntimeMemorySyncSettings: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("JIT pool is the memory reserved at launch for translated x86 code (256 to 1152 MB).")
                 Text("Video memory is how much graphics memory games are told they have. Automatic sizes it from the memory free at launch. Too high can get Madeira closed for using too much memory; too low makes games keep reloading textures.")
-                Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Wider coverage saves more memory but can slow a game down.")
+                Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Broad backs every new reservation of 4 MB and up (madeira.cfg swap-min-mb moves the floor) as it is made, so the small commits games make inside it are covered too, and the swap tier size limits the storage it uses. Wider coverage saves more memory but can slow a game down.")
                 Text("Sync engine: Fastsync (the default) handles events and semaphores in-process; its per-game options are in each game's details. Madsync is the older in-process engine. Wine standard sync uses neither. Only one engine runs at a time.")
                 Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: the ECO pill in the performance overlay turns it on and off while a game runs.")
                 if changed { Text("Restart Madeira (close it from the app switcher) for these changes to apply.").foregroundStyle(.orange) }

@@ -66,10 +66,19 @@ Removing an entry never removes the game's files or saves.
   Off/1/2/4 GB, off by default; sync engine, Fastsync by default), the interface
   switch and **Credits** (the last section). Display applies from the next session or FPS limit change; Memory &
   sync after a restart. They write `env.MADEIRA_PROMOTE`, `swap-mb`,
-  `inproc-sync` and `env.MADEIRA_FASTSYNC` in `Documents/madeira.cfg`, keeping
-  every other line. With neither sync key set the engine is fastsync
-  (`madeira_cfg_sync_engine` in `build/madeira_cfg.h`); `inproc-sync = 1` selects
-  madsync.
+  `env.MADEIRA_SWAP_COVERAGE`, `inproc-sync` and `env.MADEIRA_FASTSYNC` in
+  `Documents/madeira.cfg`, keeping every other line. With neither sync key set
+  the engine is fastsync (`madeira_cfg_sync_engine` in `build/madeira_cfg.h`);
+  `inproc-sync = 1` selects madsync.
+- **Swap coverage** (Memory & sync, `env.MADEIRA_SWAP_COVERAGE`) picks which
+  allocations the swap tier backs: large ones only (8 MB+, classic, the
+  default), all of 1 MB+ (`blocks`), those plus overflow (`wide`), or **Whole
+  reservations 4 MB+** (`broad`, ml1257: every new reservation of at least
+  `swap-min-mb`, 4 MB by default, below FEX's band is backed whole when it is
+  made, decommits punch holes, and `swap-mb` caps the disk it uses: a soft
+  cap, checked when a block is backed).
+  Without the key, `swap-mode = 2` in madeira.cfg means broad and the picker
+  shows it; choosing large allocations then writes `classic` explicitly.
 
 ## Game details
 
