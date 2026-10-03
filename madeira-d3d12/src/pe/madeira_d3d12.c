@@ -616,6 +616,9 @@ struct mad_pso {
     struct { UINT strides[16]; obj_handle_t rps; } var[8]; unsigned nvar;
     CRITICAL_SECTION var_lock;
     obj_handle_t device_handle;
+    int lazy;                                       /* plain render pipeline built at its first draw (mad_pso_realize) */
+    int lazy_cs;                                    /* compute pipeline built at its first dispatch (mad_cpso_realize) */
+    SRWLOCK rlock;                                  /* serialises this pipeline's lazy build (zero = SRWLOCK_INIT) */
     char vs_name[64], ps_name[64];                  /* ml879: for the draw dump */
     char blend[400];                                /* ml1106/ml1107: every RT's blend state for the draw dump */
     UINT root_off[MAD_ROOT_PARAM_MAX]; int has_root_off; /* ml882: offsets from the converter's reflection */
@@ -2006,6 +2009,12 @@ static int mad_upload_swap_on(void) {   /* ml1154: madeira.cfg upload-swap (defa
                   d3d12_log("[madeira-d3d12] ml1154 upload-swap = %d (%s)\n", on, on ? "CPU-visible buffers >= 8 MB live on file-backed storage, off the jetsam footprint" : "Metal-owned storage"); }
     return on;
 }
+static int mad_pso_lazy_on(void) {   /* madeira.cfg pso-lazy (default 1): pipelines built at their first draw/dispatch */
+    static int on = -1;
+    if (on < 0) { on = mad_cfg_int_pe("pso-lazy", 1) ? 1 : 0;
+                  d3d12_log("[madeira-d3d12] pipelines are built %s (madeira.cfg pso-lazy)\n", on ? "at their first draw/dispatch" : "at creation"); }
+    return on;
+}
 
 static int mad_rtvp_eq(const struct mad_rtvp *a, const struct mad_rtvp *b) {
     return a->level == b->level && a->slice == b->slice && a->layers == b->layers && a->plane == b->plane;
@@ -2483,6 +2492,138 @@ static enum WMTPrimitiveType mad_prim(D3D12_PRIMITIVE_TOPOLOGY t) {
     }
 }
 
+/* LAZY PIPELINES. Some ports (Ghost of Tsushima) create every pipeline of a
+ * level up front -- ~14,000 at New Game -- and Metal compiles each into GPU
+ * code at creation: 5.1 GB of Metal allocations, and iOS killed the app at
+ * 7.8 GB while the loading screen spun. A scene draws a small fraction of them.
+ * A plain render pipeline (no GS, no tessellation) keeps its descriptors and is
+ * built by the first draw that uses it; a compute pipeline by its first
+ * dispatch. Unused ones never cost GPU memory. A pipeline Metal then rejects is
+ * logged and its draws are skipped. madeira.cfg pso-lazy = 0 restores eager
+ * creation. */
+static volatile LONG g_pso_lazy_built, g_pso_lazy_failed;
+static obj_handle_t mad_pso_realize(struct mad_pso *p) {
+    if (p->rps || !p->lazy) return p->rps;
+    AcquireSRWLockExclusive(&p->rlock);   /* per pipeline: builds of different pipelines run in parallel */
+    if (!p->rps && p->lazy) {
+        obj_handle_t err = 0;
+        p->rps = p->has_vd ? MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &p->vd, &err)
+                           : MTLDevice_newRenderPipelineState(p->device_handle, &p->rp, &err);
+        if (err) mad_log_nserror(p->vs_name, err);
+        if (p->rps) {
+            LONG n = InterlockedIncrement(&g_pso_lazy_built);
+            if (n == 1 || (n % 500) == 0)
+                d3d12_log("[madeira-d3d12] lazy pipelines built at first draw: %ld (failed %ld)\n", n, g_pso_lazy_failed);
+        } else {
+            LONG n = InterlockedIncrement(&g_pso_lazy_failed);
+            p->lazy = 0;   /* draws with it are skipped from now on */
+            if (n <= 8) d3d12_log("[madeira-d3d12] lazy pipeline failed at first draw (vs '%s', ps '%s'); its draws are skipped\n",
+                                  p->vs_name, p->ps_name);
+        }
+    }
+    ReleaseSRWLockExclusive(&p->rlock);
+    return p->rps;
+}
+
+static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
+    if (p->cps || !p->lazy_cs) return p->cps;
+    AcquireSRWLockExclusive(&p->rlock);
+    if (!p->cps && p->lazy_cs) {
+        struct WMTComputePipelineInfo ci; obj_handle_t err = 0;
+        memset(&ci, 0, sizeof ci);
+        ci.compute_function = p->vs_fn;
+        p->cps = MTLDevice_newComputePipelineState(p->device_handle, &ci, &err);
+        if (err) mad_log_nserror("compute pipeline", err);
+        if (!p->cps) {
+            LONG n = InterlockedIncrement(&g_pso_lazy_failed);
+            p->lazy_cs = 0;   /* dispatches with it are skipped from now on */
+            if (n <= 8) d3d12_log("[madeira-d3d12] lazy compute pipeline failed at first dispatch (%s); its dispatches are skipped\n", p->vs_name);
+        } else InterlockedIncrement(&g_pso_lazy_built);
+    }
+    ReleaseSRWLockExclusive(&p->rlock);
+    return p->cps;
+}
+
+/* PARALLEL FIRST USE. Built at its first draw, a lazy pipeline is compiled on
+ * the submitting thread, one after another, and the first seconds of Ghost of
+ * Tsushima's gameplay need hundreds: ExecuteCommandLists grew from 25 ms to
+ * 2.3 s per frame with the GPU 2-7 % busy, and the game gave up. Before a batch
+ * is replayed, the pipelines its lists bind that are not built yet are built
+ * on up to 4 threads at once (Metal compiles independent pipelines
+ * concurrently): the calling thread and a pool of 3 created once -- creating
+ * Wine threads per batch cost an 8 MB stack, a TEB and an emulator thread
+ * state each time. madeira.cfg pso-parallel = 0 turns it off. */
+struct mad_prebuild { struct mad_pso **v; LONG n; volatile LONG next; };
+static struct mad_prebuild *volatile g_pb_work;
+static HANDLE g_pb_go, g_pb_idle;
+static LONG g_pb_threads;
+static void mad_prebuild_run(struct mad_prebuild *w) {
+    LONG i;
+    while ((i = InterlockedIncrement(&w->next) - 1) < w->n) {
+        struct mad_pso *p = w->v[i];
+        if (p->is_compute) mad_cpso_realize(p); else mad_pso_realize(p);
+    }
+}
+static DWORD WINAPI mad_prebuild_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        obj_handle_t pool;
+        WaitForSingleObject(g_pb_go, INFINITE);
+        pool = NSAutoreleasePool_alloc_init();
+        if (g_pb_work) mad_prebuild_run(g_pb_work);
+        if (pool) NSObject_release(pool);
+        ReleaseSemaphore(g_pb_idle, 1, NULL);
+    }
+    return 0;
+}
+static void mad_prebuild_start(void) {
+    static LONG once; unsigned t;
+    if (InterlockedExchange(&once, 1)) return;
+    g_pb_go = CreateSemaphoreA(NULL, 0, 8, NULL);
+    g_pb_idle = CreateSemaphoreA(NULL, 0, 8, NULL);
+    if (!g_pb_go || !g_pb_idle) return;
+    for (t = 0; t < 3; t++) {
+        HANDLE h = CreateThread(NULL, 256 << 10, mad_prebuild_worker, NULL, 0, NULL);
+        if (h) { CloseHandle(h); g_pb_threads++; }
+    }
+}
+static void mad_prebuild_lists(UINT count, ID3D12CommandList *const *lists) {
+    static int on = -1;
+    static volatile LONG g_prebuilt, g_prebuild_batches;
+    struct mad_pso *v[256]; LONG n = 0; UINT i, k, j;
+    if (on < 0) on = mad_cfg_int_pe("pso-parallel", 1) ? 1 : 0;   /* madeira.cfg pso-parallel (default 1): a batch's new pipelines built in parallel */
+    if (!on) return;
+    for (i = 0; i < count && n < 256; i++) {
+        struct mad_list *l = (struct mad_list *)lists[i];
+        if (!l || !l->closed || (l->alloc && l->recorded_generation != l->alloc->generation)) continue;   /* the replay rejects these */
+        for (k = 0; k < l->ncmds && n < 256; k++) {
+            struct mad_pso *p = l->cmds[k].kind == MC_PSO ? l->cmds[k].u.pso : NULL;
+            if (!p) continue;
+            if (p->is_compute ? (p->cps || !p->lazy_cs) : (p->rps || !p->lazy)) continue;
+            for (j = 0; j < (UINT)n && v[j] != p; j++) ;
+            if (j == (UINT)n) v[n++] = p;
+        }
+    }
+    if (n < 2) return;   /* one pipeline: the draw builds it itself */
+    {
+        static SRWLOCK serial = SRWLOCK_INIT;   /* one batch at a time uses the pool */
+        struct mad_prebuild w; LONG nt, t;
+        mad_prebuild_start();
+        AcquireSRWLockExclusive(&serial);
+        w.v = v; w.n = n; w.next = 0;
+        nt = g_pb_threads < n - 1 ? g_pb_threads : n - 1;
+        g_pb_work = &w;
+        if (nt > 0) ReleaseSemaphore(g_pb_go, nt, NULL);
+        mad_prebuild_run(&w);
+        for (t = 0; t < nt; t++) WaitForSingleObject(g_pb_idle, INFINITE);
+        g_pb_work = NULL;
+        ReleaseSRWLockExclusive(&serial);
+        InterlockedExchangeAdd(&g_prebuilt, n);
+        if (InterlockedIncrement(&g_prebuild_batches) <= 8 || n >= 32)
+            d3d12_log("[madeira-d3d12] pso-parallel: built %ld pipelines on %ld threads before replay (%ld so far)\n",
+                      n, nt + 1, g_prebuilt);
+    }
+}
 
 /* ml878: pipeline variant for the strides a draw actually binds. */
 static obj_handle_t mad_pso_for_strides(struct mad_pso *p, const UINT strides[16]) {
@@ -3501,6 +3642,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
      * (Astra). An engine that zeroes the count of a culled draw would have drawn
      * one instance of it. Not a skip: there is nothing to draw. */
     if ((c->kind == MC_DRAW && !c->u.draw.icount) || (c->kind == MC_DRAW_INDEXED && !c->u.drawi.inst)) { InterlockedIncrement(&g_zero_inst); return; }
+    if (e->pso && !e->pso->rps && e->pso->lazy) mad_pso_realize(e->pso);
     if (!e->pso || (!e->pso->rps && !e->pso->tess)) {   /* ml1086: a tessellation pipeline may have no plain pipeline */
         if (!said_nopso++) d3d12_log("[madeira-d3d12] draw without a pipeline state; skipped\n");
         MAD_SKIP(e);
@@ -4182,6 +4324,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     unsigned nsb = 0, nur = 0, i;
     struct mad_device *dev = e->q->device;
     static unsigned said_nopso;
+    if (e->cpso && !e->cpso->cps && e->cpso->lazy_cs) mad_cpso_realize(e->cpso);
     if (!e->cpso || !e->cpso->cps) {
         if (!said_nopso++) d3d12_log("[madeira-d3d12] Dispatch without a compute pipeline; skipped\n");
         MAD_SKIP(e);
@@ -4472,6 +4615,7 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList 
     if (ml1021_q) EnterCriticalSection(&ml1021_q->submit_lock);
 
     struct mad_queue *q = (struct mad_queue *)This;
+    mad_prebuild_lists(count, lists);   /* lazy pipelines this batch binds, built in parallel */
     for (UINT i = 0; i < count; i++) {
         struct mad_list *l = (struct mad_list *)lists[i];
         if (l && !l->closed) {
@@ -8433,6 +8577,69 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
                                       struct madeira_ir_vs_input *vsin, unsigned vsin_cap, unsigned *vsin_n,
                                       UINT *tg_out, struct madeira_ir_loc *locs, unsigned *nlocs,
                                       const struct mad_convert_opts *o);
+/* SHARED METAL LIBRARIES. A game's pipelines repeat the same shader stage many
+ * times: Ghost of Tsushima created 30,370 libraries at New Game from only
+ * ~11,400 distinct converter outputs, and Metal allocates GPU-side storage per
+ * library -- 5.1 GB there, which with everything else reached iOS's limit (a
+ * 1 MB allocation failed and the game stopped itself). Identical metallib bytes
+ * with the same entry share one MTLLibrary and MTLFunction; each pipeline takes
+ * its own reference, so pso_Release stays balanced. The table keeps one
+ * reference per distinct library. */
+struct mad_libshare { UINT64 k0, k1; obj_handle_t lib, fn; };
+static struct mad_libshare *g_libshare; static SIZE_T g_libshare_cap, g_libshare_n;
+static SRWLOCK g_libshare_lock = SRWLOCK_INIT;
+static volatile LONG g_libshare_hits;
+static void mad_libshare_key(const void *bytes, SIZE_T len, const char *name, UINT64 *k0, UINT64 *k1) {
+    const unsigned char *c = bytes;
+    SIZE_T nlen = strlen(name) + 1, i;
+    UINT64 a = 0x6a09e667f3bcc908ull, b = 0xbb67ae8584caa73bull;
+    for (i = 0; i < len + nlen; i++) {
+        unsigned char x = i < len ? c[i] : (unsigned char)name[i - len];
+        a = (a ^ x) * 0x100000001b3ull;
+        b = (b + x + 1) * 0x9e3779b97f4a7c15ull; b ^= b >> 31;
+    }
+    a ^= (UINT64)len; a *= 0xff51afd7ed558ccdull;
+    *k0 = a; *k1 = b;
+}
+static struct mad_libshare *mad_libshare_slot(UINT64 k0, UINT64 k1) {
+    SIZE_T i;
+    if (!g_libshare_cap) return NULL;
+    for (i = (SIZE_T)(k0 & (g_libshare_cap - 1));; i = (i + 1) & (g_libshare_cap - 1))
+        if (!g_libshare[i].lib || (g_libshare[i].k0 == k0 && g_libshare[i].k1 == k1)) return &g_libshare[i];
+}
+static int mad_libshare_find(UINT64 k0, UINT64 k1, obj_handle_t *lib, obj_handle_t *fn) {
+    struct mad_libshare *e; int ok = 0;
+    AcquireSRWLockShared(&g_libshare_lock);
+    e = mad_libshare_slot(k0, k1);
+    if (e && e->lib) { NSObject_retain(e->lib); NSObject_retain(e->fn); *lib = e->lib; *fn = e->fn; ok = 1; }
+    ReleaseSRWLockShared(&g_libshare_lock);
+    if (ok) {
+        LONG n = InterlockedIncrement(&g_libshare_hits);
+        if (n == 1 || (n % 2000) == 0)
+            d3d12_log("[madeira-d3d12] shared shader libraries: %ld reuses, %lu distinct\n", n, (unsigned long)g_libshare_n);
+    }
+    return ok;
+}
+static void mad_libshare_add(UINT64 k0, UINT64 k1, obj_handle_t lib, obj_handle_t fn) {
+    struct mad_libshare *e;
+    AcquireSRWLockExclusive(&g_libshare_lock);
+    if ((g_libshare_n + 1) * 10 >= g_libshare_cap * 7) {   /* grow at 70 % load; the capacity stays a power of two */
+        SIZE_T ncap = g_libshare_cap ? g_libshare_cap * 2 : 4096, i, oldcap = g_libshare_cap;
+        struct mad_libshare *old = g_libshare, *nw = calloc(ncap, sizeof *nw);
+        if (nw) {
+            g_libshare = nw; g_libshare_cap = ncap;
+            for (i = 0; i < oldcap; i++) if (old[i].lib) *mad_libshare_slot(old[i].k0, old[i].k1) = old[i];
+            free(old);
+        }
+    }
+    e = (g_libshare_n + 1) * 10 < g_libshare_cap * 9 ? mad_libshare_slot(k0, k1) : NULL;   /* never fill the table */
+    if (e && !e->lib) {
+        NSObject_retain(lib); NSObject_retain(fn);
+        e->k0 = k0; e->k1 = k1; e->lib = lib; e->fn = fn; g_libshare_n++;
+    }
+    ReleaseSRWLockExclusive(&g_libshare_lock);
+}
+
 /* ml1990: the inputs of one conversion request, shared by the first call and
  * any retry so the two can never disagree about what is being converted. */
 static void mad_fill_convert_inputs(struct madeira_ir_convert_args *a, struct mad_rootsig *rs,
@@ -8641,8 +8848,17 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
     if (vsin_n) *vsin_n = a.ret_vs_input_count < vsin_cap ? a.ret_vs_input_count : vsin_cap;
     if (nlocs) *nlocs = a.ret_loc_count < MAD_LOC_MAX ? a.ret_loc_count : MAD_LOC_MAX;
     if (tg_out) { tg_out[0] = a.ret_tg_size[0]; tg_out[1] = a.ret_tg_size[1]; tg_out[2] = a.ret_tg_size[2]; }
-    obj_handle_t dd = DispatchData_alloc_init((uint64_t)(uintptr_t)buf, (uint64_t)a.ret_len);
     obj_handle_t fn = 0, err = 0, lib = 0;
+    UINT64 share_k0, share_k1;
+    mad_libshare_key(buf, (SIZE_T)a.ret_len, name, &share_k0, &share_k1);
+    if (mad_libshare_find(share_k0, share_k1, &lib, &fn)) {   /* an identical library already exists */
+        snprintf(g_last_entry, sizeof g_last_entry, "%s", name);
+        if (o && o->name_out && o->name_cap) snprintf(o->name_out, o->name_cap, "%s", name);   /* ml927b */
+        *lib_out = lib;
+        free(buf);
+        return fn;
+    }
+    obj_handle_t dd = DispatchData_alloc_init((uint64_t)(uintptr_t)buf, (uint64_t)a.ret_len);
     if (dd) {
         lib = MTLDevice_newLibrary(d->mtl_device, dd, &err);
         NSObject_release(dd);
@@ -8681,6 +8897,7 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
             d3d12_log("[dxil-hex] end\n");
         }
     }
+    mad_libshare_add(share_k0, share_k1, lib, fn);
     *lib_out = lib;
     free(buf);
     return fn;
@@ -9473,10 +9690,15 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
      * patch-list draw can use such a pipeline, and those go through the mesh
      * pipelines below. */
     if (!p->gs_emu && !p->has_tess) {
-        obj_handle_t err = 0;
-        p->rps = has_vd ? MTLDevice_newRenderPipelineStateVD(d->mtl_device, &rp, &vd, &err)
-                        : MTLDevice_newRenderPipelineState(d->mtl_device, &rp, &err);
-        if (err) mad_log_nserror(p->vs_name, err);
+        if (mad_pso_lazy_on() && !(desc->GS.pShaderBytecode && desc->GS.BytecodeLength)) {
+            /* built at its first draw (mad_pso_realize); the descriptors are kept below */
+            p->lazy = 1; p->rp = rp; p->device_handle = d->mtl_device;
+        } else {
+            obj_handle_t err = 0;
+            p->rps = has_vd ? MTLDevice_newRenderPipelineStateVD(d->mtl_device, &rp, &vd, &err)
+                            : MTLDevice_newRenderPipelineState(d->mtl_device, &rp, &err);
+            if (err) mad_log_nserror(p->vs_name, err);
+        }
     }
     /* ml1083: hull+domain -> object/mesh pipeline, DXBC backend only (the DXIL
      * path has no tessellation emulation of its own yet). */
@@ -9505,14 +9727,14 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
         if (said++ < 16)
             d3d12_log("[madeira-d3d12] ml1138 geometry-shader pipeline could not be built; returning a placeholder whose draws are skipped "
                       "(%u targets, gs %u B)\n", desc->NumRenderTargets, (unsigned)desc->GS.BytecodeLength);
-    } else if (!p->rps && !p->tess) {
+    } else if (!p->rps && !p->tess && !p->lazy) {
         d3d12_log("[madeira-d3d12] newRenderPipelineState failed (%u targets, depth %u, %u input elements%s)\n",
                   desc->NumRenderTargets, (unsigned)desc->DSVFormat, desc->InputLayout.NumElements,
                   p->has_tess ? ", tessellation" : "");
         pso_Release((ID3D12PipelineState *)p);
         return E_FAIL;
     }
-    if (has_vd && p->rps) { p->rp = rp; p->vd = vd; p->has_vd = 1; p->device_handle = d->mtl_device; InitializeCriticalSection(&p->var_lock); }
+    if (has_vd && (p->rps || p->lazy)) { p->rp = rp; p->vd = vd; p->has_vd = 1; p->device_handle = d->mtl_device; InitializeCriticalSection(&p->var_lock); }
 
     /* Depth-stencil state is encoder state in Metal; one object per pipeline. */
     memset(&dsi, 0, sizeof dsi);
@@ -9648,6 +9870,12 @@ static HRESULT STDMETHODCALLTYPE device_CreateComputePipelineState(ID3D12Device 
     if (!p->tg[0]) { p->tg[0] = 1; }
     if (!p->tg[1]) { p->tg[1] = 1; }
     if (!p->tg[2]) { p->tg[2] = 1; }
+    if (mad_pso_lazy_on()) {   /* built at its first dispatch (mad_cpso_realize) */
+        p->lazy_cs = 1; p->device_handle = d->mtl_device;
+        hr = pso_QI((ID3D12PipelineState *)p, riid, out);
+        pso_Release((ID3D12PipelineState *)p);
+        return hr;
+    }
     memset(&ci, 0, sizeof ci);
     ci.compute_function = p->vs_fn;
     p->cps = MTLDevice_newComputePipelineState(d->mtl_device, &ci, &err);
