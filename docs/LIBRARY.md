@@ -134,7 +134,8 @@ in-game menu:
    (the existing editor) and the **Keyboard** (its own key window, with an
    Esc/Ctrl/Shift/Alt/Tab/Enter/arrow row; modifiers latch);
 2. the FPS limit, **Aspect & scaling**, and the mouse and pointer settings;
-3. the performance overlay and its fields (FPS, average frame time, memory
+3. the performance overlay and its fields (FPS, average frame time, CPU load
+   with the busiest thread, GPU load with GPU time per frame, memory
    footprint, battery);
 4. **Quit game** in red. Quit asks the program to close with Alt+F4 through
    the normal input queue, so it can save; the session ends when it exits.
