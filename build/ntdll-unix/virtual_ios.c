@@ -13304,13 +13304,17 @@ static NTSTATUS set_protection( struct file_view *view, void *base, SIZE_T size,
         if ((view->protect & access) != access) return STATUS_INVALID_PAGE_PROTECTION;
     }
 
+    /* ml1077: never execute from the tier. ml1257: BEFORE set_vprot, not after --
+     * the copy-back maps anonymous RW, which used to overwrite the protection
+     * set_vprot had just applied (a guard page came back writable), and an EXEC
+     * mprotect on the shared file mapping must not be what decides the outcome. */
+    if (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD)) ios_swap_release_range( base, size, 1 );
     if (!set_vprot( view, base, size, vprot | VPROT_COMMITTED ))
     {
         dprintf(2, "[vmem-denied] set_vprot failed: base=%p size=%p protect=0x%x\n",
                 base, (void *)size, (unsigned)protect);
         return STATUS_ACCESS_DENIED;
     }
-    if (vprot & (VPROT_EXEC | VPROT_WRITECOPY | VPROT_GUARD)) ios_swap_release_range( base, size, 1 );   /* ml1077: never execute from the tier */
 
     /* iOS-Madeira ml638 A/B: NEVER MAKE AN ANON-JIT-ALIASED PAGE PHYSICALLY WRITABLE.
      *
@@ -14809,10 +14813,12 @@ static void ios_swap_back( void *base, size_t size, unsigned int vprot )
  * granular, the extents are host-page (16 KB) aligned, and one host page can
  * only be mapped from one object: an edge inside a backed host page moves that
  * whole host page to anonymous memory, contents of its other guest pages
- * included, and the pages' own protections are re-applied afterwards (the
- * caller has already set them; a guard request leaves them PROT_NONE, so the
- * source is made readable for the copy). Without a copy buffer or a fresh
- * anonymous mapping the range stays file-backed instead of losing its data. */
+ * included, and the pages' own protections are re-applied afterwards.
+ * set_protection() calls this BEFORE set_vprot (ml1257), so those are still the
+ * old protections and set_vprot then applies the new ones to anonymous memory;
+ * a source page that is not readable (uncommitted inside a reservation extent,
+ * or a guard page) is made readable for the copy. Without a copy buffer or a
+ * fresh anonymous mapping the range stays file-backed instead of losing its data. */
 static void ios_swap_release_range( void *base, size_t size, int copy_back )
 {
     char *lo = (char *)base, *hi = (char *)base + size;
