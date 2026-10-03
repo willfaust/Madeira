@@ -23043,6 +23043,70 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
                     uintptr_t pool_offset = (uintptr_t)ios_jit_mappings[idx].jit_base
                                           - (uintptr_t)ios_jit_rx_base_global;
                     char *jit_rw_dest = (char *)ios_jit_rw_base_global + pool_offset + off;
+                    /* iOS-Madeira ml1199: words the pointer translation below must leave alone.
+                     *
+                     * That translation rewrites every 8-byte word whose value lies inside ANY
+                     * live image (ml454 accepts any containing mapping) -- including constants
+                     * that only look like addresses. In a session with a 32-bit process, its
+                     * wow64.dll sits at [0x3fff90000, 0x400000000), and fmt's count_digits
+                     * table in xtajit64's .rdata holds 0x3fffffc18 three times (the 1000..9999
+                     * entries): a 64-bit child's sync "translated" them into wow64.dll's pool
+                     * copy, fmt then counted 3 digits for 2048, and FEX died formatting its
+                     * own log line in a 64-bit process started while a 32-bit one was alive
+                     * (a diff of the copy against the image: 3 .rdata words differed).
+                     *
+                     * The pointers this sync must translate are relocation targets (DIR64
+                     * entries of the image) and words the loader wrote at run time (IAT, CFG
+                     * and CHPE pointers), which differ from what the copy already holds. A
+                     * word that is identical in the image and in the copy and is no
+                     * relocation target came from the file unchanged, so it is no pointer
+                     * that needs a pool address. Only for images with a .reloc directory
+                     * (a relocs-stripped image keeps the old rule) and regions up to 4MB;
+                     * MADEIRA_IAT_SYNC_KEEP=0 restores the old rule. */
+                    static unsigned char ios_sync_keep[0x10000];   /* 1 bit per word: 4MB */
+                    /* The bitmap is one static shared by every thread of every pseudo-process,
+                     * and this runs after virtual_mutex is released: two syncs at once would
+                     * mix their bits (a pointer left untranslated, a constant translated).
+                     * Held from building the bitmap to the end of the translation below. */
+                    static pthread_mutex_t ios_sync_keep_lock = PTHREAD_MUTEX_INITIALIZER;
+                    static int ios_sync_keep_on = -1;
+                    int keep_ok = 0, keep_locked = 0;
+                    unsigned long keep_hits = 0;
+                    if (ios_sync_keep_on < 0)
+                    {
+                        const char *e = getenv( "MADEIRA_IAT_SYNC_KEEP" );   /* ml1199: 0 = the iat-sync translates unchanged file words too (old rule) */
+                        ios_sync_keep_on = !(e && e[0] == '0');
+                    }
+                    if (ios_sync_keep_on && ios_jit_mappings[idx].reloc_rva && ios_jit_mappings[idx].reloc_size &&
+                        !(off & 7) && size / 8 <= sizeof(ios_sync_keep) * 8)
+                    {
+                        const uint64_t *src = (const uint64_t *)base, *dst = (const uint64_t *)jit_rw_dest;
+                        const char *rel = (const char *)ios_jit_rw_base_global + pool_offset
+                                          + ios_jit_mappings[idx].reloc_rva;
+                        pthread_mutex_lock( &ios_sync_keep_lock );
+                        keep_locked = 1;
+                        const char *rel_end = rel + ios_jit_mappings[idx].reloc_size;
+                        size_t nw = size / 8, k;
+
+                        memset( ios_sync_keep, 0, (nw + 7) / 8 );
+                        for (k = 0; k < nw; k++)
+                            if (src[k] == dst[k]) ios_sync_keep[k >> 3] |= (unsigned char)(1u << (k & 7));
+                        while (rel + 8 <= rel_end)
+                        {
+                            unsigned int page = *(const unsigned int *)rel, bs = *(const unsigned int *)(rel + 4), j;
+                            if (bs < 8 || rel + bs > rel_end) break;
+                            for (j = 0; j < (bs - 8) / 2; j++)
+                            {
+                                unsigned short e = *(const unsigned short *)(rel + 8 + 2 * j);
+                                size_t rva = page + (e & 0xfff), w;
+                                if ((e >> 12) != 10 || rva + 8 <= off || rva >= off + size) continue;
+                                for (w = (rva - off) / 8; w <= (rva + 7 - off) / 8 && w < nw; w++)
+                                    ios_sync_keep[w >> 3] &= (unsigned char)~(1u << (w & 7));
+                            }
+                            rel += bs;
+                        }
+                        keep_ok = 1;
+                    }
 
                     /* Determine .text section bounds within THIS region */
                     size_t text_off = ios_jit_mappings[idx].text_offset;
@@ -23230,6 +23294,15 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
                         while (p < end_p)
                         {
                             uint64_t val = *p;
+                            size_t kw = (size_t)(p - (uint64_t *)jit_rw_dest);   /* ml1199 */
+                            if (val && keep_ok && (ios_sync_keep[kw >> 3] & (1u << (kw & 7))))
+                            {
+                                if (ios_jit_translate_addr_for_owner( (void *)(uintptr_t)val, sync_owner )
+                                    != (void *)(uintptr_t)val)
+                                    keep_hits++;   /* a file constant that merely looks like an address */
+                                p++;
+                                continue;
+                            }
                             if (val)
                             {
                                 void *nv = ios_jit_translate_addr_for_owner(
@@ -23277,12 +23350,20 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
                             dprintf(2, "[x86-ptr] region %p+0x%lx: KEPT %d guest x86-CODE pointers (first 0x%llx), translated %d others\n",
                                     base, (unsigned long)size, x86skip,
                                     (unsigned long long)x86_first, fixup_count);
+                        {
+                            static int ml1199_said;
+                            if (keep_hits && ml1199_said++ < 32)
+                                dprintf(2, "[iat-sync] ml1199 region %p+0x%lx: kept %lu unchanged non-relocation word(s) "
+                                        "that look like image addresses (file constants, not pointers)\n",
+                                        base, (unsigned long)size, keep_hits);
+                        }
                         /* dprintf, not ERR — the perf WINEDEBUG default mutes
                          * err+virtual and this is the owner-routing evidence. */
                         if (fixup_count && ml1051_say)
                             dprintf(2, "[iat-sync] region %p+0x%lx: translated %d pointers (owner=%p) [#%lu]\n",
                                     base, (unsigned long)size, fixup_count, sync_owner, ml1051_k);
                     }
+                    if (keep_locked) pthread_mutex_unlock( &ios_sync_keep_lock );
                     break;
                 }
             }
