@@ -2616,8 +2616,16 @@ struct ContentView: View {
             // d3d11.mipClampBC=N is the one that matters for memory: this GPU cannot
             // sample BC, so those textures are expanded to uncompressed and cost 2-8x
             // their shipped size.
+            //
+            // DXMT splits DXMT_CONFIG on ";" only (config.cpp) and a newline is not
+            // whitespace to its parser, so options joined with "\n" arrive as ONE
+            // option whose value runs into the next key: the first gets a value it
+            // rejects and the rest are lost. Split on ";" and newlines, join with ";".
             if let txt = MadeiraConfig.get("dxmt") {
-                let v = txt.replacingOccurrences(of: ";", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)   /* ml1095: "a=b;c=d" on one line */
+                let v = txt.components(separatedBy: CharacterSet(charactersIn: ";\n\r"))   /* ml1095: "a=b;c=d" on one line */
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: ";")
                 if !v.isEmpty {
                     setenv("DXMT_CONFIG", v, 1)
                     logStore.log("DXMT config: \(v) via madeira.cfg dxmt")
