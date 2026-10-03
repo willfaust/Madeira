@@ -9,6 +9,13 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 OBJ_DIR="$BUILD_DIR/obj"
 APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
+MOLTENVK_FLAGS=()
+MOLTENVK_OBJECTS=()
+if [[ "${MADEIRA_MOLTENVK:-0}" == 1 ]]; then
+    MOLTENVK_FLAGS=(-DMADEIRA_MOLTENVK=1)
+    MOLTENVK_OBJECTS=("$OBJ_DIR/winevulkan_unixlib.o" "$OBJ_DIR/winevulkan_thunks.o")
+fi
+
 mkdir -p "$OBJ_DIR"
 
 SUCCEEDED=0
@@ -33,7 +40,7 @@ compile_one() {
         -D_ACRTIMP= -DWINBASEAPI= \
         -DBINDIR=\"/usr/local/bin\" -DLIBDIR=\"/usr/local/lib\" \
         -DDATADIR=\"/usr/local/share\" -DSYSTEMDLLPATH=\"\" \
-        -DWINE_UNIX_LIB -DWINE_IOS=1 \
+        -DWINE_UNIX_LIB -DWINE_IOS=1 "${MOLTENVK_FLAGS[@]}" \
         -Dget_thread_context=ntdll_get_thread_context \
         -Dset_thread_context=ntdll_set_thread_context \
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
@@ -88,6 +95,15 @@ echo "=== Building ntdll unix (iOS) ==="
 # logic in Thumper et al. advances past intro music.
 compile_one "$BUILD_DIR/audio_null_ios.c" "audio_null_ios"
 compile_one "$BUILD_DIR/../madsync/madsync.c" "madsync"   # ml1058: userspace ntsync
+
+# Rebuilding with Vulkan disabled must remove the previously enabled objects.
+rm -f "$OBJ_DIR/winevulkan_unixlib.o" "$OBJ_DIR/winevulkan_thunks.o"
+if [[ "${MADEIRA_MOLTENVK:-0}" == 1 ]]; then
+    compile_unixlib "$WINE_SRC/dlls/winevulkan/vulkan.c" "winevulkan_unixlib" "winevulkan" \
+        -I"$WINE_SRC/dlls/winevulkan"
+    compile_unixlib "$WINE_SRC/dlls/winevulkan/vulkan_thunks.c" "winevulkan_thunks" "winevulkan" \
+        -I"$WINE_SRC/dlls/winevulkan"
+fi
 
 # iOS-Madeira 2026-07-05 (Steam S0): network + crypto unix sides.
 echo "=== Building crypto/network unixlibs ==="
@@ -206,7 +222,15 @@ fi
 
 echo ""
 echo "=== Building libntdll_unix.a ==="
+if [ "$FAILED" -gt 0 ]; then
+    echo "Not linking: $FAILED compilation failures"
+    exit 1
+fi
+# ar updates an existing archive; recreate it so disabling Vulkan drops its
+# old members as well as its object files.
+rm -f "$OBJ_DIR/libntdll_unix.a"
 ar rcs "$OBJ_DIR/libntdll_unix.a" \
+    "${MOLTENVK_OBJECTS[@]}" \
     "$OBJ_DIR/audio_null_ios.o" "$OBJ_DIR/madsync.o" "$OBJ_DIR/nsi_unixlib_ios.o" \
     "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \

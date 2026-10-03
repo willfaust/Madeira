@@ -17,6 +17,11 @@ SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 OBJ_DIR="$BUILD_DIR/obj"
 APP_LIB="$REPO_ROOT/app/Madeira/libwin32u_unix.a"
 
+VULKAN_FLAGS=(-USONAME_LIBVULKAN)
+if [[ "${MADEIRA_MOLTENVK:-0}" == 1 ]]; then
+    VULKAN_FLAGS=(-DMADEIRA_MOLTENVK=1)
+fi
+
 mkdir -p "$OBJ_DIR"
 
 SUCCEEDED=0
@@ -50,7 +55,7 @@ compile_one() {
         -USONAME_LIBFREETYPE \
         -USONAME_LIBFONTCONFIG \
         -USONAME_LIBEGL \
-        -USONAME_LIBVULKAN \
+        "${VULKAN_FLAGS[@]}" \
         -USONAME_LIBGNUTLS \
         -UHAVE_FT2BUILD_H \
         "$@" \
@@ -81,6 +86,10 @@ for src in $WINE_SRC/dlls/win32u/*.c $WINE_SRC/dlls/win32u/dibdrv/*.c; do
 
     # Per-file iOS overrides (analogous to ntdll-unix's pattern).
     case "$name" in
+        vulkan)
+            compile_one "$BUILD_DIR/vulkan_ios.c" "vulkan"
+            continue
+            ;;
         class)
             compile_one "$BUILD_DIR/class_ios.c" "class"
             continue

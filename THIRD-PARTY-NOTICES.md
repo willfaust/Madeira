@@ -10,6 +10,10 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 
 ## Components that ship in the built app
 
+Optional [MoltenVK 1.4.1](https://github.com/KhronosGroup/MoltenVK/tree/db445ff2042d9ce348c439ad8451112f354b8d2a)
+is Apache-2.0. Its dependency licenses and source receipt are bundled under
+`licenses/moltenvk/`.
+
 | Component | Upstream license | **Madeira's fork** | Notes |
 |---|---|---|---|
 | **Wine** | LGPL-2.1-or-later | **GPL-3.0-or-later** | Fork relicensed under LGPL-2.1 §3, which expressly permits applying the ordinary GPL to a copy. `ntdll`, `wineserver`, `win32u`, ARM64EC loader modified for iOS. |
