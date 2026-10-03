@@ -94,6 +94,10 @@ starting screen takes over (or an error is shown). A profile holds:
   uncapped, so the choice is hidden and a saved 30 runs as 60);
 - reduced-precision x87: off by default, as in FEX; only an explicit choice
   exports `FEX_X87REDUCEDPRECISION=1`;
+- **AVX and AVX2**: off by default, as in FEX's iOS build; only an explicit
+  choice exports `MADEIRA_FEX_AVX=1`, which makes the ARM64EC FEX module report
+  and emulate AVX/AVX2 for a game built for AVX processors (64-bit games; WOW64
+  has no AVX);
 - **CPU cores reported** (Automatic, 1, 2, 4 or 6) and **D3D9 anisotropic
   filtering** (Application default, up to 1×, 2×, 4× or 8×): only a choice
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or
