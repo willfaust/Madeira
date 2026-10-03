@@ -1369,6 +1369,54 @@ static int ios_fault_read_insn( uint64_t fault_pc, uint32_t *out )
     return 1;
 }
 
+/* ml1242: the JIT-pool dump is OPT-IN (MADEIRA_JIT_DUMP set) and sparse.
+ *
+ * Both one-shot dumps used to write the whole 896MB RW alias. The production
+ * pool is not NO_FOOTPRINT (see jit_make_region_no_footprint), and a read fault
+ * on an untouched page of it materialises a real zero page, so the dump alone
+ * charged ~600MB to phys_footprint: Hollow Knight went 2169 -> 2755MB while it
+ * ran and hit the 4096MB jetsam limit four seconds later. Pages mincore()
+ * reports neither resident nor paged out were never written; they stay holes,
+ * so file offsets still equal pool offsets (head copies and tail CodeBuffers). */
+static void ios_dump_jit_pool( const char *why )
+{
+    extern void *ios_jit_rw_base_global;
+    extern size_t ios_jit_pool_size_global;
+    const size_t chunk = 0x100000;
+    size_t ps = vm_page_size, total = ios_jit_pool_size_global, written = 0, off, i;
+    const char *docs;
+    char path[512], vec[256];   /* one byte per page of a 1MB chunk, down to 4KB pages */
+    int fd;
+
+    if (!getenv( "MADEIRA_JIT_DUMP" ) || !ios_jit_rw_base_global || !total) return;   /* set: write the JIT pool (sparse) to Documents/fex-jit-dump.bin on the first mach UNHANDLED / SIGILL (ml1242) */
+    docs = getenv( "MADEIRA_DOCS_DIR" );
+    snprintf( path, sizeof(path), "%s/fex-jit-dump.bin", docs ? docs : "/tmp" );
+    if ((fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) < 0)
+    {
+        dprintf( 2, "[jit-dump] ml1242 %s: open failed errno=%d path=%s\n", why, errno, path );
+        return;
+    }
+    for (off = 0; off < total; off += chunk)
+    {
+        size_t len = total - off < chunk ? total - off : chunk;
+        char *base = (char *)ios_jit_rw_base_global + off;
+        int have_vec = len / ps <= sizeof(vec) && !mincore( base, len, vec );
+
+        for (i = 0; i < len; i += ps)
+        {
+            size_t n = len - i < ps ? len - i : ps;
+            if (have_vec && !(vec[i / ps] & (MINCORE_INCORE | MINCORE_PAGED_OUT))) continue;
+            if (pwrite( fd, base + i, n, off + i ) != (ssize_t)n) goto done;
+            written += n;
+        }
+    }
+done:
+    ftruncate( fd, total );
+    close( fd );
+    dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes)\n",
+             why, written, total, path );
+}
+
 static void *ios_mach_exception_thread( void *arg )
 {
     mach_port_t port = (mach_port_t)(uintptr_t)arg;
@@ -5275,41 +5323,7 @@ skip_reclaim_band: ;
                      * to verify codegen correctness independently. */
                     static volatile int dumped = 0;
                     if (cnt == 1 && __sync_bool_compare_and_swap(&dumped, 0, 1))
-                    {
-                        extern void *ios_jit_rw_base_global;
-                        extern size_t ios_jit_pool_size_global;
-                        if (ios_jit_rw_base_global && ios_jit_pool_size_global)
-                        {
-                            const char *docs = getenv("MADEIRA_DOCS_DIR");
-                            char path[512];
-                            if (docs)
-                                snprintf(path, sizeof(path), "%s/fex-jit-dump.bin", docs);
-                            else
-                                snprintf(path, sizeof(path), "/tmp/fex-jit-dump.bin");
-                            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                            if (fd >= 0)
-                            {
-                                /* Dump the entire JIT pool RW alias. ~128MB but
-                                 * mostly zero. Compresses well; helpful to scan
-                                 * any populated region. */
-                                ssize_t off = 0;
-                                size_t total = ios_jit_pool_size_global;
-                                while ((size_t)off < total)
-                                {
-                                    ssize_t n = write(fd, (char*)ios_jit_rw_base_global + off,
-                                                       total - off > 0x10000 ? 0x10000 : total - off);
-                                    if (n <= 0) break;
-                                    off += n;
-                                }
-                                close(fd);
-                                dprintf(STDERR_FILENO, "[mach_exc] DUMPED JIT pool RW alias (%zd bytes) to %s rev=ml347\n", off, path);
-                            }
-                            else
-                            {
-                                dprintf(STDERR_FILENO, "[mach_exc] DUMP open failed errno=%d path=%s\n", errno, path);
-                            }
-                        }
-                    }
+                        ios_dump_jit_pool( "mach UNHANDLED" );
                     /* Diagnostic: query the kernel for what VM region the fault PC lives in.
                      * Helps identify mystery regions (e.g. JIT pool guard zone, wineserver heap). */
                     if (cnt <= 3)
@@ -10110,29 +10124,8 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
          * fire for ILL since we deliver via setup_exception). One-shot. */
         {
             static volatile int ill_dumped = 0;
-            if (__sync_bool_compare_and_swap(&ill_dumped, 0, 1)) {
-                extern void *ios_jit_rw_base_global;
-                extern size_t ios_jit_pool_size_global;
-                if (ios_jit_rw_base_global && ios_jit_pool_size_global) {
-                    const char *docs = getenv("MADEIRA_DOCS_DIR");
-                    char path[512];
-                    if (docs) snprintf(path, sizeof(path), "%s/fex-jit-dump.bin", docs);
-                    else      snprintf(path, sizeof(path), "/tmp/fex-jit-dump.bin");
-                    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd >= 0) {
-                        ssize_t off = 0;
-                        size_t total = ios_jit_pool_size_global;
-                        while ((size_t)off < total) {
-                            ssize_t n = write(fd, (char*)ios_jit_rw_base_global + off,
-                                              total - off > 0x10000 ? 0x10000 : total - off);
-                            if (n <= 0) break;
-                            off += n;
-                        }
-                        close(fd);
-                        ERR("ILL diag: DUMPED JIT pool RW alias (%zd bytes) to %s\n", off, path);
-                    }
-                }
-            }
+            if (__sync_bool_compare_and_swap(&ill_dumped, 0, 1))
+                ios_dump_jit_pool( "ILL diag" );
         }
     }
 #endif
