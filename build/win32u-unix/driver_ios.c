@@ -521,6 +521,70 @@ static int winios_desktop_mode(void)
     return mode;
 }
 
+/* Game-mode windows. Outside desktop mode a window got win32u's offscreen
+ * surface and its position never reached the app, so a launcher or a message
+ * box a game opens before (or instead of) its 3D window was drawn nowhere:
+ * Ghost of Tsushima's Play / Options launcher and its "No installed graphics
+ * card" box. Both gates open for a game session too; the app side (Winios.m)
+ * draws only top-level windows that do not cover the whole guest desktop and
+ * do not present through Metal, so a game's own window never covers its
+ * picture. MADEIRA_GAME_WINDOWS=0 restores the old behaviour. */
+static int winios_game_windows(void)
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *env = getenv( "MADEIRA_GAME_WINDOWS" );
+        on = !winios_desktop_mode() && !(env && *env == '0');
+    }
+    return on;
+}
+
+/* Game mode, a thread that shows a launcher / message box. Taps and keys wait
+ * in the app's ring (Winios.m) until a wine thread runs pProcessEvents. A
+ * game's own loop polls PeekMessage and drains it every frame, but a modal
+ * loop (MessageBox, a launcher's GetMessage) sleeps in wait_message with no
+ * timeout and the wineserver does not watch the ring, so the box took no tap
+ * or key. Desktop mode wakes such waits every 16 ms to drain the ring
+ * (message_ios.c wait_message); a thread that shows a visible top-level
+ * window smaller than the guest desktop now does the same. A full-screen game
+ * window never marks its thread. MADEIRA_GAME_INPUT_WAKE=0 turns this off.
+ * Logs [game-input] once per thread (8 at most). */
+static __thread int winios_thread_shows_dialog;
+
+int winios_input_wake_thread(void)
+{
+    return winios_thread_shows_dialog;
+}
+
+static void winios_note_dialog_thread( HWND hwnd, const RECT *visible )
+{
+    static int on = -1;
+    static unsigned int said;
+    RECT screen;
+
+    if (winios_thread_shows_dialog) return;
+    if (on < 0)
+    {
+        /* Default on: a launcher / message box over a game takes taps and keys; 0 = off. */
+        const char *env = getenv( "MADEIRA_GAME_INPUT_WAKE" );
+        on = !(env && *env == '0');
+    }
+    if (!on) return;
+    if (visible->right - visible->left < 32 || visible->bottom - visible->top < 32) return;
+    if (!(get_window_long( hwnd, GWL_STYLE ) & WS_VISIBLE)) return;
+    if (get_window_thread( hwnd, NULL ) != GetCurrentThreadId()) return;
+    screen = get_virtual_screen_rect( 0, MDT_DEFAULT );
+    if (visible->left <= screen.left && visible->top <= screen.top &&
+        visible->right >= screen.right && visible->bottom >= screen.bottom) return;
+    winios_thread_shows_dialog = 1;
+    if (__atomic_fetch_add( &said, 1, __ATOMIC_RELAXED ) < 8)
+        dprintf( 2, "[game-input] tid=%04x hwnd=%p vis={%d,%d,%d,%d}: this thread shows a window over "
+                 "the game; its message waits now wake every 16 ms to take taps and keys "
+                 "(MADEIRA_GAME_INPUT_WAKE=0 disables)\n", (int)GetCurrentThreadId(), hwnd,
+                 (int)visible->left, (int)visible->top, (int)visible->right, (int)visible->bottom );
+}
+
 /* ml505 probe. This hook was a pure stub: wine hands the driver the
  * surface's VISIBLE REGION here — the rects left after sibling and child
  * occlusion — and we discarded all of it.
@@ -649,15 +713,19 @@ static BOOL winios_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *sur
 static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                                            const struct window_rects *new_rects, struct window_surface *surface )
 {
-    /* desktop mode only — game windows must never wake the compositor
-     * (it would draw its backdrop OVER the DXMT Metal layer) */
-    if (winios_window_frame && winios_desktop_mode())
+    /* desktop mode, or a top-level window in game mode (Winios.m draws it
+     * in its transparent game-mode overlay, never the desktop backdrop that
+     * would cover the DXMT Metal layer) */
+    if (winios_window_frame && (winios_desktop_mode()
+        || (winios_game_windows() && !(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD)
+            && NtUserGetAncestor( hwnd, GA_PARENT ) == get_desktop_window())))
     {
         const RECT *v = &new_rects->visible;
         const RECT *c = &new_rects->client;
         int visible = !IsRectEmpty( v ) && !(swp_flags & SWP_HIDEWINDOW);
         winios_window_frame( hwnd, v->left, v->top, v->right - v->left, v->bottom - v->top, visible,
                              c->left, c->top, c->right - c->left, c->bottom - c->top );
+        if (visible && surface && winios_game_windows()) winios_note_dialog_thread( hwnd, v );
     }
     /* ml505: z-order and geometry churn. If the three same-rect siblings are
      * being reordered, the topmost changes and the surface shows whichever
@@ -703,6 +771,21 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
             }
         }
     }
+
+    /* Game-mode windows need an expose-equivalent repaint. A real windowing
+     * system answers a window becoming visible, or getting a new backing
+     * surface, with an expose / damage event, and the driver turns it into
+     * NtUserRedrawWindow -- the only thing that queues WM_PAINT. winios has no
+     * such event, so a game's message box painted once into its first
+     * surface, got a new one ("[surf-create] ... RECREATED") and never
+     * painted or flushed again: a layer with no bits. Condition: a
+     * surface-backed window that is visible and was just shown or had its
+     * surface changed (apply_window_pos forces SWP_FRAMECHANGED when the
+     * surface pointer changes). Game mode only; desktop mode is unchanged. */
+    if (winios_game_windows() && surface && !IsRectEmpty( &new_rects->visible ) &&
+        !(swp_flags & SWP_HIDEWINDOW) && (swp_flags & (SWP_SHOWWINDOW | SWP_FRAMECHANGED)) &&
+        (get_window_long( hwnd, GWL_STYLE ) & WS_VISIBLE))
+        NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
 
     if (winios_pWindowPosChanged)
         winios_pWindowPosChanged( hwnd, insert_after, owner_hint, swp_flags, new_rects, surface );
@@ -1762,12 +1845,19 @@ static void load_display_driver(void)
          * forwards plain ints to Winios.m's layer compositor */
         if (winios_pWindowPosChanged || winios_window_frame)
             winios_user_driver.pWindowPosChanged = winios_drv_window_pos_changed;
-        /* S2 desktop mode only: GDI window surfaces → app compositor.
-         * Games keep the offscreen (invisible) surface path. */
+        /* S2 desktop mode: GDI window surfaces → app compositor. */
         if (winios_desktop_mode())
         {
             winios_user_driver.pCreateWindowSurface = winios_CreateWindowSurface;
             dprintf( 2, "[winios] desktop mode: window-surface compositing ENABLED\n" );
+        }
+        /* Game mode: launcher / dialog windows get real surfaces too; only
+         * top-level windows reach Winios.m's overlay (window_pos_changed). */
+        else if (winios_game_windows())
+        {
+            winios_user_driver.pCreateWindowSurface = winios_CreateWindowSurface;
+            dprintf( 2, "[winios] game mode: launcher / dialog windows are drawn over the game "
+                        "(MADEIRA_GAME_WINDOWS=0 hides them)\n" );
         }
         winios_user_driver.pUpdateDisplayDevices = winios_UpdateDisplayDevices;
         __wine_set_user_driver( &winios_user_driver, WINE_GDI_DRIVER_VERSION );

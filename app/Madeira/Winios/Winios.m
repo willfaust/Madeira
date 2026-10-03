@@ -823,6 +823,8 @@ extern void winios_screen_size(int *w, int *h);
 extern NSString * const MadeiraDisplayModeChangedNotification;
 
 static UIView *g_compositor_view;
+static BOOL g_comp_game;   /* g_compositor_view is the game-mode overlay (below) */
+static void winios_drop_compositor(const char *why);
 static CALayer *g_desk_bg;               /* teal desktop-area backdrop */
 static CGFloat g_px_to_pt = 1.0 / 3.0;   /* desktop px → screen pt (x, and y unless stretched) */
 static CGFloat g_px_to_pt_y;             /* y scale when the display mode stretches; 0 = same as x */
@@ -925,6 +927,11 @@ void winios_set_compositor_frame(double x, double y, double w, double h) {
  * next session. Returns 1 when there was a view to change. */
 int winios_compositor_set_hidden(int hidden) {
     if (!g_compositor_view) return 0;
+    if (g_comp_game) {   /* an ended game session's windows go away */
+        if (!hidden) return 0;
+        dispatch_async(dispatch_get_main_queue(), ^{ winios_drop_compositor("session ended"); });
+        return 1;
+    }
     BOOL h = hidden ? YES : NO;
     if (NSThread.isMainThread) {
         if (g_compositor_view.hidden == h) return 0;
@@ -968,13 +975,144 @@ int winios_desktop_point_from_window(double wx, double wy, int *px, int *py) {
     return 1;
 }
 
+/* GAME-MODE WINDOWS. A game's launcher or message box (Ghost of Tsushima's
+ * Play / Options box, its "No installed graphics card" dialog) is a GDI
+ * window; outside desktop mode nothing drew it, so the game sat waiting for a
+ * click on something invisible. In a game session the compositor view is
+ * created too, as a transparent overlay: no backdrop, no letterbox colour, no
+ * touches (userInteractionEnabled = NO), laid out in the same game rect the
+ * front end publishes (winios_set_desktop_rect), which is the rect
+ * MetalBackedView maps touches through -- a tap lands where the window is
+ * drawn. Only top-level windows reach it (driver_ios.c), and a
+ * window is drawn only if it does not cover the whole guest desktop and does
+ * not present through Metal (winios_note_game_metal_hwnd): a game's own
+ * window never covers its picture, and God of War's (full-desktop) window is
+ * never drawn. MADEIRA_GAME_WINDOWS=0 turns it off (both sides). */
+static NSMutableSet<NSNumber *> *g_game_metal;  /* game mode: hwnds presenting through Metal */
+
+static int winios_desktop_session(void) {
+    /* read every time: one app run can hold desktop and game sessions */
+    const char *dm = getenv("MADEIRA_DESKTOP");
+    return dm && *dm == '1';
+}
+
+static int winios_game_windows_enabled(void) {
+    const char *e = getenv("MADEIRA_GAME_WINDOWS");
+    return !(e && *e == '0');
+}
+
+/* A window whose rect covers the whole guest desktop: a game's own window. */
+static BOOL winios_covers_desktop(CGRect px) {
+    int dw = 0, dh = 0;
+    winios_screen_size(&dw, &dh);
+    if (dw <= 0 || dh <= 0) return NO;
+    return px.origin.x <= 0 && px.origin.y <= 0
+        && px.origin.x + px.size.width >= dw && px.origin.y + px.size.height >= dh;
+}
+
+static void winios_forget_cursor_layer(void);   /* cursor section, below */
+
+/* main thread only. Removes the compositor view and every window layer. */
+static void winios_drop_compositor(const char *why) {
+    if (!g_compositor_view) return;
+    winios_forget_cursor_layer();
+    for (CALayer *l in g_layers.allValues) [l removeFromSuperlayer];
+    [g_layers removeAllObjects];
+    [g_px_rects removeAllObjects];
+    [g_surf_sizes removeAllObjects];
+    [g_metal_layers removeAllObjects];
+    [g_client_rects removeAllObjects];
+    g_fit_key = nil;
+    [g_compositor_view removeFromSuperview];
+    g_compositor_view = nil;
+    g_desk_bg = nil;
+    fprintf(stderr, "[winios] %s compositor removed (%s)\n", g_comp_game ? "game-mode" : "desktop", why);
+    fflush(stderr);
+    g_comp_game = NO;
+}
+
+/* main thread only. Is this window drawn by the game overlay? Removes its
+ * layer when it is not. Desktop mode: always YES. */
+static BOOL winios_game_window_shown(NSNumber *key) {
+    if (!g_comp_game) return YES;
+    NSValue *rv = g_px_rects[key];
+    BOOL metal = [g_game_metal containsObject:key];
+    if (!metal && rv && !winios_covers_desktop(rv.CGRectValue)) return YES;
+    CALayer *l = g_layers[key];
+    if (l) {
+        [l removeFromSuperlayer];
+        [g_layers removeObjectForKey:key];
+        fprintf(stderr, "[winios] game window hwnd=0x%llx not drawn (%s)\n", key.unsignedLongLongValue,
+                metal ? "presents through Metal" : rv ? "covers the guest desktop" : "no position yet");
+        fflush(stderr);
+    }
+    return NO;
+}
+
+/* Called by IOSDisplayShim on a wine thread when a swapchain (D3D9/11/12)
+ * takes the game layer for an HWND in a game session. */
+void winios_note_game_metal_hwnd(void *hwnd) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSNumber *key = @((uintptr_t)hwnd);
+        if (!g_game_metal) g_game_metal = [NSMutableSet new];
+        if ([g_game_metal containsObject:key]) return;
+        [g_game_metal addObject:key];
+        fprintf(stderr, "[winios] game window hwnd=%p presents through Metal; its GDI surface is not drawn\n", hwnd);
+        fflush(stderr);
+        if (g_comp_game) (void)winios_game_window_shown(key);
+    });
+}
+
+/* Called at every Wine session start (WineProcessBridge): a game session
+ * starts with no overlay windows and no known Metal windows. */
+void winios_session_reset(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [g_game_metal removeAllObjects];
+        if (g_comp_game) winios_drop_compositor("new session");
+    });
+}
+
 /* main thread only */
 static void winios_ensure_compositor(void) {
-    if (g_compositor_view) return;
-    /* desktop mode only — games render via DXMT's Metal layer and the
-     * compositor backdrop would cover it (2026-07-06 Thumper regression) */
-    const char *dm = getenv("MADEIRA_DESKTOP");
-    if (!dm || *dm != '1') return;
+    BOOL desk = winios_desktop_session();
+    if (g_compositor_view) {
+        if (g_comp_game == !desk) return;
+        /* the other kind, left by an earlier session of this app run */
+        winios_drop_compositor("session kind changed");
+    }
+    /* Desktop mode, or the game overlay above. The desktop compositor's
+     * backdrop must never exist in a game session -- it would cover DXMT's
+     * Metal layer (2026-07-06 Thumper regression). */
+    if (!desk && !winios_game_windows_enabled()) return;
+    if (!desk) {
+        UIWindow *win = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+        if (!win) return;
+        if (!g_layers) g_layers = [NSMutableDictionary new];
+        if (!g_px_rects) g_px_rects = [NSMutableDictionary new];
+        if (!g_surf_sizes) g_surf_sizes = [NSMutableDictionary new];
+        g_compositor_view = [[UIView alloc] initWithFrame:win.bounds];
+        g_compositor_view.userInteractionEnabled = NO;  /* touches fall through */
+        g_compositor_view.clipsToBounds = YES;
+        g_compositor_view.backgroundColor = UIColor.clearColor;
+        g_compositor_view.opaque = NO;
+        g_comp_game = YES;
+        [win addSubview:g_compositor_view];
+        winios_layout_compositor();
+        fprintf(stderr, "[winios] game-mode window overlay attached (MADEIRA_GAME_WINDOWS=0 disables)\n");
+        fflush(stderr);
+        static id game_mode_observer;
+        if (!game_mode_observer) {
+            game_mode_observer = [[NSNotificationCenter defaultCenter]
+                addObserverForName:MadeiraDisplayModeChangedNotification object:nil
+                             queue:[NSOperationQueue mainQueue]
+                        usingBlock:^(NSNotification *note) { winios_layout_compositor(); }];
+        }
+        return;
+    }
     UIWindow *win = nil;
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
         if (w.isKeyWindow) { win = w; break; }
@@ -1187,8 +1325,12 @@ void winios_window_frame(HWND hwnd, int x, int y, int w, int h, int visible,
     dispatch_async(dispatch_get_main_queue(), ^{
         winios_ensure_compositor();
         if (!g_compositor_view) return;
-        CALayer *l = winios_layer_for(hwnd, true);
         NSNumber *key = @((uintptr_t)hwnd);
+        if (g_comp_game) {   /* game-mode windows, see winios_game_window_shown */
+            g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(x, y, w, h)];
+            if (!winios_game_window_shown(key)) return;
+        }
+        CALayer *l = winios_layer_for(hwnd, true);
         g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(x, y, w, h)];
         if (!g_client_rects) g_client_rects = [NSMutableDictionary new];
         g_client_rects[key] = [NSValue valueWithCGRect:CGRectMake(cx, cy, cw, ch)];
@@ -1196,6 +1338,10 @@ void winios_window_frame(HWND hwnd, int x, int y, int w, int h, int visible,
         [CATransaction setDisableActions:YES];
         l.frame = winios_layer_rect(x, y, w, h);
         l.hidden = !visible;
+        /* a game-mode window whose bits came before its position is on
+         * screen now -- the library's starting screen counts it */
+        if (g_comp_game && visible && l.contents)
+            atomic_fetch_add_explicit(&g_surface_present_count, 1, memory_order_relaxed);
         winios_apply_contents_rect(key, l);
         winios_place_metal_layer(key);
         [CATransaction commit];
@@ -1590,6 +1736,15 @@ int winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
          * and released with the block, which is exactly why the snapshot has to
          * own its bytes: this runs AFTER winios_surface_present has returned. */
         if (!g_compositor_view) return;
+        /* game mode draws a window only once its position says it is not
+         * the game's own (winios_game_window_shown); bits that arrive before
+         * any position wait in a hidden layer for winios_window_frame. */
+        BOOL pending = NO;   /* game mode, position not known yet: keep the bits, hidden */
+        if (g_comp_game) {
+            NSNumber *k = @((uintptr_t)hwnd);
+            if (!g_px_rects[k] && ![g_game_metal containsObject:k]) pending = YES;
+            else if (!winios_game_window_shown(k)) return;
+        }
         CALayer *l = winios_layer_for(hwnd, true);
         CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
         CGDataProviderRef dp = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
@@ -1600,9 +1755,10 @@ int winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
         if (img) {
             NSNumber *key = @((uintptr_t)hwnd);
             l.contents = (__bridge id)img;
-            atomic_fetch_add_explicit(&g_surface_present_count, 1, memory_order_relaxed);
+            if (pending) l.hidden = YES;   /* winios_window_frame decides */
+            else atomic_fetch_add_explicit(&g_surface_present_count, 1, memory_order_relaxed);
             g_surf_sizes[key] = [NSValue valueWithCGSize:CGSizeMake(sw, sh)];
-            if (CGRectIsEmpty(l.frame)) {
+            if (!pending && CGRectIsEmpty(l.frame)) {
                 /* frame not delivered yet — place at surface size */
                 g_px_rects[key] = [NSValue valueWithCGRect:CGRectMake(0, 0, sw, sh)];
                 l.frame = winios_layer_rect(0, 0, sw, sh);
@@ -1653,9 +1809,15 @@ static UIImage *winios_cursor_image(void) {
 static int g_cur_w, g_cur_h, g_cur_hx, g_cur_hy;
 static CGPoint g_cursor_pos_px;
 
+/* The cursor is a sublayer of the compositor view; a dropped view takes it. */
+static void winios_forget_cursor_layer(void) {
+    [g_cursor_layer removeFromSuperlayer];
+    g_cursor_layer = nil;
+}
+
 /* main thread only */
 static void winios_ensure_cursor_layer(void) {
-    if (g_cursor_layer || !g_compositor_view) return;
+    if (g_cursor_layer || !g_compositor_view || g_comp_game) return;
     UIImage *img = winios_cursor_image();
     g_cursor_layer = [CALayer layer];
     g_cursor_layer.zPosition = 10000;   /* above every window layer */
@@ -1693,6 +1855,7 @@ static void winios_cursor_place(void) {
 
 void winios_cursor_move(int x, int y) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (!winios_desktop_session()) return;   /* game sessions: no drawn arrow */
         winios_ensure_compositor();
         if (!g_compositor_view) return;
         winios_ensure_cursor_layer();
@@ -1711,6 +1874,7 @@ void winios_cursor_set(unsigned int cur_id, int w, int h, int hot_x, int hot_y, 
     if (w <= 0 || h <= 0 || !bgra) return;
     NSData *data = [NSData dataWithBytes:bgra length:(size_t)w * h * 4];
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (!winios_desktop_session()) return;   /* game sessions: no drawn arrow */
         winios_ensure_compositor();
         if (!g_compositor_view) return;
         winios_ensure_cursor_layer();

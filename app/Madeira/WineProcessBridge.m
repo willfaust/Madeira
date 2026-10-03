@@ -1033,6 +1033,9 @@ static void *wine_process_thread(void *arg) {
             /* ml519: start the freeze detector as soon as logging works, so
              * every launch (Thumper as well as Steam) yields a measurement. */
             { extern void winios_freeze_watch_start(void); winios_freeze_watch_start(); }
+            /* a game session starts with no game-mode overlay windows and
+             * no known Metal windows (Winios.m) */
+            { extern void winios_session_reset(void); winios_session_reset(); }
             LOG("Wine log file: %{public}s", logPath.UTF8String);
             /* Expose the app Documents dir to Wine code (e.g. for fex-jit-dump.bin) */
             setenv("MADEIRA_DOCS_DIR", docs.UTF8String, 1);
@@ -1517,6 +1520,35 @@ static void *wine_process_thread(void *arg) {
             dprintf(STDERR_FILENO, "[WineProc] __wine_main returned normally\n");
         } else {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
+        }
+
+        /* A launcher stub that starts the game and exits at once (GTA V
+         * Enhanced: PlayGTAV.exe -> GTA5_Enhanced.exe) must not end the
+         * session -- stopping the wineserver here killed the game while it
+         * loaded. If a child process that is not a crash reporter / helper was
+         * started in the last 60 s and still runs, the session goes on until
+         * no such child is left (process_ios.c, madeira_live_game_children).
+         * A game that exits normally long after starting its helpers is not
+         * affected. MADEIRA_WAIT_CHILDREN=0 ends the session with the main
+         * process, as before. */
+        {
+            extern int madeira_live_game_children(char *buf, int len, double max_age);
+            const char *wc = getenv("MADEIRA_WAIT_CHILDREN");
+            char names[256];
+            int n = madeira_live_game_children(names, sizeof names, 60.0);
+            if (n > 0 && !(wc && wc[0] == '0')) {
+                dprintf(STDERR_FILENO, "[WineProc] the main process exited but %d child process(es) "
+                        "it started still run (%s) -- a launcher started the game; the session goes on until "
+                        "they exit (MADEIRA_WAIT_CHILDREN=0 ends it with the main process)\n", n, names);
+                unsigned ticks = 0;
+                while ((n = madeira_live_game_children(names, sizeof names, -1.0)) > 0) {
+                    usleep(200 * 1000);
+                    if ((++ticks % 300) == 0)
+                        dprintf(STDERR_FILENO, "[WineProc] still running: %d child process(es) (%s), %u s\n",
+                                n, names, ticks / 5);
+                }
+                dprintf(STDERR_FILENO, "[WineProc] the last child process exited after %u s\n", ticks / 5);
+            }
         }
 
         g_wine_running = 0;

@@ -3457,6 +3457,8 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
     return time;
 }
 
+extern int winios_input_wake_thread(void);   /* driver_ios.c */
+
 /* wait for message or signaled handle */
 static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD wake_mask, DWORD changed_mask, DWORD flags )
 {
@@ -3497,7 +3499,9 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
             const char *d = getenv( "MADEIRA_DESKTOP" );
             ios_slice = (d && *d == '1');
         }
-        if (!ios_slice)
+        /* game mode: the thread that shows a launcher / message box over
+         * the game slices too (driver_ios.c winios_input_wake_thread) */
+        if (!ios_slice && !winios_input_wake_thread())
         {
             do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
             while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));

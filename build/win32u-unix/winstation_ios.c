@@ -858,16 +858,139 @@ static inline TEB64 *NtCurrentTeb64(void) { return NULL; }
 static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiBatchCount; }
 #endif
 
+#ifdef WINE_IOS
+/* The process whose thread ran init_user (class_ios.c), i.e. the session's
+ * first pseudo-process. NULL until init_user has finished. */
+extern void *ios_win32u_session_peb;
+
+static unsigned int ios_request_desktop_window( struct ntuser_thread_info *thread_info, BOOL force )
+{
+    unsigned int status;
+
+    SERVER_START_REQ( get_desktop_window )
+    {
+        req->force = force;
+        if (!(status = wine_server_call( req )))
+        {
+            thread_info->top_window = reply->top_window;
+            thread_info->msg_window = reply->msg_window;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+/* Give a pseudo-process child what init_user gave the session.
+ *
+ * init_user (class_ios.c) runs once per iOS process -- pthread_once -- so only
+ * the session's first pseudo-process registers the desktop and message window
+ * classes and connects to a window station. The wineserver keeps window
+ * classes PER PROCESS, and creates a missing desktop window in the context of
+ * the process asking for it (get_desktop_window with force, or the first
+ * top-level CreateWindowEx). A main process that never opens a window before
+ * starting its child (a launcher stub such as GTA V Enhanced's PlayGTAV.exe)
+ * leaves the shared desktop without one, and then the child cannot make it:
+ * the class lookup fails in the child, GetDesktopWindow() stays NULL for good
+ * ("iOS: skipping explorer.exe launch; top_window stays 0" on the game
+ * thread), and with it GetDC(NULL), MonitorFromWindow(GetDesktopWindow(), ...)
+ * and the child's first top-level CreateWindowEx. register_builtin_classes()
+ * was made per-process for the same reason (Steam's update UI).
+ *
+ * Only on the failure path, never in the session's own process, and once per
+ * process (pid+PEB): register the two classes for this process and ask again;
+ * if the thread has no desktop at all, connect this process the way
+ * winstation_init connects the session (WinSta0, the default desktop) and ask
+ * once more. The desktop window is detached from its creator at once (the
+ * server releases the class), so it outlives this process.
+ * MADEIRA_CHILD_DESKTOP=0 turns this off. Logs [child-desktop]. */
+static BOOL ios_child_desktop_fixup( struct ntuser_thread_info *thread_info, BOOL force,
+                                     unsigned int first_status )
+{
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct { DWORD pid; void *peb; } done[64];
+    static unsigned int done_count, said;
+    static int enabled = -1;
+    DWORD pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
+    void *peb = NtCurrentTeb()->Peb;
+    HDESK desk_before, desk_after = 0;
+    unsigned int i, status, status2 = 0, n;
+    BOOL registered = FALSE, connected = FALSE;
+
+    if (enabled < 0)
+    {
+        /* Default on; 0 keeps a child without a desktop window, as before. */
+        const char *env = getenv( "MADEIRA_CHILD_DESKTOP" );
+        enabled = !(env && env[0] == '0' && !env[1]);
+    }
+    if (!enabled || !ios_win32u_session_peb || peb == ios_win32u_session_peb) return FALSE;
+
+    /* One attempt per process: a process this did not help keeps the old
+     * single request per call (a desktop window another process creates
+     * later is still found by it). */
+    pthread_mutex_lock( &lock );
+    for (i = 0; i < done_count; i++)
+        if (done[i].pid == pid && done[i].peb == peb) break;
+    if (i < done_count)
+    {
+        pthread_mutex_unlock( &lock );
+        return FALSE;
+    }
+    if (done_count < ARRAY_SIZE(done))
+    {
+        done[done_count].pid = pid;
+        done[done_count].peb = peb;
+        done_count++;
+    }
+    register_desktop_class();
+    registered = TRUE;
+
+    desk_before = NtUserGetThreadDesktop( GetCurrentThreadId() );
+    status = ios_request_desktop_window( thread_info, force );
+    if (!thread_info->top_window && !NtUserGetThreadDesktop( GetCurrentThreadId() ))
+    {
+        winstation_init();
+        connected = TRUE;
+        desk_after = NtUserGetThreadDesktop( GetCurrentThreadId() );
+        status2 = ios_request_desktop_window( thread_info, force );
+    }
+    pthread_mutex_unlock( &lock );
+
+    n = __atomic_fetch_add( &said, 1, __ATOMIC_RELAXED );
+    if (n < 8)
+    {
+        char how[160];
+        if (connected)
+            snprintf( how, sizeof(how), "retry %#x; thread had no desktop, winstation_init gave it %p, "
+                      "second retry %#x", status, desk_after, status2 );
+        else
+            snprintf( how, sizeof(how), "retry %#x", status );
+        ERR_(win)( "[child-desktop] pid=%04x peb=%p tid=%04x: no desktop window (status %#x, "
+                   "thread desktop %p)%s; %s -> top_window=%#x msg_window=%#x\n",
+                   (int)pid, peb, (int)GetCurrentThreadId(), first_status, desk_before,
+                   registered ? "; registered the desktop/message classes for this process" : "",
+                   how, (unsigned int)thread_info->top_window, (unsigned int)thread_info->msg_window );
+    }
+    return thread_info->top_window != 0;
+}
+#endif
+
 HWND get_desktop_window(void)
 {
     struct ntuser_thread_info *thread_info = NtUserGetThreadInfo();
     BOOL is_service;
+#ifdef WINE_IOS
+    unsigned int status;
+#endif
 
     if (thread_info->top_window) return UlongToHandle( thread_info->top_window );
 
     /* don't create an actual explorer desktop window for services */
     is_service = is_service_process();
 
+#ifdef WINE_IOS
+    status = ios_request_desktop_window( thread_info, is_service );
+    if (!thread_info->top_window) ios_child_desktop_fixup( thread_info, is_service, status );
+#else
     SERVER_START_REQ( get_desktop_window )
     {
         req->force = is_service;
@@ -878,6 +1001,7 @@ HWND get_desktop_window(void)
         }
     }
     SERVER_END_REQ;
+#endif
 
     /* iOS: skip the explorer.exe launch path entirely. CreateProcess for
      * arbitrary builtins isn't wired up, and the launch always fails with

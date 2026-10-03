@@ -70,6 +70,12 @@ void winios_cursor_move(int x, int y);
  * mapping (0 when there is no desktop). */
 unsigned long long winios_surface_present_count(void);
 int winios_compositor_set_hidden(int hidden);
+
+/* Game-mode windows (Winios.m). The window a game session's swapchain
+ * presents from (IOSDisplayShim) is never drawn as a GDI window; a Wine
+ * session start clears the overlay. */
+void winios_note_game_metal_hwnd(void *hwnd);
+void winios_session_reset(void);
 int winios_desktop_point_from_window(double wx, double wy, int *px, int *py);
 
 /* Top-level window census, for the starting screen of a Madeira Dock start
