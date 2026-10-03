@@ -2653,11 +2653,31 @@ struct ContentView: View {
             // d3d11.mipClampBC=N is the one that matters for memory: this GPU cannot
             // sample BC, so those textures are expanded to uncompressed and cost 2-8x
             // their shipped size.
+            //
+            // ml1255: DXMT splits DXMT_CONFIG on ';' ONLY (util/config/config.cpp,
+            // getUserConfig), and its value scanner stops at ' ', '\t', '\r' but not
+            // '\n'. Turning ';' into '\n' (ml1095) handed it ONE line, so the first key
+            // swallowed the rest as its value: mipClampBC = "1\nd3d11.preferredMaxFrameRate=30"
+            // is no integer, fell back to 0, and the later keys were never set at all.
+            // Pass the options ';'-joined, one trimmed "key=value" each; newlines (a
+            // legacy multi-line madeira-dxmt.txt) separate options too.
             if let txt = MadeiraConfig.get("dxmt") {
-                let v = txt.replacingOccurrences(of: ";", with: "\n").trimmingCharacters(in: .whitespacesAndNewlines)   /* ml1095: "a=b;c=d" on one line */
+                let opts = txt.split(whereSeparator: { $0 == ";" || $0.isNewline })
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+                    .map { o -> String in
+                        guard let eq = o.firstIndex(of: "=") else { return o }
+                        return o[..<eq].trimmingCharacters(in: .whitespaces) + "=" + o[o.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+                    }
+                let v = opts.joined(separator: ";")
                 if !v.isEmpty {
                     setenv("DXMT_CONFIG", v, 1)
-                    logStore.log("DXMT config: \(v) via madeira.cfg dxmt")
+                    logStore.log("DXMT config: \(v) via madeira.cfg dxmt (\(opts.count) option\(opts.count == 1 ? "" : "s"))")
+                    // ml1255: DXMT reads the variable into a MAX_PATH buffer (util_env.cpp
+                    // getEnvVar); anything longer comes back EMPTY and every option is lost.
+                    if v.utf16.count > 259 {
+                        logStore.log("DXMT config is \(v.utf16.count) chars; DXMT reads at most 259 and would drop ALL of it -- shorten madeira.cfg dxmt", level: .error)
+                    }
                 }
             }
 
