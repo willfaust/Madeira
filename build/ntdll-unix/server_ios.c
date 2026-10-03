@@ -2791,6 +2791,15 @@ int wine_server_receive_fd( obj_handle_t *handle )
         server_protocol_perror("recvmsg");
     }
     /* the server closed the connection; time to die... */
+#ifdef WINE_IOS
+    /* iOS-Madeira ml1183: a killed thread whose fd socket died between get_handle_fd's
+     * reply and this read is inside server_get_unix_fd's fd_cache_mutex section: exiting
+     * here leaves that mutex, shared by every process of the task, locked (the hang
+     * ios_defer_section_abort fixes for the request pipes). Fail the read instead; the
+     * caller maps -1 to an error and the thread exits when it leaves the section.
+     * Outside a section (process init): unchanged. */
+    if (ios_defer_section_abort()) return -1;
+#endif
     abort_thread(0);
 }
 
