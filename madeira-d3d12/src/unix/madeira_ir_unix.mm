@@ -1280,6 +1280,68 @@ static int mad_ags_enabled(void)
     return enabled;
 }
 
+/* The converter's compatibility flags: D3D12 guarantees the Metal Shader
+ * Converter gives only on request. Each is on by default and can be turned off
+ * in madeira.cfg for an A/B run; the DXIL cache keys on the result, so a
+ * change re-converts once.
+ * - ml932, always: IRCompatibilityFlagForceTextureArray (see the comment at
+ *   IRCompilerSetCompatibilityFlags below).
+ * - msc-bounds-check: D3D12 robust buffer access -- an out-of-range read
+ *   returns 0, an out-of-range write is dropped. Without it a read past a
+ *   buffer returns whatever memory follows. Ghost of Tsushima dispatches a
+ *   normal-recompute kernel rounded up to its group size (221 x 64 threads);
+ *   the threads past the last vertex read their [first, last) adjacency range
+ *   from beyond the buffer, got garbage instead of 0,0 and looped until Metal
+ *   timed the command buffer out (MTLCommandBufferError 2), every run.
+ * - msc-position-invariance: the same vertex shader in two pipelines gives
+ *   bit-identical positions. Metal compiles a vertex function per pipeline and
+ *   may optimise the position math differently in each, so a pass that redraws
+ *   geometry with depth test EQUAL after a depth pre-pass loses pixels at
+ *   random (~350 such draws a frame in Ghost of Tsushima: cloth, hair). DXVK
+ *   and vkd3d-proton declare position invariant by default for the same reason.
+ * - msc-strict-nan: MSC 4.0 compiles with Metal's assumption that no operand
+ *   is NaN or Inf, so isnan() can fold to false and min/max lose their NaN
+ *   rules. D3D12 keeps IEEE semantics (Ghost of Tsushima clears a velocity
+ *   target to NaN as a "not written" marker).
+ * - msc-sampler-lod-bias: apply D3D12_SAMPLER_DESC::MipLODBias. Metal samplers
+ *   have no LOD bias; the runtime already writes it into every sampler
+ *   descriptor's metadata, but the converted shader reads it only with this flag.
+ * - msc-sample-nan-zero: a texture sample that comes back NaN reads 0. A
+ *   filtered read across NaN texels is NaN on Metal, and a NaN that reaches a
+ *   temporal resolve stays in its history and spreads as dark specks.
+ * - msc-position-inf-nan: a vertex position of +-Inf becomes NaN, which Metal
+ *   discards like D3D does. Particle systems kill particles by writing an
+ *   infinite position; kept as Inf, Metal can rasterise a sliver instead. */
+static uint32_t mad_ir_compat_flags(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        int bc = madeira_cfg_int("msc-bounds-check", 1) ? 1 : 0;
+        int inv = madeira_cfg_int("msc-position-invariance", 1) ? 1 : 0;
+        int nan = madeira_cfg_int("msc-strict-nan", 1) ? 1 : 0;
+        int lod = madeira_cfg_int("msc-sampler-lod-bias", 1) ? 1 : 0;
+        int snz = madeira_cfg_int("msc-sample-nan-zero", 1) ? 1 : 0;
+        int pin = madeira_cfg_int("msc-position-inf-nan", 1) ? 1 : 0;
+        int f = (int)IRCompatibilityFlagForceTextureArray |
+                (bc ? (int)IRCompatibilityFlagBoundsCheck : 0) |
+                (inv ? (int)IRCompatibilityFlagPositionInvariance : 0) |
+                (lod ? (int)IRCompatibilityFlagSamplerLODBias : 0) |
+                (snz ? (int)IRCompatibilityFlagSampleNanToZero : 0) |
+                (pin ? (int)IRCompatibilityFlagVertexPositionInfToNan : 0);
+#if IR_VERSION_MAJOR >= 4
+        if (nan) f |= (int)IRCompatibilityFlagDisableNanInfOptimization;
+#else
+        nan = 0;   /* converted IR was strict before 4.0 */
+#endif
+        fprintf(stderr, "[madeira-ir] MSC %d.%d.%d compatibility: bounds check %s, position invariance %s, strict NaN/Inf %s, "
+                        "sampler LOD bias %s, sampled NaN -> 0 %s, Inf position -> NaN %s (madeira.cfg msc-bounds-check, "
+                        "msc-position-invariance, msc-strict-nan, msc-sampler-lod-bias, msc-sample-nan-zero, msc-position-inf-nan)\n",
+                IR_VERSION_MAJOR, IR_VERSION_MINOR, IR_VERSION_PATCH, bc ? "on" : "off", inv ? "on" : "off",
+                nan ? "on" : "off", lod ? "on" : "off", snz ? "on" : "off", pin ? "on" : "off");
+        cached = f;   /* one store: another converting thread sees -1 or the whole value */
+    }
+    return (uint32_t)cached;
+}
+
 extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
     pthread_once(&g_ir_once, ir_load_once);
     if (!a) return MADEIRA_IR_UNSUPPORTED;
@@ -1375,7 +1437,7 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
         env.converter_ident = g_ir.ident;
         env.build_stamp = __DATE__ " " __TIME__;
         env.ags_rewrite = (uint32_t)mad_ags_enabled();
-        env.compat_flags = (uint32_t)IRCompatibilityFlagForceTextureArray;
+        env.compat_flags = mad_ir_compat_flags();
         mad_dxc_key(a, &env, &dxc_key, &dxc_check);
         if (dxc_slot) hit = mad_dxc_slot_take(dxc_key, dxc_check, &hit_len);
         if (!hit && dxc_disk) {
@@ -1517,8 +1579,9 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * (TSR history: update declares 2darray, resolve declares 2d); Metal
      * returns zeros on the mismatch. With this flag every 1D/2D/cube texture
      * is an array in the converted shader, and the runtime allocates and
-     * views every such texture as an array to match. */
-    g_ir.IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagForceTextureArray);
+     * views every such texture as an array to match. The other flags:
+     * mad_ir_compat_flags. */
+    g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)mad_ir_compat_flags());
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
     if (a->gs_emulation) {   /* ml927 */
         IRInputTopology topo = IRInputTopologyTriangle;
