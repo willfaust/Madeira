@@ -7427,11 +7427,26 @@ dispatch:
      * progress. */
     if (!is_align)
     {
-        static struct { uint64_t key; uint32_t n; } redeliv[16];
+        /* Count CONSECUTIVE identical deliveries per thread, not lifetime hits
+         * of a (thread,pc,addr) key. Slots used to be chosen by the key itself,
+         * so a fault that recurs once per frame with real progress in between
+         * kept its count for as long as no other key landed in its slot. Dark
+         * Souls Remastered's Settings menu re-writes Arxan-guarded .text every
+         * frame; each write is a self-modifying-code fault FEX handles, the
+         * game keeps running, yet 7 keys cycling once per frame reached 2000 in
+         * ~35 s and this guard killed a healthy game. A real storm refaults the
+         * same instruction back to back on one thread, so the slot is chosen by
+         * thread and any other fault on that thread restarts the run. */
+        static struct { uint64_t thread, key; uint32_t n; } redeliv[16];
         static volatile int ios_redeliv_terminating;
         uint64_t rkey = ((uint64_t)thread << 48) ^ pc ^ ((uint64_t)fault_addr << 1);
-        int rslot = (int)((rkey >> 4) & 15);
-        if (redeliv[rslot].key != rkey) { redeliv[rslot].key = rkey; redeliv[rslot].n = 1; }
+        int rslot = (int)(((uint64_t)thread * 0x9E3779B97F4A7C15ull) >> 60);
+        if (redeliv[rslot].thread != (uint64_t)thread || redeliv[rslot].key != rkey)
+        {
+            redeliv[rslot].thread = (uint64_t)thread;
+            redeliv[rslot].key = rkey;
+            redeliv[rslot].n = 1;
+        }
         else if (++redeliv[rslot].n == 256)
             dprintf( 2, "[redeliv] 256 identical redeliveries pc=0x%llx addr=0x%llx — storm forming rev=ml461\n",
                      (unsigned long long)pc, (unsigned long long)fault_addr );
