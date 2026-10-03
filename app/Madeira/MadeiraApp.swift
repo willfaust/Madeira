@@ -10,6 +10,8 @@ struct MadeiraApp: App {
                     GamepadInput.shared.start()
                     HardwareInput.shared.start()
                 }
+                // madeira://play?exe=... (Home Screen shortcuts, SavesAndShortcuts.swift)
+                .onOpenURL { ShortcutRouter.shared.handle($0) }
         }
     }
 }

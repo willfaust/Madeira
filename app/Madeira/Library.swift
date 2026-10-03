@@ -2016,6 +2016,7 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
                 Section {
                     Toggle("Liquid metal", isOn: $liquidMetal.on)
@@ -2283,6 +2284,7 @@ struct LibraryDetail: View {
     @State private var remove = false
     @State private var leaving = false
     @State private var error: String?
+    @State private var copiedLink = false
     /// Settings › Sync engine, read when the details open: the fastsync switches
     /// below only apply while it is Fastsync.
     @State private var syncEngine = SyncEngine.current
@@ -2445,6 +2447,20 @@ struct LibraryDetail: View {
                     if GamepadInput.keyboardMouseAvailable {
                         Text("XInput and DirectInput: for games older than XInput, which read the pad through DirectInput. The same pad is offered through both APIs, so a game that reads both may list two controllers. Applies to the next launch.").font(.caption).foregroundStyle(.secondary)
                         Text("Keyboard and mouse: for games without controller support. The controller presses keys and moves the mouse (left stick WASD, right stick mouse, triggers click, D-pad arrows, Start Esc, Select Tab) and the game sees no controller. Change what each button does under Controller binds, here or in the in-game menu.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                // A link that starts this game from a Home Screen icon (SavesAndShortcuts.swift).
+                if entry.desktop != true {
+                    Section {
+                        Button {
+                            UIPasteboard.general.string = ShortcutRouter.link(for: entry.windowsPath)
+                            copiedLink = true
+                        } label: {
+                            Label(copiedLink ? "Link copied" : "Copy Home Screen shortcut link",
+                                  systemImage: copiedLink ? "checkmark" : "link")
+                        }
+                    } header: { Text("Home Screen") } footer: {
+                        Text("In the Shortcuts app: new shortcut, Open URLs, paste the link, then Share › Add to Home Screen.")
                     }
                 }
                 if entry.steamAppID != nil {

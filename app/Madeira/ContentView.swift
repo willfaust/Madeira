@@ -1289,6 +1289,12 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in
                 if !SteamSignIn.isSignedIn { MadeiraDock.cleanup() }
             }
+            // A Home Screen shortcut (madeira://play?exe=...) starts its library entry.
+            .onReceive(ShortcutRouter.shared.$pendingExe) { exe in
+                guard library.enabled, library.current == nil, let exe else { return }
+                ShortcutRouter.shared.pendingExe = nil
+                launchShortcut(exe)
+            }
         }
     }
 
@@ -2340,6 +2346,25 @@ struct ContentView: View {
                 let retry = library.cloudRetry; library.cloudRetry = nil; retry?()
             }
         }
+    }
+
+    /// A Home Screen shortcut: its library entry by Windows path, or a new entry
+    /// for an executable in drive_c that is not in the library yet.
+    private func launchShortcut(_ exe: String) {
+        let key = exe.lowercased()
+        if let entry = library.entries.first(where: { $0.desktop != true && $0.windowsPath.lowercased() == key }) {
+            launchLibraryEntry(entry); return
+        }
+        guard key.hasPrefix("c:\\"),
+              var entry = try? LibraryModel.inspect(LibraryModel.drive.appendingPathComponent(
+                String(exe.dropFirst(3)).replacingOccurrences(of: "\\", with: "/"))) else {
+            LogStore.shared.log("[shortcut] \(exe) is not in drive_c", level: .error)
+            library.error = "The shortcut's game was not found: \(exe)"
+            return
+        }
+        entry.title = exe.split(separator: "\\").dropLast().last.map(String.init) ?? entry.title
+        library.save(entry)
+        launchLibraryEntry(entry)
     }
 
     /// Play in the library (Library.swift): checks that a session can start,
