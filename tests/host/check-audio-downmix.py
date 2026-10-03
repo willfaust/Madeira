@@ -4,9 +4,9 @@
 Compiles the production struct ios_stream, the downmix section (speaker masks, channel-mask
 capture, gain table) and ios_mix_stream against stubs, then checks that every client layout
 reaches the stereo bus: a 5.1 centre channel lands in both sides at -3 dB, LFE at -10 dB,
-surrounds on their own side at -3 dB, a plain WAVEFORMATEX gets the standard layout for its
-channel count, stereo and mono are unchanged, and MADEIRA_AUDIO_DOWNMIX=0 restores the old
-first-two-channels mapping.
+surrounds (and the height speakers of a 7.1.4 bed) on their own side at -3 dB, a plain
+WAVEFORMATEX gets the standard layout for its channel count, stereo and mono are unchanged,
+and MADEIRA_AUDIO_DOWNMIX=0 restores the old first-two-channels mapping.
 """
 from pathlib import Path
 import os, subprocess, tempfile
@@ -119,6 +119,14 @@ int main(int argc, char **argv)
     mix_one(&s, 32, 1, 6, 0.5f, o); expect("7.1 SL->L", o[0], 0.5f * m3); expect("7.1 SL->R", o[1], 0.0f);
     mix_one(&s, 32, 1, 7, 0.5f, o); expect("7.1 SR->L", o[0], 0.0f); expect("7.1 SR->R", o[1], 0.5f * m3);
 
+    /* 7.1.4 (ml1227: Wine's spatial audio bed): the four height speakers fold into their side at -3 dB */
+    layout(&s, 12, 0x2d63f);
+    mix_one(&s, 32, 1, 2, 0.5f, o); expect("7.1.4 FC->L", o[0], 0.5f * m3); expect("7.1.4 FC->R", o[1], 0.5f * m3);
+    mix_one(&s, 32, 1, 8, 0.5f, o); expect("7.1.4 TFL->L", o[0], 0.5f * m3); expect("7.1.4 TFL->R", o[1], 0.0f);
+    mix_one(&s, 32, 1, 9, 0.5f, o); expect("7.1.4 TFR->L", o[0], 0.0f); expect("7.1.4 TFR->R", o[1], 0.5f * m3);
+    mix_one(&s, 32, 1, 10, 0.5f, o); expect("7.1.4 TBL->L", o[0], 0.5f * m3); expect("7.1.4 TBL->R", o[1], 0.0f);
+    mix_one(&s, 32, 1, 11, 0.5f, o); expect("7.1.4 TBR->L", o[0], 0.0f); expect("7.1.4 TBR->R", o[1], 0.5f * m3);
+
     /* stereo and mono are what they always were */
     layout(&s, 2, 0x3);
     mix_one(&s, 16, 0, 0, 0.5f, o); expect("stereo L->L", o[0], 0.5f); expect("stereo L->R", o[1], 0.0f);
@@ -143,7 +151,7 @@ with tempfile.TemporaryDirectory() as t:
     env = {k: v for k, v in os.environ.items() if k != "MADEIRA_AUDIO_DOWNMIX"}
     out = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
     assert out.returncode == 0 and out.stdout.strip() == "ok", (out.returncode, out.stdout, out.stderr)
-    print("PASS: 5.1/7.1 fold centre and LFE into both sides and surrounds into their own; "
+    print("PASS: 5.1/7.1/7.1.4 fold centre and LFE into both sides and surrounds and height speakers into their own; "
           "plain formats get the standard layout; stereo and mono unchanged")
     env["MADEIRA_AUDIO_DOWNMIX"] = "0"
     out = subprocess.run([str(exe), "off"], capture_output=True, text=True, env=env)

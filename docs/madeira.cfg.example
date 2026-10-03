@@ -17,6 +17,11 @@ env.FEX_EXTENDEDVOLATILEMETADATA = oo2core_5_win64.dll:bink2w64.dll
 # ml1127: virtual desktop size for the "Wine Virtual Desktop" button (WxH, default 960x540)
 # desktop-size = 1280x720
 
+# ml1230: audio kept queued ahead of the speaker, in ms (10-500). A client that writes one
+# period per wake-up (Wine's spatial audio, Wwise) no longer loses sound when the wake-up is
+# late; more absorbs longer stalls at the cost of latency. [ios_audio] ml1230 lines report it.
+# env.MADEIRA_AUDIO_LEAD_MS = 60
+
 # ml1110/ml1134: GPU encoder ordering in the native D3D12 runtime.
 #   1 = every encoder waits for the one before it (ml1091, accurate, slowest)
 #   6 = barrier-driven (ml1134): an encoder waits only after a ResourceBarrier,
