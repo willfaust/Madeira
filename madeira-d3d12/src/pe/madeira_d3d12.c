@@ -10908,9 +10908,35 @@ static void mad_swap_release_buffers(struct mad_swapchain *s) {
     s->nbuf = 0;
 }
 
+/* In game mode every swapchain gets the SAME CAMetalLayer (the fullscreen
+ * singleton, IOSDisplayShim.m my_view_create_metal_view), whatever its HWND.
+ * GTA V Enhanced's Social Club renderer creates a 124x73 probe swapchain on a
+ * temporary window after the intro videos and destroys it unpresented; its
+ * mad_swap_make_buffers set the shared layer to a 124x73 drawable, and the
+ * game's 1920x1080 swapchain kept presenting into it (one corner of the frame
+ * stretched over the screen). The swapchain that last configured the layer is
+ * remembered (pointer compare only, never dereferenced); a Present on a
+ * swapchain whose layer another one reconfigured applies its own drawable
+ * size and format again first. Distinct layers (desktop mode) never trigger it. */
+static obj_handle_t g_layer_cfg_layer;
+static const void *g_layer_cfg_owner;
+static void mad_swap_apply_layer(struct mad_swapchain *s) {
+    struct WMTLayerProps props;
+    memset(&props, 0, sizeof props);
+    MetalLayer_getProps(s->layer, &props);
+    props.device = s->dev->mtl_device;
+    props.drawable_width = s->desc.Width;
+    props.drawable_height = s->desc.Height;
+    props.pixel_format = s->pf;
+    props.framebuffer_only = false;
+    props.display_sync_enabled = true;
+    MetalLayer_setProps(s->layer, &props);
+    g_layer_cfg_layer = s->layer;
+    g_layer_cfg_owner = s;
+}
+
 static HRESULT mad_swap_make_buffers(struct mad_swapchain *s) {
     D3D12_RESOURCE_DESC rd;
-    struct WMTLayerProps props;
     UINT i, n = s->desc.BufferCount ? s->desc.BufferCount : 2;
     int is_depth;
     if (n > MAD_SWAP_MAX_BUFFERS) n = MAD_SWAP_MAX_BUFFERS;
@@ -10939,15 +10965,7 @@ static HRESULT mad_swap_make_buffers(struct mad_swapchain *s) {
     /* The layer takes the same pixel format so the presenting blit is a plain
      * copy. framebuffer_only must be off: a framebuffer-only drawable cannot
      * be a blit destination. */
-    memset(&props, 0, sizeof props);
-    MetalLayer_getProps(s->layer, &props);
-    props.device = s->dev->mtl_device;
-    props.drawable_width = s->desc.Width;
-    props.drawable_height = s->desc.Height;
-    props.pixel_format = s->pf;
-    props.framebuffer_only = false;
-    props.display_sync_enabled = true;
-    MetalLayer_setProps(s->layer, &props);
+    mad_swap_apply_layer(s);
     d3d12_log("[madeira-d3d12] swapchain: %ux%u, %u buffers, format %u, hwnd %p\n",
               s->desc.Width, s->desc.Height, n, (unsigned)s->desc.Format, (void *)s->hwnd);
     return S_OK;
@@ -10974,6 +10992,7 @@ static ULONG STDMETHODCALLTYPE swap_Release(IDXGISwapChain4 *T) {
     if (n == 0) { mad_pd_purge(T);   /* ml1143 */
         if (s->queue && s->queue->sub_thread) mad_queue_drain(s->queue);   /* ml1121: queued presents name this swapchain */
         mad_swap_release_buffers(s);
+        if (g_layer_cfg_owner == s) g_layer_cfg_owner = NULL;   /* the next Present re-applies its own layer settings */
         if (s->view) ReleaseMetalView(s->view);
         if (s->latency_event) CloseHandle(s->latency_event);
         if (s->factory) IDXGIFactory1_Release(s->factory);
@@ -11125,6 +11144,14 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
                 d3d12_log("[madeira-d3d12] ml1070 present #%llu waited for the GPU to finish frame N-%u (serial %llu; %ld such waits so far)\n",
                           (unsigned long long)s->presents, lat, (unsigned long long)need, waits);
         }
+    }
+    if (g_layer_cfg_layer == s->layer && g_layer_cfg_owner != s) {   /* shared layer taken over, see mad_swap_apply_layer */
+        static LONG said;
+        if (InterlockedIncrement(&said) <= 8)
+            d3d12_log("[madeira-d3d12] swapchain %ux%u (hwnd %p): another swapchain reconfigured the shared Metal layer; "
+                      "drawable size and format restored before present #%llu\n",
+                      s->desc.Width, s->desc.Height, (void *)s->hwnd, (unsigned long long)s->presents);
+        mad_swap_apply_layer(s);
     }
     { LONG64 td = mad_qpc();   /* ml1128 */
     drawable = MetalLayer_nextDrawable(s->layer);
@@ -11519,6 +11546,11 @@ __declspec(dllexport) void MadeiraD3D12PresenterPresent(void *ph, ID3D12CommandQ
     struct mad_presenter *p = (struct mad_presenter *)ph;
     struct mad_queue *q = (struct mad_queue *)queue;
     if (!p || !q || !p->drawable) return;
+    /* Commit the frame's batch first, as swap_Present does (ml884). Lists
+     * accumulate in the queue's open command buffer until a flush or a fence
+     * Signal, so the present buffer below was committed ahead of the rendering
+     * it shows: the d3d12-cube test showed a grey, strobing layer at 60 FPS. */
+    mad_device_flush_all(q->device);
     /* Presentation rides its own command buffer, submitted after the frame's
      * work is already on the queue, so ordering comes from the queue itself. */
     obj_handle_t cb = MTLCommandQueue_commandBuffer(q->device->mtl_queue);
