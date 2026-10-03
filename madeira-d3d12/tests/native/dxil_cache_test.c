@@ -233,6 +233,8 @@ static void make_parts(struct mad_dxc_parts *p, struct madeira_ir_loc *locs, str
     p->locs = locs; p->nlocs = 5; p->vsin = vsin; p->nvsin = 3; p->vs_input_count = 3;
     p->tg[0] = 8; p->tg[1] = 4; p->tg[2] = 1; p->vs_output_size = 64;
     p->gs_max_prims = 2; p->gs_payload = 128; p->gs_passthrough = 1;
+    for (uint32_t i = 0; i < 8; i++) p->hs[i] = 100 + i;
+    for (uint32_t i = 0; i < 4; i++) p->ds[i] = 200 + i;
     p->lib = lib; p->lib_len = lib_len; p->lib2 = lib2; p->lib2_len = lib2_len;
 }
 
@@ -290,6 +292,11 @@ static void test_entry(void)
     CHECK(a.ret_tg_size[0] == 8 && a.ret_tg_size[1] == 4 && a.ret_tg_size[2] == 1, "threadgroup");
     CHECK(a.ret_stage == 1 && a.ret_vs_output_size == 64 && a.ret_gs_max_prims == 2 && a.ret_gs_payload == 128 && a.ret_gs_passthrough == 1, "scalars");
     CHECK(a.ret_len2 == sizeof lib2 && !memcmp(out2, lib2, sizeof lib2) && !a.ret_note[0], "stage-in library");
+    CHECK(a.ret_hs_patches_per_tg == 100 && a.ret_hs_threads_per_patch == 101 && a.ret_hs_input_cps == 102 &&
+          a.ret_hs_output_cps == 103 && a.ret_hs_output_cp_size == 104 && a.ret_hs_patch_const_size == 105 &&
+          a.ret_hs_out_prim == 106 && a.ret_hs_max_factor_bits == 107, "hull reflection");
+    CHECK(a.ret_ds_prims_per_mesh_tg == 200 && a.ret_ds_input_cps == 201 && a.ret_ds_input_cp_size == 202 &&
+          a.ret_ds_patch_const_size == 203, "domain reflection");
 
     /* No location buffer: the count is reported as 0, as a fresh conversion does. */
     memset(&a, 0, sizeof a);

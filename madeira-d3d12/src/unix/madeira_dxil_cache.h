@@ -42,7 +42,7 @@
 #include "../madeira_ir_abi.h"
 
 #define MAD_DXC_MAGIC   0x4358444du   /* "MDXC" */
-#define MAD_DXC_VERSION 1u
+#define MAD_DXC_VERSION 2u   /* 2: DXIL hull/domain reflection */
 #define MAD_DXC_EXT     "mdxc"
 #define MAD_DXC_MAX_FILE (64u << 20)  /* refuse to trust anything larger */
 
@@ -190,6 +190,7 @@ struct mad_dxc_header {
     uint32_t gs_max_prims, gs_payload, gs_passthrough, reserved;
     char entry[MADEIRA_IR_ENTRY_MAX];
     char note[128];
+    uint32_t hs[8], ds[4];   /* ret_hs_* / ret_ds_* in madeira_ir_abi.h order */
 };
 
 /* What one successful conversion produced, before it is flattened. */
@@ -200,6 +201,7 @@ struct mad_dxc_parts {
     const struct madeira_ir_vs_input *vsin; uint32_t nvsin;
     uint32_t vs_input_count;
     uint32_t tg[3], vs_output_size, gs_max_prims, gs_payload, gs_passthrough;
+    uint32_t hs[8], ds[4];
     const void *lib; uint64_t lib_len;
     const void *lib2; uint64_t lib2_len;
 };
@@ -225,6 +227,7 @@ static inline void *mad_dxc_blob_build(uint64_t key, uint64_t check,
     h.tg[0] = p->tg[0]; h.tg[1] = p->tg[1]; h.tg[2] = p->tg[2];
     h.vs_output_size = p->vs_output_size;
     h.gs_max_prims = p->gs_max_prims; h.gs_payload = p->gs_payload; h.gs_passthrough = p->gs_passthrough;
+    memcpy(h.hs, p->hs, sizeof h.hs); memcpy(h.ds, p->ds, sizeof h.ds);
     snprintf(h.entry, sizeof h.entry, "%s", p->entry ? p->entry : "");
     snprintf(h.note, sizeof h.note, "%s", p->note ? p->note : "");
     memcpy(b, &h, sizeof h);
@@ -300,6 +303,12 @@ static inline int mad_dxc_deliver(const void *blob, struct madeira_ir_convert_ar
     a->ret_gs_max_prims = h.gs_max_prims;
     a->ret_gs_payload = h.gs_payload;
     a->ret_gs_passthrough = h.gs_passthrough;
+    a->ret_hs_patches_per_tg = h.hs[0]; a->ret_hs_threads_per_patch = h.hs[1];
+    a->ret_hs_input_cps = h.hs[2]; a->ret_hs_output_cps = h.hs[3];
+    a->ret_hs_output_cp_size = h.hs[4]; a->ret_hs_patch_const_size = h.hs[5];
+    a->ret_hs_out_prim = h.hs[6]; a->ret_hs_max_factor_bits = h.hs[7];
+    a->ret_ds_prims_per_mesh_tg = h.ds[0]; a->ret_ds_input_cps = h.ds[1];
+    a->ret_ds_input_cp_size = h.ds[2]; a->ret_ds_patch_const_size = h.ds[3];
     a->ret_len2 = h.lib2_len;
     if (h.lib2_len) {
         if (a->out_buf2 && a->out_cap2 >= h.lib2_len)

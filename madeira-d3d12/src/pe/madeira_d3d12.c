@@ -290,6 +290,7 @@ struct mad_device {
 static LONG g_tview_live, g_tview_made, g_xview_live;   /* ml1126 */
 static LONG g_resolve_locked, g_resolve_miss;   /* ml1132: address lookups that took live_lock */
 static LONG g_res_added, g_res_removed, g_tess_psos, g_tess_draws, g_tess_built, g_tess_drawn, g_tess_nonidx;
+static LONG g_dtess_drawn, g_dtess_bad_cps;   /* DXIL tessellation through the converter's emulation */
 static LONG g_gs_built, g_gs_drawn;   /* ml1147 */
 static LONG g_vis_begun, g_vis_resolved, g_vis_nonzero, g_vis_restarts;   /* ml1088 */
 static LONG g_srv_clamped; static float g_srv_clamp_max;   /* ml1089 */
@@ -481,8 +482,9 @@ static void mad_skip_report(void) {
               g_fence_waits, g_fence_updates, g_barriers, g_barrier_renc_closed, g_zero_inst, g_stencil_srv);
     mad_acct_report();
     d3d12_log("[madeira-d3d12] ml1050 residency set: %ld added, %ld removed (%ld members); tessellation: %ld pipelines (%ld built as mesh pipelines), "
-              "%ld draws dropped, %ld drawn (%ld non-indexed); ml1147 DXBC geometry: %ld mesh pipelines, %ld draws\n", g_res_added, g_res_removed, g_res_added - g_res_removed, g_tess_psos, g_tess_built,
-              g_tess_draws, g_tess_drawn, g_tess_nonidx, g_gs_built, g_gs_drawn);   /* ml1083, ml1147 */
+              "%ld draws dropped, %ld drawn (%ld non-indexed); ml1147 DXBC geometry: %ld mesh pipelines, %ld draws; DXIL tessellation: %ld drawn\n",
+              g_res_added, g_res_removed, g_res_added - g_res_removed, g_tess_psos, g_tess_built,
+              g_tess_draws, g_tess_drawn, g_tess_nonidx, g_gs_built, g_gs_drawn, g_dtess_drawn);   /* ml1083, ml1147 */
     d3d12_log("[madeira-d3d12] ml1126 views: %ld typed-buffer views live (%ld made; kept OUT of the residency set, their buffer is in it), %ld texture views live\n",
               g_tview_live, g_tview_made, g_xview_live);
     d3d12_log("[madeira-d3d12] ml1132 address lookups on the locked path: %ld (true misses %ld); every other lookup was lock-free\n",
@@ -620,8 +622,11 @@ struct mad_pso {
     char blend[400];                                /* ml1106/ml1107: every RT's blend state for the draw dump */
     UINT root_off[MAD_ROOT_PARAM_MAX]; int has_root_off; /* ml882: offsets from the converter's reflection */
     UINT static_off; int has_static_off;                  /* ml923: the implicit static-sampler table slot */
-    int gs_emu;                                     /* ml927: a geometry-shader pipeline through the converter's mesh emulation */
-    obj_handle_t si_lib, gs_lib;                    /* stage-in library, geometry (mesh) library */
+    int gs_emu;                                     /* ml927: a geometry-shader pipeline through the converter's mesh emulation;
+                                                     * 2 = a DXIL hull+domain pipeline through its tessellation emulation */
+    obj_handle_t si_lib, gs_lib;                    /* stage-in library, geometry (mesh) library; gs_emu 2: gs_lib is the DOMAIN library */
+    obj_handle_t hs_lib;                            /* gs_emu 2: the hull library (hull function + tessellator) */
+    struct { UINT out_prim, patches_per_tg, threads_per_patch, input_cps, mesh_prims; float max_factor; } dt;   /* gs_emu 2: IRRuntimeTessellationPipelineConfig */
     UINT gs_vertex_size, gs_max_prims;              /* IRRuntimeGeometryPipelineConfig */
     char gs_name[64];                               /* the converter's name for the mesh (geometry) function */
     int is_compute;
@@ -2472,6 +2477,35 @@ static void mad_gs_draw(UINT pt, UINT vertex_size, UINT max_prims, UINT instance
         mesh_tg->width = max_prims ? max_prims : 1; mesh_tg->height = 1; mesh_tg->depth = 1;
     }
 }
+/* The converter runtime's TESSELLATION draw contract, ported from
+ * IRRuntimeDrawIndexedPatchesTessellationEmulation /
+ * IRRuntimeDrawPatchesTessellationEmulation (IRRuntimeCalculateDrawInfoFor-
+ * GSTSEmulation, IRRuntimeCalculateThreadgroupSizeForTessellationAndGeometry):
+ * each object threadgroup runs `patches_per_tg` patches of `input_cps` control
+ * points with `threads_per_patch` threads each, each mesh threadgroup
+ * `mesh_prims` tessellated primitives. Every patch list is
+ * IRRuntimePrimitiveTypeTriangle to the converter. */
+#define MAD_DTESS_OBJECT_TG_MEM 15360u   /* the helpers' setObjectThreadgroupMemoryLength:15360 atIndex:0 */
+static void mad_ts_draw(const struct mad_pso *p, UINT instances, UINT count, UINT16 index_type, UINT64 index_buffer,
+                        struct mad_gs_drawinfo *di, struct WMTSize *grid, struct WMTSize *obj_tg, struct WMTSize *mesh_tg) {
+    UINT overlap = p->dt.out_prim == 1 ? 0 : p->dt.out_prim == 2 ? 1 : 2;
+    UINT stride = p->dt.patches_per_tg * p->dt.input_cps;
+    memset(di, 0, sizeof *di);
+    di->index_type = index_type; di->primitive_topology = 3; di->threads_per_patch = (UINT8)p->dt.threads_per_patch;
+    di->max_input_prims = (UINT16)p->dt.mesh_prims; di->obj_vertex_stride = (UINT16)stride;
+    di->mesh_prim_stride = (UINT16)(p->dt.mesh_prims - overlap); di->gs_instance_count = 1;
+    di->patches_per_obj_tg = (UINT16)p->dt.patches_per_tg; di->input_cps_per_patch = (UINT16)p->dt.input_cps;
+    di->index_buffer = index_buffer;
+    grid->width = stride ? (count + stride - 1) / stride : 0; grid->height = instances ? instances : 1; grid->depth = 1;
+    obj_tg->width = p->dt.patches_per_tg * p->dt.threads_per_patch; obj_tg->height = 1; obj_tg->depth = 1;
+    mesh_tg->width = p->dt.mesh_prims; mesh_tg->height = 1; mesh_tg->depth = 1;
+}
+/* A direct patch-list draw whose control-point count is the hull shader's. */
+static int mad_dtess_draw_ok(const struct mad_pso *p, D3D12_PRIMITIVE_TOPOLOGY topo, int kind_direct) {
+    return p->gs_emu == 2 && p->rps && kind_direct &&
+           topo >= D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST && topo <= D3D_PRIMITIVE_TOPOLOGY_32_CONTROL_POINT_PATCHLIST &&
+           (UINT)(topo - D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1) == p->dt.input_cps;
+}
 
 static enum WMTPrimitiveType mad_prim(D3D12_PRIMITIVE_TOPOLOGY t) {
     switch (t) {
@@ -3520,7 +3554,11 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
         if (!exec_begin_render(e)) { MAD_SKIP(e); return; }
         g_dump_tables = 1;
     }
-    if (e->pso->has_tess || e->topo >= D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST) {
+    if ((e->pso->has_tess || e->topo >= D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST) &&
+        !mad_dtess_draw_ok(e->pso, e->topo, c->kind == MC_DRAW || c->kind == MC_DRAW_INDEXED)) {   /* DXIL tessellation draws go on below */
+        if (gsemu == 2 && (InterlockedIncrement(&g_dtess_bad_cps) % 64) == 1)
+            d3d12_log("[madeira-d3d12] DXIL tessellation draw with topology %u (hull takes %u control points, kind %d) dropped\n",
+                      (unsigned)e->topo, e->pso->dt.input_cps, (int)c->kind);
         /* ml1083: run it, when the pipeline was built and this draw's index
          * format has a variant. Indirect tessellation draws need a dispatch
          * kernel this runtime does not have yet; they stay dropped and counted. */
@@ -3725,9 +3763,16 @@ tess_go:
             struct WMTSize grid, otg, mtg;
             struct { UINT64 addr; UINT32 length, stride; } vbt[31];
             if (c->kind == MC_DRAW_INDEXED) { dp[2] = c->u.drawi.start; if (e->ib) ibaddr = e->ib->gpu_address + e->ib_off; }
-            mad_gs_draw(pt, e->pso->gs_vertex_size, e->pso->gs_max_prims, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
+            if (gsemu == 2) mad_ts_draw(e->pso, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
+            else mad_gs_draw(pt, e->pso->gs_vertex_size, e->pso->gs_max_prims, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
             memset(&c_mesh, 0, sizeof c_mesh); c_mesh.type = WMTRenderCommandDrawMeshThreadgroups;
             c_mesh.threadgroup_per_grid = grid; c_mesh.object_threadgroup_size = otg; c_mesh.mesh_threadgroup_size = mtg;
+            if (gsemu == 2) {   /* DXIL tessellation: object threadgroup memory (winemetal reads the marked reserved words) */
+                c_mesh.reserved[0] = (uint16_t)MAD_DTESS_OBJECT_TG_MEM; c_mesh.reserved[1] = 0x7e55;
+                MAD_SETBUF(WMTRenderCommandSetObjectBuffer, argbuf, argoff, 3);   /* kIRArgumentBufferHullDomainBindPoint */
+                MAD_SETBUF(WMTRenderCommandSetMeshBuffer, argbuf, argoff, 3);
+                InterlockedIncrement(&g_dtess_drawn);
+            }
             memset(vbt, 0, sizeof vbt);
             for (i = 0; i < 16; i++) if (e->vb[i].res && e->vb[i].res->buffer) {
                 vbt[i].addr = e->vb[i].res->gpu_address + e->vb[i].off;
@@ -7266,6 +7311,7 @@ static ULONG STDMETHODCALLTYPE pso_Release(ID3D12PipelineState *T) {
         if (p->ps_lib) NSObject_release(p->ps_lib);
         if (p->si_lib) NSObject_release(p->si_lib);   /* ml927 */
         if (p->gs_lib) NSObject_release(p->gs_lib);
+        if (p->hs_lib) NSObject_release(p->hs_lib);   /* DXIL tessellation */
         if (p->dsso) NSObject_release(p->dsso);
         if (p->cps) NSObject_release(p->cps);
         free(p->air);   /* ml1010 */
@@ -8398,12 +8444,24 @@ static const char *mad_ir_status_name(uint32_t st) {
 /* Convert one stage and build its MTLFunction. The metallib buffer is sized by
  * asking first, so a shader larger than any fixed guess still works. */
 #define MAD_LOC_MAX 64
+/* What a DXIL hull or domain shader converted for the converter's tessellation
+ * emulation reports (madeira_ir_convert_args ret_hs_* / ret_ds_*). */
+struct mad_dtess_refl {
+    UINT hs_patches_per_tg, hs_threads_per_patch, hs_input_cps, hs_output_cps, hs_output_cp_size, hs_patch_const_size, hs_out_prim;
+    float hs_max_factor;
+    UINT ds_prims_per_mesh_tg, ds_input_cps, ds_input_cp_size, ds_patch_const_size;
+};
 /* ml927: what a geometry-shader pipeline needs from the converter beyond the
  * plain conversion: emulation mode, the input topology, the input layout the
  * stage-in function is synthesized from (vertex stage), and the numbers
  * reflection reports back. */
 struct mad_convert_opts {
     int gs_emulation; UINT topology;
+    /* DXIL tessellation. lib_only: the LIBRARY is the result (returned and in
+     * *lib_out, one reference) -- the emulated object, hull and domain
+     * functions take function constants and are looked up by their names when
+     * the pipeline is built; dtess receives the hull/domain reflection. */
+    int lib_only; struct mad_dtess_refl *dtess;
     const struct madeira_ir_input_layout *layout;
     obj_handle_t *lib2_out;            /* the stage-in library (vertex stage with a layout) */
     UINT *vs_output_size, *gs_max_prims;
@@ -8641,6 +8699,19 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
     if (vsin_n) *vsin_n = a.ret_vs_input_count < vsin_cap ? a.ret_vs_input_count : vsin_cap;
     if (nlocs) *nlocs = a.ret_loc_count < MAD_LOC_MAX ? a.ret_loc_count : MAD_LOC_MAX;
     if (tg_out) { tg_out[0] = a.ret_tg_size[0]; tg_out[1] = a.ret_tg_size[1]; tg_out[2] = a.ret_tg_size[2]; }
+    if (o && o->dtess) {   /* DXIL tessellation */
+        struct mad_dtess_refl *t = o->dtess;
+        if (a.ret_hs_patches_per_tg) {
+            t->hs_patches_per_tg = a.ret_hs_patches_per_tg; t->hs_threads_per_patch = a.ret_hs_threads_per_patch;
+            t->hs_input_cps = a.ret_hs_input_cps; t->hs_output_cps = a.ret_hs_output_cps;
+            t->hs_output_cp_size = a.ret_hs_output_cp_size; t->hs_patch_const_size = a.ret_hs_patch_const_size;
+            t->hs_out_prim = a.ret_hs_out_prim; memcpy(&t->hs_max_factor, &a.ret_hs_max_factor_bits, sizeof t->hs_max_factor);
+        }
+        if (a.ret_ds_prims_per_mesh_tg) {
+            t->ds_prims_per_mesh_tg = a.ret_ds_prims_per_mesh_tg; t->ds_input_cps = a.ret_ds_input_cps;
+            t->ds_input_cp_size = a.ret_ds_input_cp_size; t->ds_patch_const_size = a.ret_ds_patch_const_size;
+        }
+    }
     obj_handle_t dd = DispatchData_alloc_init((uint64_t)(uintptr_t)buf, (uint64_t)a.ret_len);
     obj_handle_t fn = 0, err = 0, lib = 0;
     if (dd) {
@@ -8654,6 +8725,14 @@ static obj_handle_t mad_convert_stage_opts(struct mad_device *d, struct mad_root
                   tag, (unsigned)a.ret_len);
         free(buf);
         return 0;
+    }
+    if (o && o->lib_only) {   /* DXIL tessellation: the library is the result */
+        d3d12_log("[madeira-d3d12] %s converted at runtime: %u bytes of DXIL -> %u bytes of metallib, entry '%s'\n",
+                  tag, (unsigned)dxil_len, (unsigned)a.ret_len, name);
+        if (o->name_out && o->name_cap) snprintf(o->name_out, o->name_cap, "%s", name);
+        *lib_out = lib;
+        free(buf);
+        return lib;
     }
     /* The converter RENAMES entry points, so the function is looked up by the
      * name reflection reported, never by the D3D-side name. */
@@ -9117,6 +9196,114 @@ fail:
     return 0;
 }
 
+/* DXIL TESSELLATION through the Metal Shader Converter's own emulation
+ * (IRRuntimeNewGeometryTessellationEmulationPipeline): the vertex shader
+ * becomes the object function with tessellation on, the hull shader two
+ * functions linked into it (hull and tessellator), the domain shader a function
+ * linked into the mesh stage, whose mesh function is the converter's
+ * passthrough geometry shader for the tessellator's output primitive. Ghost of
+ * Tsushima draws its water this way; without it those pipelines failed and the
+ * water was missing. The DXBC path (ml1083) is DXMT's own emulation and
+ * unchanged. Indirect draws on these pipelines stay skipped, as for every
+ * geometry-emulation pipeline. madeira.cfg dxil-tess = 0 keeps DXIL hull/domain
+ * pipelines placeholders. */
+static int mad_dtess_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        on = mad_cfg_int_pe("dxil-tess", 1) ? 1 : 0;
+        d3d12_log("[madeira-d3d12] DXIL tessellation through the converter's emulation: %s (madeira.cfg dxil-tess)\n", on ? "on" : "off");
+    }
+    return on;
+}
+static void mad_dtess_convert(struct mad_device *d, struct mad_rootsig *rs, struct mad_pso *p,
+                              const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
+                              struct madeira_ir_vs_input *vsin, unsigned *nvsin) {
+    struct madeira_ir_input_layout *L = calloc(1, sizeof *L);
+    struct madeira_ir_loc locs[MAD_LOC_MAX]; unsigned nl = 0;
+    struct mad_convert_opts ov, oh, od;
+    struct mad_dtess_refl r;
+    char hname[64], dname[64];
+    obj_handle_t hok = 0, dok = 0;
+    const char *why = NULL;
+    UINT overlap;
+    static unsigned said_ok, said_fail;
+    if (!L) return;
+    memset(&r, 0, sizeof r);
+    mad_build_input_layout(desc, p, L);
+    /* The vertex shader of a hull pipeline has only the object variant
+     * ("<name>.dxil_irconverter_object_shader", specialised when the pipeline
+     * is built), so its library is the result, like the hull's and the
+     * domain's; and a vertex stage without an input layout (water grids built
+     * from SV_VertexID) still needs a stage-in function to link, so the layout
+     * goes along even when it is empty. */
+    memset(&ov, 0, sizeof ov); ov.gs_emulation = 1; ov.topology = (UINT)desc->PrimitiveTopologyType; ov.layout = L;
+    ov.lib2_out = &p->si_lib; ov.vs_output_size = &p->gs_vertex_size; ov.name_out = p->vs_name; ov.name_cap = sizeof p->vs_name;
+    ov.lib_only = 1;
+    {
+        obj_handle_t vl = mad_convert_stage_opts(d, rs, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, NULL, &p->vs_lib, "VS(dxil tess)",
+                                                 vsin, 32, nvsin, NULL, locs, &nl, &ov);
+        if (vl) { NSObject_retain(vl); p->vs_fn = vl; }   /* vs_fn and vs_lib are released separately */
+    }
+    if (p->vs_fn) mad_apply_reflected_layout(p, rs, locs, nl, "VS");
+    memset(&oh, 0, sizeof oh); oh.gs_emulation = 1; oh.topology = (UINT)desc->PrimitiveTopologyType;
+    oh.lib_only = 1; oh.dtess = &r; oh.name_out = hname; oh.name_cap = sizeof hname; hname[0] = 0;
+    nl = 0;
+    if (p->vs_fn)
+        hok = mad_convert_stage_opts(d, rs, desc->HS.pShaderBytecode, desc->HS.BytecodeLength, NULL, &p->hs_lib, "HS(dxil tess)",
+                                     NULL, 0, NULL, NULL, locs, &nl, &oh);
+    if (hok) mad_apply_reflected_layout(p, rs, locs, nl, "HS");
+    memset(&od, 0, sizeof od); od.gs_emulation = 1; od.topology = (UINT)desc->PrimitiveTopologyType;
+    od.lib_only = 1; od.dtess = &r; od.name_out = dname; od.name_cap = sizeof dname; dname[0] = 0;
+    nl = 0;
+    if (hok)
+        dok = mad_convert_stage_opts(d, rs, desc->DS.pShaderBytecode, desc->DS.BytecodeLength, NULL, &p->gs_lib, "DS(dxil tess)",
+                                     NULL, 0, NULL, NULL, locs, &nl, &od);
+    if (dok) mad_apply_reflected_layout(p, rs, locs, nl, "DS");
+    /* The checks of IRRuntimeValidateTessellationPipeline, plus the limits of
+     * the draw info's 16-bit fields. */
+    overlap = r.hs_out_prim == 1 ? 0 : r.hs_out_prim == 2 ? 1 : 2;
+    if (!p->vs_fn) why = "vertex shader";
+    else if (!hok) why = "hull shader";
+    else if (!r.hs_patches_per_tg) why = "hull reflection";
+    else if (!dok) why = "domain shader";
+    else if (!r.ds_prims_per_mesh_tg) why = "domain reflection";
+    else if (!p->si_lib) why = "stage-in function";
+    else if (r.hs_out_prim < 1 || r.hs_out_prim > 4) why = "tessellator output primitive";
+    else if (r.hs_output_cp_size != r.ds_input_cp_size || r.hs_patch_const_size != r.ds_patch_const_size ||
+             r.hs_output_cps != r.ds_input_cps) why = "hull/domain interface";
+    else if (!r.hs_input_cps || r.hs_input_cps > 32 || !r.hs_threads_per_patch ||
+             r.hs_patches_per_tg * r.hs_threads_per_patch > 1024 || r.hs_patches_per_tg * r.hs_input_cps > 0xffffu) why = "hull threadgroup shape";
+    else if (r.ds_prims_per_mesh_tg <= overlap || r.ds_prims_per_mesh_tg > 1024) why = "domain threadgroup shape";
+    else if (!(r.hs_max_factor >= 1.0f && r.hs_max_factor <= 64.0f)) why = "maximum tessellation factor";
+    if (!why) {
+        p->gs_emu = 2;
+        p->dt.out_prim = r.hs_out_prim; p->dt.patches_per_tg = r.hs_patches_per_tg; p->dt.threads_per_patch = r.hs_threads_per_patch;
+        p->dt.input_cps = r.hs_input_cps; p->dt.mesh_prims = r.ds_prims_per_mesh_tg; p->dt.max_factor = r.hs_max_factor;
+        snprintf(p->gs_name, sizeof p->gs_name, "%s", r.hs_out_prim == 1 ? "irconverter_domain_shader_point_passthrough"
+                 : r.hs_out_prim == 2 ? "irconverter_domain_shader_line_passthrough" : "irconverter_domain_shader_triangle_passthrough");
+        if (said_ok++ < 8)
+            d3d12_log("[madeira-d3d12] DXIL tessellation: vs '%s', %u control points in, %u out (%u B), %u patches x %u threads per object "
+                      "threadgroup, %u primitives per mesh threadgroup, output primitive %u, max factor %.1f, vertex %u B, patch constants %u B\n",
+                      p->vs_name, r.hs_input_cps, r.hs_output_cps, r.hs_output_cp_size, r.hs_patches_per_tg, r.hs_threads_per_patch,
+                      r.ds_prims_per_mesh_tg, r.hs_out_prim, (double)r.hs_max_factor, p->gs_vertex_size, r.hs_patch_const_size);
+    } else {
+        if (said_fail++ < 8)
+            d3d12_log("[madeira-d3d12] DXIL tessellation: %s not usable (vs %d, hs %d, ds %d, stage-in %d; hull %u patches x %u threads, "
+                      "cps %u->%u of %u B, consts %u B, prim %u, factor %.1f; domain %u prims, %u cps of %u B, consts %u B); "
+                      "the pipeline stays a placeholder\n",
+                      why, !!p->vs_fn, !!hok, !!dok, !!p->si_lib, r.hs_patches_per_tg, r.hs_threads_per_patch, r.hs_input_cps,
+                      r.hs_output_cps, r.hs_output_cp_size, r.hs_patch_const_size, r.hs_out_prim, (double)r.hs_max_factor,
+                      r.ds_prims_per_mesh_tg, r.ds_input_cps, r.ds_input_cp_size, r.ds_patch_const_size);
+        if (p->si_lib) { NSObject_release(p->si_lib); p->si_lib = 0; }
+        if (p->gs_lib) { NSObject_release(p->gs_lib); p->gs_lib = 0; }
+        if (p->hs_lib) { NSObject_release(p->hs_lib); p->hs_lib = 0; }
+        if (p->vs_fn) { NSObject_release(p->vs_fn); p->vs_fn = 0; }
+        if (p->vs_lib) { NSObject_release(p->vs_lib); p->vs_lib = 0; }
+        *nvsin = 0;
+    }
+    free(L);
+}
+
 static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device *This,
         const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc, REFIID riid, void **out) {
     struct mad_device *d = (struct mad_device *)This;
@@ -9149,6 +9336,11 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
 
     {
         struct madeira_ir_loc locs[MAD_LOC_MAX]; unsigned nl = 0;
+        if (!desc->GS.pShaderBytecode && desc->HS.pShaderBytecode && desc->DS.pShaderBytecode &&
+            !mad_bc_is_dxbc(desc->VS.pShaderBytecode, desc->VS.BytecodeLength) &&
+            !mad_bc_is_dxbc(desc->HS.pShaderBytecode, desc->HS.BytecodeLength) &&
+            !mad_bc_is_dxbc(desc->DS.pShaderBytecode, desc->DS.BytecodeLength) && mad_dtess_on())
+            mad_dtess_convert(d, rs, p, desc, vsin, &nvsin);   /* DXIL tessellation; sets gs_emu = 2 when usable */
         if (desc->GS.pShaderBytecode && !mad_bc_is_dxbc(desc->GS.pShaderBytecode, desc->GS.BytecodeLength)) {   /* ml927: geometry-shader pipeline -> converter mesh emulation; ml1147: DXIL only */
             struct madeira_ir_input_layout *L = calloc(1, sizeof *L);
             struct mad_convert_opts ov, og;
@@ -9458,12 +9650,20 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
         snprintf(ge.geometry_function, sizeof ge.geometry_function, "%s", p->gs_name);
         if (p->ps_fn) snprintf(ge.fragment_function, sizeof ge.fragment_function, "%s", p->ps_name);
         ge.gs_vertex_size_bytes = p->gs_vertex_size; ge.gs_max_input_primitives = p->gs_max_prims;
+        if (p->gs_emu == 2) {   /* DXIL tessellation: winemetal builds the tessellation variant */
+            ge.hull_library = p->hs_lib; ge.domain_library = p->gs_lib;
+            ge.max_tessellation_factor = p->dt.max_factor; ge.tessellation = 1;
+            ge.gs_max_input_primitives = p->dt.mesh_prims;
+        }
         p->rps = MTLDevice_newGeometryEmulationPipelineState(d->mtl_device, &mp, &ge, &err);
         if (err) mad_log_nserror("geometry-emulation pipeline", err);
         { static unsigned said; if (said++ < 8) d3d12_log("[madeira-d3d12] geometry pipeline %s: vs '%s' gs '%s' ps '%s' (vertex %u B, %u prims/tg, %u targets)\n",
                                                         p->rps ? "created" : "FAILED", ge.vertex_function, ge.geometry_function, ge.fragment_function,
                                                         p->gs_vertex_size, p->gs_max_prims, desc->NumRenderTargets); }
-        if (!p->rps) { p->gs_emu = 0; d3d12_log("[madeira-d3d12] geometry pipeline: falling back to a plain vertex pipeline (geometry shader DROPPED)\n"); }
+        if (!p->rps && p->gs_emu == 2) {   /* the placeholder below takes it */
+            static unsigned said; if (said++ < 8) d3d12_log("[madeira-d3d12] DXIL tessellation pipeline: Metal refused it (vs '%s' ps '%s')\n", p->vs_name, p->ps_name);
+            p->gs_emu = 0;
+        } else if (!p->rps) { p->gs_emu = 0; d3d12_log("[madeira-d3d12] geometry pipeline: falling back to a plain vertex pipeline (geometry shader DROPPED)\n"); }
     }
     /* ml1086: a hull+domain pipeline gets NO plain vertex pipeline. Its pixel
      * shader is fed by the domain shader, so the VS->PS pairing Metal checks
@@ -9505,6 +9705,15 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
         if (said++ < 16)
             d3d12_log("[madeira-d3d12] ml1138 geometry-shader pipeline could not be built; returning a placeholder whose draws are skipped "
                       "(%u targets, gs %u B)\n", desc->NumRenderTargets, (unsigned)desc->GS.BytecodeLength);
+    } else if (!p->rps && !p->tess && p->has_tess) {
+        /* The same placeholder rule for a hull+domain pipeline the tessellation
+         * paths cannot build (or dxil-tess = 0). Ghost of Tsushima treated
+         * "CreateGraphicsPipelineState failed" for its water pipelines as an
+         * error; a missing tessellated material is recoverable. */
+        static unsigned said;
+        if (said++ < 16)
+            d3d12_log("[madeira-d3d12] tessellation pipeline could not be built; returning a placeholder whose draws are skipped "
+                      "(%u targets, depth %u)\n", desc->NumRenderTargets, (unsigned)desc->DSVFormat);
     } else if (!p->rps && !p->tess) {
         d3d12_log("[madeira-d3d12] newRenderPipelineState failed (%u targets, depth %u, %u input elements%s)\n",
                   desc->NumRenderTargets, (unsigned)desc->DSVFormat, desc->InputLayout.NumElements,

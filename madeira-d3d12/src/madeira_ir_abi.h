@@ -291,6 +291,23 @@ struct madeira_ir_convert_args {
     uint32_t gs_stage;              /* in: 0 none, 1 object (VS for a GS), 2 mesh (GS) */
     uint32_t gs_strip;              /* in: 1 = the draw's topology is a strip */
     uint64_t gs_bytecode, gs_bytecode_len;   /* in: the other shader of the pair */
+    /* DXIL TESSELLATION through the Metal Shader Converter's own emulation
+     * (IRRuntimeNewGeometryTessellationEmulationPipeline). A DXIL hull or
+     * domain shader converted with gs_emulation = 1 reports what the pipeline
+     * (IRRuntimeTessellationPipelineConfig) and the draws need, from
+     * IRShaderReflectionCopyHullInfo / CopyDomainInfo. 0 = not reported. */
+    uint32_t ret_hs_patches_per_tg;     /* out (hull): max_patches_per_object_threadgroup */
+    uint32_t ret_hs_threads_per_patch;  /* out (hull): max_object_threads_per_patch */
+    uint32_t ret_hs_input_cps;          /* out (hull): input_control_point_count */
+    uint32_t ret_hs_output_cps;         /* out (hull): output_control_point_count */
+    uint32_t ret_hs_output_cp_size;     /* out (hull): output_control_point_size */
+    uint32_t ret_hs_patch_const_size;   /* out (hull): patch_constants_size */
+    uint32_t ret_hs_out_prim;           /* out (hull): IRTessellatorOutputPrimitive */
+    uint32_t ret_hs_max_factor_bits;    /* out (hull): max_tessellation_factor, float bits */
+    uint32_t ret_ds_prims_per_mesh_tg;  /* out (domain): max_input_prims_per_mesh_threadgroup */
+    uint32_t ret_ds_input_cps;          /* out (domain): input_control_point_count */
+    uint32_t ret_ds_input_cp_size;      /* out (domain): input_control_point_size */
+    uint32_t ret_ds_patch_const_size;   /* out (domain): patch_constants_size */
 };
 struct madeira_ir_input_element {
     char semantic[32];
