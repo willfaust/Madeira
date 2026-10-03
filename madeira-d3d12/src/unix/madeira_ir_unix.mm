@@ -19,6 +19,8 @@
 #include <mach-o/loader.h>   /* ml1990: LC_UUID of the converter dylib */
 #include "../../../build/madeira_cfg.h"   /* ml1095: one config file */
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
@@ -349,14 +351,82 @@ static void mad_sc_hash_add(uint64_t *h, const void *p, size_t n)
     for (size_t i = 0; i < n; i++) { *h ^= b[i]; *h *= 1099511628211ull; }
 }
 
+/* The build every cache entry (DXBC and DXIL) is bound to. A rebuild of this
+ * archive used to change __DATE__/__TIME__ and so start the device's cache from
+ * nothing: Ghost of Tsushima then converted its ~29,000 stages again behind
+ * "Compiling shaders" after every update. build/dxmt-ios/build.sh passes
+ * MADEIRA_IR_CONVERTER_ID, a hash of everything that shapes a conversion (this
+ * service and the IR ABI, the build script's flags, DXMT's airconv and DXBC
+ * parser, LLVM's configuration, the converter's headers and library); a build
+ * that changes none of them keeps the cache. Without it, every build gets a
+ * cache of its own, as before. */
+#ifdef MADEIRA_IR_CONVERTER_ID
+#define MAD_SC_BUILD "converter " MADEIRA_IR_CONVERTER_ID
+#else
+#define MAD_SC_BUILD __DATE__ " " __TIME__
+#endif
+
+/* Entries of an earlier build are never read again, and the DXBC ones (unlike
+ * the size-bounded DXIL ones) were never deleted either. The first cache access
+ * of a process compares shadercache/.mdsc-build with MAD_SC_BUILD; when it
+ * differs, a background thread removes the .mdsc entries (and torn .tmp files)
+ * written before the process started, then records the build. */
+static time_t g_sc_prune_before;
+static void *mad_sc_prune_thread(void *arg)
+{
+    char *dir = (char *)arg, path[1400];
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    struct stat st;
+    unsigned n = 0;
+    if (d) {
+        while ((e = readdir(d))) {
+            size_t l = strlen(e->d_name);
+            if (!((l > 5 && !strcmp(e->d_name + l - 5, ".mdsc")) || strstr(e->d_name, ".mdsc.tmp"))) continue;
+            if (snprintf(path, sizeof path, "%s/%s", dir, e->d_name) >= (int)sizeof path) continue;
+            if (stat(path, &st) || st.st_mtime >= g_sc_prune_before) continue;   /* this build's own */
+            if (!unlink(path)) n++;
+        }
+        closedir(d);
+        if (snprintf(path, sizeof path, "%s/.mdsc-build", dir) < (int)sizeof path) {
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { ssize_t w = write(fd, MAD_SC_BUILD, strlen(MAD_SC_BUILD)); (void)w; close(fd); }
+        }
+    }
+    if (n) dprintf(2, "[madeira-ir] DXBC shader cache: removed %u entries of earlier builds\n", n);
+    free(dir);
+    return NULL;
+}
+static void mad_sc_prune_start(void)
+{
+    const char *docs = getenv("MADEIRA_DOCS_DIR");
+    char dir[1100], marker[1200], old[128];
+    ssize_t n = -1;
+    int fd;
+    pthread_t t;
+    if (!docs || !*docs) return;
+    if (snprintf(dir, sizeof dir, "%s/shadercache", docs) >= (int)sizeof dir) return;
+    if (snprintf(marker, sizeof marker, "%s/.mdsc-build", dir) >= (int)sizeof marker) return;
+    fd = open(marker, O_RDONLY);
+    if (fd >= 0) { n = read(fd, old, sizeof old - 1); close(fd); }
+    old[n > 0 ? n : 0] = 0;
+    if (!strcmp(old, MAD_SC_BUILD)) return;
+    g_sc_prune_before = time(NULL) - 2;
+    char *arg = strdup(dir);
+    if (arg && !pthread_create(&t, NULL, mad_sc_prune_thread, arg)) pthread_detach(t);
+    else free(arg);
+}
+
 /* Returns 0 if the cache directory is unavailable. ml1990: the DXIL cache
  * shares the directory under its own extension. */
 static int mad_sc_path_ext(uint64_t key, const char *ext, char *out, size_t cap)
 {
+    static pthread_once_t prune_once = PTHREAD_ONCE_INIT;
     const char *docs = getenv( "MADEIRA_DOCS_DIR" );
     if (!docs || !*docs) return 0;
     if (snprintf(out, cap, "%s/shadercache", docs) >= (int)cap) return 0;
     mkdir(out, 0755);   /* harmless if it exists */
+    pthread_once(&prune_once, mad_sc_prune_start);
     if (snprintf(out, cap, "%s/shadercache/%016llx.%s", docs,
                  (unsigned long long)key, ext) >= (int)cap) return 0;
     return 1;
@@ -620,7 +690,7 @@ static int mad_airconv_convert_tess(struct madeira_ir_convert_args *a,
     {   /* cache identity: every input that shapes the output */
         uint64_t key = 1469598103934665603ull;
         uint32_t mv = SM50_SHADER_METAL_320, ver = MAD_SC_VERSION, st[2] = { a->tess_stage, a->tess_index_format };
-        const char *stamp = __DATE__ __TIME__;
+        const char *stamp = MAD_SC_BUILD;
         mad_sc_hash_add(&key, "tess", 4);
         mad_sc_hash_add(&key, bc, bclen);
         mad_sc_hash_add(&key, hs, hslen);
@@ -797,7 +867,7 @@ static int mad_airconv_convert_gs(struct madeira_ir_convert_args *a,
     {   /* cache identity: every input that shapes the output */
         uint64_t key = 1469598103934665603ull;
         uint32_t mv = SM50_SHADER_METAL_320, ver = MAD_SC_VERSION, st[3] = { a->gs_stage, a->tess_index_format, a->gs_strip ? 1u : 0u };
-        const char *stamp = __DATE__ __TIME__;
+        const char *stamp = MAD_SC_BUILD;
         mad_sc_hash_add(&key, "geom", 4);
         mad_sc_hash_add(&key, bc, bclen);
         mad_sc_hash_add(&key, other, olen);
@@ -1060,9 +1130,9 @@ static int mad_airconv_convert(struct madeira_ir_convert_args *a,
             /* ml1020: bind the key to THIS BUILD. A cache entry produced by an
              * older compiler is not safe to reuse -- the airconv changes in this
              * session alone would have invalidated it -- and a silently stale
-             * shader is far worse than recompiling. Rebuilding the archive
-             * changes this stamp and orphans the old entries. */
-            { const char *stamp = __DATE__ __TIME__;
+             * shader is far worse than recompiling. A build with another
+             * converter identity (MAD_SC_BUILD) orphans the old entries. */
+            { const char *stamp = MAD_SC_BUILD;
               mad_sc_hash_add(&key, stamp, strlen(stamp)); }
             if (ia_nel) mad_sc_hash_add(&key, ia_el, (size_t)ia_nel * sizeof ia_el[0]);
             /* ml1031: the emitted pixel shader now depends on WHICH vertex stage
@@ -1373,7 +1443,7 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
         void *hit = NULL;
         size_t hit_len = 0;
         env.converter_ident = g_ir.ident;
-        env.build_stamp = __DATE__ " " __TIME__;
+        env.build_stamp = MAD_SC_BUILD;
         env.ags_rewrite = (uint32_t)mad_ags_enabled();
         env.compat_flags = (uint32_t)IRCompatibilityFlagForceTextureArray;
         mad_dxc_key(a, &env, &dxc_key, &dxc_check);

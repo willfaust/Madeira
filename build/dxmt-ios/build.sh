@@ -59,8 +59,7 @@ FAILED_FILES=""
 
 compile_objc() {
     local src=$1 name=$2
-    # MADEIRA_ONLY=<name>: recompile one object only. madeira_ir_unix carries a __DATE__
-    # stamp in the shader-cache key, so a full rebuild costs a full shader recompile on device.
+    # MADEIRA_ONLY=<name>: recompile one object only.
     if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang $COMMON_FLAGS -x objective-c $INCLUDES \
@@ -73,8 +72,7 @@ compile_objc() {
 
 compile_cxx() {
     local src=$1 name=$2 extra="${3:-}"
-    # MADEIRA_ONLY=<name>: recompile one object only. madeira_ir_unix carries a __DATE__
-    # stamp in the shader-cache key, so a full rebuild costs a full shader recompile on device.
+    # MADEIRA_ONLY=<name>: recompile one object only.
     if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang++ $COMMON_FLAGS $CXX_FLAGS $INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $LLVM_INCLUDES $AIRCONV_DEFS $extra \
@@ -116,8 +114,7 @@ compile_madeira_c() {
 # and the DXMT build must not start failing when it is absent.
 compile_objcxx_arc() {
     local src=$1 name=$2 extra="${3:-}"
-    # MADEIRA_ONLY=<name>: recompile one object only. madeira_ir_unix carries a __DATE__
-    # stamp in the shader-cache key, so a full rebuild costs a full shader recompile on device.
+    # MADEIRA_ONLY=<name>: recompile one object only.
     if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang++ $COMMON_FLAGS -std=c++20 -fobjc-arc -x objective-c++ $extra \
@@ -132,6 +129,25 @@ if [[ -f "$BUILD_DIR/../madeira-d3d12/deps.sh" ]] && \
     echo "=== madeira-d3d12 canary (Objective-C++, Metal Shader Converter) ==="
     compile_objcxx_arc "$REPO_ROOT/madeira-d3d12/tests/native/msc_canary.mm" \
                        msc_canary "-DIR_PRIVATE_IMPLEMENTATION -I$MSC_INCLUDE"
+    # The shader caches' converter identity (madeira_ir_unix.mm, MAD_SC_BUILD):
+    # a hash of everything that shapes a conversion -- the service and the IR
+    # ABI, this script (its compiler flags), DXMT's AIR compiler and DXBC
+    # parser, LLVM's configuration, the converter's headers and iOS library.
+    # A build that changes none of them keeps the device's shader cache instead
+    # of converting every shader again.
+    converter_id_inputs() {
+        local f x
+        for f in "$REPO_ROOT/madeira-d3d12/src/unix" "$REPO_ROOT/madeira-d3d12/src/madeira_ir_abi.h" \
+                 "$BUILD_DIR/build.sh" "$DXMT_SRC/airconv" "$DXMT_ROOT/libs" \
+                 "$LLVM_BUILD/include/llvm/Config/llvm-config.h" "$MSC_INCLUDE" "$MSC_LIB_IOS"; do
+            [ -e "$f" ] || { echo "absent ${f#"$REPO_ROOT"/}"; continue; }
+            find "$f" -type f | LC_ALL=C sort | while read -r x; do
+                echo "$(shasum -a 256 < "$x" | cut -c1-64) ${x#"$REPO_ROOT"/}"
+            done
+        done
+    }
+    CONVERTER_ID=$(converter_id_inputs | shasum -a 256 | cut -c1-16)
+    echo "  shader cache converter identity $CONVERTER_ID"
     # The runtime conversion service reached from the D3D12 runtime through
     # winemetal's unix call. Deliberately NOT defining IR_PRIVATE_IMPLEMENTATION
     # here: the converter's runtime header emits its bind points and helper
@@ -141,7 +157,7 @@ if [[ -f "$BUILD_DIR/../madeira-d3d12/deps.sh" ]] && \
     # in-tree AIR compiler, which is linked into this same archive, so the shim
     # includes the compiler's real header rather than restating its structs.
     compile_objcxx_arc "$REPO_ROOT/madeira-d3d12/src/unix/madeira_ir_unix.mm" \
-                       madeira_ir_unix "-I$MSC_INCLUDE -I$REPO_ROOT/madeira-d3d12/src $INCLUDES $INCLUDES_DIRECTX"
+                       madeira_ir_unix "-I$MSC_INCLUDE -I$REPO_ROOT/madeira-d3d12/src $INCLUDES $INCLUDES_DIRECTX -DMADEIRA_IR_CONVERTER_ID=\"$CONVERTER_ID\""
     # ml1011: the input-layout resolver, plain C++ because DXBCParser's signature
     # reader includes a Windows shim whose BOOL clashes with Objective-C's.
     compile_cxx "$REPO_ROOT/madeira-d3d12/src/unix/madeira_sm5_ia.cpp" \
