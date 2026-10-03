@@ -22420,6 +22420,117 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
  *             NtFreeVirtualMemory   (NTDLL.@)
  *             ZwFreeVirtualMemory   (NTDLL.@)
  */
+#ifdef WINE_IOS
+/* DELAYED RELEASE of mid-size guest allocations.
+ *
+ * Ghost of Tsushima crashed in every run the same way: a 1-2 MB block the
+ * main thread allocated is MEM_RELEASEd by one job worker while other
+ * workers are still copying out of it (the view was deleted 3-8 ms before
+ * the fault), with fastsync on or off. Freed guest-band VA is handed out
+ * again at once -- to the game, or to Metal/malloc -- so late accesses
+ * either fault or scribble over someone else's objects (one run crashed in
+ * Metal's command-buffer completion handler releasing a corrupted object).
+ * A whole-view MEM_RELEASE of a private 1-16 MB allocation now succeeds
+ * immediately but the mapping stays committed for MADEIRA_FREE_DELAY_MS
+ * (default 2000; 0 turns it off), capped at 128 MB in flight, and is
+ * released later. The race itself is not fixed; its victims survive. */
+#define IOS_FD_N 256
+static struct { char *base; size_t size; unsigned int ms; } ios_fd_ring[IOS_FD_N];
+static unsigned int ios_fd_n;
+static size_t ios_fd_bytes;
+static pthread_mutex_t ios_fd_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread int ios_fd_bypass;
+static int ios_fd_ms( void )
+{
+    static int v = -1;
+    if (v < 0)
+    {
+        /* How long a released 1-16 MB guest allocation stays mapped before it is
+         * really freed (default 2000 ms; 0 frees at once, as before). */
+        const char *e = getenv( "MADEIRA_FREE_DELAY_MS" );
+        v = e ? atoi( e ) : 2000;
+        if (v < 0) v = 0;
+    }
+    return v;
+}
+static unsigned int ios_fd_now( void )
+{
+    struct timespec ts;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    return (unsigned int)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+/* release everything older than the delay (or everything past the cap) */
+static void ios_fd_drain( int force_one )
+{
+    char *todo[IOS_FD_N]; unsigned int nt = 0, i, now = ios_fd_now();
+    pthread_mutex_lock( &ios_fd_lock );
+    for (i = 0; i < ios_fd_n; )
+    {
+        if ((int)(now - ios_fd_ring[i].ms) >= ios_fd_ms() || (force_one && i == 0) || ios_fd_bytes > (128u << 20))
+        {
+            todo[nt++] = ios_fd_ring[i].base;
+            ios_fd_bytes -= ios_fd_ring[i].size;
+            ios_fd_ring[i] = ios_fd_ring[--ios_fd_n];
+            force_one = 0;
+            continue;
+        }
+        i++;
+    }
+    pthread_mutex_unlock( &ios_fd_lock );
+    for (i = 0; i < nt; i++)
+    {
+        void *b = todo[i]; SIZE_T sz = 0;
+        ios_fd_bypass = 1;
+        NtFreeVirtualMemory( NtCurrentProcess(), &b, &sz, MEM_RELEASE );
+        ios_fd_bypass = 0;
+    }
+}
+/* 1 = taken into quarantine (caller reports success), 2 = already quarantined */
+static int ios_fd_take( char *base, SIZE_T *out_size )
+{
+    struct file_view *view;
+    sigset_t sigset;
+    size_t vsize = 0;
+    unsigned int i;
+    int ok = 0;
+    if (ios_fd_bypass || !ios_fd_ms()) return 0;
+    if ((uintptr_t)base < 0x7000000000ULL || (uintptr_t)base >= 0x7c00000000ULL) return 0;
+    pthread_mutex_lock( &ios_fd_lock );
+    for (i = 0; i < ios_fd_n; i++) if (ios_fd_ring[i].base == base) break;
+    pthread_mutex_unlock( &ios_fd_lock );
+    if (i < ios_fd_n) return 2;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    view = find_view( base, 0 );
+    if (view && view->base == base && is_view_valloc( view ) &&
+        !(view->protect & (SEC_FILE | SEC_IMAGE | VPROT_SYSTEM)) &&
+        view->size >= (1u << 20) && view->size <= (16u << 20))
+    {
+        vsize = view->size;
+        ok = 1;
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    if (!ok) return 0;
+    if (ios_fd_n >= IOS_FD_N) ios_fd_drain( 1 );
+    pthread_mutex_lock( &ios_fd_lock );
+    if (ios_fd_n < IOS_FD_N)
+    {
+        ios_fd_ring[ios_fd_n].base = base; ios_fd_ring[ios_fd_n].size = vsize; ios_fd_ring[ios_fd_n].ms = ios_fd_now();
+        ios_fd_n++; ios_fd_bytes += vsize;
+    }
+    else ok = 0;
+    pthread_mutex_unlock( &ios_fd_lock );
+    if (ok)
+    {
+        static unsigned long said;
+        *out_size = vsize;
+        if (++said <= 8 || !(said % 1024))
+            dprintf( 2, "[free-delay] #%lu release of %p+0x%lx held for %d ms (%u in flight)\n",
+                     said, base, (unsigned long)vsize, ios_fd_ms(), ios_fd_n );
+    }
+    return ok;
+}
+#endif
+
 NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
 {
     struct file_view *view;
@@ -22543,6 +22654,20 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
 
     if (size) size = ROUND_SIZE( addr, size, page_mask );
     base = ROUND_ADDR( addr, page_mask );
+
+#ifdef WINE_IOS
+    if (!ios_fd_bypass)
+    {
+        ios_fd_drain( 0 );   /* releases whose delay has run out */
+        if (type == MEM_RELEASE && !size && base == addr)
+        {
+            SIZE_T held = 0;
+            int t = ios_fd_take( base, &held );
+            if (t == 1) { *addr_ptr = base; *size_ptr = held; return STATUS_SUCCESS; }
+            if (t == 2) return STATUS_MEMORY_NOT_ALLOCATED;
+        }
+    }
+#endif
 
     /* ml433 (#72): keep the jumbo ledger honest — see ios_bigres_release. */
     if (type & MEM_RELEASE) ios_bigres_release( base );
