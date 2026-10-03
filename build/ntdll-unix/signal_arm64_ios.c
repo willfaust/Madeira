@@ -6365,6 +6365,58 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
 }
 
 
+/* A CROSS-THREAD CONTEXT WITHOUT ITS CONTROL REGISTERS.
+ *
+ * When the server has no native capture of the target it answers with the
+ * integer registers only, and the ARM64EC wrapper hands an x64 caller
+ * Rip = Rsp = 0 with no CONTEXT_CONTROL. Ghost of Tsushima's loading screen
+ * froze on exactly that: one thread called GetThreadContext on another
+ * thousands of times, getting rip 0 each time, while holding a critical
+ * section the main thread waited on.
+ *
+ * The target's last x64 state is in its CPU area (ChpeV2CpuAreaInfo->
+ * ContextAmd64, saved whenever it left emulated code). It is returned in the
+ * ARM64EC register mapping, which the wrapper's context_arm_to_x64() turns
+ * back into x64 registers; X23/X28 are cleared so the wrapper does not
+ * replace Pc/Sp with an emulator frame's. Threads of this process only: the
+ * TEB pointer is read in this address space. */
+static int get_context_from_amd64_area( HANDLE handle, CONTEXT *context, DWORD needed )
+{
+    THREAD_BASIC_INFORMATION tbi;
+    const TEB *teb;
+    const CHPE_V2_CPU_AREA_INFO *cpu;
+    const ARM64EC_NT_CONTEXT *ec;
+    static LONG said;
+
+    if (NtQueryInformationThread( handle, ThreadBasicInformation, &tbi, sizeof(tbi), NULL )) return 0;
+    if (tbi.ClientId.UniqueProcess != NtCurrentTeb()->ClientId.UniqueProcess) return 0;
+    if (!(teb = tbi.TebBaseAddress) || !(cpu = teb->ChpeV2CpuAreaInfo) || !(ec = cpu->ContextAmd64)) return 0;
+    if (!ec->Pc || !ec->Sp) return 0;
+    if (needed & CONTEXT_INTEGER & ~CONTEXT_ARM64)
+    {
+        memset( context->X, 0, sizeof(context->X[0]) * 29 );
+        context->X[0] = ec->X0;   context->X[1] = ec->X1;   context->X[2] = ec->X2;   context->X[3] = ec->X3;
+        context->X[4] = ec->X4;   context->X[5] = ec->X5;   context->X[6] = ec->X6;   context->X[7] = ec->X7;
+        context->X[8] = ec->X8;   context->X[9] = ec->X9;   context->X[10] = ec->X10; context->X[11] = ec->X11;
+        context->X[12] = ec->X12; context->X[15] = ec->X15;
+        context->X[19] = ec->X19; context->X[20] = ec->X20; context->X[21] = ec->X21; context->X[22] = ec->X22;
+        context->X[25] = ec->X25; context->X[26] = ec->X26; context->X[27] = ec->X27;
+        context->ContextFlags |= CONTEXT_INTEGER;
+    }
+    context->X[23] = context->X[28] = 0;
+    context->Fp = ec->Fp;
+    context->Lr = ec->Lr;
+    context->Sp = ec->Sp;
+    context->Pc = ec->Pc;
+    context->Cpsr = 0;
+    context->ContextFlags |= CONTEXT_CONTROL;
+    if (InterlockedIncrement( &said ) <= 8)
+        ERR( "[ctx] get handle=%p: no control registers from the server; "
+             "returning the target's saved x64 state rip=%p rsp=%p\n",
+             handle, (void *)ec->Pc, (void *)ec->Sp );
+    return 1;
+}
+
 /***********************************************************************
  *              NtGetContextThread  (NTDLL.@)
  *              ZwGetContextThread  (NTDLL.@)
@@ -6378,6 +6430,9 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
     if (!self)
     {
         NTSTATUS ret = get_thread_context( handle, context, &self, IMAGE_FILE_MACHINE_ARM64 );
+        if (!ret && !self && (needed_flags & CONTEXT_CONTROL & ~CONTEXT_ARM64) &&
+            (!(context->ContextFlags & CONTEXT_CONTROL & ~CONTEXT_ARM64) || !context->Pc))
+            get_context_from_amd64_area( handle, context, needed_flags );
         if (ret || !self) return ret;
     }
 
