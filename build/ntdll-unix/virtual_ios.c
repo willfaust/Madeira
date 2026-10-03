@@ -161,6 +161,12 @@ struct ios_jit_mapping {
                          * entries may share one pe_base; translation picks
                          * the entry owned by the current thread's process,
                          * falling back to the NULL-owner (parent) entry. */
+    void *map_peb;      /* PEB of the pseudo-process whose thread registered
+                         * this copy (NULL = unknown). A NULL-owner copy is
+                         * still used by the process that mapped the image, so
+                         * a pointer into a per-process image (ntdll) stored in
+                         * it belongs to that process's copy -- see
+                         * ios_jit_patch_stale_pointer. */
     unsigned short machine_cached;  /* ml349: PE machine word, read fault-safely once */
     unsigned char  machine_valid;   /* 0 = machine_cached not yet populated */
 };
@@ -2932,6 +2938,12 @@ uint64_t ios_jit_reverse_translate( uint64_t addr, uint64_t *module_base )
  * would have unregistered alias ranges and FEX would emit NoExecOp for
  * code in their copies. */
 static void (*ios_jit_alias_pushback_cb)(unsigned long long, unsigned long long, unsigned long long) = NULL;
+/* The process whose emulator owns ios_jit_alias_pushback_cb. Every x64
+ * pseudo-process loads its OWN emulator (libarm64ecfex.dll at its own VA,
+ * own pool copy, own alias table) and replaces the callback when it
+ * registers, so the callback points into the pool copy of the last process
+ * to register. ios_jit_reclaim_process drops it when that process exits. */
+static void *ios_jit_alias_pushback_peb = NULL;
 
 void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
 {
@@ -3004,6 +3016,7 @@ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
         ios_jit_mappings[slot].reloc_rva = 0;
         ios_jit_mappings[slot].reloc_size = 0;
         ios_jit_mappings[slot].owner_peb = NULL;
+        ios_jit_mappings[slot].map_peb = ios_jit_current_peb();
         ios_jit_mappings[slot].machine_cached = 0;   /* ml349: slot reuse invalidates memo */
         ios_jit_mappings[slot].machine_valid = 0;
         __sync_synchronize();
@@ -3270,15 +3283,62 @@ NTSTATUS unixcall_ios_register_hold_release(void *args)
     return STATUS_SUCCESS;
 }
 
+/* A child pseudo-process's emulator must know the child's OWN ntdll copy.
+ *
+ * Every x64 pseudo-process starts its own emulator with its own alias table,
+ * which unixcall_ios_push_jit_aliases fills when the emulator registers. A
+ * child runs a private copy of ntdll (ios_jit_copy_module_for_child), but the
+ * drain pushed only NULL-owner entries, so a child's emulator mapped ntdll to
+ * the PARENT's copy and could not reverse-translate an address in its own.
+ *
+ * That kills a child at its first x64 syscall: ntdll's dispatch_syscall (EC
+ * code running from the child's copy) sets the x64 Pc to
+ * invoke_arm64ec_syscall through an ADRP, i.e. in the child's pool copy, and
+ * resumes emulation there. FEX maps a pool-copy RIP back to its PE VA only
+ * through this table ([pool-rip-fix]); in a child it missed, the frontend
+ * refused the pool address as NoExec and the thread died on an access
+ * violation (GTA V Enhanced's PlayGTAV.exe / GTA5_Enhanced.exe children,
+ * Ghost of Tsushima's crs-handler.exe).
+ *
+ * FEX keeps one entry per PE range, so exactly one copy of an image is pushed:
+ * the registering process's own copy if it has one, else the NULL-owner
+ * entry. Other processes' copies are never pushed. A main process owns no
+ * copies, so what it pushes is unchanged. */
+static int ios_jit_owned_copy( void *pe_base, void *peb )
+{
+    int i;
+
+    if (!pe_base || !peb) return -1;
+    for (i = 0; i < ios_jit_mapping_count; i++)
+        if (ios_jit_mappings[i].pe_base == pe_base && ios_jit_mappings[i].size &&
+            ios_jit_mappings[i].owner_peb == peb)
+            return i;
+    return -1;
+}
+
+/* Does the drain for the emulator of process `own` push mapping i? */
+static int ios_jit_alias_drain_wants( int i, void *own )
+{
+    void *owner = ios_jit_mappings[i].owner_peb;
+
+    if (owner)
+        return own && owner == own && ios_jit_mappings[i].pe_base && ios_jit_mappings[i].size;
+    return ios_jit_owned_copy( ios_jit_mappings[i].pe_base, own ) < 0;
+}
+
 NTSTATUS unixcall_ios_push_jit_aliases(void *args)
 {
     /* ml613: the ml549 stash that used to live here read a->rip_from_hostpc, a
      * field the PE-side struct never declared — an out-of-bounds read. Deleted;
      * both exports are resolved from the mapped module at the end of this call. */
     struct ios_push_jit_aliases_args *params = args;
-    int i;
+    /* the registering process is the one running this unix call (PE ntdll's
+     * arm64ec_process_init_dispatchers, on its first thread) */
+    void *self = ios_jit_current_peb();
+    int i, own_pushed = 0;
     if (!params || !params->callback) return STATUS_INVALID_PARAMETER;
     ios_jit_alias_pushback_cb = params->callback;
+    ios_jit_alias_pushback_peb = self;
 
     /* ml951: any sub-floor window registered before xtajit64 loaded has not been
      * pushed yet — the per-registration push above needs this callback. Catch up. */
@@ -3292,17 +3352,21 @@ NTSTATUS unixcall_ios_push_jit_aliases(void *args)
         for (i = 0; ios_subfloor_enum( i, &lo, &re, &sz ); i++)
             ios_push_subfloor_window( lo, re, sz );
     }
-    /* Drain current table to the callback. Child-owned copies are skipped:
-     * they share pe_base with the parent entry and pushing both would
-     * double-register the alias range in FEX (x86-64 children under FEX
-     * will need per-process alias routing — deferred to S3). */
+    /* Drain current table to the callback. A child-owned copy shares pe_base
+     * with the parent entry and FEX keeps one entry per PE range, so only one
+     * of the two is pushed: the registering process's own copy if it has one,
+     * else the parent entry (ios_jit_alias_drain_wants). */
     for (i = 0; i < ios_jit_mapping_count; i++)
     {
-        if (ios_jit_mappings[i].owner_peb) continue;
+        if (!ios_jit_alias_drain_wants( i, self )) continue;
+        if (ios_jit_mappings[i].owner_peb) own_pushed++;
         params->callback((unsigned long long)(uintptr_t)ios_jit_mappings[i].pe_base,
                          (unsigned long long)(uintptr_t)ios_jit_mappings[i].jit_base,
                          (unsigned long long)ios_jit_mappings[i].size);
     }
+    if (own_pushed)
+        dprintf(2, "[alias-push] peb=%p registered its emulator: %d image(s) mapped to this "
+                "process's own copy instead of the parent's\n", self, own_pushed);
     /* ml613: the guaranteed init path — resolve both FEX exports here, where the
      * emulator module is certainly mapped, instead of from a diagnostic probe
      * (ml612's mistake) or from a dying thread inside pthread_exit (needlessly
@@ -3880,6 +3944,35 @@ void *ios_jit_translate_addr_for_owner(void *addr, void *owner_peb)
     return addr;  /* Not in any mapping */
 }
 
+/* Which pool copy the NtProtectVirtualMemory IAT sync writes a changed region
+ * of a PE image into.
+ *
+ * It used the FIRST mapping whose PE range holds the region. Images copied per
+ * process (ntdll: the session copy, owner NULL, plus one private copy per
+ * pseudo-process child) share one PE range, so a child's change to ntdll was
+ * copied into the PARENT's copy and never into its own (GTA V Enhanced's
+ * GTA5_Enhanced.exe child protecting ntdll). Same rule as
+ * ios_jit_translate_addr_for_owner: the copy owned by the writing process
+ * wins, else the first NULL-owner copy, else the first match. A process
+ * without its own copy (every main process) gets the NULL-owner copy -- the
+ * only one there is -- as before. Returns -1 when no copy holds the region. */
+static int ios_iat_sync_pick_mapping( uintptr_t rgn_start, uintptr_t rgn_end, void *peb )
+{
+    int i, first = -1, fallback = -1;
+
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        uintptr_t pe_start = (uintptr_t)ios_jit_mappings[i].pe_base;
+        uintptr_t pe_end = pe_start + ios_jit_mappings[i].size;
+
+        if (!(rgn_start >= pe_start && rgn_end <= pe_end)) continue;
+        if (first < 0) first = i;
+        if (peb && ios_jit_mappings[i].owner_peb == peb) return i;
+        if (!ios_jit_mappings[i].owner_peb && fallback < 0) fallback = i;
+    }
+    return fallback >= 0 ? fallback : first;
+}
+
 /* Translate a PE address to JIT pool address. Returns original if not mapped.
  * Owner-aware: resolves against the calling thread's process. */
 void *ios_jit_translate_addr(void *addr)
@@ -3961,6 +4054,40 @@ static int ios_collect_iat_ranges( const unsigned char *img, size_t img_size,
     return n;
 }
 
+/* Which process's translation a healed slot gets. owner_peb is set only for
+ * the per-process ntdll copies; every other copy -- a child's own emulator,
+ * its exe, its DLLs -- has owner NULL, so a stale ntdll PE VA found in it was
+ * rewritten to the SESSION's ntdll copy. GTA V Enhanced: the child's
+ * KiUserExceptionDispatcher crossed the fault threshold, the heal rewrote the
+ * slot in the child emulator's copy to the parent's ntdll, and the child's
+ * next syscall ran the parent's ntdll (NoExec at the parent's
+ * invoke_arm64ec_syscall). A NULL-owner copy is used by the process that
+ * mapped it, so translate for that process (map_peb). A copy of an unknown
+ * process is left alone when the target image has per-process copies: the
+ * owner-aware exec-fault redirect keeps serving it. A main process owns no
+ * copy, so its translation is the NULL-owner one as before. */
+static int ios_va_has_owned_copy( uintptr_t va )
+{
+    int i;
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        uintptr_t b = (uintptr_t)ios_jit_mappings[i].pe_base;
+        if (b && ios_jit_mappings[i].owner_peb && va >= b && va < b + ios_jit_mappings[i].size) return 1;
+    }
+    return 0;
+}
+
+/* The process a slot in mapping i belongs to, for the heal's translation.
+ * Returns 0 when the slot must not be healed. */
+static int ios_heal_range_owner( int i, uintptr_t stale_va, void **owner )
+{
+    *owner = ios_jit_mappings[i].owner_peb;
+    if (*owner) return 1;
+    *owner = ios_jit_mappings[i].map_peb;
+    if (*owner) return 1;
+    return !ios_va_has_owned_copy( stale_va );
+}
+
 /* Self-heal one stale PE-VA pointer: rewrite IAT/delay-IAT slots in the
  * module-copy pool ranges that hold `stale_va` to its pool-VA equivalent.
  * Called from the heal scanner thread (signal_arm64_ios.c) for addresses
@@ -3973,22 +4100,24 @@ static int ios_collect_iat_ranges( const unsigned char *img, size_t img_size,
  * take one more fault-redirect, which is benign. */
 int ios_jit_patch_stale_pointer(unsigned long long stale_va)
 {
-    int i, patched = 0;
+    int i, patched = 0, skipped = 0;
     void *target = ios_jit_translate_addr_for_owner((void *)(uintptr_t)stale_va, NULL);
     if (!ios_jit_rw_base_global || !ios_jit_rx_base_global) return 0;
 
     for (i = 0; i < ios_jit_mapping_count; i++)
     {
-        /* Heal each pool range with ITS OWNER's translation: a stale
-         * ntdll PE-VA inside a child-owned copy must point at the child's
-         * copy, not the parent's. */
-        void *range_target = ios_jit_translate_addr_for_owner(
-            (void *)(uintptr_t)stale_va, ios_jit_mappings[i].owner_peb);
+        /* Heal each pool range with ITS PROCESS's translation: a stale
+         * ntdll PE-VA inside a child's copy (owned, or mapped by the child)
+         * must point at the child's copy, not the parent's. */
+        void *range_owner, *range_target;
         uintptr_t pool_off = (uintptr_t)ios_jit_mappings[i].jit_base
                            - (uintptr_t)ios_jit_rx_base_global;
         unsigned char *rw_img = (unsigned char *)ios_jit_rw_base_global + pool_off;
         struct ios_iat_range ranges[64];
         int nr, r;
+        if (!ios_jit_mappings[i].pe_base || !ios_jit_mappings[i].size) continue;
+        if (!ios_heal_range_owner( i, (uintptr_t)stale_va, &range_owner )) { skipped++; continue; }
+        range_target = ios_jit_translate_addr_for_owner( (void *)(uintptr_t)stale_va, range_owner );
         if (range_target == (void *)(uintptr_t)stale_va) continue;
         nr = ios_collect_iat_ranges(rw_img, ios_jit_mappings[i].size, ranges, 64);
         for (r = 0; r < nr; r++)
@@ -4025,8 +4154,7 @@ int ios_jit_patch_stale_pointer(unsigned long long stale_va)
     {
         for (i = 0; i < ios_jit_mapping_count; i++)
         {
-            void *range_target = ios_jit_translate_addr_for_owner(
-                (void *)(uintptr_t)stale_va, ios_jit_mappings[i].owner_peb);
+            void *range_owner, *range_target;
             uintptr_t pool_off = (uintptr_t)ios_jit_mappings[i].jit_base
                                - (uintptr_t)ios_jit_rx_base_global;
             unsigned char *rw_img = (unsigned char *)ios_jit_rw_base_global + pool_off;
@@ -4034,6 +4162,9 @@ int ios_jit_patch_stale_pointer(unsigned long long stale_va)
             size_t tx_end   = tx_start + ios_jit_mappings[i].text_size;
             uint64_t *p   = (uint64_t *)rw_img;
             uint64_t *end = (uint64_t *)(rw_img + (ios_jit_mappings[i].size & ~(size_t)7));
+            if (!ios_jit_mappings[i].pe_base || !ios_jit_mappings[i].size) continue;
+            if (!ios_heal_range_owner( i, (uintptr_t)stale_va, &range_owner )) continue;
+            range_target = ios_jit_translate_addr_for_owner( (void *)(uintptr_t)stale_va, range_owner );
             if (range_target == (void *)(uintptr_t)stale_va) continue;
             for (; p < end; p++)
             {
@@ -4055,6 +4186,9 @@ int ios_jit_patch_stale_pointer(unsigned long long stale_va)
      * breakage). */
     fprintf(stderr, "[stale-heal] 0x%llx -> %p, rewrote %d slot(s)\n",
             stale_va, target, patched);
+    if (skipped)
+        fprintf(stderr, "[stale-heal] 0x%llx: %d cop(ies) of unknown process left to the owner-aware "
+                "fault redirect (the target image has per-process copies)\n", stale_va, skipped);
     return patched;
 }
 
@@ -9477,6 +9611,20 @@ void ios_jit_reclaim_process( void *peb )
 
     if (!peb || !rx_base) return;
 
+    /* The alias-push callback lives in the emulator of the LAST process that
+     * registered one (ios_jit_alias_pushback_peb). If that process is the one
+     * dying, its emulator's pool copy is reclaimed below and the next image
+     * map anywhere would call freed (later reused) code. Drop the callback:
+     * the next emulator to register gets the whole table from its drain. */
+    if (peb == ios_jit_alias_pushback_peb && ios_jit_alias_pushback_cb)
+    {
+        dprintf(2, "[alias-push] peb=%p exits while its emulator receives the alias pushes: "
+                "callback dropped before its pool copy is reclaimed\n", peb);
+        ios_jit_alias_pushback_cb = NULL;
+        __sync_synchronize();
+        ios_jit_alias_pushback_peb = NULL;
+    }
+
     pthread_mutex_lock( &ios_pool_lock );
 
     for (i = 0; i < ios_pool_ledger_count; )
@@ -13197,6 +13345,7 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
         ios_jit_mappings[slot].reloc_rva = m->reloc_rva;
         ios_jit_mappings[slot].reloc_size = m->reloc_size;
         ios_jit_mappings[slot].owner_peb = child_peb;
+        ios_jit_mappings[slot].map_peb = child_peb;
         __sync_synchronize();
         ios_jit_mappings[slot].pe_base = m->pe_base;
         if (slot == ios_jit_mapping_count) ios_jit_mapping_count++;
@@ -22823,6 +22972,10 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
         if (1)
         {
             int idx;
+            /* write into the copy of the WRITING process, not the first copy
+             * of the image (see ios_iat_sync_pick_mapping) */
+            int sync_pick = ios_iat_sync_pick_mapping( (uintptr_t)base, (uintptr_t)base + size,
+                                                       ios_jit_current_peb() );
             ERR("iOS NtProtect-sync: triggered, scanning %d JIT mappings\n", ios_jit_mapping_count);
             for (idx = 0; idx < ios_jit_mapping_count; idx++)
             {
@@ -22831,6 +22984,7 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
                 uintptr_t rgn_start = (uintptr_t)base;
                 uintptr_t rgn_end = rgn_start + size;
 
+                if (idx != sync_pick) continue;
                 if (rgn_start >= pe_start && rgn_end <= pe_end)
                 {
                     /* iOS-Madeira ml632 A/B: DO NOT IAT-SYNC MEMORY OWNED BY AN ANON JIT ALIAS.
