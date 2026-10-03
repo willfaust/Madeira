@@ -1,0 +1,17 @@
+; d3d12core.dll for Madeira: the Agility SDK half of the D3D12 runtime.
+; Every entry point forwards to the d3d12.dll it ships next to (madeira-d3d12);
+; only D3D12SDKVersion lives here. Built by build/madeira-d3d12/build-pe.sh.
+LIBRARY d3d12core.dll
+EXPORTS
+    D3D12SDKVersion DATA
+    D3D12CreateDevice = d3d12.D3D12CreateDevice
+    D3D12GetDebugInterface = d3d12.D3D12GetDebugInterface
+    D3D12GetInterface = d3d12.D3D12GetInterface
+    D3D12EnableExperimentalFeatures = d3d12.D3D12EnableExperimentalFeatures
+    D3D12CreateRootSignatureDeserializer = d3d12.D3D12CreateRootSignatureDeserializer
+    D3D12CreateVersionedRootSignatureDeserializer = d3d12.D3D12CreateVersionedRootSignatureDeserializer
+    D3D12SerializeRootSignature = d3d12.D3D12SerializeRootSignature
+    D3D12SerializeVersionedRootSignature = d3d12.D3D12SerializeVersionedRootSignature
+    D3D12CoreCreateLayeredDevice = d3d12.D3D12CoreCreateLayeredDevice
+    D3D12CoreGetLayeredDeviceSize = d3d12.D3D12CoreGetLayeredDeviceSize
+    D3D12CoreRegisterLayers = d3d12.D3D12CoreRegisterLayers

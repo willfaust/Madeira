@@ -31,6 +31,13 @@ echo "  built $(ls -l "$OUT/madeira_d3d12.dll" | awk '{print $5}') bytes"
 cp "$OUT/madeira_d3d12.dll" "$OUT/d3d12.dll"
 echo "  exports: $("$MINGW/llvm-objdump" --private-headers "$OUT/d3d12.dll" 2>/dev/null | grep -cE '^ +[0-9]+ +0x[0-9a-f]+ +D3D12|^ +[0-9]+ .*D3D12')  (ordinal 101/102 pinned by d3d12.def)"
 
+# The Agility SDK half: D3D12SDKVersion plus forwarders to d3d12.dll. It ships
+# next to d3d12.dll; nothing loads it unless madeira.cfg d3d12-core-dll is set.
+echo "=== d3d12core.dll (arm64ec) ==="
+"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall \
+    -o "$OUT/d3d12core.dll" "$SRC/d3d12core.c" "$SRC/d3d12core.def"
+echo "  built $(ls -l "$OUT/d3d12core.dll" | awk '{print $5}') bytes, $("$MINGW/llvm-readobj" --coff-exports "$OUT/d3d12core.dll" | grep -c 'ForwardedTo: d3d12\.') forwarders to d3d12.dll"
+
 echo "=== d3d12-m2-x64.exe (x86_64 guest) ==="
 "$MINGW/x86_64-w64-mingw32-clang" -O2 -Wall \
     -o "$OUT/d3d12-m2-x64.exe" "$TESTS/m2_abi.c" -luuid -lole32

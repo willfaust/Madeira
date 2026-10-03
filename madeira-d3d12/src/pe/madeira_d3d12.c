@@ -11537,9 +11537,28 @@ __declspec(dllexport) void MadeiraD3D12PresenterDestroy(void *ph) {
     free(p);
 }
 
+/* madeira.cfg d3d12-core-dll (default 0). Since the Agility SDK, Windows'
+ * d3d12.dll is a loader and D3D12Core.dll the runtime that exports
+ * D3D12SDKVersion; vkd3d-proton 2.9+ ships the same split because games assume
+ * it, and some check D3D12Core's version (GTA V Enhanced loads d3d12core.dll
+ * right after D3D12.DLL under Proton). 1 loads d3d12core.dll (d3d12core.c:
+ * version 618, every function forwarded back here) as this DLL attaches, the way
+ * vkd3d-proton's import does; a value above 1 is the version it reports
+ * instead (614, 616, ...). */
+static void mad_load_d3d12core(void) {
+    long long v = mad_cfg_int_pe("d3d12-core-dll", 0);   /* 1: load d3d12core.dll (Agility SDK layout); >1: also its D3D12SDKVersion */
+    HMODULE m; UINT *ver;
+    if (v <= 0) return;
+    m = LoadLibraryW(L"d3d12core.dll");
+    if (!m) { d3d12_log("[madeira-d3d12] d3d12-core-dll: d3d12core.dll did not load (error %lu)\n", GetLastError()); return; }
+    ver = (UINT *)GetProcAddress(m, "D3D12SDKVersion");
+    if (ver && v > 1) *ver = (UINT)v;
+    d3d12_log("[madeira-d3d12] d3d12-core-dll: d3d12core.dll loaded, D3D12SDKVersion %u\n", ver ? *ver : 0);
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)inst; (void)reserved;
-    if (reason == DLL_PROCESS_ATTACH) { build_vtables(); mad_swap_fill_vtbl(); }
+    if (reason == DLL_PROCESS_ATTACH) { build_vtables(); mad_swap_fill_vtbl(); mad_load_d3d12core(); }
     return TRUE;
 }
 
