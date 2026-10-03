@@ -22771,6 +22771,48 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
 
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
 
+#ifdef WINE_IOS
+    /* A refused read-only RESTORE inside a pool-copied image.
+     *
+     * The loader makes an import table writable, binds it, and restores the
+     * section protection; the restore is what runs the IAT sync below, which
+     * copies the bound slots into the image's JIT-pool copy -- the copy the
+     * code actually runs from. When the host refuses that restore (set_vprot
+     * fails on the 16 KB host page), the sync never ran and the copy kept the
+     * unbound hint/name RVAs. 32-bit Crysis: wow64.dll relocated off its
+     * preferred base, `[vmem-denied] set_vprot failed ... protect=0x2` on its
+     * .rdata IAT page, then Wow64LdrpInitialize branched to a hint/name RVA.
+     *
+     * For a protection that keeps READ and drops WRITE on a pool-copied image,
+     * leave the page as it is (more permissive than asked, never less) and
+     * report success, so the sync still copies the parent -- the source of
+     * truth. */
+    if (status == STATUS_ACCESS_DENIED && view &&
+        (new_prot & (PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) &&
+        !(new_prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+    {
+        int mi, in_pool_image = 0;
+        for (mi = 0; mi < ios_jit_mapping_count; mi++)
+        {
+            uintptr_t ps = (uintptr_t)ios_jit_mappings[mi].pe_base;
+            if ((uintptr_t)base >= ps && (uintptr_t)base + size <= ps + ios_jit_mappings[mi].size)
+            {
+                in_pool_image = 1;
+                break;
+            }
+        }
+        if (in_pool_image)
+        {
+            static int restore_lines;
+            if (restore_lines++ < 16)
+                dprintf( 2, "[vmem-denied] restore to 0x%x refused at %p+0x%lx inside a pool-copied image "
+                            "-- page left as is, IAT sync runs\n",
+                         (unsigned)new_prot, base, (unsigned long)size );
+            status = STATUS_SUCCESS;
+        }
+    }
+#endif
+
     if (status == STATUS_SUCCESS)
     {
         *addr_ptr = base;
