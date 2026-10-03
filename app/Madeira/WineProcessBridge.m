@@ -553,17 +553,19 @@ static void madeira_link_syswow64(NSFileManager *fm, NSString *prefix, NSString 
     dprintf(STDERR_FILENO, "[WineProc] Farm syswow64: %d links -> i386-windows\n", linked);
 }
 
-/* syswow64\wbem, for 32-bit targets. The farms are flat, but WMI's registered
- * InprocServer32 paths are C:\windows\system32\wbem\<name> (wine.inf installs
- * these modules there), so a 32-bit CoCreateInstance(CLSID_WbemLocator) -- for
- * example dxdiagn asking WMI about the display adapter -- fails with
- * c0000135 when the subdirectory is empty. The list is wine.inf's. */
-static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
+/* <system_dir>\wbem: syswow64\wbem from the i386 farm for 32-bit targets,
+ * system32\wbem from the session's farm for 64-bit ones. The farms are flat,
+ * but WMI's registered InprocServer32 paths are C:\windows\system32\wbem\<name>
+ * (wine.inf installs these modules there), so CoCreateInstance(CLSID_WbemLocator)
+ * -- for example dxdiagn asking WMI about the display adapter, or a game's
+ * GPU requirement check -- fails with c0000135 when the subdirectory is
+ * empty. The list is wine.inf's. */
+static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *system_dir, NSString *source)
 {
     static const char * const wbem[] = { "wbemprox.dll", "wbemdisp.dll", "wmiutils.dll",
                                          "wmic.exe", "mofcomp.exe" };
-    NSString *dir = [prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64/wbem"];
-    NSString *source = [bundle stringByAppendingPathComponent:@"i386-windows"];
+    NSString *dir = [[prefix stringByAppendingPathComponent:@"drive_c/windows"]
+                        stringByAppendingPathComponent:[system_dir stringByAppendingPathComponent:@"wbem"]];
     int linked = 0;
 
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -576,8 +578,13 @@ static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSSt
         if (![fm fileExistsAtPath:src]) continue;
         if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil]) linked++;
     }
-    dprintf(STDERR_FILENO, "[WineProc] syswow64\\wbem: %d/%zu links\n",
+    dprintf(STDERR_FILENO, "[WineProc] %s\\wbem: %d/%zu links\n", system_dir.UTF8String,
             linked, sizeof(wbem) / sizeof(wbem[0]));
+}
+
+static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
+{
+    madeira_link_wbem(fm, prefix, @"syswow64", [bundle stringByAppendingPathComponent:@"i386-windows"]);
 }
 
 /* C:\windows\winsxs for 32-bit processes: the x86 side-by-side assemblies Wine
@@ -1194,6 +1201,7 @@ static void *wine_process_thread(void *arg) {
             }
             LOG("Symlinked %d DLLs from %{public}s to %{public}s", linked, bundle_subdir, sys32Dir.UTF8String);
             dprintf(STDERR_FILENO, "[WineProc] Symlinked %d DLLs from %s -> sys32\n", linked, bundle_subdir);
+            madeira_link_wbem(fm, prefix, @"system32", dllSource);
 
             // X3 mixed-mode: also link NON-COLLIDING files from the other
             // bundle arch so cross-arch child exes resolve by Win32 path
