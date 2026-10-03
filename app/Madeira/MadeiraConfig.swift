@@ -36,6 +36,11 @@ enum MadeiraConfig {
     /// All key/value pairs of madeira.cfg (empty when the file is absent).
     static func all() -> [String: String] {
         guard let u = url, let text = try? String(contentsOf: u, encoding: .utf8) else { return [:] }
+        return parse(text)
+    }
+
+    /// The key/value pairs of text in madeira.cfg's syntax, the last line winning.
+    static func parse(_ text: String) -> [String: String] {
         var out: [String: String] = [:]
         for raw in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -56,6 +61,43 @@ enum MadeiraConfig {
               let txt = try? String(contentsOf: d.appendingPathComponent("madeira-\(key).txt"), encoding: .utf8)
         else { return nil }
         return txt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A library game's own lines (Game details › This game's config): written to
+    /// Application Support for each launch and named by MADEIRA_CFG_GAME, which
+    /// build/madeira_cfg.h reads after madeira.cfg so a key there wins, and whose
+    /// env.NAME lines WineProcessBridge.m exports after madeira.cfg's.
+    static var gameURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("madeira-game.cfg")
+    }
+
+    /// `key` from the running game's own lines, or nil (also when empty). The
+    /// native reader lets it win on its own; Swift readers that merge (dxmt) ask.
+    static func gameValue(_ key: String) -> String? {
+        guard let p = getenv("MADEIRA_CFG_GAME"), case let path = String(cString: p), !path.isEmpty,
+              let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        return parse(text)[key].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Makes `text` the running game's lines: written and exported as
+    /// MADEIRA_CFG_GAME when it sets anything, otherwise the variable is unset
+    /// and the file removed, so a previous game's lines never apply. Returns the
+    /// pairs it applied; throws (with the variable unset) when the file cannot
+    /// be written.
+    @discardableResult
+    static func applyGame(_ text: String?) throws -> [String: String] {
+        unsetenv("MADEIRA_CFG_GAME")
+        let pairs = parse(text ?? "")
+        guard let u = gameURL else { return [:] }
+        guard !pairs.isEmpty, let text else {
+            try? FileManager.default.removeItem(at: u)
+            return [:]
+        }
+        try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try (text.hasSuffix("\n") ? text : text + "\n").write(to: u, atomically: true, encoding: .utf8)
+        setenv("MADEIRA_CFG_GAME", u.path, 1)
+        return pairs
     }
 
     static func bool(_ key: String, default dflt: Bool = false) -> Bool {

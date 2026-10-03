@@ -85,6 +85,8 @@ enum MadeiraConfig {
     static func get(_ key: String) -> String? { values[key] }
     static func bool(_ key: String, default dflt: Bool = false) -> Bool { values[key].map { ["1", "on", "true", "yes"].contains($0) } ?? dflt }
     @discardableResult static func set(_ key: String, _ value: String?) -> Bool { values[key] = value; return true }
+    static var game: String?   // stands in for the file MADEIRA_CFG_GAME names
+    @discardableResult static func applyGame(_ text: String?) throws -> [String: String] { game = text; return [:] }
 }
 final class LogStore { static let shared = LogStore(); var lines: [String] = []; func log(_ s: String) { lines.append(s) } }
 var published: (Int32, Int32) = (0, 0)
@@ -188,6 +190,11 @@ MadeiraConfig.values = [:]; game.fastSync = nil; game.semaphoreFastPath = nil
 game.reducedX87 = true; game.applyEnvironment()
 expect(env("FEX_X87REDUCEDPRECISION") == "1", "reduced x87 exported when chosen")
 game.reducedX87 = false
+// This game's own config lines: handed over at every launch, nil when there are none.
+game.config = "fence-chain = 6"; game.applyEnvironment()
+expect(MadeiraConfig.game == "fence-chain = 6", "the game's own config is applied at launch")
+game.config = nil; game.applyEnvironment()
+expect(MadeiraConfig.game == nil, "a game without its own config clears the previous one")
 // FPS limit: 30 needs DXMT's 30 FPS cap; without it a saved 30 runs as 60.
 game.fpsMode = 3; game.applyEnvironment()
 expect(vsync == 3, "30 FPS applied when DXMT has the cap")

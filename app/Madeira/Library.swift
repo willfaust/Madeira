@@ -243,6 +243,11 @@ struct LibraryEntry: Codable, Identifiable {
     /// library files decode; the fork's files carry the same keys.
     var fastSync: Bool?
     var semaphoreFastPath: Bool?
+    /// This game's own lines in madeira.cfg's syntax (Game details › This game's
+    /// config). At launch a key set here wins over madeira.cfg, env.NAME lines are
+    /// exported after madeira.cfg's and dxmt options are added to its own
+    /// (MadeiraConfig.applyGame). nil: none.
+    var config: String?
 
     var displayMode: DisplayMode { display.flatMap(DisplayMode.init(rawValue:)) ?? .fit }
 
@@ -297,6 +302,10 @@ struct LibraryEntry: Codable, Identifiable {
         // WineProcessBridge takes at most 64 arguments in 4 KB.
         guard launchArguments.utf8.count < 4096 else { throw LibraryError.message("The complete launch command is too long.") }
         guard !quoted, tokens <= 64 else { throw LibraryError.message("Use balanced double quotes and at most 64 launch arguments in total.") }
+        // build/madeira_cfg.h reads at most 64 KB of a file.
+        guard (config?.utf8.count ?? 0) < 60_000, config?.contains("\0") != true else {
+            throw LibraryError.message("This game's config is too long.")
+        }
     }
 
     /// Runs on the launch worker, before the JIT pool is taken.
@@ -321,6 +330,15 @@ struct LibraryEntry: Codable, Identifiable {
             setenv("MADEIRA_FASTSYNC_SEM", semaphoreFastPath == true ? "1" : "0", 1)
         }
         madeira_set_vsync_locked(effectiveFPSMode)
+        // This game's own lines; a launch without any unsets the previous game's.
+        do {
+            let pairs = try MadeiraConfig.applyGame(config)
+            if !pairs.isEmpty {
+                LogStore.shared.log("[game-cfg] " + pairs.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
+            }
+        } catch {
+            LogStore.shared.log("[game-cfg] this game's config could not be written: \(error.localizedDescription)")
+        }
         fputs("[frontend] launch profile applied\n", stderr)
         LogStore.shared.log("[display-shape] resolution=\(resolution) mode=\(displayMode.rawValue)")
     }
@@ -2307,6 +2325,11 @@ struct LibraryDetail: View {
         guard (640...4096).contains(width), width != 1280, width != 960 else { return nil }
         return "\(width)x720"
     }
+    /// "None", or how many keys this game's own config sets.
+    static func configSummary(_ config: String?) -> String {
+        let count = MadeiraConfig.parse(config ?? "").count
+        return count == 0 ? "None" : count == 1 ? "1 setting" : "\(count) settings"
+    }
     private func start() {
         guard !leaving else { return }
         // A Steam game starts through Madeira Dock (ContentView.launchLibraryEntry)
@@ -2450,6 +2473,15 @@ struct LibraryDetail: View {
                         Text("Keyboard and mouse: for games without controller support. The controller presses keys and moves the mouse (left stick WASD, right stick mouse, triggers click, D-pad arrows, Start Esc, Select Tab) and the game sees no controller. Change what each button does under Controller binds, here or in the in-game menu.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Section {
+                    NavigationLink {
+                        LibraryGameConfigEditor(text: Binding(get: { entry.config ?? "" }, set: { entry.config = $0.isEmpty ? nil : $0 }))
+                    } label: {
+                        LabeledContent("This game's config", value: Self.configSummary(entry.config))
+                    }
+                } header: { Text("Advanced") } footer: {
+                    Text("Lines in madeira.cfg's format for this game only. A key set here wins over madeira.cfg wherever the runtime reads it, env.NAME lines are exported after madeira.cfg's, and dxmt options are added to madeira.cfg's. Applies from the next start.")
+                }
                 if entry.steamAppID != nil {
                     Section {
                         Text(entry.launchWindowsPath).font(.caption.monospaced()).textSelection(.enabled)
@@ -2499,6 +2531,25 @@ struct LibraryDetail: View {
                 if command == "accept" { start() }
             }
         }
+    }
+}
+
+/// Game details › This game's config: the game's own lines in madeira.cfg's
+/// syntax, saved with the entry and applied at its next start
+/// (LibraryEntry.config, MadeiraConfig.applyGame).
+struct LibraryGameConfigEditor: View {
+    @Binding var text: String
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $text)
+                    .font(.caption.monospaced()).frame(minHeight: 260)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+            } footer: {
+                Text("One key = value per line, as in madeira.cfg; lines starting with # are comments. Examples: fence-chain = 6, dxmt = d3d11.mipClampBC=1, env.FEX_MULTIBLOCK = 1.")
+            }
+        }
+        .navigationTitle("This game's config").navigationBarTitleDisplayMode(.inline)
     }
 }
 

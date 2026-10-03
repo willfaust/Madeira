@@ -103,7 +103,14 @@ starting screen takes over (or an error is shown). A profile holds:
   for Steam games, which Madeira Dock starts with Steam's own launch option);
 - performance overlay, live logs and touch controls for the session, with the
   controls' **opacity** and overall **size**. The touch layout itself is saved
-  per game from the in-game editor.
+  per game from the in-game editor;
+- **Advanced › This game's config**: lines in madeira.cfg's syntax for this
+  game only. Each launch writes them to `Application Support/madeira-game.cfg`
+  and exports `MADEIRA_CFG_GAME` (unset when there are none): a key set there
+  wins over madeira.cfg wherever the runtime reads it (`build/madeira_cfg.h`),
+  `env.NAME` lines are exported after madeira.cfg's, and `dxmt` options are
+  added to madeira.cfg's (all joined with `;`, as `DXMT_CONFIG` requires).
+  Settings the app reads itself at launch (such as `pool`) stay global.
 
 A game you added starts directly. A Steam game's page (`docs/STEAM_LIBRARY.md`)
 adds a **Steam** section under the library details: **Start with** Madeira

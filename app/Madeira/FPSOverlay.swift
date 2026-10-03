@@ -392,5 +392,5 @@ struct FPSOverlay: View {
 
 /// ml1137: process-wide fence-mode display state for the overlay pill.
 enum FPSOverlayFenceMode {
-    static var current: Int = Int(MadeiraConfig.get("fence-chain") ?? "1") ?? 1
+    static var current: Int = Int(MadeiraConfig.gameValue("fence-chain") ?? MadeiraConfig.get("fence-chain") ?? "1") ?? 1
 }
