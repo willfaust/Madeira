@@ -598,6 +598,7 @@ struct mad_rootsig {
      * end of the top-level argument buffer for the static samplers; this is
      * the table it points at (nsamplers sampler descriptors, built once). */
     obj_handle_t stab; UINT64 stab_gpu;
+    const struct mad_descriptor *stab_cpu;   /* the same table, for the DXBC backend's copies (mad_air_resolve) */
 };
 struct mad_pso {
     ID3D12PipelineStateVtbl *vtbl; LONG refs; const IID *iid; const char *name;
@@ -695,6 +696,7 @@ struct mad_descriptor {
 };
 
 static enum WMTCompareFunction mad_compare(D3D12_COMPARISON_FUNC f);
+static UINT64 mad_uavctr_get(UINT64 va);   /* UAV counters, see CreateUnorderedAccessView */
 static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UINT av, UINT aw, UINT aniso, UINT cmp, UINT border, float minlod, float maxlod);
 
 /* RTV and DSV heaps hold resource pointers and never reach the GPU; the other
@@ -2772,13 +2774,20 @@ static int mad_air_resolve(struct mad_exec *e, const struct mad_rootsig *rs, con
     }
 
     /* Static samplers are baked into the shader by the DXIL converter, but the
-     * DXBC backend expects them in the table like any other sampler. */
+     * DXBC backend expects them in the table like any other sampler. The root
+     * signature already built each one's descriptor (the ml923 table the DXIL
+     * path points at); copy it into the slot. Skipping the draw instead left
+     * Ghost of Tsushima's intro videos and final image black. */
     if (rg->type == MADEIRA_IR_AIR_SAMPLER) {
         for (i = 0; i < rs->nsamplers && i < 32; i++)
             if (rs->samplers[i].shader_register == rg->lower_bound &&
                 rs->samplers[i].register_space == rg->space &&
                 (rs->samplers[i].visibility >= 32 || ((1u << rs->samplers[i].visibility) & vis_mask))) {
-                *why = "static sampler (not yet placed in the sm5 argument table)";
+                if (rs->stab_cpu && rs->stab_cpu[i].gpu_va) {
+                    *desc = rs->stab_cpu[i];
+                    return 1;
+                }
+                *why = "static sampler (its Metal sampler state could not be created)";
                 return 0;
             }
     }
@@ -2943,8 +2952,13 @@ static int mad_air_build_tables_ex(struct mad_exec *e, const struct mad_rootsig 
         } else {
             why = "range has neither the buffer nor the texture flag"; goto bad;
         }
-        if (rg->flags & MADEIRA_IR_AIR_F_UAV_COUNTER)
-            tab[off + 2] = 0;   /* no counter resource is modelled yet; the shader reads zero */
+        if (rg->flags & MADEIRA_IR_AIR_F_UAV_COUNTER) {   /* the view's counter, when it has one */
+            static LONG said_ctr;
+            tab[off + 2] = (rg->flags & MADEIRA_IR_AIR_F_BUFFER) ? mad_uavctr_get(de.gpu_va) : 0;
+            if (!tab[off + 2] && InterlockedIncrement(&said_ctr) <= 8)
+                d3d12_log("[madeira-d3d12] UAV counter for '%s' u%u space %u: the view has no counter; the shader gets address 0\n",
+                          pso->vs_name, rg->lower_bound, rg->space);
+        }
         continue;
 
     bad:
@@ -6055,6 +6069,40 @@ static void STDMETHODCALLTYPE device_CreateConstantBufferView(ID3D12Device *This
     mad_set_buffer_descriptor(e, desc->BufferLocation, desc->SizeInBytes);
 }
 
+/* UAV counters (append/consume buffers, IncrementCounter) for the DXBC
+ * backend. Its tables carry the counter's address in the word after the
+ * buffer's (DXMT's layout); it was always 0, so a shader that bumps its
+ * counter wrote through a null pointer: a GPU page fault, and every command
+ * buffer after it ignored (Ghost of Tsushima, first gameplay frames). A
+ * descriptor has no room for a third address, so the counter is remembered by
+ * the view's buffer address in a small bounded table. */
+struct mad_uavctr { UINT64 va, counter_va; };
+#define MAD_UAVCTR_CAP 4096u
+static struct mad_uavctr g_uavctr[MAD_UAVCTR_CAP];
+static SRWLOCK g_uavctr_lock = SRWLOCK_INIT;
+static void mad_uavctr_put(UINT64 va, UINT64 counter_va) {
+    unsigned h = (unsigned)((va * 0x9E3779B97F4A7C15ull) >> 52), k;
+    struct mad_uavctr *u;
+    if (!va) return;
+    AcquireSRWLockExclusive(&g_uavctr_lock);
+    for (k = 0; k < 8; k++) { u = &g_uavctr[(h + k) & (MAD_UAVCTR_CAP - 1)]; if (!u->va || u->va == va) break; }
+    if (k == 8) k = 0;
+    u = &g_uavctr[(h + k) & (MAD_UAVCTR_CAP - 1)];
+    u->va = va; u->counter_va = counter_va;
+    ReleaseSRWLockExclusive(&g_uavctr_lock);
+}
+static UINT64 mad_uavctr_get(UINT64 va) {
+    unsigned h = (unsigned)((va * 0x9E3779B97F4A7C15ull) >> 52), k; UINT64 r = 0;
+    if (!va) return 0;
+    AcquireSRWLockShared(&g_uavctr_lock);
+    for (k = 0; k < 8; k++) {
+        const struct mad_uavctr *u = &g_uavctr[(h + k) & (MAD_UAVCTR_CAP - 1)];
+        if (u->va == va) { r = u->counter_va; break; }
+        if (!u->va) break;
+    }
+    ReleaseSRWLockShared(&g_uavctr_lock);
+    return r;
+}
 static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *This,
         ID3D12Resource *res, ID3D12Resource *counter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
         D3D12_CPU_DESCRIPTOR_HANDLE h) {
@@ -6064,7 +6112,7 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
     if (!e) return;
     if (!r) { memset(e, 0, sizeof *e); return; }                                /* a null view */
     if (counter && !said_counter++)
-        d3d12_log("[madeira-d3d12] CreateUnorderedAccessView: counter resources are ignored\n");
+        d3d12_log("[madeira-d3d12] CreateUnorderedAccessView: counter resources are bound\n");
     if (r->buffer) {
         UINT64 stride = 4, first = 0, num = r->size / 4;
         if (desc && desc->ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
@@ -6078,6 +6126,35 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
             }
         }
         mad_set_buffer_descriptor(e, r->gpu_address + first * stride, num * stride);
+        {   /* remember this view's counter (or forget a stale one) */
+            struct mad_resource *cr = (struct mad_resource *)counter;
+            UINT64 cva = 0;
+            if (cr && cr->buffer && cr->gpu_address && desc && desc->ViewDimension == D3D12_UAV_DIMENSION_BUFFER &&
+                desc->Buffer.CounterOffsetInBytes + 4 <= cr->size)
+                cva = cr->gpu_address + desc->Buffer.CounterOffsetInBytes;
+            if (cva || mad_uavctr_get(e->gpu_va)) mad_uavctr_put(e->gpu_va, cva);
+            /* DXIL (Metal Shader Converter): the counter is an R32Uint texture-
+             * buffer view named by the descriptor's texture id, its element
+             * offset in metadata bits 32..39 (IRRuntimeCreateAppendBufferView /
+             * IRDescriptorTableGetBufferMetadata). The descriptor carried
+             * texture id 0, so the converter's counter atomics hit nothing. */
+            if (cva) {
+                struct mad_descriptor cd;
+                static unsigned said_ctr;
+                if (mad_typed_buffer_view((struct mad_device *)This, cr, DXGI_FORMAT_R32_UINT,
+                                          desc->Buffer.CounterOffsetInBytes / 4, 1, 1, &cd)) {
+                    UINT64 elem_off = (cd.metadata >> 32) & 0x7fffffffull;
+                    e->texture_view_id = cd.texture_view_id;
+                    e->metadata = (e->metadata & 0xffffffffull) | ((elem_off & 0xffull) << 32);
+                    if (said_ctr++ < 4)
+                        d3d12_log("[madeira-d3d12] UAV counter: buffer '%s' +%llu -> texture-buffer view, element offset %llu\n",
+                                  cr->name ? cr->name : "?", (unsigned long long)desc->Buffer.CounterOffsetInBytes,
+                                  (unsigned long long)elem_off);
+                } else if (said_ctr++ < 4)
+                    d3d12_log("[madeira-d3d12] UAV counter: no texture-buffer view for buffer '%s' +%llu; DXIL shaders see none\n",
+                              cr->name ? cr->name : "?", (unsigned long long)desc->Buffer.CounterOffsetInBytes);
+            }
+        }
         return;
     }
     {
@@ -7418,7 +7495,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateRootSignature(ID3D12Device *This, 
      * same in root signature versions 1.0 and 1.1 (1.2 adds a flags word and
      * is refused above by version). */
     r->nsamplers = nsampler;
-    r->stab = 0; r->stab_gpu = 0;
+    r->stab = 0; r->stab_gpu = 0; r->stab_cpu = NULL;
     for (UINT32 i = 0; i < nsampler; i++) {
         struct madeira_ir_static_sampler *ss = &r->samplers[i];
         UINT32 at = soff + 52 * i, w[13], k;
@@ -7452,6 +7529,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateRootSignature(ID3D12Device *This, 
             }
             mad_resident(dd, r->stab);
             r->stab_gpu = bi.gpu_address;
+            r->stab_cpu = tab;
             { static unsigned said; if (said++ < 4) d3d12_log("[madeira-d3d12] static sampler table: %u/%u samplers at %llx\n", ok, nsampler, (unsigned long long)r->stab_gpu); }
         } else { if (r->stab) { NSObject_release(r->stab); r->stab = 0; } d3d12_log("[madeira-d3d12] static sampler table: buffer creation failed\n"); }
     }
