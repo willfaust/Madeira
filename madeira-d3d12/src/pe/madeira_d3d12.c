@@ -284,7 +284,7 @@ struct mad_device {
     unsigned ntheaps, theaps_cap;
     struct mad_hret { unsigned heap; UINT64 off, size, serial; } *hret; unsigned nhret, hret_cap;
     struct mad_mhret { obj_handle_t heap; UINT64 serial; void *mem; } *mhret; unsigned nmhret, mhret_cap;   /* ml1148: Metal heaps waiting for the GPU */
-    struct { UINT32 value; obj_handle_t buf; } fillpat[8]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns */
+    struct { UINT32 value[4]; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns (a 16-byte period) */
     LONG64 hp_live_bytes, hp_total_bytes; LONG hp_textures, hp_fallbacks;
 };
 static LONG g_tview_live, g_tview_made, g_xview_live;   /* ml1126 */
@@ -1060,6 +1060,7 @@ enum mad_ck {
     MC_FILL_BB, MC_BLEND_FACTOR,   /* ml892: UAV buffer clears, blend factor */
     MC_COPY_BB, MC_COPY_B2T, MC_COPY_T2B, MC_COPY_T2T, MC_DISPATCH,
     MC_RESOLVE,   /* ResolveSubresource: uses u.tt */
+    MC_FILL_TEX,  /* ClearUnorderedAccessView* on a texture view: uses u.filltex */
     MC_ROOTSIG, MC_ROOT_CONST, MC_STENCIL_REF,
     MC_CROOTSIG, MC_CROOT, MC_CROOT_CONST,
     MC_QUERY_BEGIN, MC_QUERY_END, MC_QUERY_RESOLVE,   /* ml1088: occlusion queries */
@@ -1091,6 +1092,7 @@ struct mad_cmd {
         struct { UINT x, y, z; } dispatch;
         struct { struct mad_resource *args; UINT64 off; UINT count; UINT stride; struct mad_resource *cnt; UINT64 cnt_off; } ind;
         struct { struct mad_resource *res; UINT64 off, len; UINT8 byte; obj_handle_t pattern; } fill;   /* ml1151: pattern = exact 32-bit source */
+        struct { struct mad_resource *res; UINT level, sl0, nsl, bpp; obj_handle_t pattern; } filltex;   /* MC_FILL_TEX: mip, slices, texel size */
         struct { float rgba[4]; } blend;
         struct { struct mad_queryheap *heap; UINT type, index, count; struct mad_resource *dst; UINT64 off; } query;   /* ml1088 */
     } u;
@@ -4018,6 +4020,33 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
         MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
         return;
     }
+    case MC_FILL_TEX: {   /* texture UAV clear, copied from a pattern buffer in row bands */
+        const struct mad_resource *r = c->u.filltex.res;
+        struct wmtcmd_blit_copy_from_buffer_to_texture k;
+        UINT w, h, d, row, band, s, z, y, nsl, is3d;
+        if (!r || !r->texture || !c->u.filltex.pattern) { MAD_SKIP(e); return; }
+        mad_mip_dims(r, c->u.filltex.level, &w, &h, &d);
+        row = w * c->u.filltex.bpp;
+        if (!row || row > MAD_FILLPAT_BYTES || c->u.filltex.level >= r->tex_mips) { MAD_SKIP(e); return; }
+        band = MAD_FILLPAT_BYTES / row;
+        is3d = r->tex_type == WMTTextureType3D;
+        nsl = is3d ? 1 : r->tex_layers > c->u.filltex.sl0 ? r->tex_layers - c->u.filltex.sl0 : 0;
+        if (c->u.filltex.nsl < nsl) nsl = c->u.filltex.nsl;
+        for (s = 0; s < nsl; s++)
+            for (z = 0; z < (is3d ? d : 1); z++)
+                for (y = 0; y < h; y += band) {
+                    UINT n = h - y < band ? h - y : band;
+                    memset(&k, 0, sizeof k);
+                    k.type = WMTBlitCommandCopyFromBufferToTexture;
+                    k.src = c->u.filltex.pattern; k.src_offset = 0;
+                    k.bytes_per_row = row; k.bytes_per_image = row * n;
+                    k.size.width = w; k.size.height = n; k.size.depth = 1;
+                    k.dst = r->texture; k.slice = is3d ? 0 : c->u.filltex.sl0 + s; k.level = c->u.filltex.level;
+                    k.origin.x = 0; k.origin.y = y; k.origin.z = is3d ? z : 0;
+                    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
+                }
+        return;
+    }
     case MC_COPY_BB: {
         struct wmtcmd_blit_copy_from_buffer_to_buffer k;
         if (!c->u.bb.dst->buffer || !c->u.bb.src->buffer) { MAD_SKIP(e); return; }
@@ -4397,7 +4426,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             }
             break;
         }
-        case MC_COPY_BB: case MC_COPY_B2T: case MC_COPY_T2B: case MC_COPY_T2T: case MC_FILL_BB: exec_copy(&e, c); break;
+        case MC_COPY_BB: case MC_COPY_B2T: case MC_COPY_T2B: case MC_COPY_T2T: case MC_FILL_BB: case MC_FILL_TEX: exec_copy(&e, c); break;
         case MC_BLEND_FACTOR: memcpy(e.blend, c->u.blend.rgba, sizeof e.blend); e.has_blend = 1; break;
         case MC_DISPATCH: exec_dispatch(&e, c); break;
         case MC_RESOLVE: exec_resolve(&e, c); break;
@@ -6042,6 +6071,53 @@ static UINT64 mad_texture_view_id(struct mad_device *d, struct mad_resource *r, 
     return id;
 }
 
+/* Texture UAV clears. A texture UAV descriptor holds only the Metal view's
+ * resource id; ClearUnorderedAccessView* needs the mip, slices and format
+ * behind it, so every texture UAV's shape is remembered by id (a small
+ * bounded table: a lost entry only means that clear falls back to the
+ * resource the application names, see mad_record_uav_tex_clear). */
+struct mad_uavtex { UINT64 id; struct mad_resource *res; UINT level, sl0, nsl; DXGI_FORMAT fmt; };
+#define MAD_UAVTEX_CAP 8192u
+static struct mad_uavtex g_uavtex[MAD_UAVTEX_CAP];
+static SRWLOCK g_uavtex_lock = SRWLOCK_INIT;
+static unsigned mad_uavtex_home(UINT64 id) { return (unsigned)((id * 0x9E3779B97F4A7C15ull) >> 51); }
+static void mad_uavtex_put(UINT64 id, struct mad_resource *r, UINT level, UINT sl0, UINT nsl, DXGI_FORMAT fmt) {
+    unsigned h = mad_uavtex_home(id), k;
+    struct mad_uavtex *u;
+    if (!id) return;
+    AcquireSRWLockExclusive(&g_uavtex_lock);
+    for (k = 0; k < 8; k++) { u = &g_uavtex[(h + k) & (MAD_UAVTEX_CAP - 1)]; if (!u->id || u->id == id) break; }
+    if (k == 8) k = 0;   /* full neighbourhood: replace the home slot */
+    u = &g_uavtex[(h + k) & (MAD_UAVTEX_CAP - 1)];
+    u->id = id; u->res = r; u->level = level; u->sl0 = sl0; u->nsl = nsl; u->fmt = fmt;
+    ReleaseSRWLockExclusive(&g_uavtex_lock);
+}
+static int mad_uavtex_get(UINT64 id, struct mad_uavtex *out) {
+    unsigned h = mad_uavtex_home(id), k; int found = 0;
+    if (!id) return 0;
+    AcquireSRWLockShared(&g_uavtex_lock);
+    for (k = 0; k < 8; k++) {
+        const struct mad_uavtex *u = &g_uavtex[(h + k) & (MAD_UAVTEX_CAP - 1)];
+        if (u->id == id) { *out = *u; found = 1; break; }
+        if (!u->id) break;
+    }
+    ReleaseSRWLockShared(&g_uavtex_lock);
+    return found;
+}
+/* A released resource's ids keep their slot (the probe chain stays intact)
+ * but no longer name it. */
+static void mad_uavtex_forget(const struct mad_resource *r, UINT64 id) {
+    unsigned h = mad_uavtex_home(id), k;
+    if (!id) return;
+    AcquireSRWLockExclusive(&g_uavtex_lock);
+    for (k = 0; k < 8; k++) {
+        struct mad_uavtex *u = &g_uavtex[(h + k) & (MAD_UAVTEX_CAP - 1)];
+        if (u->id == id) { if (u->res == r) u->res = NULL; break; }
+        if (!u->id) break;
+    }
+    ReleaseSRWLockExclusive(&g_uavtex_lock);
+}
+
 static void STDMETHODCALLTYPE device_CreateConstantBufferView(ID3D12Device *This,
         const D3D12_CONSTANT_BUFFER_VIEW_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE h) {
     struct mad_descriptor *e = (struct mad_descriptor *)h.ptr;
@@ -6089,6 +6165,8 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
     }
     if (r->texture) {
         UINT64 view_id = r->gpu_resource_id;
+        UINT clr_level = 0, clr_sl0 = 0, clr_nsl = ~0u;   /* for texture UAV clears (mad_uavtex) */
+        DXGI_FORMAT clr_fmt = (desc && desc->Format != DXGI_FORMAT_UNKNOWN) ? desc->Format : r->desc.Format;
         if (desc) {   /* ml913: one mip, the named slices, the named dimension */
             enum WMTTextureType want = r->tex_type; UINT lvl0 = 0, sl0 = 0, nsl = ~0u;
             switch (desc->ViewDimension) {
@@ -6133,7 +6211,9 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
                 } else pf = 0;
                 view_id = mad_texture_view_id((struct mad_device *)This, r, want, lvl0, 1, sl0, nsl, pf, MAD_SWZ_IDENTITY);
             }
+            clr_level = lvl0; clr_sl0 = sl0; clr_nsl = nsl;
         }
+        mad_uavtex_put(view_id, r, clr_level, clr_sl0, clr_nsl, clr_fmt);
         e->gpu_va = 0; e->texture_view_id = view_id; e->metadata = 0;
         return;
     }
@@ -6623,6 +6703,11 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
             for (k = 0; k < r->nxview; k++) mad_vmap_del_locked(vd, r->xview[k].id);
             if (r->texture && !r->borrowed) mad_vmap_del_locked(vd, r->gpu_resource_id);   /* ml1053 */
             LeaveCriticalSection(&vd->view_lock);
+        }
+        if (r->texture) {   /* texture UAV clears must not reach a freed resource */
+            unsigned k;
+            mad_uavtex_forget(r, r->gpu_resource_id);
+            for (k = 0; k < r->nxview; k++) mad_uavtex_forget(r, r->xview[k].id);
         }
         { unsigned k; for (k = 0; k < r->ntview; k++) if (r->tview[k].tex) { NSObject_release(r->tview[k].tex); InterlockedDecrement(&g_tview_live); } }   /* ml905; ml1126: never set members */
         { unsigned k; for (k = 0; k < r->nxview; k++) if (r->xview[k].tex) { mad_unresident(r->owner, r->xview[k].tex); NSObject_release(r->xview[k].tex); InterlockedDecrement(&g_xview_live); } }   /* ml913 */
@@ -9769,7 +9854,7 @@ static void STDMETHODCALLTYPE list_SetComputeRoot32BitConstant(ID3D12GraphicsCom
 /* ml892: UAV clears for BUFFER views through the blit fill. The CPU handle
  * points at our descriptor entry, whose address+size name the range; the
  * resource is found by address. Metal fills bytes, so a value whose four
- * bytes are equal is exact. Texture UAV clears are not implemented yet.
+ * bytes are equal is exact. Texture UAV clears: mad_record_uav_tex_clear.
  *
  * ml1151: anything else used to be approximated by its low byte -- a clear to
  * 1 wrote 0x01010101 into every element (ph-valley09: UE 5.0 clears Nanite /
@@ -9777,33 +9862,202 @@ static void STDMETHODCALLTYPE list_SetComputeRoot32BitConstant(ID3D12GraphicsCom
  * buffer holding it repeated, kept per device for the few distinct values a
  * title uses. D3D12 clears raw and structured views with Values[0] per dword,
  * which is also exact for the R32 typed views these clears target. */
-static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v) {
+/* The buffer repeats a 16-byte period, so it also holds whole 8- and 16-byte
+ * texels for texture clears (an RGBA32 clear to (-1, 1e8, 0, 0)). */
+static obj_handle_t mad_fill_pattern16(struct mad_device *d, const UINT32 v[4]) {
     obj_handle_t buf = 0; unsigned i;
     AcquireSRWLockExclusive(&d->fillpat_lock);
-    for (i = 0; i < d->nfillpat; i++) if (d->fillpat[i].value == v) { buf = d->fillpat[i].buf; break; }
+    for (i = 0; i < d->nfillpat; i++) if (!memcmp(d->fillpat[i].value, v, 16)) { buf = d->fillpat[i].buf; break; }
     if (!buf && d->nfillpat < (sizeof d->fillpat / sizeof d->fillpat[0])) {
         struct WMTBufferInfo bi;
         memset(&bi, 0, sizeof bi); bi.length = MAD_FILLPAT_BYTES; bi.options = WMTResourceStorageModeShared;
         buf = MTLDevice_newBuffer(d->mtl_device, &bi);
         if (buf && bi.memory.ptr) {
             UINT32 *w = (UINT32 *)bi.memory.ptr; UINT64 k;
-            for (k = 0; k < MAD_FILLPAT_BYTES / 4; k++) w[k] = v;
+            for (k = 0; k < MAD_FILLPAT_BYTES / 4; k++) w[k] = v[k & 3];
             mad_resident(d, buf);
-            d->fillpat[d->nfillpat].value = v; d->fillpat[d->nfillpat].buf = buf; d->nfillpat++;
-            d3d12_log("[madeira-d3d12] ml1151 UAV clear value %#x: exact pattern buffer %u of %u\n", v, d->nfillpat, (unsigned)(sizeof d->fillpat / sizeof d->fillpat[0]));
+            memcpy(d->fillpat[d->nfillpat].value, v, 16); d->fillpat[d->nfillpat].buf = buf; d->nfillpat++;
+            d3d12_log("[madeira-d3d12] ml1151 UAV clear value %#x %#x %#x %#x: exact pattern buffer %u of %u\n",
+                      v[0], v[1], v[2], v[3], d->nfillpat, (unsigned)(sizeof d->fillpat / sizeof d->fillpat[0]));
         } else if (buf) { NSObject_release(buf); buf = 0; }
     }
     ReleaseSRWLockExclusive(&d->fillpat_lock);
     return buf;
 }
-static void mad_record_uav_clear(ID3D12GraphicsCommandList *This, D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource *res, const UINT32 v[4], const char *what) {
+static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v) {
+    UINT32 k[4] = { v, v, v, v };
+    return mad_fill_pattern16(d, k);
+}
+/* One texel of a texture UAV clear in the view's format. Uint clears
+ * copy each value's low bits into its channel (no conversion); float clears
+ * convert. Returns the texel size, 0 for a format this does not pack. */
+static USHORT mad_f32_to_f16(float f) {
+    UINT32 x; UINT32 sign, mant; int exp;
+    memcpy(&x, &f, 4);
+    sign = (x >> 16) & 0x8000; exp = (int)((x >> 23) & 0xff) - 127 + 15; mant = x & 0x7fffff;
+    if (((x >> 23) & 0xff) == 0xff) return (USHORT)(sign | 0x7c00 | (mant ? 0x200 : 0));
+    if (exp >= 31) return (USHORT)(sign | 0x7c00);
+    if (exp <= 0) {
+        if (exp < -10) return (USHORT)sign;
+        mant |= 0x800000;
+        return (USHORT)(sign | ((mant >> (14 - exp)) + ((mant >> (13 - exp)) & 1)));
+    }
+    return (USHORT)(sign | (exp << 10) | (mant >> 13));
+}
+static UINT32 mad_clear_chan(UINT32 raw, int is_float, int kind, unsigned bits) {
+    /* kind: 0 float, 1 unorm, 2 snorm, 3 uint, 4 sint */
+    UINT32 mask = bits >= 32 ? 0xffffffffu : ((1u << bits) - 1);
+    float f;
+    if (!is_float) return raw & mask;
+    memcpy(&f, &raw, 4);
+    if (f != f) f = 0.0f;
+    switch (kind) {
+    case 0: return bits == 32 ? raw : bits == 16 ? mad_f32_to_f16(f) : 0;
+    case 1: { float c = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f; return (UINT32)(c * (float)mask + 0.5f) & mask; }
+    case 2: { float c = f < -1.0f ? -1.0f : f > 1.0f ? 1.0f : f; float m = (float)(mask >> 1);
+              INT32 q = (INT32)(c * m + (c < 0.0f ? -0.5f : 0.5f)); return (UINT32)q & mask; }
+    case 3: return (UINT32)(f < 0.0f ? 0.0f : f >= 4294967295.0f ? 4294967295.0f : f) & mask;
+    default: return (UINT32)(INT32)f & mask;
+    }
+}
+static UINT mad_pack_clear(DXGI_FORMAT fmt, const UINT32 v[4], int is_float, unsigned char out[16]) {
+    unsigned nch, bits, i, kind; UINT32 c[4];
+    memset(out, 0, 16);
+    switch (fmt) {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: nch = 4; bits = 32; kind = 0; break;
+    case DXGI_FORMAT_R32G32B32A32_UINT: nch = 4; bits = 32; kind = 3; break;
+    case DXGI_FORMAT_R32G32B32A32_SINT: nch = 4; bits = 32; kind = 4; break;
+    case DXGI_FORMAT_R32G32_FLOAT: nch = 2; bits = 32; kind = 0; break;
+    case DXGI_FORMAT_R32G32_UINT: nch = 2; bits = 32; kind = 3; break;
+    case DXGI_FORMAT_R32G32_SINT: nch = 2; bits = 32; kind = 4; break;
+    case DXGI_FORMAT_R32_FLOAT: nch = 1; bits = 32; kind = 0; break;
+    case DXGI_FORMAT_R32_UINT: nch = 1; bits = 32; kind = 3; break;
+    case DXGI_FORMAT_R32_SINT: nch = 1; bits = 32; kind = 4; break;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: nch = 4; bits = 16; kind = 0; break;
+    case DXGI_FORMAT_R16G16B16A16_UNORM: nch = 4; bits = 16; kind = 1; break;
+    case DXGI_FORMAT_R16G16B16A16_SNORM: nch = 4; bits = 16; kind = 2; break;
+    case DXGI_FORMAT_R16G16B16A16_UINT: nch = 4; bits = 16; kind = 3; break;
+    case DXGI_FORMAT_R16G16B16A16_SINT: nch = 4; bits = 16; kind = 4; break;
+    case DXGI_FORMAT_R16G16_FLOAT: nch = 2; bits = 16; kind = 0; break;
+    case DXGI_FORMAT_R16G16_UNORM: nch = 2; bits = 16; kind = 1; break;
+    case DXGI_FORMAT_R16G16_SNORM: nch = 2; bits = 16; kind = 2; break;
+    case DXGI_FORMAT_R16G16_UINT: nch = 2; bits = 16; kind = 3; break;
+    case DXGI_FORMAT_R16G16_SINT: nch = 2; bits = 16; kind = 4; break;
+    case DXGI_FORMAT_R16_FLOAT: nch = 1; bits = 16; kind = 0; break;
+    case DXGI_FORMAT_R16_UNORM: nch = 1; bits = 16; kind = 1; break;
+    case DXGI_FORMAT_R16_SNORM: nch = 1; bits = 16; kind = 2; break;
+    case DXGI_FORMAT_R16_UINT: nch = 1; bits = 16; kind = 3; break;
+    case DXGI_FORMAT_R16_SINT: nch = 1; bits = 16; kind = 4; break;
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM: nch = 4; bits = 8; kind = 1; break;
+    case DXGI_FORMAT_R8G8B8A8_SNORM: nch = 4; bits = 8; kind = 2; break;
+    case DXGI_FORMAT_R8G8B8A8_UINT: nch = 4; bits = 8; kind = 3; break;
+    case DXGI_FORMAT_R8G8B8A8_SINT: nch = 4; bits = 8; kind = 4; break;
+    case DXGI_FORMAT_R8G8_UNORM: nch = 2; bits = 8; kind = 1; break;
+    case DXGI_FORMAT_R8G8_SNORM: nch = 2; bits = 8; kind = 2; break;
+    case DXGI_FORMAT_R8G8_UINT: nch = 2; bits = 8; kind = 3; break;
+    case DXGI_FORMAT_R8G8_SINT: nch = 2; bits = 8; kind = 4; break;
+    case DXGI_FORMAT_R8_UNORM: nch = 1; bits = 8; kind = 1; break;
+    case DXGI_FORMAT_R8_SNORM: nch = 1; bits = 8; kind = 2; break;
+    case DXGI_FORMAT_R8_UINT: nch = 1; bits = 8; kind = 3; break;
+    case DXGI_FORMAT_R8_SINT: nch = 1; bits = 8; kind = 4; break;
+    case DXGI_FORMAT_R10G10B10A2_UNORM: case DXGI_FORMAT_R10G10B10A2_UINT: {
+        unsigned k2 = fmt == DXGI_FORMAT_R10G10B10A2_UNORM ? 1 : 3;
+        UINT32 w = mad_clear_chan(v[0], is_float, k2, 10) | (mad_clear_chan(v[1], is_float, k2, 10) << 10) |
+                   (mad_clear_chan(v[2], is_float, k2, 10) << 20) | (mad_clear_chan(v[3], is_float, k2, 2) << 30);
+        memcpy(out, &w, 4); return 4;
+    }
+    case DXGI_FORMAT_R11G11B10_FLOAT: {
+        UINT32 w;
+        if (is_float) {   /* a half without its sign, shortened to 6 and 5 mantissa bits */
+            float f[3]; unsigned k;
+            UINT32 h[3];
+            for (k = 0; k < 3; k++) { memcpy(&f[k], &v[k], 4); if (!(f[k] > 0.0f)) f[k] = 0.0f; h[k] = mad_f32_to_f16(f[k]) & 0x7fff; }
+            w = (h[0] >> 4) | ((h[1] >> 4) << 11) | ((h[2] >> 5) << 22);
+        } else w = (v[0] & 0x7ff) | ((v[1] & 0x7ff) << 11) | ((v[2] & 0x3ff) << 22);
+        memcpy(out, &w, 4); return 4;
+    }
+    default: return 0;
+    }
+    for (i = 0; i < nch; i++) c[i] = mad_clear_chan(v[i], is_float, kind, bits);
+    if (fmt == DXGI_FORMAT_B8G8R8A8_UNORM) { UINT32 t = c[0]; c[0] = c[2]; c[2] = t; }
+    for (i = 0; i < nch; i++) {
+        if (bits == 32) memcpy(out + 4 * i, &c[i], 4);
+        else if (bits == 16) { USHORT h = (USHORT)c[i]; memcpy(out + 2 * i, &h, 2); }
+        else out[i] = (unsigned char)c[i];
+    }
+    return nch * bits / 8;
+}
+static void mad_record_uav_tex_clear(struct mad_list *l, UINT64 view_id, struct mad_resource *res, const UINT32 v[4], int is_float, const char *what) {
+    static unsigned said_miss, said_fmt, said_ok;
+    struct mad_uavtex u; unsigned char px[16]; UINT bpp, rbytes = 0, rblock = 0; UINT32 pat, w[4], per[4];
+    obj_handle_t pattern; struct mad_cmd *c;
+    {
+        /* A view we did not record, or one recorded for another resource
+         * (its id reused after a free, or an alias): the application names
+         * the resource, so clear that, with the recorded view's sub-range
+         * when there is one, else the whole of a single-mip texture in its own
+         * format. Skipping it left a texture the game clears every frame with
+         * stale data (Ghost of Tsushima: blocky haze and dark specks). */
+        int known = mad_uavtex_get(view_id, &u) && u.res && u.res->texture;
+        struct mad_resource *app = res && res->texture ? res : NULL;
+        const char *why = NULL;
+        if (known && (!res || u.res == res)) ;                    /* the normal case */
+        else if (known && app) { why = "recorded for another resource"; u.res = app; }
+        else if (app && app->tex_mips <= 1) {
+            why = known ? "recorded for a non-texture" : "not recorded";
+            memset(&u, 0, sizeof u); u.id = view_id; u.res = app; u.level = 0; u.sl0 = 0; u.nsl = ~0u; u.fmt = app->desc.Format;
+        } else {
+            if (said_miss++ < 8)
+                d3d12_log("[madeira-d3d12] %s on a texture view the runtime does not know (%s, resource '%s' %ux%u mips %u); skipped\n",
+                          what, known ? "recorded for another resource" : "not recorded",
+                          res && res->name ? res->name : "?", res ? res->width : 0, res ? res->height : 0, res ? res->tex_mips : 0);
+            return;
+        }
+        if (why && said_miss++ < 8)
+            d3d12_log("[madeira-d3d12] %s: view %s; clearing the named resource '%s' %ux%u (mip %u, format %u)\n",
+                      what, why, u.res->name ? u.res->name : "?", u.res->width, u.res->height, u.level, (unsigned)u.fmt);
+    }
+    bpp = u.res->samples > 1 ? 0 : mad_pack_clear(u.fmt, v, is_float, px);
+    if (bpp) mad_format_info(u.res->desc.Format, &rbytes, &rblock);
+    if (bpp && rblock == 1 && rbytes && rbytes != bpp) bpp = 0;   /* the view must cover whole texels */
+    memcpy(w, px, 16);
+    if (bpp == 1) pat = px[0] * 0x01010101u;
+    else if (bpp == 2) { pat = (UINT32)px[0] | ((UINT32)px[1] << 8); pat |= pat << 16; }
+    else if (bpp == 4 || bpp == 8 || bpp == 16) pat = w[0];
+    else bpp = 0;
+    /* the 16-byte period the pattern buffer repeats */
+    if (bpp == 8) { per[0] = w[0]; per[1] = w[1]; per[2] = w[0]; per[3] = w[1]; }
+    else if (bpp == 16) memcpy(per, w, 16);
+    else per[0] = per[1] = per[2] = per[3] = pat;
+    if (!bpp) {
+        if (said_fmt++ < 8)
+            d3d12_log("[madeira-d3d12] %s on texture '%s' (view format %u, %u samples, values %#x %#x %#x %#x) is not supported; skipped\n",
+                      what, u.res->name ? u.res->name : "?", (unsigned)u.fmt, u.res->samples, v[0], v[1], v[2], v[3]);
+        return;
+    }
+    pattern = mad_fill_pattern16(l->device, per);
+    if (!pattern) return;
+    c = mad_list_push(l, MC_FILL_TEX);
+    if (!c) return;
+    c->u.filltex.res = u.res; c->u.filltex.level = u.level; c->u.filltex.sl0 = u.sl0; c->u.filltex.nsl = u.nsl;
+    c->u.filltex.bpp = bpp; c->u.filltex.pattern = pattern;
+    if (said_ok++ < 8)
+        d3d12_log("[madeira-d3d12] %s on texture '%s' %ux%u mip %u slices %u+%d, format %u -> texel %#x x%u bytes\n",
+                  what, u.res->name ? u.res->name : "?", u.res->width, u.res->height, u.level, u.sl0,
+                  u.nsl == ~0u ? -1 : (int)u.nsl, (unsigned)u.fmt, pat, bpp);
+}
+static void mad_record_uav_clear(ID3D12GraphicsCommandList *This, D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource *res, const UINT32 v[4], int is_float, const char *what) {
     struct mad_list *l = (struct mad_list *)This;
     struct mad_descriptor *e = (struct mad_descriptor *)cpu.ptr;
     struct mad_resource *r; UINT64 off = 0; UINT64 len;
     struct mad_cmd *c;
     static unsigned said_tex, said_approx;
     if (!e || !l) return;
-    if (!e->gpu_va) { if (said_tex++ < 2) d3d12_log("[madeira-d3d12] %s on a texture view is not implemented; skipped\n", what); return; }
+    if (!e->gpu_va) {   /* a texture view */
+        if (e->texture_view_id) mad_record_uav_tex_clear(l, e->texture_view_id, (struct mad_resource *)res, v, is_float, what);
+        else if (said_tex++ < 2) d3d12_log("[madeira-d3d12] %s on a null view; skipped\n", what);
+        return;
+    }
     /* ml1157: the application names the resource; use it. Resolving the view's
      * address picked whichever placed resource aliased it, which could be one
      * the application frees before this list runs. */
@@ -9839,7 +10093,7 @@ static void STDMETHODCALLTYPE list_ClearUnorderedAccessViewUint(ID3D12GraphicsCo
         D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource *res,
         const UINT values[4], UINT n, const D3D12_RECT *rects) {
     (void)gpu; (void)n; (void)rects;
-    mad_record_uav_clear(This, cpu, res, values, "ClearUnorderedAccessViewUint");
+    mad_record_uav_clear(This, cpu, res, values, 0, "ClearUnorderedAccessViewUint");
 }
 static void STDMETHODCALLTYPE list_ClearUnorderedAccessViewFloat(ID3D12GraphicsCommandList *This,
         D3D12_GPU_DESCRIPTOR_HANDLE gpu, D3D12_CPU_DESCRIPTOR_HANDLE cpu, ID3D12Resource *res,
@@ -9847,7 +10101,7 @@ static void STDMETHODCALLTYPE list_ClearUnorderedAccessViewFloat(ID3D12GraphicsC
     UINT32 u[4]; int i;
     (void)gpu; (void)n; (void)rects;
     for (i = 0; i < 4; i++) memcpy(&u[i], &values[i], 4);
-    mad_record_uav_clear(This, cpu, res, u, "ClearUnorderedAccessViewFloat");
+    mad_record_uav_clear(This, cpu, res, u, 1, "ClearUnorderedAccessViewFloat");
 }
 static void STDMETHODCALLTYPE list_OMSetBlendFactor(ID3D12GraphicsCommandList *This, const FLOAT f[4]) {
     struct mad_cmd *c = mad_list_push((struct mad_list *)This, MC_BLEND_FACTOR);
