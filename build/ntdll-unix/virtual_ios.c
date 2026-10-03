@@ -163,6 +163,12 @@ struct ios_jit_mapping {
                          * falling back to the NULL-owner (parent) entry. */
     unsigned short machine_cached;  /* ml349: PE machine word, read fault-safely once */
     unsigned char  machine_valid;   /* 0 = machine_cached not yet populated */
+    unsigned char  unmapped;        /* the PE view this copy was made from has been
+                                     * unmapped (delete_view, SEC_IMAGE). The entry
+                                     * stays live for laggard translations, but its
+                                     * .data/.bss hold the unloaded module's state,
+                                     * so an image mapped at the same base again
+                                     * must not adopt it as is (ios_image_reload_mode). */
 };
 static struct ios_jit_mapping ios_jit_mappings[IOS_JIT_MAX_MAPPINGS];
 static int ios_jit_mapping_count = 0;
@@ -3006,6 +3012,7 @@ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
         ios_jit_mappings[slot].owner_peb = NULL;
         ios_jit_mappings[slot].machine_cached = 0;   /* ml349: slot reuse invalidates memo */
         ios_jit_mappings[slot].machine_valid = 0;
+        ios_jit_mappings[slot].unmapped = 0;
         __sync_synchronize();
         ios_jit_mappings[slot].pe_base = pe_base;
         if (slot == ios_jit_mapping_count) ios_jit_mapping_count++;
@@ -10424,6 +10431,149 @@ static void ios_jit_retire_image( void *base, size_t size )
                  base, (unsigned long)size, retired );
 }
 
+/***********************************************************************
+ *           ios_image_reload_mode
+ *
+ * What a module loaded again at the SAME base, after an unload, gets for its
+ * pool copy.
+ *
+ * The pool copy holds the whole image, .data and .bss included, and ARM64EC
+ * and x64 code reach their globals PC-relative, i.e. in the pool copy. When
+ * FreeLibrary unmaps an image and the loader maps the same file at the same
+ * address again, mprotect_exec's already-copied check (ml352: MZ header and
+ * SizeOfImage still match) adopted the old copy as is: the new module ran
+ * with the unloaded module's globals. Its DLL_PROCESS_DETACH had already run
+ * the static destructors, but the guard variables of function-local statics
+ * still said "constructed", so the next call returned a destroyed object.
+ * GTA V Enhanced loads dxgi.dll (DXMT), unloads it and loads it again at the
+ * same base: dxmt::Config::getInstance() handed back the unordered_map whose
+ * destructor had set the bucket array to NULL -> AV in find(). On Windows a
+ * reloaded DLL always starts with fresh .data/.bss.
+ *
+ * MADEIRA_IMAGE_RELOAD (default 1):
+ *   1  the same image reloaded at the same base by the same process gets its
+ *      copy rebuilt in place (same pool address, fresh bytes, relocations and
+ *      x18 patches redone); any other reuse of an unmapped copy gets a new
+ *      copy (as for a different image).
+ *   2  always a new copy (costs pool space per reload).
+ *   0  old behaviour: the stale copy is adopted as is.
+ * Only modules that are unloaded and loaded again at the same address are
+ * affected; every other load is unchanged. */
+static int ios_image_reload_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0)
+    {
+        const char *env = getenv( "MADEIRA_IMAGE_RELOAD" );
+        int m = 1;
+        if (env && env[0] >= '0' && env[0] <= '2' && !env[1]) m = env[0] - '0';
+        if (m != 1) dprintf( 2, "[image-reload] mode=%d (%s)\n", m,
+                             m == 2 ? "always a new pool copy" : "off: adopt the unloaded copy as is" );
+        mode = m;
+    }
+    return mode;
+}
+
+/***********************************************************************
+ *           ios_jit_note_image_unmapped
+ *
+ * delete_view of a SEC_IMAGE view: mark every pool copy made from that range
+ * as unmapped. Nothing is tombstoned (translations of laggard pointers into
+ * the unloaded module keep their old target, exactly as before); only
+ * mprotect_exec's already-copied check reads the mark. Called with
+ * virtual_mutex held; takes ios_pool_lock like ios_jit_retire_image. */
+static void ios_jit_note_image_unmapped( void *base, size_t size )
+{
+    uintptr_t start = (uintptr_t)base;
+    int i;
+
+    if (!size || !ios_image_reload_mode()) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        uintptr_t mapped = (uintptr_t)ios_jit_mappings[i].pe_base;
+        size_t length = ios_jit_mappings[i].size;
+        if (!mapped || !length) continue;
+        if (mapped >= start ? mapped - start >= size : start - mapped >= length) continue;
+        ios_jit_mappings[i].unmapped = 1;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+}
+
+/***********************************************************************
+ *           ios_jit_reload_choice
+ *
+ * Decide what an unmapped entry means for an image mapped at its base again.
+ * Pure (no memory access), so the host test can drive it:
+ *   0  entry is live (not unmapped) or mode 0: the old early-out applies;
+ *   1  rebuild the copy in place (mode 1, NULL owner, identical PE headers;
+ *      mprotect_exec then also requires the copy's pool range to be a ledger
+ *      record of the mapping process, see ios_pool_ledger_holds);
+ *   2  ignore the entry, make a new copy (add_mapping purges the old one). */
+static int ios_jit_reload_choice( const struct ios_jit_mapping *m, int same_headers, int mode )
+{
+    if (!m->unmapped || !mode) return 0;
+    if (mode == 1 && !m->owner_peb && same_headers) return 1;
+    return 2;
+}
+
+/***********************************************************************
+ *           ios_jit_same_headers
+ *
+ * 1 when the image now mapped at `pe` has byte-identical PE headers (from
+ * the start to the end of the section table) to the pool copy at `jit`,
+ * which was copied from the old view before any loader write. The new view
+ * is read fault-safely. A different file of the same size fails here and
+ * gets a new copy instead of overwriting code an emulator may still hold
+ * translations of. */
+static int ios_jit_same_headers( uintptr_t pe, const unsigned char *jit )
+{
+    unsigned char now[0x400];
+    unsigned int lfanew = 0, end, off;
+    unsigned short nsec = 0, optsz = 0;
+    mach_vm_size_t got = 0;
+
+    if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(pe + 0x3c), 4,
+                                (mach_vm_address_t)&lfanew, &got ) != KERN_SUCCESS || got != 4)
+        return 0;
+    if (!lfanew || lfanew >= 0x1000 || *(const unsigned int *)(jit + 0x3c) != lfanew) return 0;
+    nsec  = *(const unsigned short *)(jit + lfanew + 6);
+    optsz = *(const unsigned short *)(jit + lfanew + 0x14);
+    end = lfanew + 0x18 + optsz + 40u * nsec;
+    if (end > 0x1000) end = 0x1000;
+    for (off = 0; off < end; off += sizeof(now))
+    {
+        unsigned int n = end - off < sizeof(now) ? end - off : (unsigned int)sizeof(now);
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(pe + off), n,
+                                    (mach_vm_address_t)now, &got ) != KERN_SUCCESS || got != n)
+            return 0;
+        if (memcmp( now, jit + off, n )) return 0;
+    }
+    return 1;
+}
+
+/***********************************************************************
+ *           ios_pool_ledger_holds
+ *
+ * 1 when one pool ledger record of process `peb` covers [off, off + need):
+ * the in-place rebuild (ios_image_reload_mode) only rewrites bytes its first
+ * copy was given, never a neighbour's (e.g. if a rebuilt image needed more
+ * x18 trampoline space than the first copy reserved), and only in a range
+ * that lives as long as the process now using it (reclaim frees by ledger
+ * peb). */
+static int ios_pool_ledger_holds( size_t off, size_t need, void *peb )
+{
+    int i, ok = 0;
+
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_pool_ledger_count && !ok; i++)
+        ok = ios_pool_ledger[i].peb == peb && off >= ios_pool_ledger[i].off &&
+             off - ios_pool_ledger[i].off <= ios_pool_ledger[i].size &&
+             need <= ios_pool_ledger[i].size - (off - ios_pool_ledger[i].off);
+    pthread_mutex_unlock( &ios_pool_lock );
+    return ok;
+}
+
 
 /***********************************************************************
  *           delete_view
@@ -10437,6 +10587,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if (ios_retire_trace_armed) ios_retire_mark( "D0>\n" );
     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
         ios_jit_retire_image( view->base, view->size );
+    if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
     if (ios_retire_trace_armed) ios_retire_mark( "D1u\n" );   /* unmap_area done */
@@ -11752,6 +11903,10 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
             size_t image_size = 0;
             char *scan = (char *)base;
             int i;
+            /* an unmapped copy chosen for an in-place rebuild
+             * (ios_image_reload_mode); used by the pool allocation below */
+            void *reload_jit = NULL, *reload_pe = NULL;
+            size_t reload_size = 0;
 
             /* Check if this image was already copied to JIT pool */
             for (i = 0; i < ios_jit_mapping_count; i++)
@@ -11799,6 +11954,40 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                                     mz, lfanew, imgsz, base);
                             continue;
                         }
+                    }
+                    /* The same image mapped again at the base of an UNLOADED
+                     * copy (the MZ/SizeOfImage check above cannot tell). That
+                     * copy's .data/.bss hold the unloaded module's globals:
+                     * rebuild it in place or make a new copy, never adopt it
+                     * (ios_image_reload_mode). */
+                    if (ios_jit_mappings[i].unmapped)
+                    {
+                        int mode = ios_image_reload_mode();
+                        int same = mode == 1 &&
+                                   ios_jit_same_headers( mb, (const unsigned char *)ios_jit_mappings[i].jit_base );
+                        int choice = ios_jit_reload_choice( &ios_jit_mappings[i], same, mode );
+                        static int reload_n;
+
+                        if (choice && reload_n < 32)
+                        {
+                            reload_n++;
+                            dprintf( 2, "[image-reload] %s %p+0x%lx loaded again at the base of its unloaded "
+                                     "pool copy %p (owner=%p, headers %s) -> %s\n",
+                                     ios_pe_module_name( (void *)mb, ios_jit_mappings[i].size ), (void *)mb,
+                                     (unsigned long)ios_jit_mappings[i].size, ios_jit_mappings[i].jit_base,
+                                     ios_jit_mappings[i].owner_peb,
+                                     same ? "identical" : mode == 1 ? "differ" : "not compared",
+                                     choice == 1 ? "rebuilding that copy in place (fresh .data/.bss)"
+                                                 : "new pool copy" );
+                        }
+                        if (choice == 1)
+                        {
+                            reload_jit = ios_jit_mappings[i].jit_base;
+                            reload_pe = (void *)mb;
+                            reload_size = ios_jit_mappings[i].size;
+                            break;
+                        }
+                        if (choice == 2) continue;
                     }
                     ERR("iOS JIT: %p already in mapping %d (%p+0x%lx)\n",
                         base, i, (void*)mb, (unsigned long)ios_jit_mappings[i].size);
@@ -12298,8 +12487,37 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
             size_t tramp_prealloc = ios_x18_tramp_prealloc_scan(image_base, image_size);
             size_t data_delta = ios_jit_data_align_delta(image_base, image_size);
             size_t alloc_size = image_alloc + tramp_prealloc + (data_delta ? page_size : 0);
-            size_t offset = ios_pool_alloc_range(alloc_size, jit_pool_size - ios_jit_tail_reserved);
-            if (offset != (size_t)-1 && data_delta)
+            size_t offset;
+            /* ios_image_reload_mode: the same image again at the base of its
+             * unloaded copy -> rebuild that copy where it is. Its pool range
+             * (already shifted by data_delta, x18 tramps right behind the
+             * image) stays in this process's ledger, so nothing is allocated;
+             * the copy below rewrites it from the new view (fresh .data/.bss),
+             * redoes relocations and x18 patches (identical bytes for
+             * identical code), and add_mapping re-registers the same jit
+             * base, which the emulator sees as already known. */
+            if (reload_jit && reload_pe == image_base && reload_size == image_size &&
+                ios_pool_ledger_holds( (size_t)((char *)reload_jit - (char *)jit_rx_base),
+                                       image_alloc + tramp_prealloc, ios_jit_current_peb() ))
+            {
+                offset = (size_t)((char *)reload_jit - (char *)jit_rx_base);
+                ios_pool_last_alloc_reused = 0;
+                dprintf(2, "[image-reload] %s rebuilt in place: pool %p (offset 0x%lx, size 0x%lx)\n",
+                        ios_pe_module_name( image_base, image_size ), reload_jit,
+                        (unsigned long)offset, (unsigned long)image_size);
+            }
+            else
+            {
+                if (reload_jit)
+                    dprintf(2, "[image-reload] in-place rebuild dropped: image %p+0x%lx vs the "
+                            "unloaded copy's %p+0x%lx, or its pool range is not this process's "
+                            "ledger record of 0x%lx bytes -- new pool copy\n", image_base,
+                            (unsigned long)image_size, reload_pe, (unsigned long)reload_size,
+                            (unsigned long)(image_alloc + tramp_prealloc));
+                reload_jit = NULL;
+                offset = ios_pool_alloc_range(alloc_size, jit_pool_size - ios_jit_tail_reserved);
+            }
+            if (!reload_jit && offset != (size_t)-1 && data_delta)
             {
                 offset += data_delta;
                 dprintf(2, "[data-align] %s shifted +0x%lx so .data lands on a 16KB page\n",
@@ -13189,6 +13407,7 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
             if (!ios_jit_mappings[si].pe_base) { slot = si; break; }
         if (slot < 0) slot = ios_jit_mapping_count;
         ios_jit_mappings[slot].jit_base = rx_dest;
+        ios_jit_mappings[slot].unmapped = 0;
         ios_jit_mappings[slot].size = m->size;
         ios_jit_mappings[slot].text_offset = m->text_offset;
         ios_jit_mappings[slot].text_size = m->text_size;
