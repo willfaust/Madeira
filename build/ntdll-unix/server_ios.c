@@ -3611,6 +3611,10 @@ void process_exit_wrapper( int status )
             extern void ios_fd_cache_release( void *peb );
             ios_fd_cache_release( dead_peb );
         }
+        {   /* ml1205: its ml938 sub-floor windows go with it */
+            extern void ios_subfloor_release_owner( void *owner );
+            ios_subfloor_release_owner( dead_peb );
+        }
         /* Task #25: release this pseudo-process's JIT pool allocations
          * (module copies, trampolines, FEX CodeBuffers). Children only —
          * the session (else-branch) lives as long as the app. Reuse is
@@ -4396,7 +4400,10 @@ void server_init_process_done(void)
          * exe's entry — main_image_info is restored to the session's exe
          * right after child startup-info init (see wine_ios_child_main). */
         extern const SECTION_IMAGE_INFORMATION *ios_cur_image_info(void);
-        signal_start_thread( ios_cur_image_info()->TransferAddress, peb, suspend, NtCurrentTeb() );
+        extern void *ios_subfloor_low_entry( void *entry, ULONG image_charact );
+        signal_start_thread( ios_subfloor_low_entry( ios_cur_image_info()->TransferAddress,
+                                                     ios_cur_image_info()->ImageCharacteristics ),
+                             peb, suspend, NtCurrentTeb() );
     }
 }
 
