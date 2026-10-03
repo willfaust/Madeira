@@ -3251,6 +3251,21 @@ static void *ios_mach_exception_thread( void *arg )
                         __atomic_store_n((uint8_t *)rw_addr, (uint8_t)IOS_STORE_SRC(rt), __ATOMIC_RELEASE);
                         emulated = 1;
                     }
+                    /* ml1231: STLURB/STLURH/STLUR (FEAT_LRCPC2, store-release with an
+                     * unscaled 9-bit offset), what FEX emits for guest stores once the
+                     * host reports LRCPC2:
+                     *   ss01 1001 000i iiii iiii 00nn nnnt tttt   (mask 0x3fe00c00, val 0x19000000)
+                     * fault_addr already includes the offset. A guest store can be
+                     * misaligned, so the bytes are copied after a release fence rather
+                     * than with an atomic store that could itself alignment-fault. */
+                    else if ((insn & 0x3fe00c00) == 0x19000000)
+                    {
+                        int rt = insn & 0x1f;
+                        uint64_t v = IOS_STORE_SRC(rt);
+                        __atomic_thread_fence(__ATOMIC_RELEASE);
+                        memcpy((void *)rw_addr, &v, 1u << (insn >> 30));
+                        emulated = 1;
+                    }
                     /* STR (register, 32-bit): 1011 1000 001 Rm option S 10 Rn Rt */
                     else if ((insn & 0xffe00c00) == 0xb8200800)
                     {
@@ -10684,6 +10699,18 @@ static int ios_emulate_load( ucontext_t *ctx, uint32_t insn, uintptr_t rd_addr )
         return 1;
     }
 
+    /* ml1231: LDAPUR / LDAPURB / LDAPURH / LDAPURS* (FEAT_LRCPC2) --
+     * size 011001 opc 0 imm9 00 Rn Rt. FEX emits these for guest loads once
+     * the host reports LRCPC2. opc 01 zero-extends, 10 sign-extends to 64 and
+     * 11 to 32, the same convention ios_ld_extend takes; opc 00 is STLUR. */
+    if ((insn & 0x3F200C00) == 0x19000000)
+    {
+        if (opc == 0) return 0;                        /* STLUR* -- not ours */
+        if ((size == 3 && opc >= 2) || (size == 2 && opc == 3)) return 0;   /* unallocated */
+        ios_ld_setreg( ctx, rt, ios_ld_extend( rd_addr, size, opc ) );
+        return 1;
+    }
+
     /* LDAR / LDAXR / LDXR -- Rs and Rt2 both 11111 */
     if ((insn & 0x3FFFFC00) == 0x08DFFC00 ||    /* LDAR  */
         (insn & 0x3FFFFC00) == 0x085FFC00 ||    /* LDAXR */
@@ -10792,7 +10819,8 @@ static int ios_emulate_store_rel( ucontext_t *ctx, uint32_t insn, uintptr_t addr
      * Rs and Rt2 are both 11111 here, which is what separates these from the
      * store-exclusive encodings below. */
     if ((insn & 0x3FFFFC00) == 0x089FFC00 ||     /* STLR*  (o0=1) */
-        (insn & 0x3FFFFC00) == 0x089F7C00)       /* STLLR* (o0=0) */
+        (insn & 0x3FFFFC00) == 0x089F7C00 ||     /* STLLR* (o0=0) */
+        (insn & 0x3FE00C00) == 0x19000000)       /* ml1231: STLUR* (LRCPC2, imm9) */
     {
         uint64_t v = ios_get_reg( ctx, rt );
         memcpy( (void *)addr, &v, nbytes );
@@ -10962,6 +10990,8 @@ static int ios_subfloor_classify( uint32_t insn, unsigned *bytes, int *is_write 
 
     /* ---- ios_emulate_load: pure loads (tried first, so it wins ties) ---- */
     if ((insn & 0x3FFFFC00) == 0x38BFC000) return 1;                /* LDAPR*  */
+    if ((insn & 0x3F200C00) == 0x19000000 && opc != 0)              /* ml1231: LDAPUR* */
+        return !((size == 3 && opc >= 2) || (size == 2 && opc == 3));
     if ((insn & 0x3FFFFC00) == 0x08DFFC00 ||                        /* LDAR    */
         (insn & 0x3FFFFC00) == 0x085FFC00 ||                        /* LDAXR   */
         (insn & 0x3FFFFC00) == 0x085F7C00) return 1;                /* LDXR    */
@@ -10988,6 +11018,7 @@ static int ios_subfloor_classify( uint32_t insn, unsigned *bytes, int *is_write 
     /* ---- ios_emulate_store_rel: release / exclusive / LSE ---- */
     if ((insn & 0x3FFFFC00) == 0x089FFC00 ||                        /* STLR*   */
         (insn & 0x3FFFFC00) == 0x089F7C00 ||                        /* STLLR*  */
+        (insn & 0x3FE00C00) == 0x19000000 ||                        /* ml1231: STLUR* */
         (insn & 0x3FE0FC00) == 0x0800FC00 ||                        /* STLXR   */
         (insn & 0x3FE0FC00) == 0x08007C00)                          /* STXR    */
     {
