@@ -6676,8 +6676,14 @@ static void ios_exe_win_init( void )
  * small image with stripped relocations is refused by that floor, placed
  * elsewhere, and the loader then fails it with STATUS_CONFLICTING_ADDRESSES
  * ("failed to create main module ... c0000018"): the program can never start.
- * Such an image now gets the window whatever its size. */
-static int ios_exe_win_stripped_request;
+ * Such an image now gets the window whatever its size.
+ *
+ * ml1194: thread-local. ios_exe_win_claim runs inside anon_mmap_tryfixed, and
+ * not every caller of that holds virtual_mutex (anon_mmap_alloc's ml1029 carve,
+ * ios_jumbo_holdback_init, ios_retire_own_fixed_base_image), so a plain global
+ * set by the mapping thread could also be read by another thread's request
+ * that falls inside the window. */
+static __thread int ios_exe_win_stripped_request;
 
 static int ios_exe_win_small_fixed(void)
 {
