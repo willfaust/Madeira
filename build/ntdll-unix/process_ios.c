@@ -838,6 +838,40 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
     return STATUS_SUCCESS;
 }
 
+#ifdef WINE_IOS
+/* Is the file name of `image` (any directory) `name`, a lower-case ASCII name? */
+static int ios_image_name_is( const WCHAR *image, int image_len, const char *name )
+{
+    int n = (int)strlen( name ), base = 0, k;
+
+    if (!image || image_len <= 0) return 0;
+    for (k = 0; k < image_len; k++) if (image[k] == '\\' || image[k] == '/') base = k + 1;
+    if (image_len - base != n) return 0;
+    for (k = 0; k < n; k++)
+    {
+        WCHAR c = image[base + k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != (WCHAR)name[k]) return 0;
+    }
+    return 1;
+}
+
+/* conhost.exe in an ARM64EC session. Wine's conhost.exe is a native aarch64
+ * image, but the session's ARM64EC ntdll loads the emulator into it all the
+ * same, while its threads get no CHPE CPU area (init_thread_stack: "NOT
+ * setting cpu_area"). The emulator's memory notifications read through that
+ * area, so conhost's first executable allocation faults at 0x38, and its
+ * exception path faults again forever, taking the whole app down. GTA V
+ * Enhanced: SocialClubHelper.exe's AllocConsole (Chromium routing stdio to a
+ * console) killed the app 33 s in. Refused, AllocConsole just fails and the
+ * caller goes on without a console. aarch64 sessions are not affected.
+ * MADEIRA_EC_CONHOST=1 starts it anyway. */
+static int ec_conhost_refuse( int arm64ec_session, const char *env, const WCHAR *image, int image_len )
+{
+    return arm64ec_session && !(env && env[0] == '1') && ios_image_name_is( image, image_len, "conhost.exe" );
+}
+#endif
+
 /**********************************************************************
  *           NtCreateUserProcess  (NTDLL.@)
  */
@@ -1014,6 +1048,17 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                 }
             }
         }
+    }
+
+    /* conhost.exe is refused in an ARM64EC session, where it would crash the app (see
+     * ec_conhost_refuse); MADEIRA_EC_CONHOST=1 starts it anyway. */
+    if (ec_conhost_refuse( is_arm64ec(), getenv( "MADEIRA_EC_CONHOST" ), params->ImagePathName.Buffer,
+                           params->ImagePathName.Length / sizeof(WCHAR) ))
+    {
+        dprintf(2, "[proc-gate] REFUSING spawn of %s (conhost in an ARM64EC session: it is aarch64 and "
+                "its threads have no CPU area for the emulator loaded into it; env.MADEIRA_EC_CONHOST=1 "
+                "starts it)\n", debugstr_us( &params->ImagePathName ));
+        return STATUS_ACCESS_DENIED;
     }
 
     /* ml526: stamp every accepted spawn on the startup timeline. This is the
