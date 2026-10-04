@@ -161,6 +161,44 @@ arguments are not supported.
    only Valve's own later success starts the game, and a session that is
    really playing elsewhere still fails with its own message.
 
+## Offline play
+
+Valve's client can sign an account in without a connection, with an offline logon
+ticket that Steam issues to it during an online sign-in and that the client stores
+itself (desktop Steam's Offline Mode). The Dock uses that mechanism as it is
+(`madeira-dock/docs/OFFLINE.md`); Madeira stores no ticket and decides nothing
+about ownership.
+
+- **Online starts are unchanged.** Once Valve's client has confirmed the game's
+  license, the host asks it whether the account can log on offline and reports the
+  answer (`session-offline-ready`). When it is 1, the app notes that the ACCOUNT can
+  sign in offline (`DockOffline`: one date for the account and the games started
+  online since, in the app's preferences; removed with the sign-in). Steam's offline
+  sign-in is per account: with it, Valve's client answers the license question for
+  any installed game from its cached list, started online before or not.
+- **A start with no network path** (`NWPathMonitor`) sets `MADEIRA_DOCK_OFFLINE=1`
+  for the host, which hands over the sign-in as usual, asks Valve's client whether
+  it can log on offline, and only then asks it to. The client answers the license
+  question from what it cached and starts the game through the same launch call.
+  A network that fails after the start falls back the same way 20 s in.
+- **Game details** shows a small line under the title for games the Dock starts:
+  "Can be played offline" (green check) once the account is saved; "Start a game
+  online to play offline" before that; and "Start once online to play offline" for
+  a game with per-user executables that has not started online yet (Steam prepares
+  those over the network on the first start). Tapping it explains. The mark is a
+  note of the last online start; whether an offline start goes ahead is always
+  Steam's decision at that moment, and Steam's offline sign-in expires on Steam's
+  own schedule.
+- A refusal ends the start with its own message: nothing saved to sign in offline
+  (50), offline sign-in refused (51), game not in what Steam saved (52).
+
+`[dock-offline]` logs the request and the save; `[dock-report] session-offline-*`
+carries the host's numbers. Steam Cloud cannot be checked without a connection, so
+the existing "could not be checked" question still appears before an offline start.
+Device-run once (2026-10-04, iPhone 18,3 / iOS 27.0, no network path): the offline
+request, Steam's offline sign-in, the license from its cache and the game's window
+8 s after the host started; the refusals and the fallback have not been exercised.
+
 ## Starting screen
 
 A Dock start from the library (Settings › Steam › Madeira Dock, or Play on a
@@ -312,6 +350,7 @@ never asks. The preparation is Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_CLIENT_202601` | on | read by the host: `0` disables its January 2026 client adapter |
 | `MADEIRA_DOCK_HANDOFF_DIAGNOSTICS` | on | read by the host: `0` drops its numeric transfer diagnostics |
 | `MADEIRA_DOCK_SESSION_WAIT` | on | read by the host: `0` fails a launch refused with 35 (another session playing) at once instead of asking again for up to three minutes |
+| `MADEIRA_DOCK_OFFLINE_LOGON` | on | `0`: no offline starts. The app never asks for one and hides the Game details mark; read by the host too, which then does not look up Valve's offline-logon methods |
 | `MADEIRA_DOCK_INSTALLERS` | on | `0`: no one-time installs (nothing read, run or shown) |
 | `MADEIRA_INSTALL_DEFAULT_KEY` | on | `0`: install-script entries without a `HasRunKey` are ignored |
 | `MADEIRA_DOCK_INSTALL_CHOICE` | on | `0`: no per-game choice; every start runs whatever is pending |

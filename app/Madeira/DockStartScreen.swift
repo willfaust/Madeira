@@ -217,6 +217,14 @@ enum DockStartStatus {
         if ["ceg-scm", "ceg-request-busy", "ceg-request"].contains(where: { fields[$0] != nil }) && fields["ceg-result"] == nil {
             return "Steam is preparing this game's executable…"
         }
+        // Offline start: Valve's client signs in from what it saved while online.
+        if fields["session-offline-listed"] == "1" { return "Offline: Steam found this game's license in what it saved. Starting the game…" }
+        if fields["session-offline-logon-result"] == "1" || fields["session-offline-logon-retry"] == "1" {
+            return "Offline: Steam signed in from its saved sign-in. Checking this game's license…"
+        }
+        if fields["session-offline-requested"] != nil || fields["session-offline-fallback"] != nil {
+            return "No connection. Asking Steam to sign in offline…"
+        }
         if fields["session-requested-app-listed"] == "1" { return "License confirmed. Steam is starting the game…" }
         if fields["session-authenticated-online"] == "1" { return "Signed in. Waiting for Steam to confirm this game's license…" }
         if fields["session-native-token-submitted"] != nil || fields["session-logon-start-result"] != nil {

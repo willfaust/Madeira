@@ -295,6 +295,7 @@ final class SteamOwnedLibrary: ObservableObject {
 
     private func clearCaches() {
         cachedAccount = nil
+        DockOffline.clear()   // the offline notes belonged to that account
         try? FileManager.default.removeItem(at: Self.cacheURL)
         try? FileManager.default.removeItem(at: Self.playtimeURL)
     }

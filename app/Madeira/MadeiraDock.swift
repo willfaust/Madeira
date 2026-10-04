@@ -4,6 +4,7 @@
 
 import Foundation
 import Darwin
+import Network
 
 /// JIT pool size of a Dock session. A Dock session runs no desktop Steam
 /// client (no Chromium helper fan-out), so it can live with a smaller pool.
@@ -214,6 +215,14 @@ enum MadeiraDock {
                     : "Steam did not finish signing in. Check the connection and try again."
             }
             if result == 35 { return "Steam did not confirm a license for this game on the signed-in account." }
+            // Offline start (madeira-dock docs/OFFLINE.md): Valve's client decides.
+            if result == 50 {
+                return fields["session-offline-abi"] == "0"
+                    ? "There is no connection, and this Steam client build cannot be started offline by Madeira Dock. Connect to the internet and try again."
+                    : "There is no connection, and Steam has nothing saved to sign this account in offline. Start a game once while online; Steam then allows offline starts until its offline sign-in expires."
+            }
+            if result == 51 { return "There is no connection, and Steam refused to sign in offline. Connect to the internet and start the game once. Export the log if it happens again." }
+            if result == 52 { return "Steam signed in offline, but what it has saved does not list this game. Start this game once while online, then it can be played offline." }
             if result == 37 {
                 if fields["session-native-handoff-app-mismatch"] == "1" {
                     return "Madeira Dock received a sign-in transfer for a different launch. Close the session and try again."
@@ -283,6 +292,10 @@ enum MadeiraDock {
         "session-online-subscription-count", "session-online-app-zero-query", "session-online-callback-id",
         "session-timeout-subscription-count", "session-timeout-app-listed", "session-timeout-still-online",
         "session-online-blip", "session-online-blips", "session-online-lost", "session-entitlement-source",
+        "session-offline-abi", "session-offline-requested", "session-offline-can", "session-offline-logon-result",
+        "session-offline-logon-retry", "session-offline-logon-state", "session-offline-callback-id",
+        "session-offline-entitled", "session-offline-listed", "session-offline-timeout-state",
+        "session-offline-fallback", "session-offline-ready",
         "launch-client-error", "launch-update-wait", "launch-update-retry", "launch-update-ready",
         "launch-config-wait", "launch-config-gave-up", "launch-session-wait", "launch-session-gave-up",
         "ceg-request", "ceg-request-result", "ceg-request-busy", "ceg-server-result", "ceg-job-result",
@@ -290,7 +303,7 @@ enum MadeiraDock {
         "ceg-scm", "ceg-scm-started", "ceg-scm-error", "ceg-service-registered", "ceg-service-install", "ceg-service-stop", "ceg-scm-stopped",
         "shutdown-begin", "shutdown-complete", "probe-result"]
     /// The host's report rounds (madeira-dock src/main.c).
-    static let reportRounds: Set<String> = ["ml1820", "ml1830", "ml1860", "ml1870", "ml1970", "ml1990", "ml2000", "ml2011", "ml2015"]
+    static let reportRounds: Set<String> = ["ml1820", "ml1830", "ml1860", "ml1870", "ml1970", "ml1990", "ml2000", "ml2011", "ml2015", "ml2016"]
 
     static func parseReport(_ data: Data) -> Report {
         guard data.count <= 32768, let text = String(data: data, encoding: .utf8) else { return Report() }
@@ -355,6 +368,7 @@ enum MadeiraDock {
     @MainActor static func cleanup() {
         if let url = transferURL { try? FileManager.default.removeItem(at: url) }
         unsetenv("MADEIRA_DOCK_AUTH_FILE")
+        unsetenv("MADEIRA_DOCK_OFFLINE")
     }
 
     /// Writes the one-use transfer to protected Application Support storage
@@ -426,6 +440,7 @@ enum MadeiraDock {
         let guardMap = SteamSignIn.flag("MADEIRA_DOCK_IMAGE_MAP_GUARD", default: true)
         if guardMap { setenv("MADEIRA_IMAGE_MAP_GUARD", "1", 1) }
         SteamLog.event("[dock-launch] image-map-guard=\(guardMap ? 1 : 0)")
+        DockOffline.configure(appID: game.id)
     }
 
     /// Wine's explorer opens a virtual desktop and starts the host in it. With
@@ -446,4 +461,115 @@ enum MadeiraDock {
         defer { launchRequest = (false, false) }
         return launchRequest
     }
+}
+
+/// Offline play for Steam games started through Madeira Dock.
+///
+/// Valve's client can log an account on without a connection, with an offline
+/// logon ticket Steam issues to it during an online logon (desktop Steam's
+/// Offline Mode). The host asks the client for exactly that (madeira-dock
+/// docs/OFFLINE.md): Madeira decides nothing about ownership and stores no
+/// ticket. What lives here is only what the app needs around it:
+///
+/// - whether the device has a network path, so a start without one asks for the
+///   offline logon straight away (`MADEIRA_DOCK_OFFLINE=1`) instead of waiting
+///   out a connection that cannot happen;
+/// - a note of the last online start in which Valve's client confirmed a licence
+///   and said the account can log on offline (the host's
+///   `session-offline-ready=1`), for the Game details mark. Steam's offline
+///   sign-in belongs to the ACCOUNT: with it, Valve's client answers the licence
+///   question for any game from the list it cached, whether or not that game was
+///   ever started online. So the note is one date for the account, plus the games
+///   started online since, which matters only for a game whose per-user
+///   executable Steam prepares on its first start (that needs a connection). It
+///   is a display aid: an offline start is always decided by Valve's client.
+///
+/// `env.MADEIRA_DOCK_OFFLINE_LOGON = 0` removes the feature in the app and in
+/// the host (which reads the same variable).
+enum DockOffline {
+    static let enabled = SteamSignIn.flag("MADEIRA_DOCK_OFFLINE_LOGON", default: true)
+
+    private static let monitor = NWPathMonitor()
+    private static var started = false
+    /// Starts the path monitor. Called at app start, so the path is current by
+    /// the time anything is launched.
+    static func begin() {
+        guard enabled, !started else { return }
+        started = true
+        monitor.start(queue: DispatchQueue(label: "madeira.dock-offline.path"))
+    }
+    /// No usable network path right now. False until the monitor has started.
+    static var networkDown: Bool { started && monitor.currentPath.status != .satisfied }
+
+    private static let key = "madeiraDockOfflineVerified", accountKey = "madeiraDockOfflineAccount"
+    /// When Valve's client last reported, in an online start, that it can log this
+    /// account on offline; nil if it never has on this installation.
+    static var accountSaved: Date? {
+        guard enabled else { return nil }
+        var t = UserDefaults.standard.double(forKey: accountKey)
+        // A build that kept only the per-game dates: the newest of those is the account's.
+        if t <= 0, let all = UserDefaults.standard.dictionary(forKey: key) as? [String: Double] {
+            t = all.values.max() ?? 0
+        }
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+    /// When this game last started online in such a session; nil if it never has.
+    static func verified(_ appID: Int) -> Date? {
+        guard enabled, let all = UserDefaults.standard.dictionary(forKey: key) as? [String: Double],
+              let t = all[String(appID)] else { return nil }
+        return Date(timeIntervalSince1970: t)
+    }
+    /// What Game details says about a game the Dock starts.
+    enum Mark: Equatable {
+        case ready(Date)        // Steam can sign in offline; this game needs nothing more
+        case needsFirstStart    // Steam can sign in offline, but prepares this game's program online first
+        case needsOnline        // Steam has no offline sign-in saved yet
+    }
+    /// `preparedOnline`: the game's install record lists per-user executables,
+    /// which Valve's client prepares on the first start, over the network.
+    static func mark(_ appID: Int, preparedOnline: Bool) -> Mark {
+        guard let saved = accountSaved else { return .needsOnline }
+        if preparedOnline, verified(appID) == nil { return .needsFirstStart }
+        return .ready(saved)
+    }
+    private static func save(_ appID: Int) {
+        let now = Date().timeIntervalSince1970
+        var all = (UserDefaults.standard.dictionary(forKey: key) as? [String: Double]) ?? [:]
+        all[String(appID)] = now
+        UserDefaults.standard.set(all, forKey: key)
+        UserDefaults.standard.set(now, forKey: accountKey)
+    }
+    /// Sign-in removed or changed: the notes belonged to that account.
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: accountKey)
+    }
+
+    /// The app the running Dock session was started for.
+    private(set) static var sessionApp: Int?
+    private static var sessionMarked = false
+
+    /// Part of MadeiraDock.configure: tells the host when there is no network.
+    static func configure(appID: Int) {
+        sessionApp = appID
+        sessionMarked = false
+        let offline = enabled && networkDown
+        if offline { setenv("MADEIRA_DOCK_OFFLINE", "1", 1) } else { unsetenv("MADEIRA_DOCK_OFFLINE") }
+        SteamLog.event("[dock-offline] enabled=\(enabled ? 1 : 0) network=\(networkDown ? "down" : "up") request=\(offline ? 1 : 0) account-saved=\(accountSaved != nil ? 1 : 0) game-started-online=\(verified(appID) != nil ? 1 : 0)")
+    }
+
+    /// Follows the host's report (MadeiraDockModel.watchReport): an online start
+    /// in which Valve's client confirmed the licence and reported that it can log
+    /// the account on offline saves the game for offline play.
+    @MainActor static func observe(_ fields: [String: String]) {
+        guard enabled, !sessionMarked, let app = sessionApp,
+              fields["session-offline-requested"] == nil,
+              fields["session-requested-app-listed"] == "1",
+              fields["session-offline-ready"] == "1" else { return }
+        sessionMarked = true
+        save(app)
+        SteamLog.event("[dock-offline] Valve's client can log this account on offline: saved")
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+    static let changed = Notification.Name("MadeiraDockOfflineChanged")
 }

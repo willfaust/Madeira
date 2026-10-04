@@ -82,6 +82,7 @@ final class MadeiraDockModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 let report = MadeiraDock.pollReport()
+                DockOffline.observe(report.fields)
                 // The game's one-time installs run before the host writes its first field.
                 if DockInstallers.script != nil {
                     let progress = DockInstallers.poll(drive: MadeiraDock.drive)

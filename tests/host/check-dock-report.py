@@ -49,6 +49,13 @@ let entitled = parse("[steam-host] ml1830 session-requested-app-entitled=1\n[ste
 assert(entitled.fields["session-requested-app-entitled"] == "1" && entitled.fields["session-subscription-count"] == "12")
 assert(parse("[steam-host] ml1830 session-authenticated-online=1\n[steam-host] ml1830 probe-result=34\n").failure!.contains("did not confirm this game's license in time"))
 assert(parse("[steam-host] ml1830 probe-result=34\n").failure!.contains("did not finish signing in"))
+// Offline start (ml2016): Valve's client decides; each refusal has its own words.
+let offline = parse("[steam-host] ml2016 session-offline-abi=1\n[steam-host] ml2016 session-offline-requested=1\n[steam-host] ml2016 session-offline-can=2\n[steam-host] ml1830 probe-result=50\n")
+assert(offline.fields["session-offline-can"] == "2" && offline.failure!.contains("nothing saved") && offline.failure!.contains("once while online"))
+assert(parse("[steam-host] ml2016 session-offline-abi=0\n[steam-host] ml1830 probe-result=50\n").failure!.contains("client build"))
+assert(parse("[steam-host] ml2016 session-offline-logon-result=2\n[steam-host] ml1830 probe-result=51\n").failure!.contains("refused to sign in offline"))
+assert(parse("[steam-host] ml2016 session-offline-logon-state=3\n[steam-host] ml1830 probe-result=52\n").failure!.contains("does not list this game"))
+assert(parse("[steam-host] ml2016 session-offline-ready=1\n").fields["session-offline-ready"] == "1")
 let rejected = "[steam-host] ml1830 account=synthetic\n[steam-host] ml1830 token=synthetic\n[steam-host] ml1830 probe-result=2147483648\n[steam-host] ml1830 probe-result=secret\n[steam-host] ml1830 client-sha256=invalid\n[steam-host] unknown probe-result=0\n[steam-host] ml1830 probe-result=0 secret\n"
 assert(parse(rejected).fields.isEmpty)
 assert(parse(String(repeating: "x", count: 32769)).fields.isEmpty)
