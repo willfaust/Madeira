@@ -1369,6 +1369,35 @@ static int ios_fault_read_insn( uint64_t fault_pc, uint32_t *out )
     return 1;
 }
 
+/* x18-derived base register.
+ *
+ * Wine's EC kernelbase TlsGetValue is `add x8, x18, w0, uxtw #3;
+ * ldr x0, [x8, #0x1480]`: the TEB address is copied into another register one
+ * instruction before the access, so when iOS has zeroed x18 the fault's base
+ * register is x8, not x18, and the x18 emulation in the Mach handler declines
+ * (Crysis Remastered worker thread: fault at 0x1570 = TLS slot 30, then the
+ * process died). When the instruction right before the fault is an ADD/MOV
+ * that wrote exactly this base register from x18, the base holds
+ * (0 + offset) and fault_addr is the TEB offset, so the same TEB-relative
+ * emulation is correct. Only ADD (extended/shifted register or immediate) and
+ * MOV Xd,X18; the other operand must not be the destination (it still holds
+ * the value the ADD used). */
+static int ios_x18_derived_base( uint64_t fault_pc, int rn )
+{
+    uint32_t p;
+    int rd, pn, pm;
+
+    if (rn == 18 || rn >= 29 || !ios_fault_read_insn( fault_pc - 4, &p )) return 0;
+    rd = p & 31; pn = (p >> 5) & 31; pm = (p >> 16) & 31;
+    if (rd != rn) return 0;
+    if ((p & 0xffe00000u) == 0x8b200000u) return pn == 18 && pm != rd;           /* ADD Xd, X18, Wm/Xm, ext */
+    if ((p & 0xff200000u) == 0x8b000000u) return (pn == 18 && pm != rd) ||       /* ADD Xd, X18, Xm, shift */
+                                                 (pm == 18 && pn != rd && !((p >> 10) & 0x3f));
+    if ((p & 0xff800000u) == 0x91000000u) return pn == 18;                       /* ADD Xd, X18, #imm */
+    if ((p & 0xffffffe0u) == (0xaa0003e0u | (18u << 16))) return 1;              /* MOV Xd, X18 */
+    return 0;
+}
+
 static void *ios_mach_exception_thread( void *arg )
 {
     mach_port_t port = (mach_port_t)(uintptr_t)arg;
@@ -2300,7 +2329,18 @@ static void *ios_mach_exception_thread( void *arg )
                      *  - base reg VALUE vs fault_addr: equal => the register
                      *    literally held the small offset.
                      * Capped at 4 reports so a fault storm can't flood. */
-                    if (rn != 18)
+                    /* A base register computed from x18 one instruction earlier */
+                    int x18_derived = ios_x18_derived_base( fault_pc, rn );
+                    if (x18_derived)
+                    {
+                        static int ios_x18_derived_reports;
+                        if (ios_x18_derived_reports++ < 8)
+                            ERR( "[x18-derived] #%d pc=%p insn=%08x base x%d from x18 -> "
+                                 "TEB+0x%lx emulated\n", ios_x18_derived_reports, (void *)(uintptr_t)fault_pc,
+                                 insn, rn, (unsigned long)fault_addr );
+                    }
+
+                    if (rn != 18 && !x18_derived)
                     {
                         static int ios_x18_decline_reports;
                         if (ios_x18_decline_reports < 4)
@@ -2329,7 +2369,7 @@ static void *ios_mach_exception_thread( void *arg )
                         }
                     }
 
-                    if (rn == 18)
+                    if (rn == 18 || x18_derived)
                     {
                         uintptr_t ea = thread_teb + fault_addr;
                         int rt = insn & 0x1f;
