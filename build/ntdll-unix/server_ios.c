@@ -3754,6 +3754,241 @@ static void ios_create_drive_symlinks(void)
     closedir( dir );
     wine_log_write( "[drives] published %d/%d DOS drive(s) in \\DosDevices rev=ml587", created, seen );
 }
+
+#include "hw_registry_ios.h"
+
+/* CNTFRQ_EL0, the counter FEX scales the guest's TSC from. */
+static uint64_t ios_hw_cntfrq(void)
+{
+    uint64_t freq = 0;
+#ifdef __aarch64__
+    __asm__ volatile( "mrs %0, CNTFRQ_EL0" : "=r" (freq) );
+#endif
+    return freq;
+}
+
+/* hw-registry-test:begin (tests/host/check-hw-registry.py compiles from here to the end mark) */
+#define IOS_HW_RSMB 0x52534d42   /* 'RSMB', the SMBIOS firmware table provider */
+
+/* One registry key, created level by level below `base` (an existing key),
+ * every new level volatile. NtCreateKey makes ONE key: since Wine 11 keys are
+ * named objects and a path whose parent is missing fails with
+ * STATUS_OBJECT_NAME_NOT_FOUND (server/registry.c key_lookup_name), as on
+ * Windows; only kernelbase's RegCreateKeyEx walks the path itself. */
+static HANDLE ios_hw_key( const char *base, const char *subpath )
+{
+    WCHAR nameW[256];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE key, parent;
+    const char *p = subpath, *end;
+    size_t len = strlen( base );
+
+    if (len >= ARRAY_SIZE(nameW)) return 0;
+    ascii_to_unicode( nameW, base, len + 1 );
+    init_unicode_string( &name, nameW );
+    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    if (NtOpenKey( &parent, KEY_ALL_ACCESS, &attr )) return 0;
+    while (*p)
+    {
+        if (!(end = strchr( p, '\\' ))) end = p + strlen( p );
+        len = end - p;
+        if (!len || len >= ARRAY_SIZE(nameW))
+        {
+            NtClose( parent );
+            return 0;
+        }
+        ascii_to_unicode( nameW, p, len );
+        nameW[len] = 0;
+        init_unicode_string( &name, nameW );
+        InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, parent, NULL );
+        if (NtCreateKey( &key, KEY_ALL_ACCESS, &attr, 0, NULL, REG_OPTION_VOLATILE, NULL )) key = 0;
+        NtClose( parent );
+        if (!key) return 0;
+        parent = key;
+        p = *end ? end + 1 : end;
+    }
+    return parent;
+}
+
+/* The SMBIOS table exactly as GetSystemFirmwareTable('RSMB') hands it to the
+ * guest (WMI's Win32_BIOS / Win32_BaseBoard read the same bytes); NULL when
+ * ntdll has none. */
+static unsigned char *ios_hw_smbios( ULONG *len )
+{
+    const ULONG head = offsetof( SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer );
+    SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti;
+    ULONG size = head, needed = 0;
+    unsigned char *table = NULL;
+    NTSTATUS status;
+    int tries;
+
+    *len = 0;
+    for (tries = 0; tries < 2; tries++)
+    {
+        if (!(sfti = calloc( 1, size ))) return NULL;
+        sfti->ProviderSignature = IOS_HW_RSMB;
+        sfti->Action = SystemFirmwareTable_Get;
+        sfti->TableID = 0;
+        status = NtQuerySystemInformation( SystemFirmwareTableInformation, sfti, size, &needed );
+        if (status == STATUS_BUFFER_TOO_SMALL && needed > size)
+        {
+            free( sfti );
+            size = needed;
+            continue;
+        }
+        if (!status && sfti->TableBufferLength && sfti->TableBufferLength <= size - head &&
+            (table = malloc( sfti->TableBufferLength )))
+        {
+            memcpy( table, sfti->TableBuffer, sfti->TableBufferLength );
+            *len = sfti->TableBufferLength;
+        }
+        free( sfti );
+        break;
+    }
+    return table;
+}
+
+/* wineboot's fallback when the TSC rate is unknown: the processor's MaxMhz. */
+static DWORD ios_hw_power_mhz(void)
+{
+    ULONG count = peb->NumberOfProcessors ? peb->NumberOfProcessors : 1;
+    PROCESSOR_POWER_INFORMATION *info;
+    DWORD mhz = 0;
+
+    if ((info = calloc( count, sizeof(*info) )))
+    {
+        if (!NtPowerInformation( ProcessorInformation, NULL, 0, info, count * sizeof(*info) ))
+            mhz = info[0].MaxMhz;
+        free( info );
+    }
+    return mhz;
+}
+
+static void ios_hw_sz( HANDLE key, const char *name, const char *value )
+{
+    WCHAR nameW[64], data[HWREG_STR];
+    UNICODE_STRING str;
+    size_t n = strnlen( value, HWREG_STR - 1 );
+
+    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
+    ascii_to_unicode( data, value, n );
+    data[n] = 0;
+    init_unicode_string( &str, nameW );
+    NtSetValueKey( key, &str, 0, REG_SZ, data, (n + 1) * sizeof(WCHAR) );
+}
+
+static void ios_hw_dword( HANDLE key, const char *name, DWORD value )
+{
+    WCHAR nameW[64];
+    UNICODE_STRING str;
+
+    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
+    init_unicode_string( &str, nameW );
+    NtSetValueKey( key, &str, 0, REG_DWORD, &value, sizeof(value) );
+}
+
+/***********************************************************************
+ *           ios_hw_registry_publish
+ *
+ * wineboot's create_hardware_registry_keys for this port. Desktop Wine runs
+ * wineboot at every boot and it writes the volatile
+ * HKLM\HARDWARE\DESCRIPTION\System tree: Identifier and SystemBiosDate, BIOS
+ * (from the SMBIOS table), CentralProcessor\N and FloatingPointProcessor\N for
+ * every processor. wineboot never runs here, so none of it existed: GTA V
+ * Enhanced's hardware-info thread failed to open CentralProcessor\0 and BIOS,
+ * and WMI's Win32_Processor had no Caption. Written once per session, by the
+ * first process, after init_cpu_info (the processor count) and before the
+ * first process builds its environment. The processor values describe what
+ * the x86-64 guest sees from FEX's CPUID (hw_registry_ios.h), the count is
+ * GetSystemInfo's. Children of the session read the same registry.
+ */
+void ios_hw_registry_publish(void)
+{
+    static const char machine[] = "\\Registry\\Machine";
+    static const char sysdesc[] = "HARDWARE\\DESCRIPTION\\System";
+    struct hwreg_cpu cpu;
+    struct hwreg_bios bios;
+    unsigned int i, count, cpus = 0, fpus = 0;
+    unsigned char *smbios;
+    ULONG smbios_len = 0;
+    char path[96];
+    HANDLE key;
+
+    /* 0 writes no HARDWARE\DESCRIPTION keys (wineboot's volatile hardware tree,
+     * which no session had before). */
+    if (!hwreg_enabled( getenv( "MADEIRA_HW_REGISTRY" ) ))
+    {
+        wine_log_write( "[hw-registry] MADEIRA_HW_REGISTRY=0, no HARDWARE\\DESCRIPTION keys written" );
+        return;
+    }
+
+    count = hwreg_cpu_count( peb->NumberOfProcessors );
+    hwreg_fex_cpu( &cpu, ios_hw_cntfrq() );
+    if (!cpu.mhz) cpu.mhz = ios_hw_power_mhz();
+    smbios = ios_hw_smbios( &smbios_len );
+    hwreg_bios_values( &bios, smbios, smbios_len, PACKAGE_VERSION );
+    free( smbios );
+
+    if (!(key = ios_hw_key( machine, sysdesc )))
+    {
+        wine_log_write( "[hw-registry] could not create HKLM\\%s, nothing written", sysdesc );
+        return;
+    }
+    ios_hw_sz( key, "Identifier", "AT compatible" );
+    ios_hw_sz( key, "SystemBiosDate", "01/01/70" );
+    NtClose( key );
+
+    snprintf( path, sizeof(path), "%s\\BIOS", sysdesc );
+    if ((key = ios_hw_key( machine, path )))
+    {
+        ios_hw_sz( key, "BaseBoardManufacturer", bios.board_vendor );
+        ios_hw_sz( key, "BaseBoardProduct", bios.board_product );
+        ios_hw_sz( key, "BaseBoardVersion", bios.board_version );
+        ios_hw_sz( key, "BIOSVendor", bios.bios_vendor );
+        ios_hw_sz( key, "BIOSVersion", bios.bios_version );
+        ios_hw_sz( key, "BIOSReleaseDate", bios.bios_date );
+        ios_hw_dword( key, "BiosMajorRelease", bios.bios_major );
+        ios_hw_dword( key, "BiosMinorRelease", bios.bios_minor );
+        ios_hw_dword( key, "ECFirmwareMajorVersion", bios.ec_major );
+        ios_hw_dword( key, "ECFirmwareMinorVersion", bios.ec_minor );
+        ios_hw_sz( key, "SystemManufacturer", bios.sys_vendor );
+        ios_hw_sz( key, "SystemProductName", bios.sys_product );
+        ios_hw_sz( key, "SystemVersion", bios.sys_version );
+        ios_hw_sz( key, "SystemSKU", bios.sys_sku );
+        ios_hw_sz( key, "SystemFamily", bios.sys_family );
+        NtClose( key );
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        snprintf( path, sizeof(path), "%s\\CentralProcessor\\%u", sysdesc, i );
+        if ((key = ios_hw_key( machine, path )))
+        {
+            ios_hw_dword( key, "FeatureSet", cpu.feature_set );
+            ios_hw_sz( key, "Identifier", cpu.identifier );
+            ios_hw_sz( key, "VendorIdentifier", cpu.vendor );
+            ios_hw_sz( key, "ProcessorNameString", cpu.brand );
+            ios_hw_dword( key, "~MHz", cpu.mhz );
+            NtClose( key );
+            cpus++;
+        }
+        snprintf( path, sizeof(path), "%s\\FloatingPointProcessor\\%u", sysdesc, i );
+        if ((key = ios_hw_key( machine, path )))
+        {
+            ios_hw_sz( key, "Identifier", cpu.identifier );
+            NtClose( key );
+            fpus++;
+        }
+    }
+
+    wine_log_write( "[hw-registry] HKLM\\%s (volatile): %u/%u CentralProcessor + %u FloatingPointProcessor "
+                    "\"%s\" %s \"%s\" ~MHz %u FeatureSet 0x%08x; BIOS \"%s\" \"%s\" (%s, %u Wine default(s))",
+                    sysdesc, cpus, count, fpus, cpu.identifier, cpu.vendor, cpu.brand, (unsigned int)cpu.mhz,
+                    (unsigned int)cpu.feature_set, bios.sys_vendor, bios.sys_product,
+                    smbios_len ? "SMBIOS" : "no SMBIOS table", bios.defaults );
+}
+/* hw-registry-test:end */
 #endif
 
 
