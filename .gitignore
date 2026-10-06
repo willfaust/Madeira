@@ -128,6 +128,13 @@ tests/x64/asmconf_obj/
 # redistributable terms and only unmodified. Not ours to ship -- obtain them
 # yourself, see tools/fetch-vcruntime.md.
 app/Madeira/x86_64-vcruntime/*.dll
+
+# Mesa OpenGL on D3D12 and Microsoft's DXIL validator: build/mesa-d3d12/build.sh
+# output. dxil.dll is Microsoft-authored and licence-bound (LICENSE-dxil.txt);
+# the Mesa DLLs are rebuilt from pinned source.
+app/Madeira/x86_64-opengl/*
+!app/Madeira/x86_64-opengl/README.md
+build/mesa-d3d12/work/
 research/remote-metal/host/rmetald
 research/remote-metal/guest/rmtest
 

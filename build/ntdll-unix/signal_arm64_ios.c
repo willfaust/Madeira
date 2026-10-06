@@ -1282,6 +1282,133 @@ void ios_dump_guest_callers( const char *tag, unsigned long long x28 )
 }
 
 
+/* Executable aliases deliberately lack host write permission. Resolve only
+ * live mappings; callers must also validate the end of a multi-byte access. */
+static uintptr_t ios_write_alias( uintptr_t addr )
+{
+    extern void *ios_jit_rx_base_global, *ios_jit_rw_base_global;
+    extern size_t ios_jit_pool_size_global;
+    extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t );
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+    uintptr_t rw = (uintptr_t)ios_jit_rw_base_global;
+    size_t size = ios_jit_pool_size_global;
+
+    if (rx && rw && addr >= rx && addr - rx < size)
+        return rw + (addr - rx);
+    return ios_jit_anon_alias_lookup( addr );
+}
+
+/* The writable alias is a host implementation detail, not permission to
+ * bypass a guest protection fault. FEX removes logical write permission
+ * while a guest page has cached translations. Let its normal exception
+ * handler invalidate those translations and restore logical write access
+ * before emulating the retried store. Native pool writes have no guest
+ * protection record and must retain their existing path. */
+static int ios_alias_write_is_trapped( uintptr_t addr )
+{
+    extern void *ios_jit_rx_base_global;
+    extern size_t ios_jit_pool_size_global;
+    extern int ios_page_expected_prot( const void *addr );
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+    int prot;
+
+    if (rx && addr >= rx && addr - rx < ios_jit_pool_size_global) return 0;
+    prot = ios_page_expected_prot( (const void *)addr );
+    return prot >= 0 && !(prot & PROT_WRITE);
+}
+
+/* Adjacent guest pages need not occupy adjacent pool slots. Validate every
+ * fragment before writing anything, then route each through its own alias.
+ * Only ordinary stores use this; atomic RMW operations must remain atomic. */
+static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uintptr_t *blocked,
+                            int honor_guest_prot )
+{
+    enum { PAGE = 0x4000, MAX_STORE = 32 };
+    uintptr_t destinations[2];
+    size_t lengths[2], done = 0;
+    unsigned count = 0, i;
+
+    *blocked = 0;
+    if (!size || size > MAX_STORE || addr > UINTPTR_MAX - (size - 1)) return 0;
+    while (done < size)
+    {
+        uintptr_t at = addr + done, rw = ios_write_alias( at );
+        size_t length = PAGE - (at & (PAGE - 1));
+        if (length > size - done) length = size - done;
+        /* A store can cross a 4KB Wine protection boundary within one
+         * 16KB alias page. At most 32 bytes means the endpoints cover all
+         * protection pages touched by this fragment. */
+        if (honor_guest_prot && ios_alias_write_is_trapped( at ))
+        {
+            *blocked = at;
+            return 0;
+        }
+        if (honor_guest_prot && ios_alias_write_is_trapped( at + length - 1 ))
+        {
+            *blocked = (at + length - 1) & ~(uintptr_t)0xfff;
+            return 0;
+        }
+        if (!rw || rw > UINTPTR_MAX - (length - 1) ||
+            ios_write_alias( at + length - 1 ) != rw + length - 1) return 0;
+        destinations[count] = rw;
+        lengths[count++] = length;
+        done += length;
+    }
+    done = 0;
+    for (i = 0; i < count; ++i)
+    {
+        memcpy( (void *)destinations[i], (const unsigned char *)source + done, lengths[i] );
+        done += lengths[i];
+    }
+    if (count > 1)
+    {
+        static unsigned logged;
+        if (logged++ < 8)
+            dprintf( 2, "[alias-span] routed %zu bytes at %p across %u guest pages\n",
+                     size, (void *)addr, count );
+    }
+    return 1;
+}
+
+/* GPR STP/STNP, including pre/post-index writeback. gpr[31] is SP when
+ * used as a base, but register 31 as a store source is always zero. */
+static int ios_alias_store_pair( uint32_t insn, uintptr_t addr, uint64_t gpr[32], uintptr_t *blocked,
+                                 int honor_guest_prot )
+{
+    unsigned rt = insn & 31, rt2 = (insn >> 10) & 31, rn = (insn >> 5) & 31;
+    unsigned mode = (insn >> 23) & 3;
+    unsigned width = (insn & 0x80000000u) ? 8 : 4;
+    unsigned span = width * 2;
+    uintptr_t effective;
+    int64_t offset = (insn >> 15) & 0x7f;
+    uint64_t values[2];
+
+    /* Exclude loads, SIMD pairs and reserved opc encodings. */
+    if ((insn & 0x7e400000u) != 0x28000000u) return 0;
+    if ((mode == 1 || mode == 3) && rn != 31 && (rn == rt || rn == rt2)) return 0;
+    if (offset & 0x40) offset -= 0x80;
+    offset *= width;
+    effective = mode == 1 ? gpr[rn] : gpr[rn] + offset;
+    if (effective > UINTPTR_MAX - (span - 1) || addr < effective || addr - effective >= span) return 0;
+    /* FAR may identify the second word. Translate the whole effective access,
+     * rather than treating that fault address as the first store destination. */
+    addr = effective;
+    values[0] = rt == 31 ? 0 : gpr[rt];
+    values[1] = rt2 == 31 ? 0 : gpr[rt2];
+    if (width == 8)
+    {
+        if (!ios_alias_write( addr, values, sizeof(values), blocked, honor_guest_prot )) return 0;
+    }
+    else
+    {
+        uint32_t words[2] = { (uint32_t)values[0], (uint32_t)values[1] };
+        if (!ios_alias_write( addr, words, sizeof(words), blocked, honor_guest_prot )) return 0;
+    }
+    if (mode == 1) gpr[rn] = addr + offset;
+    else if (mode == 3) gpr[rn] = addr;
+    return 1;
+}
+
 /* Signal-safe 32/64-bit CAS core, shared semantics with the BSD alias path.
  * Caller establishes full alias coverage. FP/LR encodings deliberately
  * decline: Darwin's __x array contains only x0..x28. No Wine logging here. */
@@ -1313,11 +1440,44 @@ static int ios_mach_emulate_cas(uint32_t insn, uintptr_t rw_addr, uint64_t gpr[2
     return 1;
 }
 
+/* CASP/CASPA/CASPL/CASPAL pair forms (0sz0 1000 0L1 Rs o0 11111 Rn Rt).
+ * FEX's unaligned-atomic helpers (DoCAS, RunCASPAL) issue a 128-bit CASPAL on
+ * guest memory from inside its exception handler. On an executable alias that
+ * was just copied again into the pool, the access faults and nothing else
+ * completes it: FEX re-enters its handler until the stack overflows. Run the
+ * same hardware CASPAL on the RW alias so it stays atomic against other users
+ * of that alias. Caller establishes full alias coverage. */
+static int ios_mach_emulate_casp(uint32_t insn, uintptr_t rw_addr, uint64_t gpr[29])
+{
+    unsigned rs = (insn >> 16) & 31, rt = insn & 31;
+    int wide = (insn >> 30) & 1;
+
+    if ((insn & 0xbfa07c00u) != 0x08207c00u) return 0;
+    if ((rs & 1) || (rt & 1) || rs + 1 >= 29 || rt + 1 >= 29) return 0;
+    if (!rw_addr || (rw_addr & (wide ? 15 : 7))) return 0;
+    {
+        register uint64_t c0 asm("x0") = gpr[rs];
+        register uint64_t c1 asm("x1") = gpr[rs + 1];
+        register uint64_t c2 asm("x2") = gpr[rt];
+        register uint64_t c3 asm("x3") = gpr[rt + 1];
+        if (wide)
+            asm volatile(".arch_extension lse\n\tcaspal x0, x1, x2, x3, [%4]"
+                         : "+r"(c0), "+r"(c1) : "r"(c2), "r"(c3), "r"(rw_addr) : "memory");
+        else
+            asm volatile(".arch_extension lse\n\tcaspal w0, w1, w2, w3, [%4]"
+                         : "+r"(c0), "+r"(c1) : "r"(c2), "r"(c3), "r"(rw_addr) : "memory");
+        gpr[rs] = c0;
+        gpr[rs + 1] = c1;
+    }
+    return 1;
+}
+
 /* ml938/ml939: defined far below, next to the store emulator they reuse.
  * Declared here because the Mach exception thread is the primary caller and
  * sits earlier in the file. */
 static uintptr_t ios_subfloor_translate( uint64_t addr, void *peb );
 extern void *ios_jit_current_peb(void);   /* virtual_ios.c */
+extern int ios_jit_pool_pc_is_fex( uintptr_t pc );   /* virtual_ios.c */
 static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *via, void *peb );
 
 /* ml974: is the ucontext's NEON state real?
@@ -3156,10 +3316,37 @@ static void *ios_mach_exception_thread( void *arg )
                                 (unsigned long long)fault_pc);
                     }
                 }
+                /* FEX's exception handler completes some guest accesses itself
+                 * (ml657: DoCAS / RunCASPAL), after HandleRWXAccessViolation has
+                 * already invalidated the page. Its store must land through the
+                 * alias. Dispatching it again re-enters the handler while it holds
+                 * ThreadCreationMutex; the faults nest until the exception stack
+                 * overflows and the thread dies holding the lock (Stardew freeze,
+                 * 200111). Translated guest code is never in an image copy, so its
+                 * stores still reach FEX first. */
+                int honor_guest_prot = 1;
+                if (rw_addr && ios_alias_write_is_trapped( fault_addr ) &&
+                    ios_jit_pool_pc_is_fex( (uintptr_t)fault_pc ))
+                {
+                    static unsigned fex_alias_logs;
+                    honor_guest_prot = 0;
+                    if (fex_alias_logs++ < 16)
+                        dprintf( 2, "[alias-protection] completing FEX handler write pc=%llx addr=%llx\n",
+                                 (unsigned long long)fault_pc, (unsigned long long)fault_addr );
+                }
+                if (rw_addr && honor_guest_prot && ios_alias_write_is_trapped( fault_addr ))
+                {
+                    static unsigned trapped_alias_logs;
+                    if (trapped_alias_logs++ < 16)
+                        dprintf( 2, "[alias-protection] dispatching guest write fault pc=%llx addr=%llx\n",
+                                 (unsigned long long)fault_pc, (unsigned long long)fault_addr );
+                    goto dispatch_guest_fault;
+                }
                 if (rw_addr && (uintptr_t)fault_pc >= 0x100000000ULL)
                 {
                     uint32_t insn; ios_fault_read_insn( (uint64_t)(uintptr_t)fault_pc, &insn );  /* ml982 */
                     int emulated = 0;
+                    uintptr_t alias_fault = 0;
                     /* STP (SIMD&FP, signed offset, 128-bit Q): 10 101 1 1 0 0 0 imm7 Rt2 Rn Rt
                      *   pattern bits 31-22: 10 1011 1000  → top10 = 0x2B8 (= bits 31..22)
                      *   So mask 0xFFC00000 = top10. Match 0x2B8 << 22 = 0xAE000000? Hmm.
@@ -3209,35 +3396,25 @@ static void *ios_mach_exception_thread( void *arg )
                         if (imm7 & 0x40) imm7 -= 0x80;          /* sign-extend 7 bits */
                         const int64_t off = imm7 * 16;          /* Q registers scale by 16 */
 
-                        /* The WHOLE 32-byte destination must live in the SAME alias, or the
-                         * second copy would land outside it. */
-                        uintptr_t rw_end = in_jit ? (uintptr_t)(rw + ((fault_addr + 31) - rx))
-                                                  : (uintptr_t)ios_jit_anon_alias_lookup( fault_addr + 31 );
-                        if (!rw_end || rw_end != (uintptr_t)rw_addr + 31)
+                        uint64_t base_old = rn == 31 ? state.__sp : rn == 30 ? state.__lr :
+                                            rn == 29 ? state.__fp : state.__x[rn];
+                        uintptr_t effective = mode == 1 ? base_old : base_old + off;
+                        unsigned char values[32];
+                        memcpy( values, &neon_state.__v[rt], 16 );
+                        memcpy( values + 16, &neon_state.__v[rt2], 16 );
+                        if (fault_addr >= effective && fault_addr - effective < sizeof(values) &&
+                            ios_alias_write( effective, values, sizeof(values), &alias_fault, honor_guest_prot ))
                         {
-                            static int stp_span_n;
-                            if (stp_span_n < 4)
-                                dprintf(STDERR_FILENO,
-                                    "[stp-emul] ml629 #%d REFUSING: 32B span leaves the alias "
-                                    "(insn=0x%08x addr=0x%llx rw=0x%llx rw_end=0x%llx)\n",
-                                    ++stp_span_n, insn, (unsigned long long)fault_addr,
-                                    (unsigned long long)rw_addr, (unsigned long long)rw_end);
-                        }
-                        else
-                        {
-                            uint64_t base_old = (mode == 3) ? (uint64_t)fault_addr - (uint64_t)off
-                                                            : (uint64_t)fault_addr;
                             uint64_t base_new = base_old;
                             int wb = (mode == 1 || mode == 3);
-
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 16);
-                            memcpy((void *)(rw_addr + 16), &neon_state.__v[rt2], 16);
 
                             if (wb)
                             {
                                 base_new = base_old + (uint64_t)off;
                                 if (rn == 31) state.__sp = base_new;
-                                else          state.__x[rn] = base_new;
+                                else if (rn == 30) state.__lr = base_new;
+                                else if (rn == 29) state.__fp = base_new;
+                                else state.__x[rn] = base_new;
                             }
                             emulated = 1;
                             {
@@ -3259,54 +3436,55 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffc00000) == 0xf9000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint64_t value = IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* STR (immediate, unsigned offset, 32-bit): 1011 1001 00 imm12 Rn Rt */
                     else if ((insn & 0xffc00000) == 0xb9000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint32_t value = (uint32_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* STRB (immediate, unsigned offset, 8-bit): 0011 1001 00 imm12 Rn Rt */
                     else if ((insn & 0xffc00000) == 0x39000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint8_t *)rw_addr = (uint8_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint8_t value = (uint8_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* STRH (immediate, unsigned offset, 16-bit): 0111 1001 00 imm12 Rn Rt */
                     else if ((insn & 0xffc00000) == 0x79000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint16_t *)rw_addr = (uint16_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint16_t value = (uint16_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
-                    /* STP (signed offset, 64-bit): 10101001 00 imm7 Rt2 Rn Rt */
-                    else if ((insn & 0xffc00000) == 0xa9000000)
+                    /* A native heap initializer uses pre-index STP on an
+                     * executable allocation. Complete it through the alias;
+                     * making the whole host page writable would bypass SMC. */
+                    else if ((insn & 0x7e400000u) == 0x28000000u)
                     {
-                        int rt = insn & 0x1f;
-                        int rt2 = (insn >> 10) & 0x1f;
-                        *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
-                        *(uint64_t *)(rw_addr + 8) = IOS_STORE_SRC(rt2);
-                        emulated = 1;
-                    }
-                    /* STP (signed offset, 32-bit): 00101001 00 imm7 Rt2 Rn Rt */
-                    else if ((insn & 0xffc00000) == 0x29000000)
-                    {
-                        int rt = insn & 0x1f;
-                        int rt2 = (insn >> 10) & 0x1f;
-                        *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
-                        *(uint32_t *)(rw_addr + 4) = (uint32_t)IOS_STORE_SRC(rt2);
-                        emulated = 1;
+                        uint64_t gpr[32];
+                        memcpy( gpr, state.__x, sizeof(state.__x) );
+                        gpr[29] = state.__fp;
+                        gpr[30] = state.__lr;
+                        gpr[31] = state.__sp;
+                        if (ios_alias_store_pair( insn, fault_addr, gpr, &alias_fault, honor_guest_prot ))
+                        {
+                            memcpy( state.__x, gpr, sizeof(state.__x) );
+                            state.__fp = gpr[29];
+                            state.__lr = gpr[30];
+                            state.__sp = gpr[31];
+                            emulated = 1;
+                        }
                     }
                     /* STR (register, 64-bit): 1111 1000 001 Rm option S 10 Rn Rt */
                     else if ((insn & 0xffe00c00) == 0xf8200800)
                     {
                         int rt = insn & 0x1f;
-                        *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint64_t value = IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* STLR (Store-Release Register, 64-bit):
                      *   1100 1000 1001 1111 1111 11nn nnnt tttt   (mask 0xfffffc00, val 0xc89ffc00)
@@ -3357,27 +3535,26 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         uint64_t v = IOS_STORE_SRC(rt);
                         __atomic_thread_fence(__ATOMIC_RELEASE);
-                        memcpy((void *)rw_addr, &v, 1u << (insn >> 30));
-                        emulated = 1;
+                        emulated = ios_alias_write( fault_addr, &v, 1u << (insn >> 30), &alias_fault, honor_guest_prot );
                     }
                     /* STR (register, 32-bit): 1011 1000 001 Rm option S 10 Rn Rt */
                     else if ((insn & 0xffe00c00) == 0xb8200800)
                     {
                         int rt = insn & 0x1f;
-                        *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint32_t value = (uint32_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* STR (immediate, post/pre-index, 64-bit): 1111 1000 00 0imm9 0[10]1 Rn Rt */
                     else if ((insn & 0xffe00000) == 0xf8000000 && (insn & 0x800) == 0)
                     {
                         int rt = insn & 0x1f;
-                        *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint64_t value = IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                         /* Post-index (bits 11:10 = 01) / pre-index (bits 11:10 = 11):
                          * MUST update Rn += signed imm9. Without this, memcpy-style
                          * loops would write the same address forever. */
                         int idx_mode = (insn >> 10) & 3;  // bits 11:10
-                        if (idx_mode == 1 || idx_mode == 3)
+                        if (emulated && (idx_mode == 1 || idx_mode == 3))
                         {
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
@@ -3389,10 +3566,10 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffe00000) == 0xb8000000 && (insn & 0x800) == 0)
                     {
                         int rt = insn & 0x1f;
-                        *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint32_t value = (uint32_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                         int idx_mode = (insn >> 10) & 3;
-                        if (idx_mode == 1 || idx_mode == 3)
+                        if (emulated && (idx_mode == 1 || idx_mode == 3))
                         {
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
@@ -3407,10 +3584,10 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffe00000) == 0x38000000 && (insn & 0x800) == 0)
                     {
                         int rt = insn & 0x1f;
-                        *(uint8_t *)rw_addr = (uint8_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint8_t value = (uint8_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                         int idx_mode = (insn >> 10) & 3;
-                        if (idx_mode == 1 || idx_mode == 3)
+                        if (emulated && (idx_mode == 1 || idx_mode == 3))
                         {
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
@@ -3422,10 +3599,10 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffe00000) == 0x78000000 && (insn & 0x800) == 0)
                     {
                         int rt = insn & 0x1f;
-                        *(uint16_t *)rw_addr = (uint16_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint16_t value = (uint16_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                         int idx_mode = (insn >> 10) & 3;
-                        if (idx_mode == 1 || idx_mode == 3)
+                        if (emulated && (idx_mode == 1 || idx_mode == 3))
                         {
                             int rn = (insn >> 5) & 0x1f;
                             int imm9 = (insn >> 12) & 0x1ff;
@@ -3443,10 +3620,9 @@ static void *ios_mach_exception_thread( void *arg )
                         if (have_neon)
                         {
                             /* Low 64 bits of the 128-bit Q-reg = D-reg. */
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 8);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 8, &alias_fault, honor_guest_prot );
                             int idx_mode = (insn >> 10) & 3;
-                            if (idx_mode == 1 || idx_mode == 3)
+                            if (emulated && (idx_mode == 1 || idx_mode == 3))
                             {
                                 int rn = (insn >> 5) & 0x1f;
                                 int imm9 = (insn >> 12) & 0x1ff;
@@ -3462,10 +3638,9 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 4);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 4, &alias_fault, honor_guest_prot );
                             int idx_mode = (insn >> 10) & 3;
-                            if (idx_mode == 1 || idx_mode == 3)
+                            if (emulated && (idx_mode == 1 || idx_mode == 3))
                             {
                                 int rn = (insn >> 5) & 0x1f;
                                 int imm9 = (insn >> 12) & 0x1ff;
@@ -3481,10 +3656,9 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 16);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 16, &alias_fault, honor_guest_prot );
                             int idx_mode = (insn >> 10) & 3;
-                            if (idx_mode == 1 || idx_mode == 3)
+                            if (emulated && (idx_mode == 1 || idx_mode == 3))
                             {
                                 int rn = (insn >> 5) & 0x1f;
                                 int imm9 = (insn >> 12) & 0x1ff;
@@ -3505,8 +3679,7 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 16);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 16, &alias_fault, honor_guest_prot );
                         }
                     }
                     /* GPR STR (immediate, unsigned offset, 64-bit X-reg):
@@ -3519,8 +3692,8 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffc00000) == 0xf9000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint64_t *)rw_addr = IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint64_t value = IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* GPR STR (immediate, unsigned offset, 32-bit W-reg):
                      *   1011 1001 00 imm12 Rn Rt   (base 0xb9000000, mask 0xffc00000)
@@ -3528,8 +3701,8 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffc00000) == 0xb9000000)
                     {
                         int rt = insn & 0x1f;
-                        *(uint32_t *)rw_addr = (uint32_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint32_t value = (uint32_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* SIMD/FP STR (immediate, unsigned offset, D-reg): 11 111 1 01 00 imm12 Rn Rt */
                     else if ((insn & 0xffc00000) == 0xfd000000)
@@ -3537,8 +3710,7 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 8);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 8, &alias_fault, honor_guest_prot );
                         }
                     }
                     /* SIMD/FP STR (immediate, unsigned offset, S-reg): 10 111 1 01 00 imm12 Rn Rt */
@@ -3547,8 +3719,7 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 4);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 4, &alias_fault, honor_guest_prot );
                         }
                     }
                     /* SIMD/FP STR (immediate, unsigned offset, Q-reg): 00 111 1 01 10 imm12 Rn Rt */
@@ -3557,8 +3728,7 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;
                         if (have_neon)
                         {
-                            memcpy((void *)rw_addr, &neon_state.__v[rt], 16);
-                            emulated = 1;
+                            emulated = ios_alias_write( fault_addr, &neon_state.__v[rt], 16, &alias_fault, honor_guest_prot );
                         }
                     }
                     /* ml350: STRB (register offset): 0011 1000 001 Rm opt S 10 Rn Rt
@@ -3570,15 +3740,15 @@ static void *ios_mach_exception_thread( void *arg )
                     else if ((insn & 0xffe00c00) == 0x38200800)
                     {
                         int rt = insn & 0x1f;
-                        *(uint8_t *)rw_addr = (uint8_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint8_t value = (uint8_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     /* ml350: STRH (register offset): 0111 1000 001 ... (val 0x78200800) */
                     else if ((insn & 0xffe00c00) == 0x78200800)
                     {
                         int rt = insn & 0x1f;
-                        *(uint16_t *)rw_addr = (uint16_t)IOS_STORE_SRC(rt);
-                        emulated = 1;
+                        uint16_t value = (uint16_t)IOS_STORE_SRC(rt);
+                        emulated = ios_alias_write( fault_addr, &value, sizeof(value), &alias_fault, honor_guest_prot );
                     }
                     
 
@@ -3695,6 +3865,36 @@ static void *ios_mach_exception_thread( void *arg )
                                         (unsigned long long)fault_addr,
                                         (unsigned long long)rw_addr, cas_width);
                         }
+                    }
+                    /* The host FAR can identify the first byte even when a
+                     * later guest page blocks a spanning store. Dispatch the
+                     * blocked page, leaving PC, registers and all bytes intact,
+                     * so FEX invalidates that page before the next retry. */
+                    if (!emulated && (insn & 0xbfa07c00u) == 0x08207c00u)
+                    {
+                        unsigned rn = (insn >> 5) & 31;
+                        unsigned casp_width = (insn & 0x40000000u) ? 16 : 8;
+                        uint64_t base = rn == 31 ? state.__sp : rn == 30 ? state.__lr :
+                                        rn == 29 ? state.__fp : state.__x[rn];
+                        uintptr_t casp_rw = ios_write_alias( (uintptr_t)base );
+                        if (fault_addr >= base && fault_addr - base < casp_width &&
+                            casp_rw && ios_write_alias( (uintptr_t)base + casp_width - 1 ) ==
+                                       casp_rw + casp_width - 1 &&
+                            !(honor_guest_prot && ios_alias_write_is_trapped( (uintptr_t)base )) &&
+                            ios_mach_emulate_casp( insn, casp_rw, state.__x ))
+                        {
+                            static unsigned casp_mach_logs;
+                            emulated = 1;
+                            if (casp_mach_logs++ < 16)
+                                dprintf( STDERR_FILENO, "[mach-casp] insn=%08x pc=%llx addr=%llx rw=%llx\n",
+                                         insn, (unsigned long long)fault_pc,
+                                         (unsigned long long)base, (unsigned long long)casp_rw );
+                        }
+                    }
+                    if (!emulated && alias_fault && honor_guest_prot)
+                    {
+                        fault_addr = alias_fault;
+                        goto dispatch_guest_fault;
                     }
                     /* ml350 DISCRIMINATOR: alias EXISTS but the instruction is not
                      * in this decode list — every such miss previously cost a full
@@ -4348,6 +4548,7 @@ wx_done: ;
 skip_reclaim_band: ;
             }
 
+dispatch_guest_fault:
             /* ml369 (#63): last-resort in-process guest exception delivery.
              * Nothing above claimed the fault; declining it is a death
              * sentence under StikDebug (the stub cannot inject signals, so
@@ -12193,7 +12394,13 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 
                 {
                     static unsigned long wr_seen, wr_healed;
-                    int stripped = (is_write && (want & PROT_WRITE) &&
+                    /* Logical RWX does not mean the host may grant W: the
+                     * alias is RX by design. In particular, let FEX see CAS
+                     * writes so it invalidates translated code before patching
+                     * the RW alias. Healing here skips that invalidation and
+                     * leaves CoreCLR repeatedly executing its old prestub. */
+                    int aliased = ios_write_alias( (uintptr_t)siginfo->si_addr ) != 0;
+                    int stripped = (is_write && (want & PROT_WRITE) && !aliased &&
                                     host_prot >= 0 && !(host_prot & VM_PROT_WRITE));
                     ++wr_seen;
                     if (wr_seen <= 12 || (wr_seen % 4096) == 0)
@@ -12201,6 +12408,7 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                             "wine_want=%d host_prot=%d %s (seen=%lu healed=%lu) rev=ml552\n",
                             wr_seen, siginfo->si_addr, pc, (unsigned long long)esr,
                             is_write, want, host_prot,
+                            aliased ? "(intentional alias protection)" :
                             stripped ? "<== HOST STRIPPED WRITE" : "(not a strip)",
                             wr_seen, wr_healed);
 

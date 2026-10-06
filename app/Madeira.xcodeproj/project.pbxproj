@@ -106,6 +106,7 @@
 		A1000080 /* arm64ec-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000080 /* arm64ec-windows */; };
 		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
 		A1000081 /* x86_64-vcruntime in Resources */ = {isa = PBXBuildFile; fileRef = A2000081 /* x86_64-vcruntime */; };
+		A1000082 /* x86_64-opengl in Resources */ = {isa = PBXBuildFile; fileRef = A2000082 /* x86_64-opengl */; };
 		A1000090 /* libgnutls.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000090 /* libgnutls.a */; };
 		A1000091 /* libhogweed.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000091 /* libhogweed.a */; };
 		A1000092 /* libnettle.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000092 /* libnettle.a */; };
@@ -287,6 +288,7 @@
 		A2000080 /* arm64ec-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "arm64ec-windows"; sourceTree = "<group>"; };
 		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
 		A2000081 /* x86_64-vcruntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "x86_64-vcruntime"; sourceTree = "<group>"; };
+		A2000082 /* x86_64-opengl */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "x86_64-opengl"; sourceTree = "<group>"; };
 		A2000090 /* libgnutls.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libgnutls.a; sourceTree = "<group>"; };
 		A2000091 /* libhogweed.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libhogweed.a; sourceTree = "<group>"; };
 		A2000092 /* libnettle.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libnettle.a; sourceTree = "<group>"; };
@@ -475,6 +477,7 @@
 				A20000D1 /* d3d12 */,
 				A20000D2 /* licenses */,
 				A2000081 /* x86_64-vcruntime */,
+				A2000082 /* x86_64-opengl */,
 				A2000040 /* prefix-template.tar.gz */,
 				A2000094 /* cacert.pem */,
 				A2000041 /* PrefixExtractor.c */,
@@ -646,6 +649,7 @@
 				A10000D1 /* d3d12 in Resources */,
 				A10000D2 /* licenses in Resources */,
 				A1000081 /* x86_64-vcruntime in Resources */,
+				A1000082 /* x86_64-opengl in Resources */,
 				A1000040 /* prefix-template.tar.gz in Resources */,
 				A1000094 /* cacert.pem in Resources */,
 				A1000910 /* Assets.xcassets in Resources */,

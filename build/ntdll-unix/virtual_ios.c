@@ -177,6 +177,7 @@ struct ios_jit_mapping {
                                      * must not adopt it as is (ios_image_reload_mode). */
     unsigned char  hybrid_cached;   /* ml1245: image carries ARM64EC metadata */
     unsigned char  hybrid_valid;    /* 0 = hybrid_cached not yet populated */
+    unsigned char  is_fex;          /* copy of FEX's ARM64EC module (xtajit64.dll) */
 };
 static struct ios_jit_mapping ios_jit_mappings[IOS_JIT_MAX_MAPPINGS];
 static int ios_jit_mapping_count = 0;
@@ -2955,6 +2956,15 @@ static void (*ios_jit_alias_pushback_cb)(unsigned long long, unsigned long long,
  * (ios_push_subfloor_window). */
 static void *ios_jit_alias_pushback_peb = NULL;
 
+/* FEX's ARM64EC module is built as libarm64ecfex.dll and shipped as
+ * xtajit64.dll; its export directory keeps the build name. Called when a
+ * copy is registered, while the image is mapped and readable. */
+static unsigned char ios_image_is_fex( const void *pe_base, size_t size )
+{
+    const char *name = ios_pe_module_name( pe_base, size );
+    return !strcasecmp( name, "libarm64ecfex.dll" ) || !strcasecmp( name, "xtajit64.dll" );
+}
+
 void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
 {
     int i;
@@ -3032,6 +3042,9 @@ void ios_jit_add_mapping(void *pe_base, void *jit_base, size_t size)
         ios_jit_mappings[slot].unmapped = 0;
         ios_jit_mappings[slot].hybrid_cached = 0;    /* ml1245: same for the EC memo */
         ios_jit_mappings[slot].hybrid_valid = 0;
+        ios_jit_mappings[slot].is_fex = ios_image_is_fex( pe_base, size );
+        if (ios_jit_mappings[slot].is_fex)
+            dprintf( 2, "[jit-pool] FEX module copy pe=%p jit=%p+0x%lx\n", pe_base, jit_base, (unsigned long)size );
         __sync_synchronize();
         ios_jit_mappings[slot].pe_base = pe_base;
         if (slot == ios_jit_mapping_count) ios_jit_mapping_count++;
@@ -4380,6 +4393,20 @@ int ios_jit_pool_image_pc(uintptr_t pc, uintptr_t *pe_addr_out)
             if (pe_addr_out) *pe_addr_out = (uintptr_t)ios_jit_mappings[i].pe_base + (pc - jb);
             return 1;
         }
+    }
+    return 0;
+}
+/* Is this executing address inside a pool copy of FEX's own module? Lock-free
+ * read, like ios_jit_pool_image_pc. Translated guest code is never inside an
+ * image copy, so it always returns 0 for x64-JIT addresses. */
+int ios_jit_pool_pc_is_fex(uintptr_t pc)
+{
+    int i;
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        uintptr_t jb = (uintptr_t)ios_jit_mappings[i].jit_base;
+        if (ios_jit_mappings[i].pe_base && pc >= jb && pc < jb + ios_jit_mappings[i].size)
+            return ios_jit_mappings[i].is_fex;
     }
     return 0;
 }
@@ -13895,6 +13922,7 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
         ios_jit_mappings[slot].machine_valid = 0;
         ios_jit_mappings[slot].hybrid_cached = 0;
         ios_jit_mappings[slot].hybrid_valid = 0;
+        ios_jit_mappings[slot].is_fex = ios_image_is_fex( m->pe_base, m->size );
         ios_jit_mappings[slot].jit_base = rx_dest;
         ios_jit_mappings[slot].unmapped = 0;
         ios_jit_mappings[slot].size = m->size;

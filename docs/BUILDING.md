@@ -22,6 +22,7 @@ remediation; steps marked UNVERIFIED have not yet been re-run from scratch.
 | `toolchains/llvm-project/` + `toolchains/llvm-ios-build/` + `toolchains/llvm-host-build/` | LLVM built for iOS (hours) | upstream llvm-project at commit `8dfdcc7b7` ("[libc++] Fix memory leaks when throwing inside std::vector constructor"); configure `llvm-ios-build` with `-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_BUILD_TYPE=Release -DLLVM_HOST_TRIPLE=arm64-apple-ios17.0 -DLLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-ios17.0 -DLLVM_TARGET_ARCH=host -DLLVM_TARGETS_TO_BUILD= -DLLVM_ENABLE_PROJECTS= -DLLVM_BUILD_TOOLS=Off -DLLVM_INCLUDE_TESTS=Off -DLLVM_ENABLE_ZLIB=Off` (values read back from the existing CMakeCache); a host build for tablegen lives in `llvm-host-build` | recipe reconstructed; UNVERIFIED |
 | `research/GPTK/Metal Shader Converter 4.0 beta 2.pkg` | Apple installer, 30 MB, licence-bound | Apple developer downloads; SHA-256 `1acc33c87ea663933df89721a998d066106685473020bcbe007cee7a16155734` (pinned in `build/madeira-d3d12/deps.sh`). Only needed to REBUILD the converter fetch; the library itself is tracked | n/a |
 | `app/Madeira/x86_64-vcruntime/` | Microsoft Visual C++ 2015-2022 x64 runtime DLLs (concrt140, msvcp140*, vcamp140, vccorlib140, vcruntime140*), redistributable under Microsoft's terms, not under this repository's licence | extract from Microsoft's `vc_redist.x64.exe` (or copy from `C:\Windows\System32` of a licensed Windows install) into that folder | UNVERIFIED |
+| `toolchains/mesa-d3d12/` (OpenGL, optional) | Mesa 26.2.4 source, the DirectXShaderCompiler release for `dxil.dll`, and zlib for Meson | downloaded by `build/mesa-d3d12/build.sh` and checked against the SHA-256 values in it: `mesa-26.2.4.tar.xz` `bce5f7fb…832e9` from archive.mesa3d.org, `dxc_2026_09_29.zip` `ad31b1fc…7e7f1` (DirectXShaderCompiler v1.9.2609), zlib 1.3.1 and its wrap patch; DirectX-Headers at commit `9e393d6d` (v1.619.1) | Verified 2026-10-06 |
 | A free Apple ID; StikDebug or a pairing file plus LocalDevVPN | signing and JIT runtime requirements | see `docs/JIT.md` | n/a |
 
 ## Native build chains (all in the repository)
@@ -62,6 +63,17 @@ git-ignored and consumed by the app project.
    `app/Madeira/legal/LICENSES-rppairing-crates.txt` (tracked). `cargo test`
    in that folder runs its host tests. Verified on the development machine.
 5. Native D3D12 runtime: `build/madeira-d3d12/build-pe.sh` -> `d3d12.dll`, `madeira_d3d12.dll` and the test executables in `app/Madeira/arm64ec-windows/` (tracked). Verified this session. `build/madeira-d3d12/fetch-converter.sh` re-verifies the converter library; `build/stage-licenses.sh` refreshes the bundled licence copies (the Xcode build fails if they are stale).
+5b. OpenGL (optional): `build/mesa-d3d12/build.sh` builds Mesa's Windows x64
+   D3D12 driver from the pinned tarball with `build/mesa-d3d12/patches/` and
+   writes `opengl32.dll`, `libgallium_wgl.dll` and the fetched `dxil.dll`
+   (with `LICENSE-dxil.txt`) to `app/Madeira/x86_64-opengl/` (ignored). Needs
+   bison 3, ninja, and uv or `python3 -m venv` for Meson and Mako. Meson cannot
+   download (`--wrap-mode=nodownload`), and two clean builds give the same
+   bytes. `tests/host/check-mesa-fence-fallback.py` checks the fence patch
+   against the built tree. At session start WineProcessBridge.m links these
+   DLLs over Wine's opengl32 stub for x64 games (`env.MADEIRA_OPENGL = 0`
+   keeps the stub); without them nothing changes. Verified on the development
+   machine 2026-10-06.
 6. App: `xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -destination 'generic/platform=iOS' -allowProvisioningUpdates build` (Debug is the configuration that runs the games; Release builds have crashed the guest), then zip `Payload/Madeira.app` into an IPA and sideload. Verified this session on the development machine.
 7. WoW64 (32-bit programs, optional): `build/wine-i386/build.sh` (i386 Wine farm
    -> `app/Madeira/i386-windows/`), `build/fex-wow64/build.sh` (FEX WOW64 module

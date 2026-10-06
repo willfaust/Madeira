@@ -1457,6 +1457,37 @@ static void *wine_process_thread(void *arg) {
                 LOG("Symlinked %d MS VC++ Runtime DLLs (x86_64 native) over arm64ec builtins, skipped %d", vcrtLinked, vcrtSkipped);
                 dprintf(STDERR_FILENO, "[WineProc] Symlinked %d MS VC++ Runtime DLLs over arm64ec builtins (skipped %d for native EC SEH)\n", vcrtLinked, vcrtSkipped);
             }
+
+            /* Desktop OpenGL for x64 games: Mesa's opengl32.dll and its
+             * libgallium_wgl.dll run OpenGL on D3D12 (madeira_d3d12, then
+             * Metal), with Microsoft's dxil.dll validating the shaders.
+             * build/mesa-d3d12/build.sh writes them to x86_64-opengl/; an
+             * empty folder changes nothing. Wine's builtin opengl32 here is a
+             * stub whose every call fails, so the overlay is on by default;
+             * env.MADEIRA_OPENGL = 0 keeps the builtin. The loop above has
+             * already restored the builtin opengl32 for this session, so off
+             * only has to drop the overlay's other files. A game folder that
+             * ships its own opengl32.dll still comes first. */
+            if (use_arm64ec) {
+                NSString *glSource = [bundlePath stringByAppendingPathComponent:@"x86_64-opengl"];
+                const char *glSwitch = getenv("MADEIRA_OPENGL");
+                const BOOL glOn = !(glSwitch && glSwitch[0] == '0');
+                int glLinked = 0;
+                for (NSString *dll in [fm contentsOfDirectoryAtPath:glSource error:nil]) {
+                    if (![[[dll pathExtension] lowercaseString] isEqualToString:@"dll"]) continue;
+                    NSString *src = [glSource stringByAppendingPathComponent:dll];
+                    NSString *dst = [sys32Dir stringByAppendingPathComponent:dll];
+                    if (glOn) {
+                        [fm removeItemAtPath:dst error:nil];
+                        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil]) glLinked++;
+                    } else if ([[fm destinationOfSymbolicLinkAtPath:dst error:nil] isEqualToString:src] &&
+                               ![fm fileExistsAtPath:[dllSource stringByAppendingPathComponent:dll]]) {
+                        [fm removeItemAtPath:dst error:nil];
+                    }
+                }
+                dprintf(STDERR_FILENO, "[WineProc] OpenGL: %s (%d Mesa DLLs linked over the builtin)\n",
+                        glOn ? "Mesa on D3D12" : "Wine builtin (MADEIRA_OPENGL=0)", glLinked);
+            }
         }
 
         // Build the launch path for Wine's PE loader.

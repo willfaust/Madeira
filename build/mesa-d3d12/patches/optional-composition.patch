@@ -1,0 +1,85 @@
+--- a/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp
++++ b/src/gallium/winsys/d3d12/wgl/d3d12_wgl_framebuffer.cpp
+@@ -120,29 +120,22 @@
+    delete framebuffer;
+ }
+ 
+-static IDCompositionDevice *
+-dcomp_get_device()
++static HRESULT
++dcomp_get_device(IDCompositionDevice **device)
+ {
++   *device = nullptr;
+    HMODULE dcomp_mod = LoadLibraryA("DComp.DLL");
+-   if (!dcomp_mod) {
+-      return NULL;
+-   }
++   if (!dcomp_mod)
++      return HRESULT_FROM_WIN32(GetLastError());
+ 
+    typedef HRESULT (STDAPICALLTYPE *PFN_DCOMP_CREATE_DEVICE)(IDXGIDevice *, REFIID, void **);
+    PFN_DCOMP_CREATE_DEVICE DCompositionCreateDevice;
+ 
+    DCompositionCreateDevice = (PFN_DCOMP_CREATE_DEVICE)GetProcAddress(dcomp_mod, "DCompositionCreateDevice");
+-   if (!DCompositionCreateDevice) {
+-      return NULL;
+-   }
++   if (!DCompositionCreateDevice)
++      return HRESULT_FROM_WIN32(GetLastError());
+ 
+-   IDCompositionDevice *device;
+-   HRESULT hr = DCompositionCreateDevice(NULL, IID_PPV_ARGS(&device));
+-   if (FAILED(hr)) {
+-      return NULL;
+-   }
+-
+-   return device;
++   return DCompositionCreateDevice(NULL, IID_PPV_ARGS(device));
+ }
+ 
+ static void
+@@ -172,14 +165,31 @@
+ 
+    if (desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE) {
+       if (!framebuffer->dcomp) {
+-         framebuffer->dcomp.Attach(dcomp_get_device());
++         IDCompositionDevice *device = nullptr;
++         HRESULT hr = dcomp_get_device(&device);
++         framebuffer->dcomp.Attach(device);
+          if (!framebuffer->dcomp) {
+-            debug_printf("D3D12: failed to create dcomp device\n");
+-            return;
++            /* An alpha channel in the GL color buffer does not require a
++             * transparent desktop window. Keep RGBA rendering, but use the
++             * ordinary HWND swapchain when composition is unavailable.
++             * Layered/no-redirection windows still require composition;
++             * allocation and device failures must not be hidden either.
++             */
++            const LONG_PTR ex_style = GetWindowLongPtr(framebuffer->window, GWL_EXSTYLE);
++            const bool unavailable = hr == E_NOTIMPL || hr == E_NOINTERFACE ||
++               hr == DXGI_ERROR_UNSUPPORTED ||
++               hr == HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND) ||
++               hr == HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
++            if (!unavailable || (ex_style & (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP))) {
++               debug_printf("D3D12: failed to create dcomp device (0x%08x)\n", (unsigned)hr);
++               return;
++            }
++            desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++            debug_printf("D3D12: composition unavailable; using opaque HWND presentation\n");
+          }
+       }
+ 
+-      if (!framebuffer->target) {
++      if (desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE && !framebuffer->target) {
+          if (FAILED(framebuffer->dcomp->CreateTargetForHwnd(framebuffer->window, TRUE, &framebuffer->target))) {
+             debug_printf("D3D12: failed to create dcomp target\n");
+             return;
+@@ -303,7 +313,7 @@
+       framebuffer->offscreen_buffer = screen->base.base.resource_create(&screen->base.base, &local_templ);
+    }
+ 
+-   framebuffer->need_fillrect = util_format_has_alpha(templ->format);
++   framebuffer->need_fillrect = desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE;
+ }
+ 
+ static bool
