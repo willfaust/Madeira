@@ -649,7 +649,7 @@ struct SteamGameArtwork: View {
 /// smaller radial fade: the blur ramps from the centre out to the sharp artwork
 /// with no edge. Sizes follow the artwork's shorter side, so a list thumbnail gets
 /// the same look as a grid card.
-private struct SteamArtworkBlurSpot: View {
+struct SteamArtworkBlurSpot: View {
     let image: Image
     let size: CGSize
     /// (blur radius, fade radius) as fractions of the shorter side, outermost first.

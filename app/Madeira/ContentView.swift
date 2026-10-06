@@ -2148,6 +2148,7 @@ struct ContentView: View {
         .sheet(item: $devSheet) { sheet in
             switch sheet {
             case .steamSignIn: SteamSignInView()
+            case .epicSignIn: EpicSignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
             case .allSettings: AllSettingsView()
             }
@@ -2538,7 +2539,25 @@ struct ContentView: View {
     }
 
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
-    private func startLibraryEntry(_ entry: LibraryEntry) {
+    private func startLibraryEntry(_ entry: LibraryEntry, epicArguments: String? = nil) {
+        if let appName = entry.epicAppName, epicArguments == nil {
+            // Fetch after JIT setup so the short-lived exchange code is fresh when Wine starts.
+            Task {
+                do {
+                    let arguments = try await EpicAuth.shared.gameArguments(appName: appName)
+                    guard library.current == nil, wine_process_is_running() == 0, wineserver_is_running() == 0 else { return }
+                    startLibraryEntry(entry, epicArguments: arguments)
+                } catch { library.error = (error as? EpicAuthError)?.message ?? error.localizedDescription }
+            }
+            return
+        }
+        // The library keeps the entry without this run's exchange code.
+        let savedEntry = entry
+        var entry = entry
+        if let epicArguments, let appName = entry.epicAppName {
+            let command = entry.epicLaunchCommand ?? EpicInstaller.shared.installed[appName]?.launchCommand ?? ""
+            entry.arguments = [command, entry.arguments, epicArguments].filter { !$0.isEmpty }.joined(separator: " ")
+        }
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             library.error = error.localizedDescription
@@ -2556,7 +2575,7 @@ struct ContentView: View {
         let program = entry.desktop == true ? "explorer.exe"
             : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
         LogStore.shared.startSessionLog(program: program)
-        library.begin(entry)
+        library.begin(savedEntry)
         runWineFullSequence(profile: entry)
     }
 

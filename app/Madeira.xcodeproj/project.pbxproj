@@ -24,6 +24,13 @@
 		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
 		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
+		B1000780 /* EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000780 /* EpicAPI.swift */; };
+		B1000781 /* EpicAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000781 /* EpicAuth.swift */; };
+		B1000782 /* EpicSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000782 /* EpicSignInView.swift */; };
+		B1000783 /* EpicLibraryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000783 /* EpicLibraryViews.swift */; };
+		B1000784 /* EpicManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000784 /* EpicManifest.swift */; };
+		B1000785 /* EpicChunk.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000785 /* EpicChunk.swift */; };
+		B1000786 /* EpicInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000786 /* EpicInstaller.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
 		A100060A /* SwiftSteam/Content/DepotDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060A /* DepotDownloader.swift */; };
@@ -190,6 +197,13 @@
 		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
 		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
 		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
+		B2000780 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicAPI.swift; sourceTree = "<group>"; };
+		B2000781 /* EpicAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicAuth.swift; sourceTree = "<group>"; };
+		B2000782 /* EpicSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicSignInView.swift; sourceTree = "<group>"; };
+		B2000783 /* EpicLibraryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicLibraryViews.swift; sourceTree = "<group>"; };
+		B2000784 /* EpicManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicManifest.swift; sourceTree = "<group>"; };
+		B2000785 /* EpicChunk.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicChunk.swift; sourceTree = "<group>"; };
+		B2000786 /* EpicInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Epic/EpicInstaller.swift; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
 		A200060A /* DepotDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/DepotDownloader.swift"; sourceTree = "<group>"; };
@@ -403,6 +417,13 @@
 				A2000710 /* SavesAndShortcuts.swift */,
 				A2000711 /* WineMono.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
+				B2000780 /* EpicAPI.swift */,
+				B2000781 /* EpicAuth.swift */,
+				B2000782 /* EpicSignInView.swift */,
+				B2000783 /* EpicLibraryViews.swift */,
+				B2000784 /* EpicManifest.swift */,
+				B2000785 /* EpicChunk.swift */,
+				B2000786 /* EpicInstaller.swift */,
 				A2000600 /* SteamInstall.swift */,
 				A2000609 /* ContentDecryptor.swift */,
 				A200060A /* DepotDownloader.swift */,
@@ -729,6 +750,13 @@
 				A1000710 /* SavesAndShortcuts.swift in Sources */,
 				A1000711 /* WineMono.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
+				B1000780 /* EpicAPI.swift in Sources */,
+				B1000781 /* EpicAuth.swift in Sources */,
+				B1000782 /* EpicSignInView.swift in Sources */,
+				B1000783 /* EpicLibraryViews.swift in Sources */,
+				B1000784 /* EpicManifest.swift in Sources */,
+				B1000785 /* EpicChunk.swift in Sources */,
+				B1000786 /* EpicInstaller.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,
 				A100060A /* SwiftSteam/Content/DepotDownloader.swift in Sources */,
