@@ -1720,6 +1720,10 @@ static UINT nulldrv_VulkanInit( UINT version, void *vulkan_handle, const struct 
     return STATUS_NOT_IMPLEMENTED;
 }
 
+#ifdef MADEIRA_MOLTENVK
+#include "moltenvk_ios.c"
+#endif
+
 static UINT nulldrv_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs )
 {
     return STATUS_NOT_IMPLEMENTED;
@@ -1872,6 +1876,9 @@ static void load_display_driver(void)
                         "(MADEIRA_GAME_WINDOWS=0 hides them)\n" );
         }
         winios_user_driver.pUpdateDisplayDevices = winios_UpdateDisplayDevices;
+#ifdef MADEIRA_MOLTENVK
+        winios_user_driver.pVulkanInit = winios_VulkanInit;
+#endif
         __wine_set_user_driver( &winios_user_driver, WINE_GDI_DRIVER_VERSION );
 #else
         __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );

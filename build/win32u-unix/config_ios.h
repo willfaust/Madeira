@@ -19,4 +19,8 @@
 #undef SONAME_LIBVULKAN
 #undef SONAME_LIBGNUTLS
 
+#ifdef MADEIRA_MOLTENVK
+#define SONAME_LIBVULKAN "@executable_path/Frameworks/MoltenVK.framework/MoltenVK"
+#endif
+
 #endif
