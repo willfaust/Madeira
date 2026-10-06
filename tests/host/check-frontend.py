@@ -6,7 +6,7 @@ exit report.
    (app/Madeira/Library.swift) and the display layout (app/Madeira/
    GuestDisplay.swift) with small stubs and checks the launch environment a
    profile exports (executable, arguments, virtual monitor size for every
-   entry, x87 precision only when chosen, fastsync's switches only when
+   entry, both x87 precision choices, fastsync's switches only when
    Settings chose Fastsync, nothing else for the engine), the
    30 FPS fallback without DXMT's 30 FPS cap, profile validation, decoding of
    library files that carry unknown or fork-written keys (display mode,
@@ -175,11 +175,11 @@ game.configureLaunch()
 expect(env("MADEIRA_STEAM_APPID") == nil && env("MADEIRA_STEAM_APPPATH") == nil && env("MADEIRA_WORKDIR") == nil,
        "any other launch clears the direct start's identity and folder")
 
-// Engine switches: only x87 precision, and only when chosen (FEX's default otherwise).
+// Both x87 choices must override the WOW64 backend's reduced-precision default.
 expect(!game.reducedX87, "reduced-precision x87 is off for new entries")
 setenv("FEX_X87REDUCEDPRECISION", "1", 1)
 game.applyEnvironment()
-expect(env("FEX_X87REDUCEDPRECISION") == nil, "x87: nothing exported unless chosen")
+expect(env("FEX_X87REDUCEDPRECISION") == "0", "x87 off explicitly requests full precision, clearing a previous reduced-precision launch")
 expect(env("MADEIRA_CPU_COUNT") == nil && env("DXMT_D9_ANISO_LIMIT") == nil, "no other engine switches are exported")
 expect(env("MADEIRA_FASTSYNC") == "auto" && env("MADEIRA_FASTSYNC_SEM") == nil,
        "no sync keys (Fastsync, the default): fastsync exported, semaphore waits left to madeira.cfg")
@@ -201,6 +201,8 @@ MadeiraConfig.values = [:]; game.fastSync = nil; game.semaphoreFastPath = nil
 game.reducedX87 = true; game.applyEnvironment()
 expect(env("FEX_X87REDUCEDPRECISION") == "1", "reduced x87 exported when chosen")
 game.reducedX87 = false
+game.applyEnvironment()
+expect(env("FEX_X87REDUCEDPRECISION") == "0", "switching x87 off restores full precision")
 // This game's own config lines: handed over at every launch, nil when there are none.
 game.config = "fence-chain = 6"; game.applyEnvironment()
 expect(MadeiraConfig.game == "fence-chain = 6", "the game's own config is applied at launch")

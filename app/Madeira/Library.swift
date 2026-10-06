@@ -174,8 +174,8 @@ struct LibraryEntry: Codable, Identifiable {
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
     var fpsMode = 1
-    /// FEX's X87ReducedPrecision for this game. Off by default, as in FEX; only
-    /// an explicit choice exports FEX_X87REDUCEDPRECISION=1.
+    /// FEX's X87ReducedPrecision for this game. Export both states explicitly:
+    /// FEX defaults to reduced precision when no override is set.
     var reducedX87 = false
     var liveLogs = false
     var performance = false
@@ -489,8 +489,7 @@ struct LibraryEntry: Codable, Identifiable {
     /// Runs on the launch worker, before the JIT pool is taken.
     func applyEnvironment() {
         configureLaunch()
-        // Unset unless chosen: FEX's own default then applies, as for any other launch.
-        if reducedX87 { setenv("FEX_X87REDUCEDPRECISION", "1", 1) } else { unsetenv("FEX_X87REDUCEDPRECISION") }
+        setenv("FEX_X87REDUCEDPRECISION", reducedX87 ? "1" : "0", 1)
         // Exported only when chosen: unset keeps the engine's own default (and any
         // madeira.cfg setting), as before these choices existed.
         // Unset otherwise, so a previous game's choice (a launch that died before the
