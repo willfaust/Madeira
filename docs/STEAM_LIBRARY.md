@@ -351,6 +351,11 @@ nothing else), and the Windows desktop client's installer and launch code.
 
 ## Tests
 
+`tests/host/check-steam-session-jobs.py` compiles the production session with
+a test connection. It checks that disconnecting during a send resumes each
+pending request once, even when the send then fails. It needs `swiftc` and
+Python 3 and never contacts Steam.
+
 `tests/host/check-steam-library.py` (needs `swiftc` on Linux, `cc`,
 `python3` with `cryptography` or the `openssl` command, and libssl, liblzma and
 zlib development files; it never contacts Steam):
