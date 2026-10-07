@@ -22,10 +22,18 @@ extents, whole-host-page copy-back and the [swap] census.
    - opt-in reserve-time backing (wide) maps PROT_NONE, a later commit
      (mprotect) is zero-filled, is not backed twice ("present"), and a
      decommit splits it;
-   - the census line names every reason and the coverage.
+   - the census line names every reason and the coverage;
+   - ml1291: a given-back range queued to the punch thread is not free before
+     its punch, reads as zero in the file afterwards and only then returns
+     to the free list (the other cases run with MADEIRA_SWAP_PUNCH_DEFER=0,
+     punching synchronously as before);
+   - ml1297: a range whose punch failed (synchronous or on the punch thread)
+     is never returned to the free list.
 2. Source-checks the call sites in allocate_virtual_memory(), that every new
-   entry point returns first when the tier is off, and that the census
-   neither allocates nor uses stdio.
+   entry point returns first when the tier is off, that the census neither
+   allocates nor uses stdio, that the punch thread punches without
+   virtual_mutex and returns the range under it, and (ml1293) that a dead
+   range drops its dirty pages (MS_KILLPAGES) before it is punched.
 Device runs are still required: this proves the bookkeeping, not iOS paging.
 """
 from pathlib import Path
@@ -75,6 +83,8 @@ prelude = r'''
 #include <fcntl.h>
 #include <assert.h>
 #include <sys/mman.h>
+#include <pthread.h>
+#include <signal.h>
 #include <linux/falloc.h>
 typedef unsigned long ULONG_PTR;
 #define VPROT_READ       0x01
@@ -146,6 +156,15 @@ struct fpunchhole { unsigned fp_flags; unsigned reserved; off_t fp_offset; off_t
 static int test_fcntl( int fd, int cmd, struct fpunchhole *ph )
 { (void)cmd; return fallocate( fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, ph->fp_offset, ph->fp_length ); }
 #define fcntl( fd, cmd, arg ) test_fcntl( fd, cmd, arg )
+/* ml1291: the punch thread returns ranges to the free list under Wine's virtual lock */
+static pthread_mutex_t virtual_mutex = PTHREAD_MUTEX_INITIALIZER;
+#ifdef __linux__
+#define pthread_setname_np( name ) pthread_setname_np( pthread_self(), name )   /* glibc names a given thread */
+#endif
+/* ml1293: Darwin's msync flag (drop the pages without writing them back); a plain msync here */
+#ifndef MS_KILLPAGES
+#define MS_KILLPAGES 0
+#endif
 '''
 
 harness = r'''
@@ -421,6 +440,78 @@ static void test_reserve( void )
     munmap( r, 16u << 20 );
 }
 
+/* ml1291: a give queued to the punch thread */
+static void test_deferred_punch( void )
+{
+    char buf[0x4000];
+    unsigned long long done0;
+    uint64_t a, b;
+    int i, waited;
+    env( "blocks", NULL, NULL );
+    reset_tier();
+    unsetenv( "MADEIRA_SWAP_PUNCH_DEFER" );
+    ios_swap_pq_state = 0;   /* the next give starts the thread */
+    a = ios_swap_take( 0x8000 );
+    b = ios_swap_take( 0x4000 );
+    memset( buf, 0x6b, sizeof(buf) );
+    CHECK( pwrite( ios_swap_fd, buf, sizeof(buf), (off_t)a ) == (ssize_t)sizeof(buf), "deferred: data written to the file" );
+    done0 = ios_swap_pq_done;
+    pthread_mutex_lock( &virtual_mutex );   /* every caller holds it in Wine */
+    ios_swap_give( a, 0x8000 );
+    CHECK( ios_swap_pq_state == 1, "deferred: the punch thread started" );
+    CHECK( ios_swap_nfree == 0, "deferred: a queued range is not free before its punch" );
+    pthread_mutex_unlock( &virtual_mutex );
+    for (waited = 0; ios_swap_pq_done == done0 && waited < 5000; waited++) usleep( 1000 );
+    pthread_mutex_lock( &virtual_mutex );
+    CHECK( ios_swap_pq_done == done0 + 1, "deferred: the punch thread finished the give" );
+    CHECK( ios_swap_nfree == 1 && ios_swap_free[0].off == a && ios_swap_free[0].len == 0x8000, "deferred: the range is free after its punch" );
+    pthread_mutex_unlock( &virtual_mutex );
+    memset( buf, 0x6b, sizeof(buf) );
+    CHECK( pread( ios_swap_fd, buf, sizeof(buf), (off_t)a ) == (ssize_t)sizeof(buf), "deferred: file read back" );
+    for (i = 0; i < (int)sizeof(buf); i++) if (buf[i]) { CHECK( 0, "deferred: the punched range reads zero" ); break; }
+    pthread_mutex_lock( &virtual_mutex );
+    ios_swap_give( b, 0x4000 );
+    pthread_mutex_unlock( &virtual_mutex );
+    for (waited = 0; ios_swap_pq_done == done0 + 1 && waited < 5000; waited++) usleep( 1000 );
+    pthread_mutex_lock( &virtual_mutex );
+    CHECK( ios_swap_pq_done == done0 + 2 && ios_swap_bump == 0 && ios_swap_nfree == 0, "deferred: all offsets returned" );
+    pthread_mutex_unlock( &virtual_mutex );
+    reset_tier();
+}
+
+/* ml1297: a range whose punch failed is never reused */
+static void test_punch_failure( void )
+{
+    int fd = ios_swap_fd, nullfd = open( "/dev/null", O_RDONLY ), waited;
+    unsigned long long leaks0 = ios_swap_punch_leaks, done0;
+    uint64_t a;
+    env( "blocks", NULL, NULL );
+    reset_tier();
+    a = ios_swap_take( 0x8000 );
+    ios_swap_take( 0x4000 );   /* keeps a below the bump */
+    ios_swap_pq_state = -1;   /* synchronous */
+    ios_swap_fd = nullfd;
+    ios_swap_give( a, 0x8000 );
+    ios_swap_fd = fd;
+    CHECK( ios_swap_punch_leaks == leaks0 + 1 && ios_swap_nfree == 0, "punch failure (synchronous): range not reused" );
+    reset_tier();
+    a = ios_swap_take( 0x8000 );
+    ios_swap_take( 0x4000 );
+    ios_swap_pq_state = 1;    /* the punch thread started in test_deferred_punch */
+    done0 = ios_swap_pq_done;
+    ios_swap_fd = nullfd;
+    pthread_mutex_lock( &virtual_mutex );
+    ios_swap_give( a, 0x8000 );
+    pthread_mutex_unlock( &virtual_mutex );
+    for (waited = 0; ios_swap_pq_done == done0 && waited < 5000; waited++) usleep( 1000 );
+    ios_swap_fd = fd;
+    pthread_mutex_lock( &virtual_mutex );
+    CHECK( ios_swap_pq_done == done0 + 1 && ios_swap_punch_leaks == leaks0 + 2 && ios_swap_nfree == 0, "punch failure (punch thread): range not reused" );
+    pthread_mutex_unlock( &virtual_mutex );
+    close( nullfd );
+    reset_tier();
+}
+
 static void test_off( void )
 {
     struct file_view v = { 0, 0, 0 };
@@ -444,6 +535,7 @@ int main( int argc, char **argv )
     close( fd );
     setenv( "MADEIRA_SWAP_FILE", path, 1 );
     setenv( "MADEIRA_SWAP_MB", "256", 1 );
+    setenv( "MADEIRA_SWAP_PUNCH_DEFER", "0", 1 );   /* ml1291: synchronous punches up to test_deferred_punch */
     unsetenv( "MADEIRA_SWAP_COVERAGE" );
     ios_swap_init();
     unlink( path );
@@ -455,6 +547,8 @@ int main( int argc, char **argv )
     test_commit_copyback();
     test_classic_commit();
     test_reserve();
+    test_deferred_punch();
+    test_punch_failure();
     env( "blocks", NULL, NULL );
     ios_swap_tick( 1 );
     printf( "%d failures\n", bad );
@@ -466,7 +560,7 @@ with tempfile.TemporaryDirectory() as tmp:
     c = Path(tmp) / 'swap.c'
     exe = Path(tmp) / 'swap'
     c.write_text(prelude + core + harness)
-    subprocess.run(['cc', '-O1', '-Wall', '-Wno-unused-function', '-Werror', '-o', str(exe), str(c)], check=True)
+    subprocess.run(['cc', '-O1', '-Wall', '-Wno-unused-function', '-Werror', '-pthread', '-o', str(exe), str(c)], check=True)
     r = subprocess.run([str(exe)], capture_output=True, text=True, env=dict(os.environ))
     print(r.stdout.strip())
     check(r.returncode == 0, 'swap-tier core run failed:\n' + r.stdout + r.stderr)
@@ -479,6 +573,9 @@ with tempfile.TemporaryDirectory() as tmp:
             check(name in census[-1], 'census names ' + name)
         check('footprint=4321MB coverage=blocks min=1024KB' in census[-1], 'census carries footprint and coverage')
         check(re.search(r'file=\d+/256MB', census[-1]) is not None, 'census carries file use and cap')
+    check('[swap] ml1291 deferred F_PUNCHHOLE off (MADEIRA_SWAP_PUNCH_DEFER=0)' in err, 'MADEIRA_SWAP_PUNCH_DEFER=0 keeps the punches synchronous')
+    check('[swap] ml1291 deferred F_PUNCHHOLE on' in err, 'the punch thread starts by default')
+    check('range not reused, ml1297' in err, 'ml1297: a failed synchronous punch is logged')
 
 # ------------------------------------------------------------ source checks
 avm = body_of(virt, 'static NTSTATUS allocate_virtual_memory(')
@@ -510,6 +607,17 @@ check('return ios_swap_map( base, size, get_unix_prot( vprot | VPROT_COMMITTED )
       'ios_swap_map( base, size, get_unix_prot( vprot | VPROT_COMMITTED ) );' in virt, 'ml1082: commit-time extents mapped committed')
 check('ios_swap_map( base, size, get_unix_prot( vprot ) )' in body_of(virt, 'static void ios_swap_reserve( void *base, size_t size, unsigned int vprot, struct file_view *view )\n{'),
       'reserve-time extents keep the reservation protection (PROT_NONE)')
+give = body_of(virt, 'static void ios_swap_give( uint64_t off, size_t len )\n{')
+check(give.index('if (ios_swap_punch_defer( off, len )) return;') < give.index('F_PUNCHHOLE'), 'ml1291: a give is queued before the synchronous punch')
+punch = body_of(virt, 'static void *ios_swap_punch_thread( void *arg )\n{')
+check(punch.index('ios_swap_punch_timed(') < punch.index('pthread_mutex_lock( &virtual_mutex );') < punch.index('ios_swap_free_add('),
+      'ml1291: the punch runs without virtual_mutex, the free list is updated under it')
+rel = body_of(virt, 'static void ios_swap_release_range( void *base, size_t size, int copy_back )\n{')
+check('if (!copy_back) msync( oa, olen, MS_KILLPAGES );\n            ios_swap_give( ooff, olen );' in rel,
+      'ml1293: a released range drops its dirty pages before it is given back')
+resv = body_of(virt, 'static int ios_swap_punch_resv( char *lo, size_t len )\n{')
+check('msync( lo, len, MS_KILLPAGES );' in resv and resv.index('msync( lo, len, MS_KILLPAGES );') < resv.index('ios_swap_punch_timed('),
+      'ml1293: a decommit drops its dirty pages before the punch')
 setprot = body_of(virt, 'static NTSTATUS set_protection( struct file_view *view, void *base, SIZE_T size, ULONG protect )')
 check('ios_swap_release_range( base, size, 1 )' in setprot, 'set_protection still leaves the tier for EXEC/WRITECOPY/GUARD')
 

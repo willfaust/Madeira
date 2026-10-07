@@ -15395,6 +15395,10 @@ static struct { char *va; size_t len; uint64_t off; int resv; size_t key; uint64
 static unsigned ios_swap_n;
 static struct { uint64_t off, len; } ios_swap_free[8192];
 static unsigned ios_swap_nfree;
+/* ml1297: ranges whose punch failed. They are never returned to the free list: a
+ * later backing must read zero, and such a range may still hold its old
+ * data. The offset space is lost, the disk blocks stay in use. */
+static unsigned long long ios_swap_punch_leaks;
 static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused;
 
 /* COVERAGE, FREE-SPACE REUSE AND A LOW-VOLUME CENSUS (only while the tier is on).
@@ -15596,15 +15600,19 @@ static void ios_swap_free_add( uint64_t off, uint64_t len )
     if (ios_swap_nfree < 8192) { ios_swap_free[ios_swap_nfree].off = off; ios_swap_free[ios_swap_nfree].len = len; ios_swap_nfree++; }
     else ios_swap_free_drop++;   /* leaked offset space: later backings may be refused, never wrong */
 }
+static int ios_swap_punch_defer( uint64_t off, size_t len );   /* ml1291, below */
 static void ios_swap_give( uint64_t off, size_t len )
 {
     struct fpunchhole ph;
+    if (ios_swap_punch_defer( off, len )) return;   /* ml1291: punched and freed off the virtual lock */
     memset( &ph, 0, sizeof(ph) );
     ph.fp_offset = (off_t)off; ph.fp_length = (off_t)len;
     if (fcntl( ios_swap_fd, F_PUNCHHOLE, &ph ))
     {
         static int said;
-        if (said++ < 8) dprintf( 2, "[swap] ml1077 F_PUNCHHOLE off=%llu len=%zu failed errno=%d\n", (unsigned long long)off, len, errno );
+        if (said++ < 8) dprintf( 2, "[swap] ml1077 F_PUNCHHOLE off=%llu len=%zu failed errno=%d (range not reused, ml1297)\n", (unsigned long long)off, len, errno );
+        ios_swap_punch_leaks++;
+        return;
     }
     ios_swap_free_add( off, len );
 }
@@ -15617,6 +15625,117 @@ static uint64_t ios_swap_now_ns( void )
     clock_gettime( CLOCK_MONOTONIC, &ts );
 #endif
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ml1291: the swap file's F_PUNCHHOLE off the virtual lock.
+ *
+ * Ori and the Will of the Wisps, 2026-10-07: two freezes of 18 s and 13 s with
+ * every game thread idle, the main thread in fcntl() in both thread samples, a
+ * job worker waiting on a mutex, the swap file's disk use growing meanwhile, and
+ * each freeze ending exactly when the tier's release counter went up. A release
+ * (ios_swap_release_range, a failed map) gives the file range back with
+ * F_PUNCHHOLE, and APFS can hold that call for seconds behind the file's
+ * writeback; it ran under virtual_mutex, so every thread that allocates, frees,
+ * protects or faults through Wine waited for it.
+ *
+ * A given-back range is mapped by nothing any more (its view was replaced by
+ * anonymous memory or is being unmapped), so the punch itself needs no lock.
+ * ios_swap_give now queues it; a host thread punches it and only then, under
+ * virtual_mutex, returns the range to the free list, so it cannot be handed to a
+ * new backing before it reads as zero. A full queue or a thread that could not
+ * start falls back to the synchronous punch. MADEIRA_SWAP_PUNCH_DEFER=0 keeps
+ * every punch synchronous. Punches of 100 ms or more are logged, the in-place
+ * decommit punch (ios_swap_punch_resv, still synchronous) included. */
+#define IOS_SWAP_PQ 1024
+static struct { uint64_t off, len; } ios_swap_pq[IOS_SWAP_PQ];
+static unsigned ios_swap_pq_head, ios_swap_pq_n;
+static pthread_mutex_t ios_swap_pq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ios_swap_pq_cond = PTHREAD_COND_INITIALIZER;
+static int ios_swap_pq_state;   /* 0 not started, 1 running, -1 off */
+static unsigned long long ios_swap_pq_done, ios_swap_punch_slow, ios_swap_punch_max_ms;
+
+static int ios_swap_punch_timed( uint64_t off, uint64_t len, const char *why )
+{
+    struct fpunchhole ph;
+    uint64_t t0 = ios_swap_now_ns(), ms;
+    int rc;
+    memset( &ph, 0, sizeof(ph) );
+    ph.fp_offset = (off_t)off; ph.fp_length = (off_t)len;
+    if ((rc = fcntl( ios_swap_fd, F_PUNCHHOLE, &ph )))
+    {
+        static int said;
+        if (said++ < 8) dprintf( 2, "[swap] ml1291 F_PUNCHHOLE (%s) off=%llu len=%llu failed errno=%d\n",
+                                 why, (unsigned long long)off, (unsigned long long)len, errno );
+    }
+    ms = (ios_swap_now_ns() - t0) / 1000000;
+    if (ms > ios_swap_punch_max_ms) ios_swap_punch_max_ms = ms;
+    if (ms >= 100 && (++ios_swap_punch_slow <= 16 || (ios_swap_punch_slow % 64) == 0))
+        dprintf( 2, "[swap] ml1291 F_PUNCHHOLE (%s) off=%llu len=%llu took %llu ms (%llu slow, max %llu ms)\n",
+                 why, (unsigned long long)off, (unsigned long long)len, (unsigned long long)ms,
+                 ios_swap_punch_slow, ios_swap_punch_max_ms );
+    return rc;
+}
+
+static void *ios_swap_punch_thread( void *arg )
+{
+    sigset_t all;
+    sigfillset( &all );
+    pthread_sigmask( SIG_BLOCK, &all, NULL );
+    pthread_setname_np( "madeira-swap-punch" );
+    for (;;)
+    {
+        uint64_t off, len;
+        int rc;
+        pthread_mutex_lock( &ios_swap_pq_lock );
+        while (!ios_swap_pq_n) pthread_cond_wait( &ios_swap_pq_cond, &ios_swap_pq_lock );
+        off = ios_swap_pq[ios_swap_pq_head].off;
+        len = ios_swap_pq[ios_swap_pq_head].len;
+        ios_swap_pq_head = (ios_swap_pq_head + 1) % IOS_SWAP_PQ;
+        ios_swap_pq_n--;
+        pthread_mutex_unlock( &ios_swap_pq_lock );
+
+        rc = ios_swap_punch_timed( off, len, "deferred" );
+
+        pthread_mutex_lock( &virtual_mutex );   /* the free list and the bump live under it */
+        if (rc) ios_swap_punch_leaks++;   /* ml1297: not reused */
+        else ios_swap_free_add( off, len );
+        ios_swap_pq_done++;
+        pthread_mutex_unlock( &virtual_mutex );
+    }
+    return NULL;
+}
+
+/* Called with virtual_mutex held (every ios_swap_give caller is). */
+static int ios_swap_punch_defer( uint64_t off, size_t len )
+{
+    int queued = 0;
+    if (!ios_swap_pq_state)
+    {
+        /* MADEIRA_SWAP_PUNCH_DEFER=0 keeps every swap file punch synchronous, under the virtual lock. */
+        const char *e = getenv( "MADEIRA_SWAP_PUNCH_DEFER" );
+        pthread_t t;
+        ios_swap_pq_state = -1;
+        if (!(e && e[0] == '0') && !pthread_create( &t, NULL, ios_swap_punch_thread, NULL ))
+        {
+            pthread_detach( t );
+            ios_swap_pq_state = 1;
+        }
+        dprintf( 2, "[swap] ml1291 deferred F_PUNCHHOLE %s\n",
+                 ios_swap_pq_state > 0 ? "on" : (e && e[0] == '0') ? "off (MADEIRA_SWAP_PUNCH_DEFER=0)" : "off (no thread)" );
+    }
+    if (ios_swap_pq_state < 0) return 0;
+    pthread_mutex_lock( &ios_swap_pq_lock );
+    if (ios_swap_pq_n < IOS_SWAP_PQ)
+    {
+        unsigned slot = (ios_swap_pq_head + ios_swap_pq_n) % IOS_SWAP_PQ;
+        ios_swap_pq[slot].off = off;
+        ios_swap_pq[slot].len = len;
+        ios_swap_pq_n++;
+        queued = 1;
+        pthread_cond_signal( &ios_swap_pq_cond );
+    }
+    pthread_mutex_unlock( &ios_swap_pq_lock );
+    return queued;
 }
 /* ml1258, broad only: a size whose backed blocks die young stays anonymous.
  * ml1226: "twice" was too eager. Ori and the Will of the Wisps freed 13 backed
@@ -15820,6 +15939,10 @@ static void ios_swap_release_range( void *base, size_t size, int copy_back )
                 mprotect_range( oa, olen, 0, 0 );
                 ios_swap_unbacks++;
             }
+            /* ml1293: the range's contents are dead (decommit/release), but its dirty pages would
+             * still be written to the file by the pageout daemon -- I/O that slowed every other
+             * fault on the file and the punch behind it. Discard them first: no writeback. */
+            if (!copy_back) msync( oa, olen, MS_KILLPAGES );
             ios_swap_give( ooff, olen );
             ios_swap_bytes -= olen;
             ios_swap_releases++;
@@ -15863,12 +15986,9 @@ static int ios_swap_punch_resv( char *lo, size_t len )
     for (i = 0; i < ios_swap_n; i++)
     {
         char *a = ios_swap_ext[i].va;
-        struct fpunchhole ph;
         if (!ios_swap_ext[i].resv || lo < a || lo + len > a + ios_swap_ext[i].len) continue;
-        memset( &ph, 0, sizeof(ph) );
-        ph.fp_offset = (off_t)(ios_swap_ext[i].off + (lo - a));
-        ph.fp_length = (off_t)len;
-        if (fcntl( ios_swap_fd, F_PUNCHHOLE, &ph ))
+        msync( lo, len, MS_KILLPAGES );   /* ml1293: drop the dead dirty pages before the punch */
+        if (ios_swap_punch_timed( ios_swap_ext[i].off + (lo - a), len, "decommit" ))   /* ml1291: timed */
         {
             static int said;
             if (said++ < 8) dprintf( 2, "[swap] ml1257 hole %p+0x%zx failed errno=%d: releasing instead\n", lo, len, errno );
@@ -15901,6 +16021,8 @@ void ios_swap_stats_line( void )
              (unsigned long long)(ios_swap_logical >> 20), ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused,
              ios_swap_mode, disk >> 20, (unsigned long long)(ios_swap_cap >> 20), ios_swap_resv_n, ios_swap_holes,
              ios_swap_disk_refused, ios_swap_nchurny, ios_swap_churn_skips );
+    dprintf( 2, "[swap] ml1291 punches: %llu deferred done, %u queued, %llu slow (>=100 ms), max %llu ms; ml1297 %llu ranges not reused after a failed punch\n",
+             ios_swap_pq_done, ios_swap_pq_n, ios_swap_punch_slow, ios_swap_punch_max_ms, ios_swap_punch_leaks );
     /* ml1221: the census (bytes by reason) with every stats line, ~10 s, not only
      * after its own 30 s: Ori and the Will of the Wisps was jetsammed at 26 s and never printed one. */
     ios_swap_tick( 1 );

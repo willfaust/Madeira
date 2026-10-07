@@ -1450,6 +1450,151 @@ done:
              why, written, total, path );
 }
 
+/* ml1289: a store into aliased pages that CROSSES a 16 KB page boundary.
+ *
+ * The older cases of the write-fault store emulator (STR/STRB/STRH/STP/STUR,
+ * GPR and SIMD&FP, in ios_mach_exception_thread) write the whole access at
+ * alias(fault_addr): they take fault_addr as the start of the access and
+ * assume the alias goes on past the end of its page. A store that crosses a
+ * page breaks both: fault_addr need not be its first byte, and the next page
+ * may belong to another alias range or have none, so the bytes land at the
+ * wrong place or past the end of the first range's RW view. ml1276 and
+ * upstream's ml1283 already handle their encodings per page; this does the
+ * same for the rest, and only for crossing stores, so every other store keeps
+ * its existing case. The address comes from the registers, each page takes
+ * its own alias (a page without one that is plain writable memory is written
+ * directly), the store is refused when a page has neither, and the base
+ * register is written back after the whole store for the indexed forms.
+ * Store-release forms are left alone: a crossing STLR/STLUR is misaligned and
+ * takes the alignment-fault path instead.
+ *
+ * Returns 1 (written), -1 (refused: a page of the store has no alias) or 0
+ * (not a crossing store this helper decodes; the per-encoding cases run).
+ * ml1292: also called by the thread sampler (server_ios.c) to complete a store
+ * the kernel keeps faulting on, with the thread suspended. */
+int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
+                                     const arm_neon_state64_t *neon,
+                                     uintptr_t rx, uintptr_t rw, size_t sz )
+{
+    extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t fault_addr );
+    extern void ios_jit_anon_alias_note_write( unsigned long long );
+    const unsigned rt = insn & 31, rn = (insn >> 5) & 31, size = insn >> 30, v = (insn >> 26) & 1;
+    const unsigned opc = (insn >> 22) & 3;
+    const uint64_t base = rn == 31 ? st->__sp : st->__x[rn];
+    uint8_t src[32];
+    uint64_t ea, a, x0, x1;
+    int64_t imm = 0;
+    int wb = 0, pair = 0;
+    unsigned bytes, elem, rt2 = (insn >> 10) & 31, parts = 0, done = 0, i, part_len[2];
+    uintptr_t part_rw[2];
+
+    if ((insn & 0x3a000000u) == 0x28000000u)                    /* STP/STNP and SIMD&FP pairs */
+    {
+        const unsigned mode = (insn >> 23) & 3;              /* 0 stnp, 1 post, 2 offset, 3 pre */
+        if ((insn >> 22) & 1) return 0;                      /* loads */
+        if (v) elem = size == 3 ? 0 : 4u << size;            /* S, D, Q */
+        else   elem = size == 0 ? 4 : size == 2 ? 8 : 0;     /* W, X (01 is STGP) */
+        if (!elem) return 0;
+        imm = (((int64_t)((insn >> 15) & 0x7f)) << 57 >> 57) * (int64_t)elem;
+        ea = mode == 1 ? base : base + (uint64_t)imm;
+        wb = mode == 1 || mode == 3;
+        bytes = 2 * elem;
+        pair = 1;
+    }
+    else if ((insn & 0x3b000000u) == 0x38000000u || (insn & 0x3b000000u) == 0x39000000u)
+    {
+        /* single-register LDR/STR families: a store has opc 00 (GPR) or opc<0> = 0 (SIMD&FP) */
+        if (v ? (opc & 1) : opc != 0) return 0;
+        elem = v && (opc & 2) ? (size == 0 ? 16u : 0u) : 1u << size;
+        if (!elem) return 0;
+        if ((insn & 0x3b000000u) == 0x39000000u)                 /* unsigned offset */
+            ea = base + ((uint64_t)((insn >> 10) & 0xfff) * elem);
+        else if ((insn & 0x00200c00u) == 0x00200800u)            /* register offset */
+        {
+            const unsigned option = (insn >> 13) & 7, rm = (insn >> 16) & 31;
+            uint64_t off = rm == 31 ? 0 : st->__x[rm];
+            if (!(option & 2)) return 0;
+            if (option == 2) off = (uint32_t)off;
+            else if (option == 6) off = (uint64_t)(int64_t)(int32_t)off;
+            if (insn & 0x1000) off *= elem;
+            ea = base + off;
+        }
+        else if (!(insn & 0x00200000u))                          /* unscaled, post, pre */
+        {
+            const unsigned idx = (insn >> 10) & 3;
+            if (idx == 2) return 0;                                /* unprivileged */
+            imm = ((int64_t)((insn >> 12) & 0x1ff)) << 55 >> 55;
+            ea = idx == 1 ? base : base + (uint64_t)imm;
+            wb = idx == 1 || idx == 3;
+        }
+        else return 0;
+        bytes = elem;
+    }
+    else return 0;
+
+    if (((ea ^ (ea + bytes - 1)) & ~(uint64_t)0x3fff) == 0) return 0;   /* within one page */
+    if (v && !neon) return 0;
+
+    if (v)
+    {
+        memcpy( src, &neon->__v[rt], elem );
+        if (pair) memcpy( src + elem, &neon->__v[rt2], elem );
+    }
+    else
+    {
+        x0 = rt == 31 ? 0 : st->__x[rt];
+        x1 = rt2 == 31 ? 0 : st->__x[rt2];
+        memcpy( src, &x0, elem );
+        if (pair) memcpy( src + elem, &x1, elem );
+    }
+
+    while (done < bytes && parts < 2)
+    {
+        unsigned len = bytes - done;
+        a = ea + done;
+        if (len > 0x4000 - (a & 0x3fff)) len = 0x4000 - (unsigned)(a & 0x3fff);
+        part_rw[parts] = (rx && rw && sz && a >= rx && a - rx <= sz - len)
+                         ? rw + (a - rx) : ios_jit_anon_alias_lookup( (uintptr_t)a );
+        if (!part_rw[parts])
+        {
+            /* A page with no alias that is plain writable memory (the aliased page is
+             * the one that faulted) takes its bytes directly. */
+            mach_vm_address_t ra = (mach_vm_address_t)a;
+            mach_vm_size_t rs = 0;
+            vm_region_basic_info_data_64_t ri;
+            mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t ro = MACH_PORT_NULL;
+            if (mach_vm_region( mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
+                                (vm_region_info_t)&ri, &rc, &ro ) == KERN_SUCCESS &&
+                ra <= a && a + len <= ra + rs && (ri.protection & VM_PROT_WRITE))
+                part_rw[parts] = (uintptr_t)a;
+            if (ro != MACH_PORT_NULL) mach_port_deallocate( mach_task_self(), ro );
+        }
+        if (!part_rw[parts]) break;
+        part_len[parts++] = len;
+        done += len;
+    }
+    {
+        static int split_n;
+        if (split_n < 8)
+            dprintf( STDERR_FILENO, "[split-store] ml1289 #%d insn=0x%08x bytes=%u ea=0x%llx parts=%u %s\n",
+                     ++split_n, insn, bytes, (unsigned long long)ea, parts,
+                     done == bytes ? "emulated" : "REFUSED: a page of the store has no alias and is not writable" );
+    }
+    if (done != bytes) return -1;
+    for (i = 0, done = 0; i < parts; done += part_len[i], i++)
+    {
+        memcpy( (void *)part_rw[i], src + done, part_len[i] );
+        ios_jit_anon_alias_note_write( (unsigned long long)(ea + done) );
+    }
+    if (wb)
+    {
+        if (rn == 31) st->__sp = base + (uint64_t)imm;
+        else          st->__x[rn] = base + (uint64_t)imm;
+    }
+    return 1;
+}
+
 static void *ios_mach_exception_thread( void *arg )
 {
     mach_port_t port = (mach_port_t)(uintptr_t)arg;
@@ -3199,7 +3344,15 @@ static void *ios_mach_exception_thread( void *arg )
                      *
                      * STP Q is not architecturally one atomic 32-byte transaction, so two
                      * 16-byte copies are correct. Rn==31 is SP, never __x[31]. */
-                    if (have_neon && (insn & 0xFE400000) == 0xAC000000)
+                    /* ml1289: a store that crosses a 16 KB page is written per page here;
+                     * every other store goes on to its per-encoding case below. */
+                    const int split_r = ios_store_split_crossing( insn, &state, have_neon ? &neon_state : NULL,
+                                                                  rx, rw, sz );
+                    if (split_r)
+                    {
+                        if (split_r > 0) emulated = 1;
+                    }
+                    else if (have_neon && (insn & 0xFE400000) == 0xAC000000)
                     {
                         const int mode = (insn >> 23) & 0x3; /* 0 stnp, 1 post, 2 offset, 3 pre */
                         const int rt   = insn & 0x1f;
