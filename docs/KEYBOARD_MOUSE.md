@@ -86,8 +86,8 @@ Two paths carry the mouse; whichever delivers a delta first wins and is logged:
 How motion reaches the program depends on the program's cursor:
 
 - **The program shows a cursor, and UIKit reports the pointer's position**
-  (iPad, pointer not locked; the desktop session always counts as showing
-  one): the program's cursor is put where the pointer is on the game view
+  (iPad, pointer not locked; desktop sessions also follow reported cursor
+  visibility): the program's cursor is put where the pointer is on the game view
   (absolute moves), mapped exactly as a touch is. The drawn cursor therefore
   sits under the hidden iOS pointer and never drifts away from it, and it stops
   at the edge where the pointer leaves the game view.
@@ -101,8 +101,33 @@ Buttons are left, right, middle and the two side buttons
 (`XBUTTON1`/`XBUTTON2`); continuous scrolling is summed into wheel notches of
 120, vertical and horizontal.
 
+Button sources are chosen per button. A GCMouse movement report alone does
+not disable indirect-pointer clicks: buttons without raw reports can use the
+fallback, while raw-reported buttons retain their holds without duplicate edges.
+Raw button value callbacks and a 4 ms state sample share one edge history.
+Sampling recovers missing callbacks without expiring a held button; it stops
+while the app is inactive or no mouse is connected. Buttons held on attachment
+or return to the app must be released before a new press is routed. The first
+80 button callback/edge records and routing decisions are logged; diagnostics
+also report sampled values every 10 s.
+While raw mouse motion owns the relative route, game-surface touch packets
+carry only positionless button/wheel events. Surface motion is suppressed,
+including compatibility clicks reported as direct touches: their absolute
+position must not warp the camera or mix with raw deltas during a drag.
+Visible-cursor menus and touch-only sessions retain their original packets.
+Desktop cursor visibility/position metadata also permits relative mouse-look
+and automatic pointer lock when a desktop-hosted game hides its cursor.
+
 **Gain:** relative mouse motion has its own sensitivity (`sensMouse`, default
 1.0 = the device's deltas unchanged).
+
+**iPad:** native mouse support does not require AssistiveTouch. If primary
+clicks arrive as finger gestures, try disabling it under Settings >
+Accessibility > Touch > AssistiveTouch and restart Madeira. The touch engine
+resolves a short tap on release, which can post both button edges together;
+games polling held state can miss that pulse. AssistiveTouch can consume the
+primary button while secondary buttons still reach GameController (also
+documented for [Citrix's generic mouse input](https://docs.citrix.com/en-us/citrix-workspace-app-for-ios/configure/peripheral-devices.html)).
 
 **iPhone:** pointer devices are routed only through AssistiveTouch (Settings >
 Accessibility > Touch > AssistiveTouch > On, then Devices). If a mouse is
@@ -111,7 +136,9 @@ AssistiveTouch, a click also arrives as a synthesised finger touch at the
 AssistiveTouch cursor, which would snap the program's cursor there. While the
 mouse is in use (a GCMouse delta in the last 2 s), touches on the game view
 with no contact patch, or within 50 ms of a GCMouse button change, are
-dropped. The first 30 classifications are logged. Set
+dropped. The decision is retained through release/cancellation, so a touch
+admitted on press cannot lose its release when the raw mouse becomes active.
+The first 30 classifications are logged. Set
 `"ignoreTouchesWithMouse": false` in `Documents/madeira-input.json` to turn the
 filter off. The on-screen touch controls are not filtered. AssistiveTouch's own
 cursor cannot be hidden by an app; the program's drawn cursor is the one that
@@ -145,6 +172,12 @@ arriving at the screen edges and the pointer cannot wander onto the app's own
 buttons. iPadOS honours it only while Madeira is full screen, and only on the
 GCMouse path (on the UIKit path locking would stop pointer delivery, so it is
 refused). iPhone has no lockable pointer and shows no lock control.
+The game root and app-owned overlay roots request the same preference without
+forwarding it to SwiftUI child controllers. New hosting classes are installed
+as roots change. The `[hwinput] system pointer lock` line reports both
+`requested` and the scene's resolved `actual` state; `actual=1` is confirmation
+that iPadOS granted it. A request alone is not proof of containment; see
+[Apple's pointer-lock contract](https://developer.apple.com/documentation/uikit/uiviewcontroller/preferspointerlocked).
 
 - **Automatic:** while a program on the game view hides its cursor (for half a
   second, so a program about to show one does not lock), the pointer is over

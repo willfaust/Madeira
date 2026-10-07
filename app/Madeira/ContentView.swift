@@ -370,15 +370,15 @@ final class MetalBackedView: UIView {
         tmResolved = true
         tmDragTouch = t
         let (x, y) = mapPoint(tmGestureDownPoint)
-        winios_post_touch_down(x, y)
+        postSurfaceTouchDown(x, y)
     }
 
     /// Right/middle click at a guest position: winios_post_touch_* are
     /// left-button only, so these go through winios_pointer with ABSOLUTE.
     private func tmAbsoluteClick(down: UInt32, up: UInt32, at p: CGPoint) {
         let (x, y) = mapPoint(p)
-        winios_pointer(x, y, down | F_ABS, 0)
-        winios_pointer(x, y, up | F_ABS, 0)
+        postSurfacePointer(x, y, down | F_ABS)
+        postSurfacePointer(x, y, up | F_ABS)
     }
 
     private func touchModeBegan(_ touches: Set<UITouch>) {
@@ -415,9 +415,9 @@ final class MetalBackedView: UIView {
             tmScrollAccum += dy
             let (mx, my) = mapPoint(avg)
             while tmScrollAccum <= -14 { tmScrollAccum += 14
-                winios_pointer(mx, my, F_WHEEL, UInt32(bitPattern: Int32(-120))) }
+                postSurfacePointer(mx, my, F_WHEEL, data: UInt32(bitPattern: Int32(-120))) }
             while tmScrollAccum >= 14 { tmScrollAccum -= 14
-                winios_pointer(mx, my, F_WHEEL, UInt32(bitPattern: Int32(120))) }
+                postSurfacePointer(mx, my, F_WHEEL, data: UInt32(bitPattern: Int32(120))) }
             return
         }
         for t in touches {
@@ -426,7 +426,7 @@ final class MetalBackedView: UIView {
             if tmResolved {
                 guard t === tmDragTouch else { continue }
                 let (x, y) = mapPoint(p)
-                winios_post_touch_move(x, y)
+                postSurfaceTouchMove(x, y)
                 continue
             }
             guard tmDownPoints.count == 1 else {
@@ -437,7 +437,7 @@ final class MetalBackedView: UIView {
                 tmSlopBroken = true
                 tmCommitDrag(t)                  // button down at the ORIGINAL point
                 let (x, y) = mapPoint(p)
-                winios_post_touch_move(x, y)
+                postSurfaceTouchMove(x, y)
             }
         }
     }
@@ -445,7 +445,7 @@ final class MetalBackedView: UIView {
     private func touchModeEnded(_ touches: Set<UITouch>, _ event: UIEvent?) {
         if tmResolved, let d = tmDragTouch, touches.contains(d) {
             let (x, y) = mapPoint(d.location(in: self))
-            winios_post_touch_up(x, y)
+            postSurfaceTouchUp(x, y)
             tmResetGesture()
             return
         }
@@ -457,8 +457,8 @@ final class MetalBackedView: UIView {
         switch peak {
         case 1:
             let (x, y) = mapPoint(mid)
-            winios_post_touch_down(x, y)
-            winios_post_touch_up(x, y)
+            postSurfaceTouchDown(x, y)
+            postSurfaceTouchUp(x, y)
         case 2: tmAbsoluteClick(down: F_RDOWN, up: F_RUP, at: mid)
         case 3: tmAbsoluteClick(down: F_MDOWN, up: F_MUP, at: mid)
         default: break
@@ -468,7 +468,7 @@ final class MetalBackedView: UIView {
     private func touchModeCancelled(_ touches: Set<UITouch>) {
         if tmResolved, let d = tmDragTouch, touches.contains(d) {
             let (x, y) = mapPoint(d.location(in: self))
-            winios_post_touch_up(x, y)   // never leave the button held
+            postSurfaceTouchUp(x, y)   // never leave the button held
             tmResetGesture()
             return
         }
@@ -525,7 +525,36 @@ final class MetalBackedView: UIView {
         return i
     }
     private func postPointer(_ flags: UInt32, data: Int32 = 0) {
-        winios_pointer(Int32(Self.cursor.x), Int32(Self.cursor.y), flags, UInt32(bitPattern: data))
+        postSurfacePointer(Int32(Self.cursor.x), Int32(Self.cursor.y), flags, data: UInt32(bitPattern: data))
+    }
+
+    private func postSurfacePointer(_ x: Int32, _ y: Int32, _ flags: UInt32, data: UInt32 = 0) {
+        guard let event = HardwareInput.shared.surfacePointerEvent(x: x, y: y, flags: flags, data: data) else { return }
+        winios_pointer(event.x, event.y, event.flags, event.data)
+    }
+
+    private func postSurfaceTouchDown(_ x: Int32, _ y: Int32) {
+        if HardwareInput.shared.hardwareOwnsRelativeMotion {
+            postSurfacePointer(x, y, F_MOVE | F_LDOWN | F_ABS)
+        } else {
+            winios_post_touch_down(x, y)
+        }
+    }
+
+    private func postSurfaceTouchMove(_ x: Int32, _ y: Int32) {
+        if HardwareInput.shared.hardwareOwnsRelativeMotion {
+            postSurfacePointer(x, y, F_MOVE | F_ABS)
+        } else {
+            winios_post_touch_move(x, y)
+        }
+    }
+
+    private func postSurfaceTouchUp(_ x: Int32, _ y: Int32) {
+        if HardwareInput.shared.hardwareOwnsRelativeMotion {
+            postSurfacePointer(x, y, F_LUP | F_ABS)
+        } else {
+            winios_post_touch_up(x, y)
+        }
     }
     private func avgPoint(_ touches: [UITouch]) -> CGPoint {
         var x: CGFloat = 0, y: CGFloat = 0
@@ -568,7 +597,7 @@ final class MetalBackedView: UIView {
         guard desktopMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
-            winios_post_touch_down(x, y)
+            postSurfaceTouchDown(x, y)
             return
         }
         let now = Date().timeIntervalSinceReferenceDate
@@ -615,7 +644,7 @@ final class MetalBackedView: UIView {
         guard desktopMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
-            winios_post_touch_move(x, y)
+            postSurfaceTouchMove(x, y)
             return
         }
         let active = activeTouches(event)
@@ -675,7 +704,7 @@ final class MetalBackedView: UIView {
             let iy = Int32(max(-30000, min(30000, relCarryY)))
             relCarryX -= CGFloat(ix)
             relCarryY -= CGFloat(iy)
-            if ix != 0 || iy != 0 { winios_pointer(ix, iy, F_MOVE, 0) }
+            if ix != 0 || iy != 0 { postSurfacePointer(ix, iy, F_MOVE) }
             return
         }
 
@@ -697,7 +726,7 @@ final class MetalBackedView: UIView {
         guard desktopMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
-            winios_post_touch_up(x, y)
+            postSurfaceTouchUp(x, y)
             return
         }
         let now = Date().timeIntervalSinceReferenceDate
@@ -741,7 +770,7 @@ final class MetalBackedView: UIView {
         guard desktopMode else {
             guard let t = touches.first else { return }
             let (x, y) = mapTouch(t)
-            winios_post_touch_up(x, y)
+            postSurfaceTouchUp(x, y)
             return
         }
         fputs("[trackpad] CANCELLED (dragActive=\(dragActive))\n", stderr)
@@ -829,6 +858,7 @@ enum JoystickPadHost {
             host.view.backgroundColor = .clear
             host.view.isUserInteractionEnabled = false
             w.rootViewController = host
+            PointerLock.register(host)
             overlay = w
         }
         overlay?.frame = scene.coordinateSpace.bounds
@@ -3932,6 +3962,7 @@ enum TouchControlsHost {
             let host = UIHostingController(rootView: TouchControlsOverlay())
             host.view.backgroundColor = .clear
             w.rootViewController = host
+            PointerLock.register(host)
             window = w
         }
         window?.frame = scene.coordinateSpace.bounds

@@ -79,7 +79,7 @@ static int winios_desktop_mode(void);
 
 static int winios_direct_cursor_on(void)
 {
-    return !winios_desktop_mode() && winios_direct_cursor_wanted && winios_direct_cursor_wanted();
+    return winios_direct_cursor_wanted && winios_direct_cursor_wanted();
 }
 
 /* Wine's cursor position, read the way NtUserGetCursorPos does but without the
@@ -99,7 +99,7 @@ static void winios_report_cursor_pos(void)
     if (!status) winios_direct_cursor_pos( x, y );
 }
 
-/* A program moved its cursor itself (SetCursorPos). Direct mode only. */
+/* A program moved its cursor itself (SetCursorPos). Metadata is used in both modes. */
 static BOOL winios_drv_set_cursor_pos( INT x, INT y )
 {
     if (winios_direct_cursor_on()) winios_direct_cursor_pos( x, y );
@@ -1849,7 +1849,7 @@ static void load_display_driver(void)
         /* direct mode: inert (like winios_pSetCursor) until the app enables it */
         else if (winios_direct_cursor_set) winios_user_driver.pSetCursor         = winios_drv_set_cursor;
         else if (winios_pSetCursor)      winios_user_driver.pSetCursor           = winios_pSetCursor;
-        if (!winios_desktop_mode() && winios_direct_cursor_pos)
+        if (winios_direct_cursor_pos)
             winios_user_driver.pSetCursorPos = winios_drv_set_cursor_pos;
         if (winios_pDestroyCursorIcon)   winios_user_driver.pDestroyCursorIcon   = winios_pDestroyCursorIcon;
         if (winios_pShowWindow)          winios_user_driver.pShowWindow          = winios_pShowWindow;
