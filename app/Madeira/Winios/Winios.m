@@ -22,6 +22,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#include "WiniosCursor.h"
 #import <os/log.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -2369,6 +2370,7 @@ void winios_cursor_set(unsigned int cur_id, int w, int h, int hot_x, int hot_y, 
 }
 
 void winios_cursor_show(int show) {
+    winios_direct_cursor_show(show); // Visibility metadata also drives desktop mouse routing.
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_comp_game) {   /* the dialog cursor shows only over a dialog */
             g_game_cursor_prog_hidden = !show;
