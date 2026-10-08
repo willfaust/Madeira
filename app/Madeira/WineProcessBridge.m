@@ -975,11 +975,34 @@ static void *wine_process_thread(void *arg) {
             if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
             aerr = nil;
+            /* A short I/O buffer. iOS's default hands the render callback about
+             * 1024 frames (~21 ms) a pass. A WASAPI client that refills one period
+             * at a time (SDL's backend writes 10 ms whenever 10 ms or less is
+             * queued) never has that much queued, so every pass came up short and
+             * the game's sound had a gap every pass (a client delivered 93.6% of its
+             * audio). 5 ms passes fit inside one period. env.MADEIRA_AUDIO_IO_MS
+             * (1..40) chooses another length; 0 keeps iOS's default. Bluetooth
+             * outputs may still use longer buffers. */
+            {
+                char iov[16] = "";
+                const char *ioe = getenv("MADEIRA_AUDIO_IO_MS");
+                if (ioe) strlcpy(iov, ioe, sizeof iov);
+                else madeira_cfg_get("env.MADEIRA_AUDIO_IO_MS", iov, sizeof iov);
+                int io_ms = 5;
+                if (iov[0] == '0' && !iov[1]) io_ms = 0;
+                else if (iov[0] && atoi(iov) >= 1 && atoi(iov) <= 40) io_ms = atoi(iov);
+                if (io_ms) {
+                    [session setPreferredIOBufferDuration:io_ms / 1000.0 error:&aerr];
+                    if (aerr) LOG("AVAudioSession setPreferredIOBufferDuration(%d ms) failed: %{public}s",
+                                  io_ms, aerr.localizedDescription.UTF8String);
+                    aerr = nil;
+                }
+            }
             [session setActive:YES error:&aerr];
             if (aerr) LOG("AVAudioSession setActive failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
-            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms",
-                     session.sampleRate, session.outputLatency * 1000.0);
+            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms io-buffer=%.1fms",
+                     session.sampleRate, session.outputLatency * 1000.0, session.IOBufferDuration * 1000.0);
         }
 
         /* 2026-07-04 BISECT RESULT: arm A (this env set, all handler fixes
