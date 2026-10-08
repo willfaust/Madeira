@@ -175,28 +175,34 @@ static void my_release_metal_device(macdrv_metal_device d) {
     (void)d;
 }
 
-// The critical two: return a "view" handle that maps to the CAMetalLayer.
-// We pack the layer pointer directly. `v` carries the swapchain's HWND
-// (see my_get_win_data). Desktop mode: per-window layer in the desktop
-// compositor. Game mode: the fullscreen singleton, exactly as before.
-static macdrv_metal_view my_view_create_metal_view(macdrv_view v, macdrv_metal_device d) {
-    (void)d;
+// The layer an HWND presents to. Desktop mode: per-window layer in the
+// desktop compositor. Game mode: the fullscreen singleton. Shared by DXMT
+// (below) and the OpenGL presenter (Winios/WiniosGL.m).
+CAMetalLayer *madeira_display_layer_for_hwnd(void *hwnd) {
     if (madeira_desktop_mode()) {
-        CAMetalLayer *layer = winios_metal_layer_for_hwnd((void *)v);
-        if (!layer) {
-            NSLog(@"[madeira-display] desktop metal layer creation failed for hwnd=%p", (void *)v);
-            return NULL;
-        }
-        fprintf(stderr, "[madeira-display] desktop metal view for hwnd=%p layer=%p\n", (void *)v, layer);
-        fflush(stderr);
-        return (macdrv_metal_view)CFBridgingRetain(layer);
+        CAMetalLayer *layer = winios_metal_layer_for_hwnd(hwnd);
+        if (!layer)
+            NSLog(@"[madeira-display] desktop metal layer creation failed for hwnd=%p", hwnd);
+        return layer;
     }
     pthread_mutex_lock(&g_lock);
     CAMetalLayer *layer = g_layer;
     pthread_mutex_unlock(&g_lock);
-    if (!layer) {
-        NSLog(@"[madeira-display] view_create_metal_view called before layer registered!");
-        return NULL;
+    if (!layer)
+        NSLog(@"[madeira-display] metal layer requested before one was registered!");
+    return layer;
+}
+
+// The critical two: return a "view" handle that maps to the CAMetalLayer.
+// We pack the layer pointer directly. `v` carries the swapchain's HWND
+// (see my_get_win_data).
+static macdrv_metal_view my_view_create_metal_view(macdrv_view v, macdrv_metal_device d) {
+    (void)d;
+    CAMetalLayer *layer = madeira_display_layer_for_hwnd((void *)v);
+    if (!layer) return NULL;
+    if (madeira_desktop_mode()) {
+        fprintf(stderr, "[madeira-display] desktop metal view for hwnd=%p layer=%p\n", (void *)v, layer);
+        fflush(stderr);
     }
     winios_note_game_metal_hwnd((void *)v);
     return (macdrv_metal_view)CFBridgingRetain(layer);

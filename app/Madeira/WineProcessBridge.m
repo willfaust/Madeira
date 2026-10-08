@@ -927,6 +927,33 @@ static void *wine_process_thread(void *arg) {
          * so the next log proves it arrived rather than leaving us to infer it. */
         setenv("FNA3D_FORCE_DRIVER", "D3D11", 0);
 
+        /* OpenGL backend for the winios GL driver (build/win32u-unix/opengl_ios.c):
+         *   zink - desktop OpenGL 3.3-4.x: Mesa OSMesa + Zink on MoltenVK, from the
+         *          bundle's gl/ folder (build/mesa-ios, build/moltenvk-ios)
+         *   gles - Apple's OpenGL ES 3.0 (EAGL); desktop-GL-only apps fail
+         * madeira.cfg `gl-backend = zink|gles` chooses; otherwise zink when its
+         * dylibs are bundled. MADEIRA_GL_BACKEND in the environment wins over both.
+         * The driver falls back to gles by itself if Zink cannot start. */
+        {
+            NSString *glDir = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"gl"];
+            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:
+                                [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"]];
+            char glb[16] = "";
+            if (!madeira_cfg_get("gl-backend", glb, sizeof glb) || !glb[0])
+                strlcpy(glb, haveZink ? "zink" : "gles", sizeof glb);
+            setenv("MADEIRA_GL_BACKEND", glb, 0);
+            setenv("MADEIRA_GL_DIR", glDir.UTF8String, 1);
+            LOG("OpenGL backend: %{public}s (zink bundled: %d)", getenv("MADEIRA_GL_BACKEND"), haveZink);
+
+            /* With the GLES backend there is no desktop GL context, so make LOVE ask
+             * for OpenGL ES first. LOVE 11 checks this SDL hint (read from the
+             * environment) before trying desktop GL; SDL then creates the context
+             * through WGL_EXT_create_context_es2_profile, which that backend
+             * advertises. overwrite=0: an explicit setting still wins. */
+            if (!strcmp(getenv("MADEIRA_GL_BACKEND"), "gles"))
+                setenv("LOVE_GRAPHICS_USE_OPENGLES", "1", 0);
+        }
+
         /* ml720: make Mono report unhandled exceptions and assembly-load failures.
          *
          * DIAGNOSTIC — revisit before shipping; this is chatty and costs startup time.

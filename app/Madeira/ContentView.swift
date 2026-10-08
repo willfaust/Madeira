@@ -182,7 +182,7 @@ final class MetalBackedView: UIView {
     /// presented into it (before that it is the 800x600 seed or the last
     /// session's size, and Aspect would letterbox against the wrong shape).
     private func drawableAspect() -> CGSize {
-        guard madeira_get_present_count() != Self.presentCountAtLaunch else { return .zero }
+        guard madeira_frame_count() != Self.presentCountAtLaunch else { return .zero }
         let d = MetalHostView.shared.metalLayer.drawableSize
         return (d.width > 0 && d.height > 0) ? d : .zero
     }
@@ -3203,7 +3203,7 @@ struct ContentView: View {
                 // loop actually observes so that can't happen silently again.
                 if now - lastHeartbeat > 30 {
                     lastHeartbeat = now
-                    logStore.log("detach-wait: presents=\(madeira_get_present_count()) running=\(wine_process_is_running()) elapsed=\(Int(now - pollStart))s")
+                    logStore.log("detach-wait: presents=\(madeira_frame_count()) running=\(wine_process_is_running()) elapsed=\(Int(now - pollStart))s")
                 }
                 // Task #25: the present heuristic is meaningless in desktop
                 // mode — ANY child presenting (cube, a game window) trips it
@@ -3212,7 +3212,7 @@ struct ContentView: View {
                 // attached until the desktop exits (or the safety cap).
                 let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
                 if !isDesktopSession {
-                    if presentingSince == nil && madeira_get_present_count() >= 1 {
+                    if presentingSince == nil && madeira_frame_count() >= 1 {
                         presentingSince = now
                         logStore.log("Game is presenting (#1, splash) — early detach in \(Int(settleAfterFirstPresent))s")
                     }

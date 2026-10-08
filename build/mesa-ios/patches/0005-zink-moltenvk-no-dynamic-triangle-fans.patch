@@ -1,0 +1,18 @@
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -3517,6 +3517,15 @@
+       screen->have_triangle_fans = (VK_TRUE == screen->info.portability_subset_feats.triangleFans);
+    }
+ #endif // VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
++   /* Madeira: MoltenVK converts a triangle fan to triangles only when the
++    * pipeline was created with VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN. Zink shares
++    * one pipeline for every triangle topology and sets the fan with
++    * vkCmdSetPrimitiveTopology, which MoltenVK hands to Metal as a triangle
++    * list, so a 4-vertex fan draws one triangle of two. Let Mesa convert fans
++    * (and quads) to indexed triangles instead.
++    */
++   if (screen->info.driver_props.driverID == VK_DRIVER_ID_MOLTENVK)
++      screen->have_triangle_fans = false;
+ 
+    check_base_requirements(screen);
+    util_live_shader_cache_init(&screen->shaders, zink_create_gfx_shader_state, zink_delete_shader_state);

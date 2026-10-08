@@ -63,8 +63,14 @@ git-ignored and consumed by the app project.
    `app/Madeira/legal/LICENSES-rppairing-crates.txt` (tracked). `cargo test`
    in that folder runs its host tests. Verified on the development machine.
 5. Native D3D12 runtime: `build/madeira-d3d12/build-pe.sh` -> `d3d12.dll`, `madeira_d3d12.dll` and the test executables in `app/Madeira/arm64ec-windows/` (tracked). Verified this session. `build/madeira-d3d12/fetch-converter.sh` re-verifies the converter library; `build/stage-licenses.sh` refreshes the bundled licence copies (the Xcode build fails if they are stale).
-6. App: `xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -destination 'generic/platform=iOS' -allowProvisioningUpdates build` (Debug is the configuration that runs the games; Release builds have crashed the guest), then zip `Payload/Madeira.app` into an IPA and sideload. Verified this session on the development machine.
-7. WoW64 (32-bit programs, optional): `build/wine-i386/build.sh` (i386 Wine farm
+6. OpenGL and LOVE games:
+   - Before step 3, apply the Wine patch: `git -C wine apply ../patches/wine-opengl-winios.patch`. Then rebuild the tracked `opengl32.dll` with `build/wine-pe/build-modules.sh opengl32`.
+   - `build/luajit-x64/build.sh` -> `app/Madeira/compat/love/lua51.dll`, needed for LOVE games.
+   - `build/moltenvk-ios/build.sh`, then `build/mesa-ios/build.sh` -> `app/Madeira/gl/`, the desktop OpenGL backend. Optional: without it the app uses OpenGL ES. The script applies every file in `build/mesa-ios/patches` once (a `.madeira-applied-*` marker in the Mesa source records it), so an existing Mesa tree picks up a new patch on the next run.
+   - 32-bit OpenGL games (id Tech 3: Jedi Academy, Jedi Outcast, Quake III) need all of: the regenerated wow64 thunks in `wine-opengl-winios.patch` (from `dlls/opengl32/make_opengl`; to regenerate, run `perl make_opengl` in `wine/dlls/opengl32`, which downloads the pinned Khronos registry files into `~/.cache/wine`), `build/ntdll-unix` rebuilt, and Mesa patch `0004` (Zink on MoltenVK: fragment inputs Metal can link, and no crash when a pipeline fails). They need the desktop OpenGL (Zink) backend; fixed-function OpenGL does not exist in OpenGL ES. A 32-bit process gets `GL_EXTENSIONS` cut to 3072 bytes, because these engines copy it into a fixed buffer; `env.MADEIRA_GL_EXTENSIONS_MAX` in madeira.cfg sets another limit (0 = none).
+   - Each script says what source to download if it is missing. Verified on the development machine.
+7. App: `xcodebuild -project app/Madeira.xcodeproj -scheme Madeira -destination 'generic/platform=iOS' -allowProvisioningUpdates build` (Debug is the configuration that runs the games; Release builds have crashed the guest), then zip `Payload/Madeira.app` into an IPA and sideload. Verified this session on the development machine.
+8. WoW64 (32-bit programs, optional): `build/wine-i386/build.sh` (i386 Wine farm
    -> `app/Madeira/i386-windows/`), `build/fex-wow64/build.sh` (FEX WOW64 module
    -> `app/Madeira/aarch64-windows/xtajit.dll`) and the aarch64 `wow64.dll` /
    `wow64win.dll`; see docs/WOW64.md, "Building". UNVERIFIED on macOS.

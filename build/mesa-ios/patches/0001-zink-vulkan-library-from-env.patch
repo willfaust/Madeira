@@ -1,0 +1,20 @@
+--- a/src/gallium/drivers/zink/zink_screen.c	2026-09-26 15:43:25
++++ b/src/gallium/drivers/zink/zink_screen.c	2026-09-26 15:43:25
+@@ -3308,10 +3308,15 @@
+ 
+    u_trace_state_init();
+ 
+-   screen->loader_lib = util_dl_open(VK_LIBNAME);
++   /* Madeira: an iOS app cannot load libvulkan by bare name; the host passes
++    * the bundled Vulkan implementation (MoltenVK) by path. */
++   const char *vk_libname = getenv("ZINK_VULKAN_LIBRARY");
++   if (!vk_libname || !*vk_libname)
++      vk_libname = VK_LIBNAME;
++   screen->loader_lib = util_dl_open(vk_libname);
+    if (!screen->loader_lib) {
+       if (!screen->driver_name_is_inferred)
+-         mesa_loge("ZINK: failed to load "VK_LIBNAME);
++         mesa_loge("ZINK: failed to load %s", vk_libname);
+       goto fail;
+    }
+ 
