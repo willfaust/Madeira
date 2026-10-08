@@ -152,6 +152,14 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
   choice exports `MADEIRA_FEX_AVX=1`, which makes the ARM64EC FEX module report
   and emulate AVX/AVX2 for a game built for AVX processors (64-bit games; WOW64
   has no AVX);
+- **Large memory reservations**: off by default; turned on, it adds
+  `oversize-reserve = 1` to the game's config lines (see **This game's config**
+  below), and ntdll serves a reservation of 64 GB or more that the app's
+  address map cannot hold with a real part (`oversize-reserve-mb`, 16 GB) and
+  reports the size that was asked for. It is for a game that quits at start
+  because such a reservation fails (Final Fantasy Tactics - The Ivalice
+  Chronicles reserves 256 GB); a program that falls back to a smaller
+  reservation when a huge one fails is better off without it;
 - **CPU cores reported** (Automatic, 1, 2, 4 or 6) and **D3D9 anisotropic
   filtering** (Application default, up to 1×, 2×, 4× or 8×): only a choice
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or

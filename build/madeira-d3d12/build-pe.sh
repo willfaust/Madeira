@@ -20,8 +20,13 @@ python3 "$SRC/gen_vtables.py" \
     "$SRC/madeira_d3d12_stubs.h" >/dev/null
 
 echo "=== madeira_d3d12.dll (arm64ec) ==="
+# ml1310: DXMT's BCn decoders, for BC uploads on GPUs without BC sampling.
+for cpp in "$SRC/mad_bcn.cpp" "$REPO_ROOT/dxmt/src/dxmt/dxmt_bcn.cpp"; do
+    "$MINGW/arm64ec-w64-mingw32-clang++" -c -O2 -std=c++17 -fno-exceptions -fno-rtti \
+        -I"$REPO_ROOT/dxmt/src/dxmt" -o "$OUT/$(basename "$cpp" .cpp).o" "$cpp"
+done
 "$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall \
-    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$SRC/d3d12.def" \
+    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$OUT/mad_bcn.o" "$OUT/dxmt_bcn.o" "$SRC/d3d12.def" \
     -I"$SRC" -I"$REPO_ROOT/madeira-d3d12/src" -I"$REPO_ROOT/dxmt/src/winemetal" \
     -L"$REPO_ROOT/dxmt/build-arm64ec/src/winemetal" -lwinemetal \
     -luuid -lole32

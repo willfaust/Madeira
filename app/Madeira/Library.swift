@@ -280,12 +280,17 @@ struct LibraryEntry: Codable, Identifiable {
     /// MetalFX spatial upscaling factor (Display › MetalFX upscaling: 1.5 or 2;
     /// nil = off), passed on as this game's `metalfx-upscale` line.
     var metalFXUpscale: Double?
+    /// ml1298: a reservation of 64 GB or more that the address space cannot hold
+    /// is served with a real 16 GB part (ntdll's ios_oversize_reserve), passed on
+    /// as this game's `oversize-reserve` line; nil = off, such a reservation fails.
+    var largeReservations: Bool?
 
     /// What MadeiraConfig.applyGame writes for this game: the lines its pickers
     /// stand for, then its own config, which wins where both set a key.
     var gameConfigText: String? {
         var lines: [String] = []
         if let metalFXUpscale { lines.append("metalfx-upscale = \(metalFXUpscale)") }
+        if largeReservations == true { lines.append("oversize-reserve = 1") }
         if let config, !config.isEmpty { lines.append(config) }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
@@ -3041,6 +3046,8 @@ struct LibraryDetail: View {
                     Toggle("Reduced-precision x87", isOn: $entry.reducedX87)
                     // Exported for this game only when chosen (applyEnvironment).
                     Toggle("AVX and AVX2", isOn: Binding(get: { entry.avx ?? false }, set: { entry.avx = $0 ? true : nil }))
+                    // ml1298: this game's `oversize-reserve` line (gameConfigText).
+                    Toggle("Large memory reservations", isOn: Binding(get: { entry.largeReservations ?? false }, set: { entry.largeReservations = $0 ? true : nil }))
                     // Exported for this game only when chosen (applyEnvironment).
                     Picker("CPU cores reported", selection: Binding(get: { entry.cpuCount ?? 0 }, set: { entry.cpuCount = $0 == 0 ? nil : $0 })) {
                         Text("Automatic").tag(0)
@@ -3064,7 +3071,7 @@ struct LibraryDetail: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 } header: { Text("Compatibility & performance") } footer: {
-                    Text("Reduced-precision x87 can make older games faster at some cost in accuracy; it is off by default. Turn on AVX and AVX2 (off by default, 64-bit games) when a game built for AVX processors quits at start with an illegal instruction (c000001d); FEX then emulates AVX, which is slower. Report an NVIDIA GPU is for games that stop with \"no graphics card\" or \"failed to get GPU driver info\". With Fastsync, fast synchronization (on by default) handles events without a server round trip, and fast semaphore waits (off by default) does the same for semaphores. Settings apply to the next launch; a precision change may still require restarting Madeira.")
+                    Text("Reduced-precision x87 can make older games faster at some cost in accuracy; it is off by default. Turn on AVX and AVX2 (off by default, 64-bit games) when a game built for AVX processors quits at start with an illegal instruction (c000001d); FEX then emulates AVX, which is slower. Turn on Large memory reservations (off by default) when a game quits at start because it reserves more address space than iOS gives the app (64 GB or more, as Final Fantasy Tactics - The Ivalice Chronicles does); Madeira then backs 16 GB of it. Report an NVIDIA GPU is for games that stop with \"no graphics card\" or \"failed to get GPU driver info\". With Fastsync, fast synchronization (on by default) handles events without a server round trip, and fast semaphore waits (off by default) does the same for semaphores. Settings apply to the next launch; a precision change may still require restarting Madeira.")
                 }
                 Section("On screen") {
                     Toggle("Performance overlay", isOn: $entry.performance)
