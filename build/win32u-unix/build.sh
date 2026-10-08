@@ -132,6 +132,10 @@ for src in $WINE_SRC/dlls/win32u/*.c $WINE_SRC/dlls/win32u/dibdrv/*.c; do
     compile_one "$src" "$name"
 done
 
+# winios OpenGL driver: WGL over Apple's OpenGL ES (EAGL half in
+# app/Madeira/Winios/WiniosGL.m).
+compile_one "$BUILD_DIR/opengl_ios.c" "opengl_ios"
+
 echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then

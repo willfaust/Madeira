@@ -1,0 +1,26 @@
+# Meson cross file for iOS arm64 (device). @SDK@ is filled in by build.sh.
+# The VK_USE_PLATFORM_* defines match what MoltenVK's mvk_vulkan.h sets, so
+# every file sees the same Vulkan platform types whatever it includes first.
+[binaries]
+c = ['xcrun', '-sdk', 'iphoneos', 'clang']
+cpp = ['xcrun', '-sdk', 'iphoneos', 'clang++']
+objc = ['xcrun', '-sdk', 'iphoneos', 'clang']
+ar = ['xcrun', '-sdk', 'iphoneos', 'ar']
+strip = ['xcrun', '-sdk', 'iphoneos', 'strip']
+pkg-config = 'false'
+
+[built-in options]
+c_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0', '-DVK_USE_PLATFORM_METAL_EXT=1', '-DVK_USE_PLATFORM_IOS_MVK=1']
+cpp_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0', '-DVK_USE_PLATFORM_METAL_EXT=1', '-DVK_USE_PLATFORM_IOS_MVK=1']
+objc_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0', '-DVK_USE_PLATFORM_METAL_EXT=1', '-DVK_USE_PLATFORM_IOS_MVK=1']
+c_link_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0']
+cpp_link_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0']
+objc_link_args = ['-arch', 'arm64', '-isysroot', '@SDK@', '-miphoneos-version-min=17.0']
+
+[host_machine]
+system = 'darwin'
+subsystem = 'ios'
+kernel = 'xnu'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'

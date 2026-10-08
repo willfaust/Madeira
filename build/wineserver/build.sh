@@ -17,7 +17,7 @@ if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
     if [ -f "$APP_LIB" ]; then
         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
     else
-        echo "ERROR: No base libwineserver.a found"
+        echo "ERROR: No base libwineserver.a found; run build/wineserver/bootstrap-base.sh first"
         exit 1
     fi
 fi

@@ -1,0 +1,33 @@
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -842,7 +842,12 @@
+    caps->clip_halfz = true;
+    caps->texture_query_samples = true;
+    caps->texture_barrier = true;
+-   caps->query_so_overflow = true;
++   /* Madeira: overflow queries count transform feedback, so without it
++    * (MoltenVK has no VK_EXT_transform_feedback) GL_ARB_transform_feedback_
++    * overflow_query must not be exposed; the KHR-GL41 overflow-query tests
++    * crashed in a worker thread when it was.
++    */
++   caps->query_so_overflow = screen->info.have_EXT_transform_feedback;
+    caps->gl_spirv = true;
+    caps->clear_scissored = true;
+    caps->invalidate_buffer = true;
+@@ -993,7 +998,15 @@
+ 
+    caps->max_texture_array_layers = screen->info.props.limits.maxImageArrayLayers;
+ 
+-   caps->depth_clip_disable = screen->info.have_EXT_depth_clip_enable;
++   /* Madeira: without VK_EXT_depth_clip_enable, Vulkan disables depth clipping
++    * whenever depthClampEnable is set, which is exactly GL depth clamp, and
++    * zink_pipeline.c already sets depthClampEnable from the GL state. MoltenVK
++    * has the core depthClamp feature (Metal's MTLDepthClipModeClamp) but not
++    * the extension, so GL_ARB_depth_clamp was missing and glDisable(
++    * GL_DEPTH_CLAMP) raised GL_INVALID_ENUM under the 4.1 version override.
++    */
++   caps->depth_clip_disable = screen->info.have_EXT_depth_clip_enable ||
++                              screen->info.feats.features.depthClamp;
+ 
+    caps->shader_stencil_export = screen->info.have_EXT_shader_stencil_export;
+ 

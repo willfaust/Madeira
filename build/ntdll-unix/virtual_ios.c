@@ -4776,14 +4776,16 @@ int ios_patch_rtl_pc_to_file_header_current( const void *pe_addr )
 #define X18_ROLE_RN   1  /* bits[9:5] = base register for loads/stores/data-proc */
 #define X18_ROLE_RM   2  /* bits[20:16] = second register (MOV, register offset) */
 #define X18_ROLE_RT2  3  /* bits[14:10] = second register in LDP/STP */
+#define X18_ROLE_RT   4  /* bits[4:0] = the register being STORED (64-bit STR/STUR/STP) */
 
-static int ios_insn_x18_role(uint32_t insn)
+static int ios_insn_x18_role(uint32_t insn, int stores)
 {
     /* Quick reject: check if 18 appears in any relevant field */
     int rn = (insn >> 5) & 0x1f;
     int rm = (insn >> 16) & 0x1f;
     int rt2 = (insn >> 10) & 0x1f;
-    if (rn != 18 && rm != 18 && rt2 != 18) return X18_ROLE_NONE;
+    int rt = insn & 0x1f;
+    if (rn != 18 && rm != 18 && rt2 != 18 && !(stores && rt == 18)) return X18_ROLE_NONE;
 
     /* Classify instruction to verify the field is actually a register */
     uint32_t top8 = insn >> 24;
@@ -4846,7 +4848,56 @@ static int ios_insn_x18_role(uint32_t insn)
         if (rm == 18) return X18_ROLE_RM;
     }
 
+    /* x18 as the VALUE stored: `str x18, [sp, #n]` / `stp x18, xM, [sp, #n]`.
+     * This is NtCurrentTeb() written into a struct -- Wine's opengl32 thunks do
+     * it in nearly every function (`.teb = NtCurrentTeb()` in each params
+     * struct: 3,102 sites), and on iOS it stored a zeroed x18, so every GL call
+     * reached the unix side with teb == NULL. Only the plain 64-bit store forms
+     * are recognised: STR (unsigned offset), STUR, STP (signed offset). Loads
+     * INTO x18 are never patched. Only for images where ios_x18_patch_stores()
+     * is true (opengl32); every other image is patched exactly as before. */
+    if (stores && rt == 18 && rn != 18)
+    {
+        if ((insn & 0xFFC00000) == 0xF9000000) return X18_ROLE_RT;                /* STR  Xt, [Xn, #imm12*8] */
+        if ((insn & 0xFFE00C00) == 0xF8000000) return X18_ROLE_RT;                /* STUR Xt, [Xn, #simm9] */
+        if ((insn & 0xFFC00000) == 0xA9000000 && rt2 != 18) return X18_ROLE_RT;   /* STP  Xt, Xt2, [Xn, #simm7*8] */
+    }
+
     return X18_ROLE_NONE;
+}
+
+/* The trampoline pushes its scratch register (`str xS, [sp, #-16]!`) before
+ * running the rewritten instruction, so an SP-based X18_ROLE_RT store must
+ * address 16 bytes further up. Returns FALSE when the adjusted offset does not
+ * encode (the site is then left unpatched). */
+static BOOL ios_insn_x18_store_sp_fixup( uint32_t *insn )
+{
+    uint32_t v = *insn;
+    int64_t imm;
+
+    if (((v >> 5) & 0x1f) != 31) return TRUE;                  /* base is not SP */
+    if ((v & 0xFFC00000) == 0xF9000000)                        /* STR: imm12, scaled by 8 */
+    {
+        imm = ((v >> 10) & 0xfff) + 2;
+        if (imm > 0xfff) return FALSE;
+        *insn = (v & ~(0xfffu << 10)) | ((uint32_t)imm << 10);
+        return TRUE;
+    }
+    if ((v & 0xFFE00C00) == 0xF8000000)                        /* STUR: signed imm9, bytes */
+    {
+        imm = ((int64_t)((int32_t)(v << 11) >> 23)) + 16;
+        if (imm > 255) return FALSE;
+        *insn = (v & ~(0x1ffu << 12)) | (((uint32_t)imm & 0x1ff) << 12);
+        return TRUE;
+    }
+    if ((v & 0xFFC00000) == 0xA9000000)                        /* STP: signed imm7, scaled by 8 */
+    {
+        imm = ((int64_t)((int32_t)(v << 10) >> 25)) + 2;
+        if (imm > 63) return FALSE;
+        *insn = (v & ~(0x7fu << 15)) | (((uint32_t)imm & 0x7f) << 15);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* Replace x18 in an instruction with a different register */
@@ -4857,6 +4908,7 @@ static uint32_t ios_insn_replace_x18(uint32_t insn, int role, int scratch)
     case X18_ROLE_RN:  return (insn & ~(0x1f << 5)) | (scratch << 5);
     case X18_ROLE_RM:  return (insn & ~(0x1f << 16)) | (scratch << 16);
     case X18_ROLE_RT2: return (insn & ~(0x1f << 10)) | (scratch << 10);
+    case X18_ROLE_RT:  return (insn & ~0x1fu) | scratch;
     default:           return insn;
     }
 }
@@ -4908,7 +4960,17 @@ static unsigned char *ios_x18_build_data_map( const char *text, size_t text_size
  * 2.2MB reservation for ntdll) — with per-child copies of every DLL that
  * waste was ~HALF the pool (4 apps hit 368/384MB). Count the actual
  * patch sites and size the reservation to fit. */
-size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
+/* Madeira: which images also get their x18 STORES patched (X18_ROLE_RT).
+ * Only opengl32, whose generated thunks store NtCurrentTeb() into every
+ * params struct. Another generated-thunk DLL that passes the TEB the same way
+ * would need adding here. `image` is the readable mapped PE. */
+int ios_x18_patch_stores( const void *image, size_t image_size )
+{
+    extern const char *ios_pe_module_name( const void *image_base, size_t image_size );
+    return !strcasecmp( ios_pe_module_name( image, image_size ), "opengl32.dll" );
+}
+
+size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores )
 {
     unsigned char *data_map = ios_x18_build_data_map( text, text_size );
     size_t need = 0;
@@ -4916,7 +4978,7 @@ size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
     {
         uint32_t insn = *(const uint32_t *)(text + i);
         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7)))) continue;
-        if (ios_insn_x18_role( insn ) != X18_ROLE_NONE) need += 32;
+        if (ios_insn_x18_role( insn, stores ) != X18_ROLE_NONE) need += 32;
     }
     free( data_map );
     /* Slack: the patcher's per-site max is 32B; pad one page so a
@@ -4926,7 +4988,7 @@ size_t ios_jit_x18_tramp_need( const char *text, size_t text_size )
 }
 
 int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
-                       char *tramp_rw, char *tramp_rx, size_t tramp_size)
+                       char *tramp_rw, char *tramp_rx, size_t tramp_size, int stores)
 {
     size_t tramp_off = 0;
     int count = 0;
@@ -5082,10 +5144,10 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
         int role;
         if (data_map && (data_map[(i / 4) >> 3] & (1 << ((i / 4) & 7))))
         {
-            if (ios_insn_x18_role(insn) != X18_ROLE_NONE) lit_skipped++;
+            if (ios_insn_x18_role(insn, stores) != X18_ROLE_NONE) lit_skipped++;
             continue;
         }
-        role = ios_insn_x18_role(insn);
+        role = ios_insn_x18_role(insn, stores);
         if (role == X18_ROLE_NONE) continue;
 
         /* Determine scratch register — use x17 normally.
@@ -5094,9 +5156,17 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
         int rt = insn & 0x1f;
         int rn = (insn >> 5) & 0x1f;
         int rm = (insn >> 16) & 0x1f;
-        if (rt == 17 || rn == 17 || rm == 17) scratch = 16;
+        int rt2 = (role == X18_ROLE_RT) ? (insn >> 10) & 0x1f : -1;   /* STP's second register */
+        uint32_t replaced;
+        if (rt == 17 || rn == 17 || rm == 17 || rt2 == 17) scratch = 16;
         /* Double-check: if both x16 and x17 are used, skip (extremely rare) */
-        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16))
+        if (scratch == 16 && (rt == 16 || rn == 16 || rm == 16 || rt2 == 16))
+        {
+            skipped++;
+            continue;
+        }
+        replaced = ios_insn_replace_x18(insn, role, scratch);
+        if (role == X18_ROLE_RT && !ios_insn_x18_store_sp_fixup( &replaced ))
         {
             skipped++;
             continue;
@@ -5159,7 +5229,7 @@ int ios_jit_patch_x18(char *text_rw, char *text_rx, size_t text_size,
             *(uint32_t *)(tramp_rw + tramp_off) = 0xF9400000 | ((slot_off / 8) << 10) | (scratch << 5) | scratch;
             tramp_off += 4;
             /* Modified instruction with x18 replaced by scratch */
-            *(uint32_t *)(tramp_rw + tramp_off) = ios_insn_replace_x18(insn, role, scratch);
+            *(uint32_t *)(tramp_rw + tramp_off) = replaced;
             tramp_off += 4;
             /* ldr xSCRATCH, [sp], #16 */
             *(uint32_t *)(tramp_rw + tramp_off) = (scratch == 17) ? 0xF84107F1 : 0xF84107F0;
@@ -8008,6 +8078,7 @@ static unsigned long ios_wow_env_ulong( const char *name, unsigned long dflt )
  * when a 32-bit process starts, never ahead of time.  0 on a large map.
  */
 static unsigned ios_wow_small_va_slots;
+extern unsigned long long ios_layerkit_lo, ios_layerkit_hi;   /* ml900: measured in ios_va_profile() */
 static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
 {
     static int announced;
@@ -8033,6 +8104,36 @@ static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
             *floor = lo;
             *ceil  = hi;
         }
+        else
+        {
+            /* A SMALLER MAP STILL. A tablet reported max_address = 0x458000000
+             * (17.4 GB): top - 8 GB is below 16 GB, the band above was empty, the
+             * candidates stayed in the unreachable high band and a 32-bit main
+             * image was terminated with c0000017. Its launch probe showed the
+             * 4 GB slots at 4, 8 and 12 GB free; 4 GB holds the JIT pool and the
+             * executable window, and CoreAnimation's measured range
+             * (ios_layerkit_lo/hi, [layerkit-range]) took 12 GB up. So on such a
+             * map the band starts at 8 GB, runs to the end of the map, and is cut
+             * at the CoreAnimation range -- keeping whichever side can hold a
+             * window. The guard page may borrow the first page of that range. */
+            ULONG_PTR slo = (ULONG_PTR)0x200000000ULL;                  /* 8 GB */
+            ULONG_PTR shi = kern_max;
+
+            if (ios_layerkit_hi && ios_layerkit_lo < shi && ios_layerkit_hi > slo)
+            {
+                ULONG_PTR below_hi = ios_layerkit_lo > slo ? ios_layerkit_lo : slo;
+                ULONG_PTR above_lo = ((ULONG_PTR)ios_layerkit_hi + IOS_WOW_WINDOW_SIZE - 1) &
+                                     ~(IOS_WOW_WINDOW_SIZE - 1);
+
+                if (below_hi >= slo + IOS_WOW_WINDOW_SIZE) shi = below_hi;
+                else slo = above_lo;
+            }
+            if (shi >= slo + IOS_WOW_WINDOW_SIZE)
+            {
+                *floor = slo;
+                *ceil  = shi;
+            }
+        }
         if (!announced)
         {
             announced = 1;
@@ -8040,6 +8141,32 @@ static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
                         "guest-window band -- candidates come from [%p,%p), at most %u window(s) "
                         "at once\n", (void *)kern_max, (void *)*floor, (void *)*ceil,
                      ios_wow_small_va_slots );
+        }
+    }
+    else if (kern_max > 1)
+    {
+        /* A map that ends just past the floor. Without the increased-memory-limit
+         * entitlement a phone reported max_address = 0x7180000000 (454 GB) with
+         * everything between ~6 GB and 0x7000000000 refused (kr=3): the first
+         * slot above the floor, 0x7100000000, runs past the end, so no 32-bit
+         * program could start. The floor sits above 0x7000000000 because the
+         * JIT pool's RW alias usually lives there; when the pool went elsewhere
+         * the launch probe found that slot free. Offer it: ios_wow_window_try
+         * maps it fixed, so an occupied slot is still rejected. */
+        ULONG_PTR first = (*floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
+        ULONG_PTR below = *floor & ~(IOS_WOW_WINDOW_SIZE - 1);
+
+        if (first + IOS_WOW_WINDOW_SIZE > kern_max && below + IOS_WOW_WINDOW_SIZE <= kern_max &&
+            below + IOS_WOW_WINDOW_SIZE <= *ceil)
+        {
+            *floor = below;
+            if (!announced)
+            {
+                announced = 1;
+                dprintf( 2, "[wow-window] SHORT MAP: the map ends at %p, no slot fits above the floor "
+                            "-- trying [%p,%p) (free only when the JIT pool is elsewhere)\n",
+                         (void *)kern_max, (void *)*floor, (void *)*ceil );
+            }
         }
     }
 }
@@ -9071,6 +9198,11 @@ extern const void *dwrite_unix_call_funcs[];
  * STATUS_NOT_IMPLEMENTED. */
 extern const void *winegstreamer_unix_call_funcs[];
 
+/* opengl32's unix side, compiled from wine/dlls/opengl32/unix_{wgl,thunks}.c
+ * into libntdll_unix.a (build/ntdll-unix/build.sh). */
+extern const void *opengl32_unix_call_funcs[];
+extern const void *opengl32_unix_call_wow64_funcs[];
+
 /* win32u's unix init, statically linked via libwin32u_unix.a. Renamed
  * from __wine_unix_lib_init in build/win32u-unix/build.sh so future
  * statically-linked unix libs can keep their own init without colliding.
@@ -9419,11 +9551,22 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             libname = "win32u (stub table)";
             funcs64 = funcs_wow64 = (const void *)ios_stub_unix_call_table;
         } else if (match && strstr(match, "opengl32")) {
+            /* Real opengl32 unix side (OpenGL ES / desktop GL through the winios
+             * WGL driver). MADEIRA_NO_GL=1 keeps the old GL-absent stub table.
+             * The wow64 table's thunks convert every embedded guest pointer with
+             * ios_wow_host_ptr() (patches/wine-opengl-winios.patch: make_opengl),
+             * so 32-bit GL games (Quake 3 engine, GLQuake) reach the driver. */
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
-            WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (attach ok, wgl/gl NOT_SUPPORTED)\n",
-                          module, match);
-            libname = "opengl32 (GL-absent stub table)";
-            funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
+            if (getenv("MADEIRA_NO_GL")) {
+                WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (MADEIRA_NO_GL)\n",
+                              module, match);
+                libname = "opengl32 (GL-absent stub table, MADEIRA_NO_GL)";
+                funcs64 = funcs_wow64 = (const void *)ios_gl_stub_unix_call_table;
+            } else {
+                libname = "opengl32 (winios WGL)";
+                funcs64 = (const void *)opengl32_unix_call_funcs;
+                funcs_wow64 = (const void *)opengl32_unix_call_wow64_funcs;
+            }
         } else {
             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
             WARN_(module)("iOS: no unix .so for module %p (unix_path=%s, modname=%s, mapped=%s), using stub table\n",
@@ -11545,7 +11688,8 @@ const char *ios_pe_module_name( const void *image_base, size_t image_size )
  * the patch stage; scanning x64 bytes would count garbage matches). */
 static size_t ios_x18_tramp_prealloc_scan( const char *image, size_t image_size )
 {
-    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
+    extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+    extern int ios_x18_patch_stores( const void *image, size_t image_size );
     const size_t pg = 0x4000;
     unsigned int pe_off;
     unsigned short machine, num_sec, opt_sz;
@@ -11574,7 +11718,7 @@ static size_t ios_x18_tramp_prealloc_scan( const char *image, size_t image_size 
     }
     if (machine != IMAGE_FILE_MACHINE_ARM64 && !is_arm64ec) return 0;
     if (!text_sz || text_off + text_sz > image_size) return 0;
-    return (ios_jit_x18_tramp_need(image + text_off, text_sz) + pg - 1) & ~(pg - 1);
+    return (ios_jit_x18_tramp_need(image + text_off, text_sz, ios_x18_patch_stores(image, image_size)) + pg - 1) & ~(pg - 1);
 }
 
 
@@ -13578,8 +13722,10 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                     if (text_sz > 0)
                     {
                         /* Task #25: exact budget (was 100% of .text, ~99% wasted). */
-                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
-                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz);
+                        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+                        extern int ios_x18_patch_stores( const void *image, size_t image_size );
+                        int x18_stores = ios_x18_patch_stores(image_base, image_size);
+                        size_t tramp_budget = ios_jit_x18_tramp_need((char *)jit_rw_base + offset + text_off, text_sz, x18_stores);
                         size_t tramp_alloc = (tramp_budget + page_size - 1) & ~(page_size - 1);
                         /* task #34: fixed image-relative offset — the region
                          * pre-reserved in this image's own allocation. The
@@ -13605,7 +13751,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                             char *text_rx = (char *)jit_rx_base + offset + text_off;
 
                             int patched = ios_jit_patch_x18(text_rw, text_rx, text_sz,
-                                                            tramp_rw, tramp_rx, tramp_alloc);
+                                                            tramp_rw, tramp_rx, tramp_alloc, x18_stores);
 
                             if (patched > 0)
                             {
@@ -13840,9 +13986,11 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
      * mprotect_exec copy pipeline). Budget from the SOURCE bytes; identical
      * to what the post-memcpy scan would compute. */
     {
-        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size );
+        extern size_t ios_jit_x18_tramp_need( const char *text, size_t text_size, int stores );
+        extern int ios_x18_patch_stores( const void *image, size_t image_size );
         child_tramp_prealloc = m->text_size
-            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size) + pg - 1) & ~(pg - 1))
+            ? ((ios_jit_x18_tramp_need((const char *)m->pe_base + m->text_offset, m->text_size,
+                                       ios_x18_patch_stores(m->pe_base, m->size)) + pg - 1) & ~(pg - 1))
             : 0;
     }
     alloc_size += child_tramp_prealloc;
@@ -13972,7 +14120,8 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
         int patched = ios_jit_patch_x18(
             rw_dest + m->text_offset, rx_dest + m->text_offset, m->text_size,
             (char *)ios_jit_rw_base_global + tramp_off,
-            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
+            (char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc,
+            ios_x18_patch_stores(m->pe_base, m->size));
         sys_icache_invalidate((char *)ios_jit_rx_base_global + tramp_off, child_tramp_prealloc);
         dprintf(2, "[child-ntdll] x18-patched %d instructions (tramps at image-relative +0x%lx)\n",
                 patched, (unsigned long)(alloc_size - child_tramp_prealloc));

@@ -1,0 +1,80 @@
+--- a/src/gallium/drivers/zink/nir_to_spirv/nir_to_spirv.c
++++ b/src/gallium/drivers/zink/nir_to_spirv/nir_to_spirv.c
+@@ -737,6 +737,23 @@
+          break
+ 
+ 
++
++/* Madeira: a variable's GLSL name goes into the SPIR-V as OpName, and
++ * MoltenVK's SPIRV-Cross keeps it in the Metal source it compiles. A name that
++ * is a Metal type or keyword then breaks the shader: a sampler2DMS uniform
++ * called "sampler" became `texture2d_ms<float> sampler`, which hides Metal's
++ * sampler type, so the fragment shader did not compile and every draw with it
++ * was skipped. Prefix variable names so no application name can collide; they
++ * are debug names only (bindings and locations come from decorations).
++ */
++static void
++emit_var_name(struct ntv_context *ctx, SpvId var_id, const char *name)
++{
++   char buf[256];
++   snprintf(buf, sizeof(buf), "v_%s", name);
++   spirv_builder_emit_name(&ctx->builder, var_id, buf);
++}
++
+ static SpvId
+ input_var_init(struct ntv_context *ctx, struct nir_variable *var)
+ {
+@@ -749,7 +766,7 @@
+    SpvId var_id = spirv_builder_emit_var(&ctx->builder, pointer_type, sc);
+ 
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    if (var->data.mode == nir_var_mem_push_const) {
+       ctx->push_const_var = var_id;
+@@ -863,7 +880,7 @@
+    SpvId var_id = spirv_builder_emit_var(&ctx->builder, pointer_type,
+                                          SpvStorageClassOutput);
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    if (var->data.precision == GLSL_PRECISION_MEDIUM || var->data.precision == GLSL_PRECISION_LOW) {
+       spirv_builder_emit_decoration(&ctx->builder, var_id,
+@@ -953,7 +970,7 @@
+    SpvId var_id = spirv_builder_emit_var(&ctx->builder, pointer_type,
+                                          SpvStorageClassPrivate);
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    _mesa_hash_table_insert(ctx->vars, var, (void *)(intptr_t)var_id);
+ 
+@@ -972,7 +989,7 @@
+    SpvId var_id = spirv_builder_emit_var(&ctx->builder, pointer_type,
+                                          SpvStorageClassFunction);
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    _mesa_hash_table_insert(ctx->vars, var, (void *)(intptr_t)var_id);
+ }
+@@ -1216,7 +1233,7 @@
+    }
+ 
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    if (var->data.fb_fetch_output)
+       spirv_builder_emit_input_attachment_index(&ctx->builder, var_id, var->data.index);
+@@ -1355,7 +1372,7 @@
+    SpvId var_id = spirv_builder_emit_var(&ctx->builder, pointer_type,
+                                          ssbo ? SpvStorageClassStorageBuffer : SpvStorageClassUniform);
+    if (var->name)
+-      spirv_builder_emit_name(&ctx->builder, var_id, var->name);
++      emit_var_name(ctx, var_id, var->name);
+ 
+    if (aliased)
+       spirv_builder_emit_decoration(&ctx->builder, var_id, SpvDecorationAliased);

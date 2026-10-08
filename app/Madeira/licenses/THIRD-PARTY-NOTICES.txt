@@ -58,6 +58,14 @@ Library/Application Support/WineMono, with the same mscorlib patch):
   wine-mono-11.0.0-src.tar.xz from https://dl.winehq.org/wine/wine-mono/11.0.0/
   (SHA-256 c504cb0b91ce09b72869e063844ce114564d4ac340479a82aa6789f51510e520).
 Dynamically loaded at runtime:
+- Mesa 25.0.7 OSMesa with the Zink and softpipe drivers (gl/libOSMesa.dylib,
+  built by build/mesa-ios/build.sh with the patches in build/mesa-ios/patches):
+  MIT and the other permissive licences listed in Mesa-license.rst (copied by
+  that script).
+- MoltenVK 1.4.2 (gl/libMoltenVK.dylib, built by build/moltenvk-ios/build.sh):
+  Apache-2.0 (MoltenVK-Apache-2.0.txt). It contains SPIRV-Cross
+  (SPIRV-Cross-Apache-2.0.txt), SPIRV-Tools (SPIRV-Tools-Apache-2.0.txt) and
+  cereal (cereal-BSD-3-Clause.txt); the script copies all four texts.
 - Apple Metal Shader Converter dynamic library: Apple proprietary, under the
   agreement in d3d12/METAL-SHADER-CONVERTER-AGREEMENT.txt (section 2.B:
   distribution solely for shader conversion). Its headers: Apache-2.0
