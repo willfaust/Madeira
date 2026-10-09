@@ -123,7 +123,11 @@ Observed successes in that development build:
 
 The main-based PR subsequently compiled and linked successfully with rebuilt
 native archives using Xcode 27. The isolated app passed deep/strict signature
-verification; installation and device acceptance of that build remain pending.
+verification and was installed. Its first device check exposed missing Dock
+packaging: the library was hidden despite the persisted SSD catalog remaining
+intact. Dock and the full i386 Wine/DXMT farm were then built, packaged and
+reinstalled; the i386 dependency check reported zero missing imports. Device
+gameplay acceptance of the corrected package remains pending.
 See [BUILDING.md](BUILDING.md#native-link-validation-for-external-storage) for
 the additional clean-build prerequisites. Remaining checks include the final
 UI/accessibility pass,

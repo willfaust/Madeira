@@ -144,6 +144,14 @@ The clean build required these additions to the recipes above:
 - Combine the 87 DXMT objects and its 34 declared LLVM archives with
   `xcrun -sdk iphoneos libtool -static` into `libdxmt_combined.a`, and copy it to
   `app/Madeira`. The script only refreshes that combined archive if it exists.
+- Build and stage `build/madeira-dock/build.sh --check` before packaging. A
+  successful Xcode link does not guarantee this ignored output is present:
+  without `arm64ec-windows/dockhost.exe`, the app hides the Steam library.
+  Check the final bundle for the executable and `dock-notices.txt`. For 32-bit
+  games, also verify `i386-windows/ntdll.dll` and the WoW64 components described
+  above; an empty resource directory is insufficient. The full
+  `build/wine-i386/build.sh` subsequently built the Wine farm and DXMT PE
+  components on macOS with Bison 3, llvm-mingw and Meson available.
 - Run `build/stage-licenses.sh` before the app build. Use
   `MTL_LANGUAGE_REVISION=Metal31` for the app's shaders on the tested older iPad OS.
   The app links as iOS 17 while DXMT's existing script targets iOS 18; the linker
