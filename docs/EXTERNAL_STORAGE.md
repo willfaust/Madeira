@@ -121,8 +121,12 @@ Observed successes in that development build:
 - Internal game-payload growth remained zero during measured external installs;
   prefix/client/prerequisite files still consumed some internal storage.
 
-This is supporting device evidence, not acceptance of the final main-based native
-build. Remaining checks include a full source build, final UI/accessibility pass,
+The main-based PR subsequently compiled and linked successfully with rebuilt
+native archives using Xcode 27. The isolated app passed deep/strict signature
+verification; installation and device acceptance of that build remain pending.
+See [BUILDING.md](BUILDING.md#native-link-validation-for-external-storage) for
+the additional clean-build prerequisites. Remaining checks include the final
+UI/accessibility pass,
 native direct launch/CWD (including 32-bit), active background expiration, cloud
 upload/conflict continuity and physical iPad low-space/read-only/large-file and
 APFS/exFAT combinations. Desktop visibility during startup remains unexplained.
