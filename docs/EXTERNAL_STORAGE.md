@@ -126,8 +126,10 @@ native archives using Xcode 27. The isolated app passed deep/strict signature
 verification and was installed. Its first device check exposed missing Dock
 packaging: the library was hidden despite the persisted SSD catalog remaining
 intact. Dock and the full i386 Wine/DXMT farm were then built, packaged and
-reinstalled; the i386 dependency check reported zero missing imports. Device
-gameplay acceptance of the corrected package remains pending.
+reinstalled; the i386 dependency check reported zero missing imports. With the
+registration recovery fix below, the owner confirmed Borderlands GOTY gameplay
+on the main-based native build, then closed and reopened Madeira and confirmed
+a second successful launch.
 See [BUILDING.md](BUILDING.md#native-link-validation-for-external-storage) for
 the additional clean-build prerequisites. Remaining checks include the final
 UI/accessibility pass,
@@ -142,4 +144,5 @@ The native package's first launch attempt also exposed Steam rewriting
 entry only after the SSD marker and mappings have been validated and the separate
 prefix ownership record matches. Explicit foreign IDs and unowned aliases remain
 refused. Host regression coverage includes repeated rewrites and refusal cases;
-physical relaunch validation remains pending.
+the owner also confirmed successful physical relaunch after closing and reopening
+the app. This does not establish direct E: launch/CWD or live cloud conflict behavior.
