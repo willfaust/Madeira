@@ -30,12 +30,19 @@ final class MadeiraDockModel: ObservableObject {
         clientInstalled = MadeiraDock.clientInstalled
         let drive = MadeiraDock.drive, prefix = MadeiraDock.prefix
         Task.detached(priority: .userInitiated) {
-            let found = MadeiraDock.games(drive: drive)
+            let internalGames = MadeiraDock.games(drive: drive)
+            let external = await SteamStorageModel.shared.externalGames()
+            let found = internalGames + external.games.filter { candidate in !internalGames.contains { $0.id == candidate.id } }
+            let externalAccess: SteamExternalLease?
+            if let id = external.games.first?.storageID {
+                externalAccess = try? await SteamStorageModel.shared.accessForOperation(libraryID: id, write: false)
+            } else { externalAccess = nil }
+            defer { externalAccess?.keepAlive() }
             var programs: [Int: Int] = [:], runNext: [Int: Bool] = [:]
             if DockInstallers.choiceEnabled {
                 let ledger = DockInstallLedger.load(prefix: prefix)
                 for game in found where game.installed {
-                    let count = DockInstallers.programCount(game, drive: drive)
+                    let count = DockInstallers.programCount(game, drive: drive, externalRoot: externalAccess?.root)
                     if count > 0 { programs[game.id] = count; runNext[game.id] = ledger.runsNext(game.id) }
                 }
             }

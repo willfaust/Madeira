@@ -213,6 +213,13 @@ func jwt(_ claims: String) -> String {
         require((try? MadeiraDock.subject("opaque")) == nil && (try? MadeiraDock.subject(jwt(#"{"sub":"x"}"#))) == nil, "no usable subject: refused")
 
         // Host environment and launch.
+        let externalGame = DockGame(id: 6000, name: "External", installDir: "Fixture Game", library: "steamapps",
+                                    installed: true, customExecutables: false, storageID: "external-fixture")
+        MadeiraDock.configure(externalGame)
+        require(env("MADEIRA_STEAM_HOST_EXPECTED_INSTALL") == "C:\\MadeiraExternalLibrary\\steamapps\\common\\Fixture Game",
+                "external launch expects the same alias registered with Valve")
+        require(externalGame.windowsInstallPath == "E:\\steamapps\\common\\Fixture Game",
+                "direct Wine and installer paths retain the registered E drive")
         MadeiraDock.configure(alpha, launchOption: 7)
         require(env("MADEIRA_STEAM_HOST_LAUNCH_OPTION") == "7", "the original launch entry key reaches the host")
         MadeiraDock.configure(alpha, launchOption: 0)
@@ -260,7 +267,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-dock-contract-') as tmp:
     (tmp / 'checks.swift').write_text(checks)
     exe = tmp / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
-                            str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'checks.swift'), str(app / 'SteamKeyValues.swift')])
+                            str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'checks.swift'), str(app / 'SteamKeyValues.swift'), str(app / 'SteamStorage.swift')])
     require(build.returncode == 0, 'production Dock Swift compiles on the host')
     if build.returncode == 0:
         run = subprocess.run([str(exe)], env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))

@@ -62,7 +62,7 @@ require('open(LibraryModel.shared.steamEntry(installed, title: item.name))' in g
 require(games.count('startDock(') == 0, 'the section never starts Dock itself: Play is on the Game details page')
 # A finished download: the game becomes a library entry, and its sheet's button reads Open (Game details).
 sheet = games[games.index('struct SteamGameSheet: View {'):games.index('struct SteamEntrySection')]
-require('Text("Open")' in sheet and 'if let installed = item.installed {' in sheet and 'dismiss(); open(entry)' in sheet,
+require('Text("Open")' in sheet and 'SteamGamesRules.canOpenInstalledGame(installed, hasTransfer: steam.downloads[appID] != nil)' in sheet and 'dismiss(); open(entry)' in sheet,
         "a finished download's sheet offers Open, which opens the Game details page")
 require('SteamGameSheet(appID: selection.id) { entry in' in games and 'open(entry) }' in games,
         'Open presents the Game details page after the download sheet closes')
@@ -74,11 +74,19 @@ require('LibraryModel.shared.removeSteam(appID: game.id)' in owned_source[owned_
         "Uninstall removes the game's library entry with its files")
 detail = library[library.index('struct LibraryDetail: View {'):library.index('struct FPSChoice: View {')]
 steam_section = games[games.index('struct SteamEntrySection'):]
+require('@ObservedObject private var steam = SteamOwnedLibrary.shared' in detail and
+        detail.index('let download = steam.downloads[appID]') < detail.index('Button(action: start)') and
+        'SteamTransferControls(appID: appID, download: download,' in detail and
+        'SteamDownloadStatus(download: download)' in detail,
+        'Game details observes transfers and replaces Play with transfer controls and progress')
+require('SteamTransferControls(' not in steam_section and 'SteamDownloadStatus(' not in steam_section,
+        'Steam section does not duplicate the header transfer controls or progress')
+
 require('SteamEntrySection(entry: $entry)' in detail and 'if entry.steamAppID != nil {' in detail,
         'Game details: the Steam section for a Steam game')
 for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for this launch"', '"One-time installs"',
               '"Run at next start"', '"Skip"', '"Repair installed files"', '"Uninstall"', '"App ID"',
-              '"Free space on this device"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
+              '"Free space in game library"', '"The game"', '"Program"', '"Choose…"']:
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
               '"Aspect & scaling"', '"Compatibility & performance"', '"Reduced-precision x87"', '"CPU cores reported"',
@@ -109,7 +117,7 @@ require('await library.refreshSteamMetadata(game, title: item.name)' in cell and
 steam_meta = library[library.index('    func refreshSteamMetadata('):]
 steam_meta = steam_meta[:steam_meta.index('\n    }\n')]
 require(steam_meta.index('SteamInstallFiles.buildID(') <
-        steam_meta.index('let install = "\\(folder)#\\(record.build ?? 0)#\\(picked ?? "")#\\(known ? 1 : 0)"') <
+        steam_meta.index('let install = "\\(game.storageID)#\\(folder)#\\(record.build ?? 0)#\\(picked ?? "")#\\(known ? 1 : 0)"') <
         steam_meta.index('stored.steamMetadataInstall == install') < steam_meta.index('launchOptions(appID: game.id)'),
         "the format is read again only for another install folder, build or picked program, once Steam's launch "
         "configuration is cached, or a day later while no program is known")
@@ -118,7 +126,7 @@ require('\\(steam.game(item.id)?.launches != nil)' in cell,
 require('stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil' in steam_meta and
         'let options = kept == nil ? await SteamOwnedLibrary.shared.launchOptions(appID: game.id) : nil' in steam_meta and
         'SteamDirectStart.program(picked: kept, options: options, installFolder: root)' in steam_meta and
-        'LibraryModel.inspect(root.appendingPathComponent(path))' in steam_meta and
+        'LibraryModel.inspect(root.appendingPathComponent(path), root: drive)' in steam_meta and
         'LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false)' in steam_meta,
         'the program is the one "The game" starts; bits from its PE header, the API as for any library game')
 require(steam_meta.count('Task.detached(priority: .utility)') == 3 and 'updated.folderBytes = record.size ?? updated.folderBytes' in steam_meta
@@ -132,13 +140,13 @@ require('next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == en
         "a Steam game keeps one entry, and a details page saved later keeps the card's newer format")
 launch = content_view[content_view.index('private func launchLibraryEntry('):content_view.index('private func runWineFullSequence(')]
 require('if let appID = entry.steamAppID, !entry.startsSteamGameDirectly {' in launch and
-        'startDock(game, compactPool: MadeiraDockModel.shared.compactPool, profile: entry)' in launch,
+        'startDock(game, compactPool: MadeiraDockModel.shared.compactPool, profile: entry, storageChecked: storageChecked)' in launch,
         "Play on a Steam game's Game details page starts it through Madeira Dock with its own profile")
 # "Start with: The game" (SteamDirectStart): the program from Steam's launch configuration or the
 # Program picker starts like any library game, without Dock, a sign-in transfer or a client.
 direct = launch[launch.index('if let appID = entry.steamAppID, !entry.startsSteamGameDirectly {'):]
 require(direct.index('startDock(') < direct.index('guard entry.steamProgram?.isEmpty == false else {') <
-        direct.index('LibraryModel.executable(entry.launchRelativePath)') < direct.index('entry.configureLaunch()') <
+        direct.index('LibraryModel.executable(entry.launchRelativePath, root: storageRoot)') < direct.index('entry.configureLaunch()') <
         direct.index('runWineFullSequence(profile: entry)'),
         '"The game": no program chosen, no start; otherwise the program is checked inside drive_c and started as a library game')
 require('writeHandoff' not in direct[direct.index('guard entry.steamProgram'):] and 'credentialsForDock' not in launch,
@@ -288,6 +296,10 @@ func record(_ appID: Int, _ name: String, _ folder: String, flags: Int) -> Strin
         require(R.status(installed: nil, transfer: nil, updateAvailable: false) == .notInstalled, "owned only: not installed")
         require(R.status(installed: partial, transfer: nil, updateAvailable: false) == .partlyInstalled, "an unfinished record is not playable")
         require(R.status(installed: ready, transfer: nil, updateAvailable: false) == .installed, "installed")
+        require(R.canOpenInstalledGame(ready, hasTransfer: false), "completed install can open its details")
+        require(!R.canOpenInstalledGame(ready, hasTransfer: true), "pending update keeps pause/resume controls instead of Open")
+        require(!R.canOpenInstalledGame(partial, hasTransfer: false) && !R.canOpenInstalledGame(partial, hasTransfer: true),
+                "rediscovered partial install keeps Install/Resume controls with or without an active transfer")
         require(R.status(installed: ready, transfer: nil, updateAvailable: true) == .updateAvailable, "installed with a newer build")
         require(R.status(installed: ready, transfer: .active(percent: 250), updateAvailable: true) == .downloading(100), "a download wins over the record; percent is clamped")
         require(R.status(installed: nil, transfer: .paused, updateAvailable: false).badge == "Paused", "paused pill")
@@ -471,7 +483,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-steam-games-') as tmp:
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
                             str(tmp / 'stubs.swift'), str(tmp / 'dock.swift'), str(tmp / 'rules.swift'),
                             str(tmp / 'checks.swift'), str(tmp / 'owned.swift'), str(app / 'SteamKeyValues.swift'),
-                            str(app / 'SteamInstall.swift'), str(app / 'SwiftSteam/Library/SteamAppInfo.swift')],
+                            str(app / 'SteamInstall.swift'), str(app / 'SteamStorage.swift'), str(app / 'SwiftSteam/Library/SteamAppInfo.swift')],
                            capture_output=True, text=True)
     require(build.returncode == 0, 'production Steam games rules and Dock discovery compile on the host')
     if build.returncode:

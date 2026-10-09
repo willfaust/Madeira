@@ -273,6 +273,23 @@ func pe(_ url: URL, machine: UInt16) throws {
                 "MADEIRA_INSTALL_DEFAULT_KEY=0: entries without a key are ignored")
         require(DockInstallers.programCount(game, drive: drive) == 5, "the sheet's program count")
 
+        let external = base.appendingPathComponent("external")
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: common.deletingLastPathComponent(), to: external.appendingPathComponent("steamapps"))
+        let externalGame = DockGame(id: 7000, name: "Fixture", installDir: "Fixture Game", library: "steamapps",
+                                    installed: true, customExecutables: false, storageID: "ssd-fixture")
+        let externalFound = DockInstallers.found(externalGame, drive: drive, externalRoot: external, defaultKey: true)
+        require(externalFound.scripts == 2 && externalFound.processes.count == 5 &&
+                externalFound.processes.allSatisfy { $0.executable.hasPrefix("E:\\") }, "external game and shared installers use E paths")
+        let externalDir = externalGame.windowsInstallPath
+        require(DockInstallers.resolve(externalDir + "\\redist\\tool.exe", drive: drive, externalRoot: external)?.lastPathComponent == "Tool.EXE",
+                "external installer resolution preserves actual file spelling")
+        require(DockInstallers.found(externalGame, drive: drive).processes.isEmpty &&
+                DockInstallers.resolve(externalDir + "\\Redist\\Tool.EXE", drive: drive) == nil,
+                "external installers require a scoped external root")
+        require(DockInstallers.resolve(externalDir + "\\link\\wine", drive: drive, externalRoot: external) == nil,
+                "external installer cannot follow a link outside its library")
+
         // ---- prepare(): a first start on a bundle without 32-bit support or msiexec
         MadeiraConfig.values["inproc-sync"] = "1"   // madsync chosen: the per-session request applies
         try? FileManager.default.removeItem(at: prefix.appendingPathComponent(DockInstallLedger.fileName))
@@ -420,7 +437,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-dock-installers-') as tmp:
     (tmp / 'checks.swift').write_text(checks, encoding='utf-8')
     exe = tmp / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-o', str(exe),
-                            str(tmp / 'stubs.swift'), str(tmp / 'checks.swift'), str(app / 'DockInstallers.swift')])
+                            str(tmp / 'stubs.swift'), str(tmp / 'checks.swift'), str(app / 'DockInstallers.swift'), str(app / 'SteamStorage.swift')])
     require(build.returncode == 0, 'production installer Swift compiles on the host')
     batch_text = ''
     if build.returncode == 0:

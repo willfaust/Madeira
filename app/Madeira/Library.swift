@@ -243,6 +243,10 @@ struct LibraryEntry: Codable, Identifiable {
     /// through Valve's client, with Steam's default launch option.
     /// `relativePath` is then its install folder, relative to drive_c.
     var steamAppID: Int?
+    /// Nil in older entries: their files remain on the internal C: library.
+    var libraryID: String?
+    var storageID: String { libraryID ?? "internal" }
+    var storageDrivePrefix: String { storageID == "internal" ? "C:\\" : "E:\\" }
     /// How a Steam game starts (Game details › Steam › Start with): nil is Madeira
     /// Dock, the default; "game" is the game's own program in Wine, without Steam
     /// (SteamDirectStart).
@@ -417,11 +421,11 @@ struct LibraryEntry: Codable, Identifiable {
         guard startsSteamGameDirectly, let program = steamProgram, !program.isEmpty else { return relativePath }
         return relativePath + "/" + program
     }
-    var launchWindowsPath: String { "C:\\" + launchRelativePath.replacingOccurrences(of: "/", with: "\\") }
+    var launchWindowsPath: String { storageDrivePrefix + launchRelativePath.replacingOccurrences(of: "/", with: "\\") }
     /// "The game"'s working folder as a Windows path, or nil for the program's own folder.
     var steamWorkingWindowsPath: String? {
         guard startsSteamGameDirectly, let folder = steamProgramFolder else { return nil }
-        return "C:\\" + (folder.isEmpty ? relativePath : relativePath + "/" + folder).replacingOccurrences(of: "/", with: "\\")
+        return storageDrivePrefix + (folder.isEmpty ? relativePath : relativePath + "/" + folder).replacingOccurrences(of: "/", with: "\\")
     }
 
     static let desktopID = UUID(uuidString: "AF046C35-C32A-497B-92BC-0BBD14F8CB61")!
@@ -431,13 +435,14 @@ struct LibraryEntry: Codable, Identifiable {
         return entry
     }
 
-    var windowsPath: String { "C:\\" + relativePath.replacingOccurrences(of: "/", with: "\\") }
+    var windowsPath: String { storageDrivePrefix + relativePath.replacingOccurrences(of: "/", with: "\\") }
 
     /// The vsync mode to apply: a saved 30 or 40 FPS limit runs as 60 when it is
     /// not offered (DXMT without that cap would present uncapped).
     var effectiveFPSMode: Int32 { ProMotionIntent.supportedMode(fpsMode) }
 
-    func validate() throws {
+    func validate(storageRoot: URL? = nil) throws {
+        _ = try SteamStorageLocation(libraryID: storageID, relativePath: relativePath)
         let size = resolution.split(separator: "x").compactMap { Int($0) }
         guard size.count == 2, (320...4096).contains(size[0]), (240...4096).contains(size[1]),
               (0...4).contains(fpsMode), !arguments.contains("\0"), !windowsPath.contains("\0"),
@@ -468,9 +473,11 @@ struct LibraryEntry: Codable, Identifiable {
             // quotes is accepted.
             var isFolder: ObjCBool = false
             guard !chosen.contains("\""), !chosen.contains("\0"), chosen.utf8.count < 500,
-                  let url = Self.hostURL(ofWindowsPath: chosen),
+                  let url = (chosen.lowercased().hasPrefix("e:\\") && storageRoot != nil
+                    ? try? SteamStoragePath.native(String(chosen.dropFirst(3)).trimmingCharacters(in: CharacterSet(charactersIn: "\\")), root: storageRoot!)
+                    : Self.hostURL(ofWindowsPath: chosen)),
                   FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), isFolder.boolValue else {
-                throw LibraryError.message("The working folder must be an existing folder on drive C:, such as C:\\Games\\Some Game.")
+                throw LibraryError.message("The working folder must be an existing folder in this game’s registered library.")
             }
         }
         // validate() is the last step of a launch that can refuse it
@@ -574,7 +581,9 @@ struct LibraryEntry: Codable, Identifiable {
             // The game's own Steam identity (SteamAppId, SteamGameId, SteamAppPath = its install
             // folder) instead of the bridge's fixed one.
             setenv("MADEIRA_STEAM_APPID", String(steamAppID), 1)
-            setenv("MADEIRA_STEAM_APPPATH", windowsPath, 1)
+            let appPath = storageID != "internal"
+                ? SteamStoragePath.externalWindowsRoot + "\\" + relativePath.replacingOccurrences(of: "/", with: "\\") : windowsPath
+            setenv("MADEIRA_STEAM_APPPATH", appPath, 1)
         }
         // ml1163: a game starts in launchDirectory (a chosen folder, Steam's for "The game",
         // else the program's own). It is exported when the bridge's default, the folder of
@@ -736,19 +745,26 @@ final class LibraryModel: ObservableObject {
         let folder = game.library + "/common/" + game.installDir
         if var entry = entries.first(where: { $0.steamAppID == game.id }) {
             entry.relativePath = folder
+            entry.libraryID = game.storageID
             return entry
         }
         var entry = LibraryEntry(title: title ?? game.name, relativePath: folder, bits: 0)
         entry.steamAppID = game.id
-        entry.folderBytes = SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: Self.drive.appendingPathComponent(game.library, isDirectory: true))
+        entry.libraryID = game.storageID
+        if game.storageID == "internal" {
+            entry.folderBytes = SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: Self.drive.appendingPathComponent(game.library, isDirectory: true))
+        }
         return entry
     }
     /// A Steam download finished (SteamOwnedLibrary): the game gets its library
     /// entry, or an existing one keeps its title, artwork and settings.
-    func upsertSteam(_ game: DockGame, title: String) {
+    func upsertSteam(_ game: DockGame, title: String, bytes: Int64? = nil) {
         guard !readOnly else { return }
         var entry = steamEntry(game, title: title)
-        entry.folderBytes = SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: Self.drive.appendingPathComponent(game.library, isDirectory: true)) ?? entry.folderBytes
+        entry.folderBytes = bytes ?? entry.folderBytes
+        if game.storageID == "internal" {
+            entry.folderBytes = SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: Self.drive.appendingPathComponent(game.library, isDirectory: true)) ?? entry.folderBytes
+        }
         save(entry)
     }
     /// A Steam game was uninstalled: its entry goes with its files.
@@ -771,7 +787,7 @@ final class LibraryModel: ObservableObject {
     @MainActor
     func refreshMetadata(_ id: UUID) async {
         let revision = 12
-        guard !metadataInFlight.contains(id), let entry = entries.first(where: { $0.id == id }), entry.desktop != true,
+        guard !metadataInFlight.contains(id), let entry = entries.first(where: { $0.id == id }), entry.desktop != true, entry.storageID == "internal",
               entry.metadataRevision != revision || Date().timeIntervalSince(entry.metadataChecked ?? .distantPast) > 86400,
               let url = try? Self.executable(entry.relativePath) else { return }
         metadataInFlight.insert(id)
@@ -796,10 +812,14 @@ final class LibraryModel: ObservableObject {
         guard !readOnly, game.installed, !steamMetadataInFlight.contains(game.id) else { return }
         steamMetadataInFlight.insert(game.id)
         defer { steamMetadataInFlight.remove(game.id) }
-        let drive = Self.drive
+        let access: SteamExternalLease?
+        do { access = try await SteamStorageModel.shared.accessForOperation(libraryID: game.storageID, write: false) }
+        catch { return } // unavailable storage must not erase cached metadata
+        defer { access?.keepAlive() }
+        let drive = access?.root ?? Self.drive
         let folder = game.library + "/common/" + game.installDir
-        let root = drive.appendingPathComponent(folder, isDirectory: true)
-        let steamApps = drive.appendingPathComponent(game.library, isDirectory: true)
+        guard let root = try? SteamStoragePath.native(folder, root: drive),
+              let steamApps = try? SteamStoragePath.native(game.library, root: drive) else { return }
         let record = await Task.detached(priority: .utility) {
             (build: SteamInstallFiles.buildID(appID: game.id, steamApps: steamApps),
              size: SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: steamApps))
@@ -807,7 +827,7 @@ final class LibraryModel: ObservableObject {
         let stored = entries.first { $0.steamAppID == game.id }
         let picked = stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil
         let known = SteamOwnedLibrary.shared.game(game.id)?.launches != nil
-        let install = "\(folder)#\(record.build ?? 0)#\(picked ?? "")#\(known ? 1 : 0)"
+        let install = "\(game.storageID)#\(folder)#\(record.build ?? 0)#\(picked ?? "")#\(known ? 1 : 0)"
         if let stored, stored.steamMetadataInstall == install, stored.metadataRevision == revision,
            stored.bits != 0 || Date().timeIntervalSince(stored.metadataChecked ?? .distantPast) < 86400 { return }
         // Steam's launch configuration is asked for only when no picked program is installed.
@@ -815,14 +835,16 @@ final class LibraryModel: ObservableObject {
         let options = kept == nil ? await SteamOwnedLibrary.shared.launchOptions(appID: game.id) : nil
         let program = await Task.detached(priority: .utility) { () -> (url: URL, bits: Int, api: String?)? in
             guard let path = SteamDirectStart.program(picked: kept, options: options, installFolder: root),
-                  let inspected = try? LibraryModel.inspect(root.appendingPathComponent(path)) else { return nil }
+                  let inspected = try? LibraryModel.inspect(root.appendingPathComponent(path), root: drive) else { return nil }
             return (root.appendingPathComponent(path), inspected.bits, inspected.graphicsAPI)
         }.value
         var api = program?.api
         if let program, let scanned = await LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false).api { api = scanned }
         guard !Task.isCancelled else { return }
+        do { try access?.validate() } catch { return }
         var updated = entries.first { $0.steamAppID == game.id } ?? LibraryEntry(title: title, relativePath: folder, bits: 0)
         updated.steamAppID = game.id
+        updated.libraryID = game.storageID
         updated.relativePath = folder
         updated.bits = program?.bits ?? 0
         updated.graphicsAPI = api
@@ -835,7 +857,9 @@ final class LibraryModel: ObservableObject {
 
     /// What an entry can start: an executable, or (ml1163) a batch file run through cmd.exe.
     static let programExtensions: Set<String> = ["exe", "bat", "cmd"]
-    static func executable(_ relative: String) throws -> URL {
+    static func executable(_ relative: String, root: URL? = nil) throws -> URL {
+        let drive = (root ?? Self.drive).resolvingSymlinksInPath().standardizedFileURL
+        if root != nil { _ = try SteamStoragePath.native(relative, root: drive) }
         let url = drive.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
         guard url.path.hasPrefix(drive.path + "/"), programExtensions.contains(url.pathExtension.lowercased()),
               FileManager.default.fileExists(atPath: url.path) else {
@@ -843,7 +867,8 @@ final class LibraryModel: ObservableObject {
         }
         return url
     }
-    static func inspect(_ url: URL) throws -> LibraryEntry {
+    static func inspect(_ url: URL, root: URL? = nil) throws -> LibraryEntry {
+        let drive = (root ?? Self.drive).resolvingSymlinksInPath().standardizedFileURL
         guard url.resolvingSymlinksInPath().path.hasPrefix(drive.path + "/") else {
             throw LibraryError.message("The executable must be inside drive_c.")
         }
@@ -1136,6 +1161,7 @@ final class LibraryModel: ObservableObject {
         }
     }
     private func finish() {
+        Task { @MainActor in SteamStorageModel.shared.releaseSession() }
         if sawProcess, let report = exitReport() { error = report }
         timer?.invalidate(); timer = nil
         saveCurrentProfile()
@@ -2573,6 +2599,9 @@ struct LibraryView: View {
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
             }
+            if settingsShow("SSD", "storage", "external", "library") {
+                Section("Storage") { NavigationLink("Game storage") { SteamStorageSettings() } }
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("appearance", "liquid metal", "metal", "glass") {
@@ -2843,10 +2872,12 @@ struct ExecutableBrowser: View {
 
 private struct LibraryPlayStyle: ButtonStyle {
     var pending: Bool
+    @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.padding(.horizontal, 18).padding(.vertical, 10)
-            .foregroundStyle(.white)
-            .background(pending || configuration.isPressed ? Color(uiColor: .darkGray) : .accentColor,
+            .foregroundStyle(isEnabled ? Color.white : Color(uiColor: .secondaryLabel))
+            .background(!isEnabled ? Color(uiColor: .tertiarySystemFill) :
+                        (pending || configuration.isPressed ? Color(uiColor: .darkGray) : .accentColor),
                         in: RoundedRectangle(cornerRadius: 14))
     }
 }
@@ -2856,6 +2887,9 @@ struct LibraryDetail: View {
     var play: (LibraryEntry) -> Void
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
+    @ObservedObject private var storage = SteamStorageModel.shared
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @State private var showStorage = false
     @State private var importCover = false
     @State private var findCover = false
     @State private var remove = false
@@ -2919,18 +2953,47 @@ struct LibraryDetail: View {
                             if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
                                 DockOfflineMark(appID: appID)
                             }
-                            Button(action: start) {
-                                HStack(spacing: 10) {
-                                    // Enabling JIT can take seconds with nothing else on screen.
-                                    if model.startingJIT == entry.id {
-                                        ProgressView().tint(.white)
-                                        Text("Starting JIT").fontWeight(.semibold)
-                                    } else {
-                                        Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
-                                    }
-                                }.frame(minWidth: 100, minHeight: 30)
+                            if let appID = entry.steamAppID, let download = steam.downloads[appID] {
+                                SteamTransferControls(appID: appID, download: download,
+                                    storageUnavailable: entry.storageID != "internal" && storage.availability != .available)
+                                SteamDownloadStatus(download: download)
+                            } else {
+                                Button(action: start) {
+                                    HStack(spacing: 10) {
+                                        // Enabling JIT can take seconds with nothing else on screen.
+                                        if entry.storageID != "internal", storage.availability != .available {
+                                            Image(systemName: "externaldrive.badge.exclamationmark")
+                                            Text("SSD unavailable").fontWeight(.semibold)
+                                        } else if model.startingJIT == entry.id {
+                                            ProgressView().tint(.white)
+                                            Text("Starting JIT").fontWeight(.semibold)
+                                        } else {
+                                            Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
+                                        }
+                                    }.frame(minWidth: 100, minHeight: 30)
+                                }
+                                .buttonStyle(LibraryPlayStyle(pending: leaving))
+                                .disabled(leaving || (entry.storageID != "internal" && storage.availability != .available))
                             }
-                            .buttonStyle(LibraryPlayStyle(pending: leaving)).disabled(leaving)
+                            if entry.storageID != "internal", storage.availability != .available {
+                                Button { Task { await storage.check() } } label: {
+                                    HStack {
+                                        if storage.checking { ProgressView() }
+                                        Text(storage.checking ? "Checking SSD…" : "Check SSD connection")
+                                    }
+                                }.buttonStyle(.borderless).disabled(storage.checking)
+                                Text(storage.problem ?? "Reconnect the SSD before playing.").font(.footnote)
+                                Button("Storage options") { showStorage = true }
+                                    .buttonStyle(.borderless)
+                                    .sheet(isPresented: $showStorage) {
+                                        NavigationStack {
+                                            SteamStorageSettings()
+                                                .toolbar { ToolbarItem(placement: .confirmationAction) {
+                                                    Button("Done") { showStorage = false }
+                                                } }
+                                        }
+                                    }
+                            }
                         }
                     }.padding(.vertical, 24)
                         .listRowBackground(
@@ -3158,8 +3221,9 @@ struct LibraryDetail: View {
                 Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
             }
             .task {
-                if entry.graphicsAPI == nil, entry.desktop != true, let url = try? LibraryModel.executable(entry.relativePath) { entry.graphicsAPI = LibraryModel.graphicsImports(url) }
+                if entry.graphicsAPI == nil, entry.desktop != true, entry.storageID == "internal", let url = try? LibraryModel.executable(entry.relativePath) { entry.graphicsAPI = LibraryModel.graphicsImports(url) }
             }
+            .monitorSteamStorage(libraryID: entry.storageID)
             .onDisappear { if !leaving { model.save(entry) } }
             .onReceive(LibraryController.shared.commands) { command in
                 guard !leaving, !findCover, !importCover, !remove else { return }
@@ -3414,7 +3478,7 @@ struct DockOfflineMark: View {
             .foregroundStyle(ready ? Color.green : Color.secondary)
         }
         .buttonStyle(.plain)
-        .task { preparedOnline = MadeiraDock.games(drive: MadeiraDock.drive).first { $0.id == appID }?.customExecutables ?? false }
+        .task { preparedOnline = (SteamGamesModel.shared.games + MadeiraDock.games(drive: MadeiraDock.drive)).first { $0.id == appID }?.customExecutables ?? false }
         .alert(ready ? "Can be played offline" : "Not ready for offline play yet", isPresented: $explain) {
             Button("OK", role: .cancel) {}
         } message: { Text(Self.explanation(mark)) }

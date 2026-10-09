@@ -481,3 +481,18 @@ credentials:
   ASan/UBSan and ThreadSanitizer (top-level windows only, one path lookup per
   process, frames and swapchains, capacity, the born-minimized restore and its
   switch), the driver's path form, and the wiring and glyph row.
+
+## External storage
+
+The app registers the selected SSD folder with Valve's client through the owned
+`C:\MadeiraExternalLibrary` alias. Dock receives that same path as its expected
+install location. The tested Valve client rejected a standalone E: library as
+unmounted; the alias uses the existing C: mount without copying the payload.
+Authentication, entitlement and expected-install-path checks remain unchanged.
+
+E: points to the same registered root for direct Wine launches and installer
+paths. The app validates the folder identity and holds coordinated security-scoped
+access through the session. Installer data comes from the SSD; generated scripts,
+registry and Steam client remain internal. Disconnected records stay visible.
+See [EXTERNAL_STORAGE.md](EXTERNAL_STORAGE.md) for lifecycle and test coverage,
+including the distinction between host checks and mixed-runtime device evidence.

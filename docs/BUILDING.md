@@ -80,3 +80,83 @@ rebuild, signing and installation has NOT been performed. Until it is,
 docs/LICENSING.md keeps the relink capability marked unverified. The
 alternative the LGPL offers, shipping the application's object files, is
 not currently done.
+
+## External storage checks
+
+`python3 tests/host/typecheck-ios.py` type-checks the production Swift sources
+with the installed iOS SDK without linking native archives. It is not a complete
+app build. The download integration harness supports macOS and Linux; see
+[EXTERNAL_STORAGE.md](EXTERNAL_STORAGE.md) for commands and validation limits.
+
+The independent data-access probe under `tests/device/ssd-probe` builds with
+XcodeGen and Xcode. Use a separate bundle ID and a dedicated scratch folder.
+Windows execution fixtures live under `tests/device/ssd-execution`; they require
+llvm-mingw. Neither probe is part of the production app target.
+
+### Native link validation for external storage
+
+On 2026-10-09, the main-based SSD change compiled and linked in Debug with Xcode
+27 / iOS 27 SDK, then passed deep/strict code-signature verification as an isolated
+app. This validates the native link, not device gameplay. The application and
+pinned submodule sources were unchanged by the prerequisite work below. Tracked
+Windows DLL farms and the converter remain binary inputs; Microsoft runtime DLLs
+were staged from the preserved published app, not rebuilt or committed.
+
+The clean build required these additions to the recipes above:
+
+- Install Bison 3 and put it before macOS Bison in PATH for Wine configuration.
+- Initialize the pinned FEX, Wine and DXMT submodules and their required nested
+  dependencies. FEX's iOS configuration also needs
+  `-DCMAKE_SYSTEM_PROCESSOR=arm64 -DTUNE_CPU=none`: the default native CPU probe
+  reads Linux `/proc/cpuinfo`. Run configuration fresh if the first attempt cached
+  an empty processor. Build `JemallocLibs` in addition to `FEXCore` and
+  `FEXCore_Base`; the app links all three. No FEX source edits were needed.
+- Build FFmpeg, GnuTLS headers/libraries, FreeType 2.13.3 and the locked pairing
+  library using their repository scripts. These builds succeeded on macOS.
+- Configure `wine/build-macos` with `--enable-win64 --without-x --disable-tests
+  --enable-winegstreamer`, `ac_cv_func_pipe2=no`, and llvm-mingw on PATH. The
+  host configure probe otherwise enables the newer pipe2 API, unavailable on the
+  tested older iPad OS; disabling that feature selects Wine's existing portable
+  pipe/fcntl fallback without a source patch. Generate the `include/*.h`
+  targets in its Makefile before running the native Wine scripts. The wineserver
+  script patches an existing base archive: on a clean checkout, first compile
+  the Wine `server/Makefile.in` source list using the same iOS flags and shims in
+  `build/wineserver/build.sh`, archive those objects into
+  `build/wineserver/obj/libwineserver.a`, then run that script's normal patch and
+  symbol-renaming pass. The generic bootstrap recipe used for this validation
+  came from commit `f4c9a17` (`build/wineserver/bootstrap-base.sh`); no OpenGL or
+  pipe compatibility source changes were imported.
+- LLVM source was pinned to `8dfdcc7b7bf66834a761bd8de445840ef68e4d1a`. Build a
+  Release host `llvm-tblgen`, then the iOS libraries with that tool. In addition
+  to the options above, use `LLVM_NO_DEAD_STRIP=ON` to avoid old AddLLVM selecting
+  Linux `--gc-sections` for iOS, disable zstd/terminfo/libedit, and supply
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5` for current CMake. No LLVM source edit is
+  required. Build the library targets listed by `llvm_deps` in
+  `dxmt/src/airconv/meson.build`; unused LLVM tools/backends are unnecessary.
+- Generate `air_msad.h`, `air_samplepos.h` and `air_tessellation.h` from the
+  corresponding DXMT shaders with its Meson Metal/xxd pipeline. The native build
+  script does not generate them or add their output directory to airconv's
+  include flags. Use `-std=metal3.1 --target=air64-apple-macos14.0`, then
+  `xxd -n <basename> -i <input.air> <output.h>`. Compile `airconv_context.cpp`
+  with the generated-header directory on its include path. The newer Metal
+  compiler rejected the tessellation intrinsic's argument count; installed Metal
+  `32023.883` compiled the unmodified shader successfully.
+- Combine the 87 DXMT objects and its 34 declared LLVM archives with
+  `xcrun -sdk iphoneos libtool -static` into `libdxmt_combined.a`, and copy it to
+  `app/Madeira`. The script only refreshes that combined archive if it exists.
+- Build and stage `build/madeira-dock/build.sh --check` before packaging. A
+  successful Xcode link does not guarantee this ignored output is present:
+  without `arm64ec-windows/dockhost.exe`, the app hides the Steam library.
+  Check the final bundle for the executable and `dock-notices.txt`. For 32-bit
+  games, also verify `i386-windows/ntdll.dll` and the WoW64 components described
+  above; an empty resource directory is insufficient. The full
+  `build/wine-i386/build.sh` subsequently built the Wine farm and DXMT PE
+  components on macOS with Bison 3, llvm-mingw and Meson available.
+- Run `build/stage-licenses.sh` before the app build. Use
+  `MTL_LANGUAGE_REVISION=Metal31` for the app's shaders on the tested older iPad OS.
+  The app links as iOS 17 while DXMT's existing script targets iOS 18; the linker
+  warns about this mismatch. This build does not establish iOS 17 compatibility.
+
+The signing team, bundle identifier and display name were isolated test-build
+settings. Native source linking replaces the earlier frontend-only diagnostic
+build; device validation still needs to exercise this exact implementation.

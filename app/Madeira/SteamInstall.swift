@@ -24,8 +24,68 @@ enum SteamInstallPaths {
 
     /// Whether an install (its drive-relative library folder) is in the library
     /// Madeira downloads into, and so can be updated or removed here.
-    static func isManaged(library: String) -> Bool {
-        library.caseInsensitiveCompare(libraryRelative) == .orderedSame
+    static func isManaged(library: String, storageID: String = "internal") -> Bool {
+        library.caseInsensitiveCompare(storageID == "internal" ? libraryRelative : "steamapps") == .orderedSame
+    }
+}
+
+/// Register the one external root with Valve's client while no Wine session is
+/// running. Preserve existing libraries and unknown fields; refuse malformed
+/// metadata instead of replacing it with an empty document.
+enum SteamLibraryFolders {
+    /// verifiedAliasOwnerID comes from Madeira's private prefix record, after the
+    /// caller validates the SSD marker and both filesystem mappings. Steam can
+    /// rewrite libraryfolders.vdf without preserving our custom ownership field.
+    static func register(externalID: String, name: String, apps: [Int: Int64], drive: URL,
+                         verifiedAliasOwnerID: String? = nil) throws {
+        guard UUID(uuidString: externalID) != nil else { throw SteamStorageError.invalidRecord }
+        let file = try SteamStoragePath.native(SteamInstallPaths.libraryRelative + "/libraryfolders.vdf", root: drive)
+        var root: [String: SteamValue] = [:]
+        do {
+            let data = try Data(contentsOf: file)
+            var parser = try SteamKeyValues(data)
+            root = try parser.read().fields
+            guard root["libraryfolders"] != nil else { throw SteamStorageError.invalidRecord }
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { }
+        var folders = root["libraryfolders"]?.fields ?? [:]
+        if folders.isEmpty {
+            folders["0"] = .object(["path": .text("C:\\Program Files (x86)\\Steam"), "apps": .object([:])])
+        }
+        let owned = folders.first { $0.value["madeira_library_id"]?.string == externalID }?.key
+        let existingAlias = folders.first {
+            let path = $0.value["path"]?.string?.trimmingCharacters(in: CharacterSet(charactersIn: "\\/")).lowercased()
+            return path == SteamStoragePath.externalWindowsRoot.lowercased()
+        }?.key
+        // Recover a Steam-rewritten entry only with independent, verified
+        // ownership. An explicit different ID or an unrelated E: stays untouched.
+        if let existingAlias, owned != existingAlias {
+            guard owned == nil,
+                  folders[existingAlias]?["madeira_library_id"] == nil,
+                  verifiedAliasOwnerID == externalID else {
+                throw SteamStorageError.mappingConflict
+            }
+        }
+        let key = owned ?? existingAlias ?? String((folders.keys.compactMap(Int.init).max() ?? 0) + 1)
+        var entry = folders[key]?.fields ?? [:]
+        entry["path"] = .text(SteamStoragePath.externalWindowsRoot)
+        entry["label"] = .text(name)
+        entry["madeira_library_id"] = .text(externalID)
+        entry["apps"] = .object(Dictionary(uniqueKeysWithValues: apps.map { (String($0.key), .text(String(max(0, $0.value)))) }))
+        folders[key] = .object(entry)
+        root["libraryfolders"] = .object(folders)
+        func quote(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        func encode(_ fields: [String: SteamValue], indent: String = "") -> String {
+            fields.keys.sorted().map { key in
+                switch fields[key]! {
+                case .text(let value): return indent + quote(key) + "\t" + quote(value) + "\n"
+                case .object(let nested): return indent + quote(key) + "\n" + indent + "{\n" + encode(nested, indent: indent + "\t") + indent + "}\n"
+                }
+            }.joined()
+        }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(encode(root).utf8).write(to: file, options: .atomic)
     }
 }
 
@@ -48,26 +108,52 @@ enum SteamInstallFiles {
     /// resume journal and the records of the apps that own its shared depots
     /// (those describe the same folder). Only paths strictly inside
     /// `steamApps/common` are removed.
-    nonisolated static func delete(appID: Int, folderName: String, steamApps: URL) {
-        let fm = FileManager.default
-        let common = steamApps.appendingPathComponent("common", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
-        let folder = common.appendingPathComponent(safeFolderName(folderName)).resolvingSymlinksInPath().standardizedFileURL
-        if folder.path.hasPrefix(common.path + "/"), folder.deletingLastPathComponent().path == common.path {
-            try? fm.removeItem(at: folder)
+    nonisolated static func delete(appID: Int, folderName: String, steamApps: URL) throws {
+        guard appID > 0, folderName == safeFolderName(folderName) else {
+            throw CocoaError(.fileWriteInvalidFileName)
         }
-        let recordURL = steamApps.appendingPathComponent("appmanifest_\(appID).acf")
-        if let state = record(appID: appID, steamApps: steamApps) {
+        let fm = FileManager.default
+        let root = steamApps.resolvingSymlinksInPath().standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        // Validate every target before changing anything. Never follow common,
+        // downloading, a game folder or an install record outside this library.
+        func target(_ relative: String) throws -> URL {
+            var url = root
+            for component in relative.split(separator: "/") {
+                url.appendPathComponent(String(component))
+                do {
+                    let attributes = try fm.attributesOfItem(atPath: url.path)
+                    guard attributes[.type] as? FileAttributeType != .typeSymbolicLink else {
+                        throw CocoaError(.fileWriteInvalidFileName)
+                    }
+                } catch let error as NSError where error.domain == NSCocoaErrorDomain &&
+                    [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(error.code) { }
+            }
+            return url
+        }
+        let folder = try target("common/" + folderName)
+        let journal = try target("downloading/\(appID)")
+        let recordURL = try target("appmanifest_\(appID).acf")
+        var shared: [URL] = []
+        if let state = record(appID: appID, steamApps: root) {
             for (_, owner) in (state["SharedDepots"]?.fields ?? [:]).sorted(by: { $0.key < $1.key }).prefix(64) {
-                guard let ownerID = owner.string.flatMap({ Int($0) }), ownerID > 0, ownerID != appID,
-                      let ownerState = record(appID: ownerID, steamApps: steamApps),
+                guard let ownerID = owner.string.flatMap({ Int($0) }), ownerID > 0, ownerID != appID else { continue }
+                let ownerURL = try target("appmanifest_\(ownerID).acf")
+                guard let ownerState = record(appID: ownerID, steamApps: root),
                       let dir = ownerState["installdir"]?.string,
-                      safeFolderName(dir).caseInsensitiveCompare(safeFolderName(folderName)) == .orderedSame
-                else { continue }
-                try? fm.removeItem(at: steamApps.appendingPathComponent("appmanifest_\(ownerID).acf"))
+                      dir.caseInsensitiveCompare(folderName) == .orderedSame else { continue }
+                shared.append(ownerURL)
             }
         }
-        try? fm.removeItem(at: recordURL)
-        try? fm.removeItem(at: steamApps.appendingPathComponent("downloading/\(appID)", isDirectory: true))
+        // Missing targets are already removed; every other I/O failure is real.
+        // Keep the primary install record until all payload/journal work succeeds.
+        for url in [folder, journal] + shared + [recordURL] {
+            do { try fm.removeItem(at: url) }
+            catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError { }
+        }
     }
 
     /// Validates a manifest path and folds directory spelling to the first

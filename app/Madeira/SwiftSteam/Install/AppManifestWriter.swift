@@ -41,7 +41,7 @@ struct AppManifestWriter {
         sharedDepots: [(depotID: Int, ownerAppID: Int)] = [],
         customExecutables: [String] = []
     ) throws {
-        let manifestPath = (steamAppsPath as NSString).appendingPathComponent("appmanifest_\(appID).acf")
+        let manifestPath = try SteamStoragePath.native("appmanifest_\(appID).acf", root: URL(fileURLWithPath: steamAppsPath)).path
 
         let timestamp = Int(Date().timeIntervalSince1970)
 
@@ -153,7 +153,7 @@ struct AppManifestWriter {
     static func mergeOwnerManifest(ownerAppID: UInt32, ownerName: String, ownerBuildID: UInt32, installDir: String,
                                    steamID: UInt64, steamAppsPath: String,
                                    depots: [InstalledDepot]) throws {
-        let path = (steamAppsPath as NSString).appendingPathComponent("appmanifest_\(ownerAppID).acf")
+        let path = try SteamStoragePath.native("appmanifest_\(ownerAppID).acf", root: URL(fileURLWithPath: steamAppsPath)).path
         var merged: [Int: InstalledDepot] = [:]
         if let data = FileManager.default.contents(atPath: path), data.count <= 1 << 20,
            var parser = try? SteamKeyValues(data), let root = try? parser.read(),

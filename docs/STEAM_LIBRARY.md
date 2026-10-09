@@ -47,14 +47,15 @@ finishes, so it keeps its own settings.
 The page has, in this order:
 
 - the header: artwork (Steam's, or a chosen cover), title, its bits, graphics
-  API and install size, Steam's playtime, and **Play**;
+  API and install size, Steam's playtime, and **Play** (or transfer progress and
+  **Pause download**, **Resume download** or **Retry download** while work remains);
 - **Library details**: title, **Choose cover image**, **Use Steam artwork**;
 - **Steam**: **Start with** Madeira Dock (the default) or **The game** (below);
   under Madeira Dock, **Smaller JIT pool (512 MB) for this launch** (Dock's
   per-launch choice) and **One-time installs**, **Run at next start** or
   **Skip** (Dock's choice for the game's Steam install scripts, when it has
-  any); under The game, **Program**; an update's progress with **Pause update** / **Resume update**,
-  or **Update available — download**; **Repair installed files**; App ID; free
+  any); under The game, **Program**; **Update available — download** when no
+  transfer is pending; **Repair installed files**; App ID; free
   space; the last Dock result; **Uninstall** (with a confirmation);
 - **Display**, **Compatibility & performance** (reduced-precision x87,
   **CPU cores reported**, **D3D9 anisotropic filtering**), **On screen** and
@@ -421,3 +422,50 @@ Madeira Dock or as The game).
   licenses are whatever Steam's license list contains.
 - Games installed by Valve's client in another library folder are listed and
   played but not updated or removed here.
+
+## External SSD libraries
+
+Settings → Game storage registers one dedicated local SSD folder using an
+in-place picker. New installs explicitly choose iPad or that folder in Download
+to. Existing and partial installations keep their library through resume, update
+and repair. External payloads, journals, caches and manifests stay under the
+selected root's `steamapps`; Steam's client and the Wine prefix remain internal.
+
+Library records store a stable library ID and relative path. Missing IDs in old
+entries mean internal storage. A bookmark and identity marker recover the same
+external library after reconnect; an unrelated folder at the old mount path is
+refused. Disconnected games retain their settings and show Connect SSD.
+
+Uninstall waits for the downloader and removes library metadata only after file
+deletion succeeds. A failure can leave partial payload removal: reconnect and
+retry or repair. Uninstall also deletes saves stored beside game files. Cloud
+GameInstall roots use the selected library; unavailable storage stops comparison
+and transfer before missing files can be acknowledged as deletions. For external
+GameInstall saves, cloud comparison and transfers reject symlink components that
+could leave the selected library, including links found during local-only save
+scanning. Internal Wine user-folder paths retain their existing behaviour.
+
+An interrupted install keeps Resume/Retry controls even when its partial record
+has been rediscovered. Reconnect the original library and use Check SSD connection
+before resuming; existing chunks are validated and valid ones reused. A failed
+network request is reported as a network error when the SSD is still accessible,
+and pausing does not mark the SSD disconnected. Updates use Pause/Resume rather
+than the first-install cancellation prompt that deletes partial files.
+
+The game-details header shows transfer controls while a
+download or update remains pending. Paused progress includes completed and total
+bytes, with a small display snapshot stored internally across app restarts; the
+SSD's journals and chunk checks remain authoritative. Older paused records need
+one resume to calculate their displayed counts. Visible game cards check an
+available external library about every two seconds while the app is active, so
+removal can disable Resume without closing the card. Provider response time can
+add delay; use Check SSD connection after reconnecting.
+
+Pause and background expiration also cancel the file-verification worker and
+wait for it to stop using the library. Free-space estimates distinguish sparse
+files' logical length from allocated blocks. A successful space check is not a
+guarantee that all writes will succeed; filesystem errors still stop the operation
+and retain its resumable data.
+
+See [EXTERNAL_STORAGE.md](EXTERNAL_STORAGE.md) for the storage and mapping
+contracts, test commands, device evidence and remaining validation gaps.

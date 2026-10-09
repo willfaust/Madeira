@@ -22,7 +22,7 @@ struct SteamInstallRun: Equatable, Hashable, Sendable, Codable {
 /// One program of a "Run Process" entry, resolved to a Windows path.
 struct SteamInstallProcess: Equatable, Sendable {
     var run: SteamInstallRun
-    var executable: String      // C:\...
+    var executable: String      // C:\... or E:\...
     var arguments: String
 }
 
@@ -249,7 +249,7 @@ enum DockInstallScripts {
                 guard let raw = fields["process \(number)"], !raw.isEmpty, raw.utf8.count <= 1024 else { continue }
                 let exe = expand(raw, installDir: installDir)
                 let lower = exe.lowercased()
-                guard exe.count > 3, exe.hasPrefix("C:\\"), !exe.contains("%"), !exe.contains("\""),
+                guard exe.count > 3, (exe.hasPrefix("C:\\") || exe.hasPrefix("E:\\")), !exe.contains("%"), !exe.contains("\""),
                       !exe.contains(".."), lower.hasSuffix(".exe") || lower.hasSuffix(".msi") else { continue }
                 let args = expand(fields["command \(number)"] ?? "", installDir: installDir, path: false)
                     .trimmingCharacters(in: .whitespaces)
@@ -493,11 +493,13 @@ enum DockInstallers {
 
     /// The install scripts' programs of a game: its own folder (one level down) and the
     /// shared redistributables Steam keeps next to it, and how many scripts were read.
-    nonisolated static func found(_ game: DockGame, drive: URL,
+    nonisolated static func found(_ game: DockGame, drive: URL, externalRoot: URL? = nil,
                                   defaultKey: Bool = DockInstallers.flag("MADEIRA_INSTALL_DEFAULT_KEY")) -> (processes: [SteamInstallProcess], scripts: Int) {
+        guard game.storageID == "internal" || externalRoot != nil else { return ([], 0) }
+        let drive = game.storageID == "internal" ? drive : externalRoot!
         let common = game.library + "/common"
         let shared = common + "/Steamworks Shared"
-        func windows(_ relative: String) -> String { "C:\\" + relative.replacingOccurrences(of: "/", with: "\\") }
+        func windows(_ relative: String) -> String { (game.storageID == "internal" ? "C:\\" : "E:\\") + relative.replacingOccurrences(of: "/", with: "\\") }
         let roots: [(URL, Int, String, Int?)] = [
             (drive.appendingPathComponent(common + "/" + game.installDir, isDirectory: true), 1, game.windowsInstallPath,
              defaultKey ? game.id : nil),
@@ -520,29 +522,27 @@ enum DockInstallers {
     }
 
     /// The number of install-script programs a game has (the Dock sheet's list).
-    nonisolated static func programCount(_ game: DockGame, drive: URL) -> Int {
-        enabled ? found(game, drive: drive).processes.count : 0
+    nonisolated static func programCount(_ game: DockGame, drive: URL, externalRoot: URL? = nil) -> Int {
+        enabled ? found(game, drive: drive, externalRoot: externalRoot).processes.count : 0
     }
 
     nonisolated static func inside(_ url: URL, drive: URL) -> Bool {
         url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(drive.resolvingSymlinksInPath().standardizedFileURL.path + "/")
     }
 
-    /// A C:\ path resolved on disk the way Wine resolves it (case-insensitive), staying
-    /// inside drive_c; nil when it does not exist.
-    nonisolated static func resolve(_ windowsPath: String, drive: URL) -> URL? {
-        guard windowsPath.uppercased().hasPrefix("C:\\"), windowsPath.utf8.count < 1024 else { return nil }
+    /// A C:\ or E:\ path resolved case-insensitively within its selected root;
+    /// nil when the root or file is unavailable.
+    nonisolated static func resolve(_ windowsPath: String, drive: URL, externalRoot: URL? = nil) -> URL? {
+        let external = windowsPath.uppercased().hasPrefix("E:\\")
+        guard (windowsPath.uppercased().hasPrefix("C:\\") || (external && externalRoot != nil)), windowsPath.utf8.count < 1024 else { return nil }
+        let drive = external ? externalRoot! : drive
         let parts = windowsPath.dropFirst(3).split(separator: "\\", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.contains("/") }) else { return nil }
         var current = drive
         for part in parts {
-            let exact = current.appendingPathComponent(part)
-            if FileManager.default.fileExists(atPath: exact.path) { current = exact }
-            else {
-                guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
-                      let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
-                current.appendPathComponent(match)
-            }
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
+                  let match = names.first(where: { $0 == part }) ?? names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
+            current.appendPathComponent(match)
             guard inside(current, drive: drive) else { return nil }
         }
         return current
@@ -562,9 +562,9 @@ enum DockInstallers {
     /// Why this build cannot run a program, nil when it can. Decided by what the program is
     /// (a Windows Installer package, a 32-bit executable) and what the bundle has, never by
     /// its name: a package needs msiexec.exe, a 32-bit executable needs 32-bit support.
-    nonisolated static func runnable(_ process: SteamInstallProcess, drive: URL, has32Bit: Bool, hasMsiexec: Bool) -> String? {
+    nonisolated static func runnable(_ process: SteamInstallProcess, drive: URL, has32Bit: Bool, hasMsiexec: Bool, externalRoot: URL? = nil) -> String? {
         if process.executable.lowercased().hasSuffix(".msi") { return hasMsiexec ? nil : "Windows Installer package" }
-        guard let file = resolve(process.executable, drive: drive), let machine = machine(file) else { return nil }
+        guard let file = resolve(process.executable, drive: drive, externalRoot: externalRoot), let machine = machine(file) else { return nil }
         return machine == 0x14c && !has32Bit ? "32-bit installer" : nil
     }
 
@@ -593,7 +593,7 @@ enum DockInstallers {
 
     /// Called right before a Dock start, while no session runs (the registry is on disk).
     /// Records the previous batch's results, plans the game's programs and writes the batch.
-    static func prepare(_ game: DockGame, drive: URL, prefix: URL,
+    static func prepare(_ game: DockGame, drive: URL, prefix: URL, externalRoot: URL? = nil,
                         has32Bit: Bool = DockInstallers.bundleHas32Bit, hasMsiexec: Bool = DockInstallers.bundleHasMsiexec,
                         fusionSource: URL? = Bundle.main.resourceURL?.appendingPathComponent("i386-windows/fusion.dll")) {
         script = nil; serverSync = false; note = nil; finishedAt = nil; logged = []
@@ -606,7 +606,7 @@ enum DockInstallers {
             LogStore.shared.log("[dock-installers] app=\(app) off (MADEIRA_DOCK_INSTALLERS=0)"); return
         }
         let defaultKey = flag("MADEIRA_INSTALL_DEFAULT_KEY")
-        let (found, scripts) = Self.found(game, drive: drive, defaultKey: defaultKey)
+        let (found, scripts) = Self.found(game, drive: drive, externalRoot: externalRoot, defaultKey: defaultKey)
         guard !found.isEmpty else {
             LogStore.shared.log("[dock-installers] app=\(app) scripts=\(scripts) programs=0"); return
         }
@@ -615,8 +615,8 @@ enum DockInstallers {
         }
         let items = DockInstallScripts.plan(found,
                                             done: { DockInstallScripts.marked($0, in: registry[$0.hive] ?? "") },
-                                            exists: { resolve($0, drive: drive) != nil },
-                                            runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec) })
+                                            exists: { resolve($0, drive: drive, externalRoot: externalRoot) != nil },
+                                            runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec, externalRoot: externalRoot) })
         var pending = items.filter { $0.status == .pending }.map(\.process)
         var ledger = DockInstallLedger.load(prefix: prefix)
         // The game's One-time installs choice: absent or "Run at next start" runs the pending
