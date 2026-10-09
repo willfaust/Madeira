@@ -64,7 +64,7 @@ code = r"""
 #include <unistd.h>
 #include <limits.h>
 #include <assert.h>
-""" + pe_machine + "\n" + target + r"""
+""" + '\n#include "' + str(root / 'app/Madeira/SteamStorageNative.h') + '"\n' + pe_machine + "\n" + target + r"""
 int main(int argc, char **argv)
 {
     const char *d = argv[1];
@@ -81,6 +81,19 @@ int main(int argc, char **argv)
     /* full paths under drive_c, backslashes and spaces */
     assert(madeira_target_machine("C:\\Program Files\\App Dir\\app32.exe", prefix, bundle) == 0x14c);
     assert(madeira_target_machine("c:\\Program Files\\App Dir\\app64.exe", prefix, bundle) == 0x8664);
+    /* E: requires both the registered mapping and its current identity. */
+    assert(madeira_target_machine("E:\\Games\\app32.exe", prefix, bundle) == 0);
+    setenv("MADEIRA_EXTERNAL_LIBRARY_ID", "12345678-1234-1234-1234-123456789abc", 1);
+    assert(madeira_target_machine("E:\\Games\\app32.exe", prefix, bundle) == 0x14c);
+    assert(madeira_target_machine("e:\\Games\\app64.exe", prefix, bundle) == 0x8664);
+    assert(madeira_storage_native(prefix, "E:\\Games", p, sizeof(p)) == 0);
+    assert(madeira_storage_native(prefix, "E:\\Games\\..\\escape", p, sizeof(p)) != 0);
+    assert(madeira_storage_native(prefix, "E:\\escape\\app32.exe", p, sizeof(p)) != 0);
+    assert(madeira_storage_native(prefix, "E:\\missing", p, sizeof(p)) != 0);
+    assert(madeira_storage_native(prefix, "E:\\Games", p, 8) != 0);
+    setenv("MADEIRA_EXTERNAL_LIBRARY_ID", "aaaaaaaa-1234-1234-1234-123456789abc", 1);
+    assert(madeira_target_machine("E:\\Games\\app32.exe", prefix, bundle) == 0);
+    unsetenv("MADEIRA_EXTERNAL_LIBRARY_ID");
     assert(madeira_target_machine("C:\\Program Files\\App Dir\\none.exe", prefix, bundle) == 0);
     /* other forms are not probed */
     assert(madeira_target_machine("D:\\app32.exe", prefix, bundle) == 0);
@@ -108,6 +121,12 @@ with tempfile.TemporaryDirectory() as tmp:
     bad = bytearray(pe(0x14c)); bad[0x3c:0x40] = (32 << 20).to_bytes(4, "little"); (t / "badlfa.exe").write_bytes(bad)
     app = t / "prefix/drive_c/Program Files/App Dir"; app.mkdir(parents=True)
     (app / "app32.exe").write_bytes(pe(0x14c)); (app / "app64.exe").write_bytes(pe(0x8664))
+    external = t / 'external/Games'; external.mkdir(parents=True)
+    (external / 'app32.exe').write_bytes(pe(0x14c)); (external / 'app64.exe').write_bytes(pe(0x8664))
+    (external.parent / '.madeira-library-id').write_text('12345678-1234-1234-1234-123456789abc')
+    (external.parent / 'escape').symlink_to(app, target_is_directory=True)
+    (t / 'prefix/dosdevices').mkdir()
+    (t / 'prefix/dosdevices/e:').symlink_to(external.parent, target_is_directory=True)
     for farm in ["aarch64-windows", "arm64ec-windows", "i386-windows"]:
         (t / "bundle" / farm).mkdir(parents=True)
     (t / "bundle/aarch64-windows/both.exe").write_bytes(pe(0xaa64))
@@ -119,3 +138,4 @@ with tempfile.TemporaryDirectory() as tmp:
     out = subprocess.run([str(exe), str(t)], check=True, capture_output=True, text=True)
     assert "probe ok" in out.stdout, out.stdout + out.stderr
 print("PASS: PE machine probe: PE32/PE32+/non-PE/truncated/huge e_lfanew; drive_c paths; bare names prefer the 64-bit farms")
+print("PASS: registered E: machine and working-directory paths; missing identity, different identity, traversal and symlink escapes refused")

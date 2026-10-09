@@ -146,6 +146,15 @@ func window(_ image: String, _ w: Int, _ h: Int, visible: Bool = true, drawn: Bo
         require(S.decide(before, rendered: false, places: places).scene == .waiting, "console, tray and the host's hidden window: keep waiting")
         require(S.decide(before, rendered: true, places: places).scene == .waiting, "D3D frames never make a helper's window the game's")
         let game = window("\\??\\C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fixture Game\\bin\\Game.exe", 1280, 720)
+        for externalPath in ["E:\\steamapps\\common\\Fixture Game\\game.exe",
+                             "C:\\MadeiraExternalLibrary\\steamapps\\common\\Fixture Game\\game.exe"] {
+            let external = window(externalPath, 1280, 720)
+            require(S.owner(externalPath, places: places) == .other &&
+                    S.decide(before + [external], rendered: false, places: places).scene == .game,
+                    "external library: canonical E and scoped C alias both classify a drawn game window")
+            require(S.decide(before + [external], rendered: false, places: places, early: [external.hwnd]).scene == .steamWindow,
+                    "external library: prerequisite window remains an installer when first shown before the host")
+        }
         let decided = S.decide(before + [game], rendered: false, places: places)
         require(decided.scene == .game && decided.window == game, "the game's shown, drawn window ends the wait")
         require(S.decide(before + [window("C:\\Program Files\\Publisher\\Launcher\\start.exe", 800, 600)], rendered: false, places: places).scene == .game,

@@ -113,6 +113,7 @@ enum GamepadInput { static let keyboardMouseAvailable = true }   // LibraryEntry
 enum LibraryError: LocalizedError { case message(String) }
 func env(_ name: String) -> String? { getenv(name).map { String(cString: $0) } }
 '''
+swift += (root / 'app/Madeira/SteamStorage.swift').read_text() + '\n'
 swift += block(lib, 'struct LibraryEntry: Codable, Identifiable') + '\n'
 swift += block(lib, 'enum SyncEngine: String, CaseIterable, Identifiable') + '\n'
 swift += '\n'.join(l for l in display.splitlines() if not l.startswith('import ')) + '\n'
@@ -510,7 +511,8 @@ check('__attribute__((weak)) void madeira_set_display_max_fps' in shim and 'ProM
 check('__attribute__((weak)) int madeira_dxmt_has_40_cap(void) {\n    return 0;' in shim
       and 'madeira_dxmt_has_40_cap() != 0 && panelMaxFPS >= 120' in fps
       and 'ProMotionIntent.has40Cap || mode == 4' in lib, 'the 40 FPS cap is offered only with DXMT support and a 120 Hz panel')
-check('LibraryView(play: launchLibraryEntry' in content, 'ContentView shows the library when it is the chosen interface')
+check('else if library.enabled {' in content and 'LibraryView(play: { launchLibraryEntry($0) }, enableJIT: enableJIT,' in content,
+      'ContentView shows the library and forwards its selected profile to launchLibraryEntry')
 check('runWineFullSequence(profile: entry)' in content and 'profile.applyEnvironment()' in content,
       'library launches use the shared launch path with the profile applied')
 check('Button("Use New Interface")' in content, 'the developer interface can switch back to the library')

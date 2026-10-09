@@ -4,7 +4,7 @@
 # Madeira Converter Exception: see LICENSE-EXCEPTION.md
 """Host checks for the owned Steam library and downloads (docs/STEAM_LIBRARY.md).
 
-Never contacts Steam. It needs swiftc (Linux), cc, python3 with `cryptography`
+Never contacts Steam. It needs swiftc (Linux or macOS), cc, python3 with `cryptography`
 or the openssl command, and libssl/liblzma/zlib development files.
 
 Part A is static: licence headers, the Xcode project, no program names, the
@@ -31,6 +31,8 @@ scripted Steam connection (`SteamCMSession`), and runs it:
   installed until its record is written, and once written is found by Madeira
   Dock's own scanner (MadeiraDock.games); an update fetches only what changed and
   shrinks files; hostile manifest paths never leave the install folder.
+  MADEIRA_TEST_EXTERNAL_PARENT optionally places the external fixture in a fresh
+  child of a mounted test volume; the parent itself is never removed.
 """
 from pathlib import Path
 import base64
@@ -172,7 +174,7 @@ require(-1 not in order and order == sorted(order),
         'Dock start: the app connection closes, then the sign-in is read and handed over, then the session starts')
 require(dock_start.count('SteamSignIn.credentialsForDock()') == 1 and dock_start.count('MadeiraDock.writeHandoff(') == 1,
         'the sign-in is read and written once, after the connection closed')
-require('SteamOwnedLibrary.shared.dockEnded()' in dock_start[:dock_start.index('Task { @MainActor in')],
+require('SteamOwnedLibrary.shared.dockEnded()' in block(dock_start, 'func fail('),
         'a failed Dock start gives the connection back')
 dock_view = (app / 'MadeiraDockView.swift').read_text()
 watch = block(dock_view, 'func watchReport()')
@@ -676,7 +678,377 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     return Data(pkg)
 }
 
+
+func storageChecks() throws {
+    require((try? SteamStorageCapacity.resolve(important: 0, ordinary: 4_000_000_000, filesystem: 4_000_000_000)) == 4_000_000_000,
+            "storage: zero important capacity falls back to real free bytes")
+    require((try? SteamStorageCapacity.resolve(important: nil, ordinary: nil, filesystem: 8_000_000_000)) == 8_000_000_000,
+            "storage: filesystem capacity supports volumes without URL capacity keys")
+    require((try? SteamStorageCapacity.resolve(important: 0, ordinary: 0, filesystem: 0)) == 0,
+            "storage: genuinely full volume remains full")
+    require((try? SteamStorageCapacity.resolve(important: nil, ordinary: -1, filesystem: nil)) == nil,
+            "storage: unknown capacity is not unlimited space")
+    #if os(iOS) || os(macOS)
+    require(SteamExternalAccess.availability(for: POSIXError(.EACCES)) == .permissionDenied &&
+            SteamExternalAccess.availability(for: POSIXError(.EPERM)) == .permissionDenied,
+            "storage: POSIX permission failures are not labelled disconnected")
+    let wrappedReadOnly = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                                 userInfo: [NSUnderlyingErrorKey: POSIXError(.EROFS)])
+    require(SteamExternalAccess.availability(for: wrappedReadOnly) == .readOnly,
+            "storage: provider-wrapped read-only errors retain their actionable state")
+    require(SteamExternalAccess.availability(for: POSIXError(.ENOENT)) == .disconnected &&
+            SteamExternalAccess.availability(for: SteamStorageError.unavailable(.identityMismatch)) == .identityMismatch,
+            "storage: missing paths and explicit identity failures keep their distinct states")
+    #endif
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("madeira-storage-" + UUID().uuidString)
+    try fm.createDirectory(at: base, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: base) }
+    require((try? SteamStorageCapacity.availableBytes(at: base)) != nil, "storage: real destination capacity is queried on the host")
+    let external = base.appendingPathComponent("SSD")
+    try fm.createDirectory(at: external, withIntermediateDirectories: false)
+    let id = try SteamStorageIdentity.register(root: external)
+    let library = SteamStorageLibrary(id: id, name: "SSD", bookmark: nil)
+    try SteamStorageIdentity.verify(id, root: external)
+    let mapping = base.appendingPathComponent("e:")
+    try fm.createSymbolicLink(at: mapping, withDestinationURL: base.appendingPathComponent("old-mount"))
+    require((try? SteamStorageMapping.replace(mapping, root: external, libraryID: id, ownerID: nil)) == nil,
+            "storage: unowned stale mapping is not replaced")
+    try SteamStorageMapping.replace(mapping, root: external, libraryID: id, ownerID: id)
+    require(mapping.resolvingSymlinksInPath().path == external.path, "storage: owned stale mapping follows the reconnected library")
+    try SteamStorageMapping.replace(mapping, root: external, libraryID: id, ownerID: nil)
+    require(mapping.resolvingSymlinksInPath().path == external.path, "storage: matching target can be adopted without an owner record")
+    try fm.removeItem(at: mapping)
+    try fm.createDirectory(at: mapping, withIntermediateDirectories: false)
+    require((try? SteamStorageMapping.replace(mapping, root: external, libraryID: id, ownerID: id)) == nil,
+            "storage: mapping never replaces a real directory even with matching ownership")
+    require((try? SteamStorageMapping.replace(base.appendingPathComponent("wrong:"), root: external, libraryID: UUID().uuidString, ownerID: id)) == nil,
+            "storage: mapping rejects a mismatched destination marker")
+    require((try? SteamStorageIdentity.register(root: external)) == id, "storage: repeat registration preserves identity")
+    require((try? SteamStoragePath.windows("steamapps/common/Game", library: library)) == "E:\\steamapps\\common\\Game", "storage: external Windows mapping")
+    require((try? SteamStoragePath.windows("Games/Test", library: .internalLibrary)) == "C:\\Games\\Test", "storage: internal Windows mapping")
+    let legacy = try JSONDecoder().decode(SteamStorageLocation.self, from: Data(#"{"relativePath":"Games/Old/game.exe"}"#.utf8))
+    require(legacy.libraryID == SteamStorageLibrary.internalID, "storage: legacy location migrates to internal without moving files")
+    let location = try SteamStorageLocation(libraryID: id, relativePath: "steamapps/common/Game")
+    require((try? location.windowsPath(in: library)) == "E:\\steamapps\\common\\Game", "storage: persistent location resolves registered drive")
+    require((try? location.nativeURL(in: .internalLibrary, root: external)) == nil, "storage: external address cannot use internal root")
+    let catalogURL = base.appendingPathComponent("catalog.json")
+    var catalog = try SteamStorageCatalog.load(from: catalogURL)
+    var registered = library
+    registered.bookmark = Data("synthetic bookmark".utf8)
+    let assignment = SteamStorageAssignment(appID: 55, location: location, name: "Game", installed: false)
+    try catalog.transaction(file: catalogURL) { next in
+        try next.register(registered)
+        try next.assign(assignment)
+    }
+    require((try? SteamStorageCatalog.load(from: catalogURL)) == catalog, "storage: queued destination survives restart")
+    let initialCatalog = catalog
+    let internalLocation = try SteamStorageLocation(relativePath: "Program Files (x86)/Steam/steamapps/common/Game")
+    do {
+        try catalog.transaction(file: catalogURL) { next in
+            try next.assign(SteamStorageAssignment(appID: 55, location: internalLocation, name: "Game", installed: false))
+        }
+        require(false, "storage: partial install cannot retarget internal")
+    } catch { require(catalog == initialCatalog, "storage: partial install cannot retarget internal") }
+    let badSave = base.appendingPathComponent("not-a-directory")
+    try Data().write(to: badSave)
+    do {
+        try catalog.transaction(file: badSave.appendingPathComponent("catalog.json")) { $0.remove(appID: 55) }
+        require(false, "storage: failed persistence rolls back in-memory mutation")
+    } catch { require(catalog == initialCatalog, "storage: failed persistence rolls back in-memory mutation") }
+    var updating = initialCatalog
+    let updatingFile = base.appendingPathComponent("updating.json")
+    var update = assignment
+    update.installed = true; update.pending = true
+    update.transferProgress = SteamStorageTransferProgress(doneBytes: 248_000_000, totalBytes: 1_000_000_000)
+    try updating.transaction(file: updatingFile) { try $0.assign(update) }
+    // Discovery may still see the old complete manifest during a paused update.
+    var scanned = update; scanned.pending = nil; scanned.transferProgress = nil
+    try updating.transaction(file: updatingFile) { try $0.assign(scanned) }
+    require((try? SteamStorageCatalog.load(from: updatingFile))?.assignments[55]?.pending == true,
+            "storage: paused update survives restart and old-manifest discovery")
+    require((try? SteamStorageCatalog.load(from: updatingFile))?.assignments[55]?.transferProgress == update.transferProgress,
+            "storage: paused byte counts survive restart and manifest rediscovery")
+    require(initialCatalog.assignments[55]?.transferProgress == nil,
+            "storage: catalogs without transfer snapshots remain readable")
+    update.pending = false
+    try updating.transaction(file: updatingFile) { try $0.assign(update) }
+    require(updating.assignments[55]?.pending == false, "storage: successful completion explicitly clears pending state")
+    require(updating.assignments[55]?.transferProgress == nil,
+            "storage: successful completion clears obsolete transfer progress")
+    try Data("broken".utf8).write(to: catalogURL)
+    require((try? SteamStorageCatalog.load(from: catalogURL)) == nil, "storage: corrupt catalog never resets into an internal fallback")
+    try JSONEncoder().encode(catalog).write(to: catalogURL)
+    let internalDrive = base.appendingPathComponent("drive_c")
+    let foldersFile = SteamInstallPaths.steamApps(drive: internalDrive).appendingPathComponent("libraryfolders.vdf")
+    try fm.createDirectory(at: foldersFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(#"""
+    "libraryfolders" {
+        "0" { "path" "C:\\Program Files (x86)\\Steam" "apps" { "1" "42" } }
+        "1" { "path" "C:\\Other Games" "custom" "keep" }
+    }
+    "unknown" "preserved"
+    """#.utf8).write(to: foldersFile)
+    try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [55: 1234], drive: internalDrive)
+    try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [55: 5678], drive: internalDrive)
+    var foldersParser = try SteamKeyValues(Data(contentsOf: foldersFile))
+    let foldersRecord = try foldersParser.read()
+    require(foldersRecord["libraryfolders"]?.fields.count == 3 && foldersRecord["unknown"]?.string == "preserved" &&
+            foldersRecord["libraryfolders"]?["1"]?["custom"]?.string == "keep",
+            "storage: Steam registration preserves other libraries and unknown fields")
+    require(foldersRecord["libraryfolders"]?["2"]?["path"]?.string == "C:\\MadeiraExternalLibrary" &&
+            foldersRecord["libraryfolders"]?["2"]?["apps"]?["55"]?.string == "5678",
+            "storage: Steam registration updates one stable scoped alias entry")
+    let registeredFolders = try Data(contentsOf: foldersFile)
+    try Data(#"""
+    "libraryfolders" { "0" { "path" "E:\\" "custom" "unrelated" } }
+    """#.utf8).write(to: foldersFile)
+    try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [:], drive: internalDrive)
+    var foreignParser = try SteamKeyValues(Data(contentsOf: foldersFile))
+    let foreignRecord = try foreignParser.read()
+    require(foreignRecord["libraryfolders"]?["0"]?["path"]?.string == "E:\\" &&
+            foreignRecord["libraryfolders"]?["0"]?["custom"]?.string == "unrelated" &&
+            foreignRecord["libraryfolders"]?["1"]?["path"]?.string == "C:\\MadeiraExternalLibrary",
+            "storage: registering SSD leaves an unrelated E library untouched")
+    let unownedAlias = Data(#"""
+    "libraryfolders" { "0" { "path" "C:\\MadeiraExternalLibrary" } }
+    """#.utf8)
+    try unownedAlias.write(to: foldersFile)
+    var aliasRefused = false
+    do { try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [:], drive: internalDrive) }
+    catch { aliasRefused = true }
+    require(aliasRefused && (try? Data(contentsOf: foldersFile)) == unownedAlias,
+            "storage: registration refuses an unowned alias without changing its metadata")
+    try registeredFolders.write(to: foldersFile)
+    let externalApps = external.appendingPathComponent("steamapps")
+    try fm.createDirectory(at: externalApps, withIntermediateDirectories: true)
+    try Data(#"""
+    "AppState" { "appid" "55" "installdir" "Game" "name" "Fixture" "StateFlags" "4" }
+    """#.utf8).write(to: externalApps.appendingPathComponent("appmanifest_55.acf"))
+    try fm.createSymbolicLink(at: internalDrive.appendingPathComponent("MadeiraExternalLibrary"), withDestinationURL: external)
+    let externalFixtures = try MadeiraDock.games(library: library, root: external)
+    require(externalFixtures.count == 1, "storage: alias fixture is discoverable externally")
+    require(MadeiraDock.games(drive: internalDrive).isEmpty, "storage: C alias never reclassifies an SSD game as internal")
+    try fm.removeItem(at: externalApps)
+    try fm.removeItem(at: internalDrive.appendingPathComponent("MadeiraExternalLibrary"))
+    let broken = Data("broken".utf8)
+    try broken.write(to: foldersFile)
+    do {
+        try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [:], drive: internalDrive)
+        require(false, "storage: malformed Steam registration is not overwritten")
+    } catch { require((try? Data(contentsOf: foldersFile)) == broken, "storage: malformed Steam registration is not overwritten") }
+    for bad in ["/abs", "../escape", "a/../escape", "C:\\escape", "a//b", "a/", "a\u{0}b"] {
+        require((try? SteamStoragePath.native(bad, root: external)) == nil, "storage: rejects invalid relative path")
+    }
+    let outside = base.appendingPathComponent("outside")
+    try fm.createDirectory(at: outside, withIntermediateDirectories: false)
+    try fm.createSymbolicLink(at: external.appendingPathComponent("escape"), withDestinationURL: outside)
+    require((try? SteamStoragePath.native("escape/payload", root: external)) == nil, "storage: rejects symlink escape")
+    let relocated = base.appendingPathComponent("SSD-reconnected")
+    try fm.moveItem(at: external, to: relocated)
+    try SteamStorageIdentity.verify(id, root: relocated)
+    require((try? location.nativeURL(in: library, root: relocated)) == relocated.appendingPathComponent("steamapps/common/Game"),
+            "storage: persisted game address follows relocated registered library")
+    require((try? SteamStorageCatalog.load(from: catalogURL))?.assignments[55] == assignment,
+            "storage: disconnected library retains its install assignment")
+    require(true, "storage: identity survives changed mount path")
+    try fm.createDirectory(at: external, withIntermediateDirectories: false)
+    _ = try SteamStorageIdentity.register(root: external)
+    do { try SteamStorageIdentity.verify(id, root: external); require(false, "storage: replacement disk rejected") }
+    catch { require(true, "storage: replacement disk rejected") }
+
+    let apps = relocated.appendingPathComponent("steamapps")
+    try fm.createDirectory(at: apps, withIntermediateDirectories: false)
+    let record = apps.appendingPathComponent("appmanifest_55.acf")
+    try Data("install identity".utf8).write(to: record)
+    try fm.createSymbolicLink(at: apps.appendingPathComponent("common"), withDestinationURL: outside)
+    do { try SteamInstallFiles.delete(appID: 55, folderName: "Game", steamApps: apps); require(false, "storage: unsafe uninstall fails") }
+    catch { require(fm.fileExists(atPath: record.path), "storage: failed uninstall preserves primary record") }
+    try fm.removeItem(at: apps.appendingPathComponent("common"))
+    try Data("not a directory".utf8).write(to: apps.appendingPathComponent("common"))
+    do { try SteamInstallFiles.delete(appID: 55, folderName: "Game", steamApps: apps); require(false, "storage: filesystem deletion failure surfaces") }
+    catch { require(fm.fileExists(atPath: record.path), "storage: real deletion failure preserves primary record") }
+    do { try SteamInstallFiles.delete(appID: 55, folderName: "Game", steamApps: base.appendingPathComponent("missing")); require(false, "storage: missing library is not a successful uninstall") }
+    catch { require(true, "storage: missing library is not a successful uninstall") }
+    #if os(macOS)
+    let report = try SteamStorageProbe.run(root: relocated)
+    require(report.hasPrefix("PASS:"), "storage: production POSIX data probe")
+    #endif
+}
+
+func storageAsyncChecks() async throws {
+    do {
+        let _: Int = try await SteamStorageOperation.run({ throw URLError(.notConnectedToInternet) }, validate: {})
+        require(false, "storage: network failure is preserved")
+    } catch let error as URLError {
+        require(error.code == .notConnectedToInternet, "storage: network failure stays a network failure on a healthy volume")
+    }
+    do {
+        let _: Int = try await SteamStorageOperation.run({ throw URLError(.networkConnectionLost) }, validate: {
+            throw SteamStorageError.unavailable(.disconnected)
+        })
+        require(false, "storage: missing volume wins over an operation failure")
+    } catch SteamStorageError.unavailable(.disconnected) {
+        require(true, "storage: disconnected volume gives reconnect guidance")
+    }
+    var cancellationValidated = false
+    do {
+        let _: Int = try await SteamStorageOperation.run({ throw CancellationError() }, validate: { cancellationValidated = true })
+        require(false, "storage: cancellation is preserved")
+    } catch is CancellationError {
+        require(!cancellationValidated, "storage: cancellation never probes or marks the volume disconnected")
+    }
+    do {
+        let _: Int = try await SteamStorageOperation.run({ 1 }, validate: { throw SteamStorageError.unavailable(.identityMismatch) })
+        require(false, "storage: successful work still validates its destination")
+    } catch SteamStorageError.unavailable(.identityMismatch) {
+        require(true, "storage: replaced destination cannot publish a successful operation")
+    }
+    let normal = SteamStorageAsyncWork<Int>()
+    let value = try await Task.detached { try normal.execute { 73 } }.value
+    require(value == 73, "storage: async operation finishes before accessor returns")
+    let cancelled = SteamStorageAsyncWork<Int>()
+    cancelled.cancel()
+    do {
+        _ = try await Task.detached { try cancelled.execute { fatalError("cancelled operation ran") } }.value
+        require(false, "storage: cancellation before access prevents operation")
+    } catch { require(error is CancellationError, "storage: cancellation before access prevents operation") }
+    let cleanup = FileManager.default.temporaryDirectory.appendingPathComponent("storage-cleanup-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: cleanup) }
+    let work = SteamStorageAsyncWork<Int>()
+    let signal = AsyncStream<Void>.makeStream()
+    let worker = Task.detached {
+        try work.execute {
+            signal.continuation.yield(())
+            signal.continuation.finish()
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) }
+            catch {
+                try Data("closed".utf8).write(to: cleanup)
+                throw error
+            }
+            return 0
+        }
+    }
+    for await _ in signal.stream { break }
+    work.cancel()
+    do { _ = try await worker.value; require(false, "storage: cancellation propagates into active async operation") }
+    catch {
+        require(error is CancellationError && FileManager.default.fileExists(atPath: cleanup.path),
+                "storage: cancellation waits for operation cleanup before releasing accessor")
+    }
+}
+
+@MainActor func preparationCancellationChecks() async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("prepare-cancel-" + UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let files = root.appendingPathComponent("files"), journals = root.appendingPathComponent("journals")
+    try fm.createDirectory(at: files, withIntermediateDirectories: true)
+    try fm.createDirectory(at: journals, withIntermediateDirectories: true)
+    var manifest = DepotManifest(depotID: 77, manifestGID: 88, creationTime: 0,
+                                 totalUncompressedSize: 0, totalCompressedSize: 0)
+    manifest.files = (0..<5000).map { .init(filename: "part-\($0)", size: 0, flags: 0, chunks: []) }
+    let plan = DepotDownloader.DepotPlan(depotID: 77, manifestGID: 88, key: Data(), manifest: manifest,
+                                        hosts: [], auth: [:], declaredSize: 0, health: ContentHostHealth())
+    let cancelled = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return try await DepotDownloader.prepareForInstall(plans: [plan], installURL: files, journalDir: journals)
+    }
+    do { _ = try await cancelled.value; require(false, "preparation: pre-cancelled request is rejected") }
+    catch {
+        let filesAfterCancel = try fm.contentsOfDirectory(atPath: files.path)
+        require(error is CancellationError && filesAfterCancel.isEmpty,
+                "preparation: pre-cancelled request makes no payload files")
+    }
+    let running = Task {
+        try await DepotDownloader.prepareForInstall(plans: [plan], installURL: files, journalDir: journals)
+    }
+    let deadline = Date().addingTimeInterval(10)
+    while !fm.fileExists(atPath: files.appendingPathComponent("part-0").path), Date() < deadline {
+        try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    require(fm.fileExists(atPath: files.appendingPathComponent("part-0").path), "preparation: actual filesystem work began")
+    running.cancel()
+    do { _ = try await running.value; require(false, "preparation: active request observes cancellation") }
+    catch { require(error is CancellationError, "preparation: active request observes cancellation") }
+    let stopped = try fm.contentsOfDirectory(atPath: files.path).count
+    try await Task.sleep(nanoseconds: 20_000_000)
+    let after = try fm.contentsOfDirectory(atPath: files.path).count
+    require(stopped > 0 && stopped < 5000 && after == stopped,
+            "preparation: cancellation waits for worker to stop touching the library")
+}
+
+@MainActor func sparseResumeChecks() async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("sparse-resume-" + UUID().uuidString)
+    defer { try? fm.removeItem(at: root) }
+    let files = root.appendingPathComponent("files"), journals = root.appendingPathComponent("journals")
+    try fm.createDirectory(at: files, withIntermediateDirectories: true)
+    try fm.createDirectory(at: journals, withIntermediateDirectories: true)
+    let payload = Data(repeating: 0x71, count: 4096)
+    var sha = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
+    _ = payload.withUnsafeBytes { CC_SHA1($0.baseAddress, CC_LONG($0.count), &sha) }
+    let size: UInt64 = 5 * 1024 * 1024 * 1024 + 4096
+    let chunks = [UInt64(0), size - 4096].map {
+        DepotManifest.ChunkEntry(sha: Data(sha), crc: 0, offset: $0, compressedSize: 100, uncompressedSize: 4096)
+    }
+    var manifest = DepotManifest(depotID: 66, manifestGID: 99, creationTime: 0,
+                                 totalUncompressedSize: size, totalCompressedSize: 200)
+    manifest.files = [.init(filename: "large.bin", size: size, flags: 0, chunks: chunks)]
+    let plan = DepotDownloader.DepotPlan(depotID: 66, manifestGID: 99, key: Data(), manifest: manifest,
+                                        hosts: [], auth: [:], declaredSize: size, health: ContentHostHealth())
+    let initial = try await DepotDownloader.prepareForInstall(plans: [plan], installURL: files, journalDir: journals)
+    require(initial.remainingUncompressed == 8192, "sparse: initial estimate counts payload chunks, not empty holes")
+    let file = files.appendingPathComponent("large.bin")
+    let handle = try FileHandle(forUpdating: file)
+    defer { try? handle.close() }
+    try handle.write(contentsOf: payload)
+    try handle.synchronize()
+    let journal = try JournalWriter(url: journals.appendingPathComponent("depot_66_99.journal"))
+    try journal.append(0); try journal.flush()
+    let partial = try await DepotDownloader.prepareForInstall(plans: [plan], installURL: files, journalDir: journals)
+    require(partial.doneBytes == 100 && partial.pending[0].count == 1,
+            "sparse: verified first chunk is reused in a file larger than 4 GiB")
+    require(partial.remainingUncompressed == 4096,
+            "sparse: resumed logical length does not imply missing payload is allocated")
+    try handle.seek(toOffset: size - 4096)
+    try handle.write(contentsOf: payload); try handle.synchronize()
+    try journal.append(1); try journal.close()
+    let complete = try await DepotDownloader.prepareForInstall(plans: [plan], installURL: files, journalDir: journals)
+    require(complete.doneBytes == 200 && complete.pending[0].isEmpty && complete.remainingUncompressed == 0,
+            "sparse: chunk beyond 4 GiB verifies and a complete resume needs no new space")
+    try handle.seek(toOffset: size - 4096)
+    let tail = try handle.read(upToCount: 4096)
+    require(tail == payload, "sparse: tail bytes survive preparation and reopening beyond 4 GiB")
+    for offset in [size - 2048, UInt64.max] {
+        var badChunks = manifest
+        badChunks.files = [.init(filename: "bad-chunk.bin", size: size, flags: 0,
+            chunks: [.init(sha: Data(sha), crc: 0, offset: offset, compressedSize: 100, uncompressedSize: 4096)])]
+        let invalidChunk = DepotDownloader.DepotPlan(depotID: 66, manifestGID: 99, key: Data(), manifest: badChunks,
+            hosts: [], auth: [:], declaredSize: size, health: ContentHostHealth())
+        do {
+            _ = try await DepotDownloader.prepareForInstall(plans: [invalidChunk], installURL: files, journalDir: journals)
+            require(false, "sparse: chunk range outside the file must be refused")
+        } catch { require(error is SteamError, "sparse: invalid or overflowing chunk offset is refused without a trap") }
+    }
+    var oversized = manifest
+    oversized.files = [.init(filename: "oversized.bin", size: UInt64.max, flags: 0, chunks: [])]
+    let invalid = DepotDownloader.DepotPlan(depotID: 66, manifestGID: 99, key: Data(), manifest: oversized,
+                                           hosts: [], auth: [:], declaredSize: UInt64.max, health: ContentHostHealth())
+    do {
+        _ = try await DepotDownloader.prepareForInstall(plans: [invalid], installURL: files, journalDir: journals)
+        require(false, "sparse: unsupported file length is refused without an integer trap")
+    } catch {
+        require(!fm.fileExists(atPath: files.appendingPathComponent("oversized.bin").path),
+                "sparse: unsupported file length is refused before creating its payload")
+    }
+}
+
 @MainActor func units(_ fx: [String: Any]) async throws {
+    try storageChecks()
+    try await storageAsyncChecks()
+    try await preparationCancellationChecks()
+    try await sparseResumeChecks()
     // ---- protobuf: hostile input throws instead of trapping
     var big = ProtobufDecoder(Data([0x0a, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]))
     _ = try? big.readTag()
@@ -901,7 +1273,14 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
 @MainActor func install(_ fx: [String: Any], phase: String) async throws {
     let tmp = URL(fileURLWithPath: fx["tmp"] as! String)
     let drive = tmp.appendingPathComponent("drive_c")
-    let steamApps = SteamInstallPaths.steamApps(drive: drive)
+    let externalRoot = tmp.appendingPathComponent("external")
+    let external = fx["storage"] as? String == "external"
+    var storage = SteamStorageLibrary.internalLibrary
+    if external {
+        try FileManager.default.createDirectory(at: externalRoot, withIntermediateDirectories: true)
+        storage = SteamStorageLibrary(id: try SteamStorageIdentity.register(root: externalRoot), name: "SSD", bookmark: nil)
+    }
+    let steamApps = external ? externalRoot.appendingPathComponent("steamapps") : SteamInstallPaths.steamApps(drive: drive)
     let hosts = fx["hosts"] as! [String]
     let session = ScriptedSession()
     session.keys = [9001: hexData(fx["key"] as! String), 9003: hexData(fx["keyShared"] as! String)]
@@ -930,6 +1309,12 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(app.sharedOwners[9100]?.installDir == "Fixture Game", "the owner of the shared depot is known for the record")
     let downloader = DepotDownloader(session: session)
     downloader.contentHosts = { _ in hosts }
+    if phase == "symlink" {
+        let outside = tmp.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: steamApps, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: steamApps.appendingPathComponent("common"), withDestinationURL: outside)
+    }
     var lastProgress = SteamDownloadProgress()
     let licensed: Set<UInt32> = phase == "refused-licensed" ? [9001, 9003, 9004] : [9001, 9003]
     do {
@@ -937,12 +1322,13 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         print("RESULT install=ok")
     } catch {
         print("RESULT install=failed reason=\(SteamOwnedLibrary.reason(error))")
-        require(phase == "interrupt" || phase == "refused-licensed", "install failed only where the phase expects it (\(error))")
+        require(["interrupt", "refused-licensed", "symlink"].contains(phase), "install failed only where the phase expects it (\(error))")
+        if phase == "symlink" { require(error is SteamStorageError, "download rejects a symlink out of the selected library") }
         if phase == "refused-licensed" { require(error as? SteamError == .depotKeyNotFound(9004), "a refusal for a depot the account is licensed for fails the install") }
     }
-    let found = MadeiraDock.games(drive: drive)
+    let found = try external ? MadeiraDock.games(library: storage, root: externalRoot) : MadeiraDock.games(drive: drive)
     print("RESULT listed=\(found.filter { $0.id == 9000 && $0.installed }.count)")
-    if phase != "interrupt" && phase != "refused-licensed" {
+    if !["interrupt", "refused-licensed", "symlink"].contains(phase) {
         require(lastProgress.phase == .finishing && lastProgress.doneBytes == lastProgress.totalBytes && lastProgress.totalBytes > 0, "progress ends complete: \(lastProgress.doneBytes)/\(lastProgress.totalBytes)")
         // Keys are asked for with the app being installed; manifest codes and tokens with the app that owns the content.
         require(session.keyRequests.contains { $0.depot == 9001 && $0.app == 9000 } && session.keyRequests.contains { $0.depot == 9003 && $0.app == 9000 }, "depot keys are requested for the installed app")
@@ -950,10 +1336,11 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         require(session.authRequests.contains { $0.depot == 9003 && $0.app == 9100 && $0.host == "127.0.0.1" }, "content authorization names the bare host name")
         require(!session.keyRequests.contains { $0.depot == 9002 }, "a depot for another language is never asked for")
         guard let game = found.first(where: { $0.id == 9000 }) else { require(false, "Madeira Dock's discovery finds the downloaded game"); return }
-        require(game.installed && game.installDir == "Fixture Game" && game.library == "Program Files (x86)/Steam/steamapps" && game.name == "Fixture Game",
+        require(game.installed && game.installDir == "Fixture Game" && game.library == (external ? "steamapps" : "Program Files (x86)/Steam/steamapps") && game.name == "Fixture Game",
                 "Madeira Dock's discovery finds the downloaded game as fully installed")
+        require(game.storageID == storage.id && game.windowsInstallPath.hasPrefix(external ? "E:\\" : "C:\\"), "discovered game retains its library and Windows drive")
         require(game.customExecutables, "the record lists the per-user executables Valve's client prepares (CheckGuid)")
-        require(SteamInstallPaths.isManaged(library: game.library), "it is in the library Madeira manages")
+        require(SteamInstallPaths.isManaged(library: game.library, storageID: game.storageID), "it is in the library Madeira manages")
         do { try MadeiraDock.validate(game, drive: drive, bundled: true) ; require(false, "validate needs the client files") }
         catch { require(error.localizedDescription.contains("client"), "Dock's launch check passes the record and stops at the missing client files only") }
         require(SteamInstallFiles.buildID(appID: 9000, steamApps: steamApps) == build, "the record's build id")
@@ -969,8 +1356,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         require(ownedNow.buildID == 1001 && ownedNow.folderName == "Fixture Game", "the owned game carries the build")
     }
     if phase == "uninstall" {
-        SteamInstallFiles.delete(appID: 9000, folderName: "Fixture Game", steamApps: steamApps)
-        require(MadeiraDock.games(drive: drive).isEmpty, "an uninstalled game is no longer found (its shared owner record went with it)")
+        try SteamInstallFiles.delete(appID: 9000, folderName: "Fixture Game", steamApps: steamApps)
+        let remaining = try external ? MadeiraDock.games(library: storage, root: externalRoot) : MadeiraDock.games(drive: drive)
+        require(remaining.isEmpty, "an uninstalled game is no longer found (its shared owner record went with it)")
         require(!FileManager.default.fileExists(atPath: steamApps.appendingPathComponent("common/Fixture Game").path), "its folder is gone")
         require(FileManager.default.fileExists(atPath: steamApps.appendingPathComponent("common").path) , "the common folder stays")
     }
@@ -1005,26 +1393,26 @@ dock_body = (dock[dock.index('enum MadeiraDock {'):dock.index('    @MainActor pr
              dock[dock.index("    /// The host's environment for one launch."):])
 # URLSession lives in FoundationNetworking on Linux; the production file imports Foundation only.
 downloader_host = downloader.replace('import Foundation\n', 'import Foundation\n#if canImport(FoundationNetworking)\nimport FoundationNetworking\n#endif\n', 1)
-# The free-space query is Darwin's (volumeAvailableCapacityForImportantUsage); the host has none, so the check is skipped there.
-space = ('let values = try? installURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])\n'
-         '            let available = UInt64(max(0, values?.volumeAvailableCapacityForImportantUsage ?? Int64.max))')
-assert space in downloader_host
-downloader_host = downloader_host.replace(space, 'let available = UInt64.max')
+# SteamStorageCapacity performs a real destination-volume query on both hosts.
 fetcher_source = sources['SwiftSteam/Library/SteamLibraryFetcher.swift']
 
 work = Path(tempfile.mkdtemp(prefix='madeira-steam-library-'))
 servers = []
+external_work = None
 try:
     shim = work / 'shim'
-    for name, header, csource in [('CommonCrypto', CRYPTO_H, CRYPTO_C), ('Compression', COMPRESSION_H, COMPRESSION_C)]:
+    shim.mkdir()
+    # Apple supplies these modules and libraries. Linux uses equivalent shims.
+    apple = sys.platform == 'darwin'
+    for name, header, csource in ([] if apple else [('CommonCrypto', CRYPTO_H, CRYPTO_C), ('Compression', COMPRESSION_H, COMPRESSION_C)]):
         directory = shim / name
         directory.mkdir(parents=True)
         stem = 'cc_shim' if name == 'CommonCrypto' else 'compression_shim'
         (directory / f'{stem}.h').write_text(header)
         (directory / f'{stem}.c').write_text(csource)
         (directory / 'module.modulemap').write_text(f'module {name} [system] {{ header "{stem}.h" export * }}\n')
-    (shim / 'zlib').mkdir()
-    (shim / 'zlib/module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" link "z" export * }\n')
+    if not apple: (shim / 'zlib').mkdir()
+    if not apple: (shim / 'zlib/module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" link "z" export * }\n')
     (work / 'decoders.h').write_text(DECODERS_H.format(app=app))
 
     objects = []
@@ -1034,8 +1422,9 @@ try:
         require(result.returncode == 0, f'{Path(source).name} compiles on the host')
         if result.returncode: sys.stdout.write(result.stderr[-3000:])
         objects.append(str(obj))
-    compile_c(shim / 'CommonCrypto/cc_shim.c', ['-I', str(shim / 'CommonCrypto')])
-    compile_c(shim / 'Compression/compression_shim.c', ['-I', str(shim / 'Compression')])
+    if not apple:
+        compile_c(shim / 'CommonCrypto/cc_shim.c', ['-I', str(shim / 'CommonCrypto')])
+        compile_c(shim / 'Compression/compression_shim.c', ['-I', str(shim / 'Compression')])
     for name in ['zstd_edu.c', 'lzma_shim.c', 'chunk_zip.c']:
         compile_c(steam / name)
 
@@ -1052,14 +1441,15 @@ try:
                   steam / 'Core/SteamMessageCodec.swift', steam / 'Core/SteamCMSession.swift',
                   steam / 'Content/ContentDecryptor.swift', steam / 'Content/DepotManifest.swift',
                   steam / 'Library/SteamAppInfo.swift', steam / 'Library/SteamLibraryFetcher.swift',
-                  steam / 'Install/AppManifestWriter.swift', app / 'SteamInstall.swift', app / 'SteamKeyValues.swift']
+                  steam / 'Install/AppManifestWriter.swift', app / 'SteamInstall.swift', app / 'SteamStorage.swift', app / 'SteamKeyValues.swift']
+    if apple: production.append(root / 'tests/device/ssd-probe/SteamStorageProbe.swift')
     exe = work / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-sanitize=address', '-g', '-o', str(exe),
                             '-I', str(shim / 'CommonCrypto'), '-I', str(shim / 'Compression'), '-I', str(shim / 'zlib'),
                             '-import-objc-header', str(work / 'decoders.h'),
                             str(work / 'stubs.swift'), str(work / 'checks.swift'), str(work / 'dock.swift'), str(work / 'owned.swift'),
                             str(work / 'downloader.swift')] + [str(x) for x in production] + objects +
-                           ['-Xlinker', '-lcrypto', '-Xlinker', '-llzma', '-Xlinker', '-lz'], capture_output=True, text=True)
+                           ([] if apple else ['-Xlinker', '-lcrypto']) + ['-Xlinker', '-llzma', '-Xlinker', '-lz'], capture_output=True, text=True)
     require(build.returncode == 0, 'the production Steam library, download and decoder code compile on the host')
     if build.returncode:
         sys.stdout.write(build.stderr[-6000:])
@@ -1127,6 +1517,28 @@ try:
             done.add(depot.files[key >> 32]['chunks'][key & 0xffffffff][0].hex())
     require(len(done) >= 1 and len(state.served_ok) >= 1, f'{len(done)} chunks journaled after {len(state.served_ok)} served')
 
+    # A journal is only a hint: a completed chunk can be lost/corrupted after an
+    # unplug. Preserve the journal but change one byte in a separate saved tree.
+    damaged_root = work / 'damaged-root'
+    shutil.copytree(root_dir, damaged_root)
+    selected_journal = next(j for j in journals if j.read_text().strip())
+    depot_id = int(re.match(r'depot_(\d+)_', selected_journal.name).group(1))
+    depot = {9001: version1, 9003: shared}[depot_id]
+    key = int(selected_journal.read_text().split()[0], 16)
+    damaged_entry = depot.files[key >> 32]
+    chunk = damaged_entry['chunks'][key & 0xffffffff]
+    damaged_file = damaged_root / folder.relative_to(root_dir) / damaged_entry['name'].replace('\\', '/')
+    with damaged_file.open('r+b') as f:
+        f.seek(chunk[1]); value = f.read(1); f.seek(chunk[1]); f.write(bytes([value[0] ^ 0xff]))
+    state.limit = None
+    state.reset_counters()
+    result = run('resume-corrupt', dict(fixture, tmp=str(damaged_root)))
+    require(result.get('install') == 'ok' and chunk[0].hex() in state.chunk_requests and
+            damaged_file.read_bytes() == damaged_entry['data'],
+            'resume verifies journaled bytes and repairs a corrupted completed chunk')
+    require(not ((set(state.chunk_requests) & done) - {chunk[0].hex()}),
+            'the remaining valid journaled chunks are still reused')
+
     # ---- resume: the journaled chunks are not fetched again; the install finishes
     state.limit = None
     state.reset_counters()
@@ -1191,7 +1603,51 @@ try:
     result = run('refused-licensed', other)
     require(result.get('install') == 'failed' and result.get('listed') == '0' and
             not list((work / 'root2').rglob('appmanifest_*.acf')), 'a refused licensed depot fails the install without a record')
+    state.reset_counters()
+    result = run('symlink', dict(fixture, tmp=str(work / 'symlink-root')))
+    require(result.get('install') == 'failed' and not state.chunk_requests and
+            not list((work / 'symlink-root/outside').iterdir()),
+            'a preexisting common symlink cannot redirect a download outside the library')
+    # The same production downloader/scanner/deletion code at an external root.
+    external_root = work / 'external-root'
+    # Optional existing mount supplied by the disposable-volume harness. Always
+    # create our own fresh child; never reuse or delete the supplied parent.
+    if parent := os.environ.get('MADEIRA_TEST_EXTERNAL_PARENT'):
+        external_work = Path(tempfile.mkdtemp(prefix='madeira-download-fixture-', dir=parent))
+        external_root = external_work
+    external_fixture = dict(fixture, storage='external', tmp=str(external_root))
+    external_apps = external_root / 'external/steamapps'
+    state.reset_counters(); state.limit = 4
+    interrupted = run('interrupt', external_fixture)
+    require(interrupted.get('install') == 'failed' and not (external_apps / 'appmanifest_9000.acf').exists(),
+            'external interrupted install retains no completed install record')
+    external_done = set()
+    # exFAT can carry AppleDouble ._ sidecars; only depot journals are chunk records.
+    for journal in (external_apps / 'downloading/9000').glob('depot_*.journal'):
+        depot_id = int(re.match(r'depot_(\d+)_', journal.name).group(1))
+        depot = {9001: version1, 9003: shared}[depot_id]
+        for line in journal.read_text().split():
+            key = int(line, 16)
+            external_done.add(depot.files[key >> 32]['chunks'][key & 0xffffffff][0].hex())
+    require(external_done, 'external interruption retains usable chunk journals')
+    state.reset_counters(); state.limit = None
+    result = run('resume', external_fixture)
+    require(not (set(state.chunk_requests) & external_done), 'external resume reuses verified completed chunks')
+    require(result.get('install') == 'ok' and result.get('listed') == '1' and
+            (external_apps / 'appmanifest_9000.acf').is_file() and
+            (external_apps / f'depotcache/9001_{gid1}.manifest').is_file() and
+            not (external_root / 'drive_c').exists(),
+            'external payloads, records and depot cache stay external with no internal game staging')
+    state.reset_counters()
+    result = run('update', external_fixture)
+    require(result.get('install') == 'ok' and set(state.chunk_requests) == {new_sha},
+            'external update reuses unchanged chunks')
+    run('uninstall', external_fixture)
+    require(not list(external_apps.glob('appmanifest_*.acf')) and not (external_apps / 'common/Fixture Game').exists(),
+            'external uninstall removes payload and records from the selected library')
 finally:
+    if external_work is not None:
+        shutil.rmtree(external_work)
     for server in servers:
         server.shutdown(); server.server_close()
     if os.environ.get('MADEIRA_KEEP_WORK'):
