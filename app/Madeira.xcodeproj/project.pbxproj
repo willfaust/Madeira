@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E5510001 /* SteamStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5520001 /* SteamStorage.swift */; };
+		E5510004 /* SteamStorageModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5520004 /* SteamStorageModel.swift */; };
 		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
 		A1000521 /* MadeiraDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000521 /* MadeiraDockView.swift */; };
 		A1000650 /* DockStartScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000650 /* DockStartScreen.swift */; };
@@ -173,6 +175,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E5520001 /* SteamStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamStorage.swift"; sourceTree = "<group>"; };
+		E5520004 /* SteamStorageModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamStorageModel.swift"; sourceTree = "<group>"; };
 		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
 		A2000521 /* MadeiraDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDockView.swift"; sourceTree = "<group>"; };
 		A2000650 /* DockStartScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartScreen.swift"; sourceTree = "<group>"; };
@@ -404,6 +408,8 @@
 				A2000711 /* WineMono.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
 				A2000600 /* SteamInstall.swift */,
+				E5520001 /* SteamStorage.swift */,
+				E5520004 /* SteamStorageModel.swift */,
 				A2000609 /* ContentDecryptor.swift */,
 				A200060A /* DepotDownloader.swift */,
 				A200060B /* DepotManifest.swift */,
@@ -730,6 +736,8 @@
 				A1000711 /* WineMono.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
+				E5510001 /* SteamStorage.swift in Sources */,
+				E5510004 /* SteamStorageModel.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,
 				A100060A /* SwiftSteam/Content/DepotDownloader.swift in Sources */,
 				A100060B /* SwiftSteam/Content/DepotManifest.swift in Sources */,

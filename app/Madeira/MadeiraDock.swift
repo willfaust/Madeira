@@ -34,10 +34,19 @@ struct DockGame: Identifiable, Equatable, Sendable {
     let library: String         // drive-relative steamapps folder
     let installed: Bool         // StateFlags has "fully installed"
     let customExecutables: Bool // the install record lists per-user executables (CheckGuid)
+    var storageID: String = "internal"
+    var storageAvailable = true
 
-    /// Windows path of the game's folder, which Dock requires Valve's client to resolve to.
+    /// Canonical Wine path of the game folder, used for direct starts and installers.
     var windowsInstallPath: String {
-        "C:\\" + (library + "/common/" + installDir).replacingOccurrences(of: "/", with: "\\")
+        (storageID == "internal" ? "C:\\" : "E:\\") + (library + "/common/" + installDir).replacingOccurrences(of: "/", with: "\\")
+    }
+
+    var clientInstallPath: String {
+        if storageID != "internal" {
+            return SteamStoragePath.externalWindowsRoot + "\\" + windowsInstallPath.dropFirst(3)
+        }
+        return windowsInstallPath
     }
 }
 
@@ -82,14 +91,14 @@ enum MadeiraDock {
     }
 
     /// The game an app manifest describes, or nil when it is not one Dock can start.
-    static func game(manifest data: Data, library: String) -> DockGame? {
+    static func game(manifest data: Data, library: String, storageID: String = "internal") -> DockGame? {
         guard data.count <= 1 << 20, var parser = try? SteamKeyValues(data), let root = try? parser.read(),
               let state = root["AppState"], let appID = state["appid"]?.string.flatMap({ Int($0) }), validAppID(appID),
               let folder = state["installdir"]?.string, validFolderName(folder) else { return nil }
         let flags = state["StateFlags"]?.string.flatMap { UInt32($0) } ?? 0
         let name = state["name"]?.string.map { String($0.prefix(200)) } ?? ""
         return DockGame(id: appID, name: name.isEmpty ? "App \(appID)" : name, installDir: folder, library: library,
-                        installed: flags & 4 != 0, customExecutables: !(state["CheckGuid"]?.fields.isEmpty ?? true))
+                        installed: flags & 4 != 0, customExecutables: !(state["CheckGuid"]?.fields.isEmpty ?? true), storageID: storageID)
     }
 
     /// Installed games in the client's own library (`<client>/steamapps`) and the other
@@ -121,6 +130,28 @@ enum MadeiraDock {
         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// The sole registered external library. Missing storage is an error, not
+    /// an empty discovery result; callers retain their remembered identities.
+    static func games(library: SteamStorageLibrary, root: URL) throws -> [DockGame] {
+        guard library.id != SteamStorageLibrary.internalID else { return games(drive: root) }
+        try SteamStorageIdentity.verify(library.id, root: root)
+        let apps = try SteamStoragePath.native("steamapps", root: root)
+        let names: [String]
+        do { names = try FileManager.default.contentsOfDirectory(atPath: apps.path) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) { return [] }
+        var result: [DockGame] = []
+        for name in names.sorted().prefix(2000) where name.hasPrefix("appmanifest_") && name.hasSuffix(".acf") {
+            let record = try SteamStoragePath.native("steamapps/" + name, root: root)
+            let values = try record.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 1 << 20,
+                  let game = game(manifest: try Data(contentsOf: record), library: "steamapps", storageID: library.id),
+                  !result.contains(where: { $0.id == game.id }) else { continue }
+            _ = try SteamStoragePath.native("steamapps/common/" + game.installDir, root: root)
+            result.append(game)
+        }
+        return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     /// "C:\\Games\\SteamLibrary" -> "Games/SteamLibrary/steamapps" (C: only).
     static func libraryRelative(_ windowsPath: String) -> String? {
         let path = windowsPath.replacingOccurrences(of: "\\", with: "/")
@@ -131,7 +162,7 @@ enum MadeiraDock {
     }
 
     /// Everything a launch needs, checked before any sign-in is handed over.
-    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled) throws {
+    static func validate(_ game: DockGame, drive: URL, bundled: Bool = MadeiraDock.bundled, libraryRoot: URL? = nil) throws {
         guard bundled else { throw DockError.message("Madeira Dock is not built into this app. Run build/madeira-dock/build.sh.") }
         guard validAppID(game.id), validFolderName(game.installDir) else {
             throw DockError.message("This game's Steam install record is invalid.")
@@ -139,9 +170,11 @@ enum MadeiraDock {
         guard FileManager.default.fileExists(atPath: drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/steamclient64.dll").path) else {
             throw DockError.message("Steam's client files are missing. Download Valve's client components first.")
         }
+        guard game.storageID == "internal" || libraryRoot != nil else { throw SteamStorageError.unavailable(.disconnected) }
+        let folder = try SteamStoragePath.native(game.library + "/common/" + game.installDir, root: libraryRoot ?? drive)
         var isFolder: ObjCBool = false
         guard game.installed,
-              FileManager.default.fileExists(atPath: drive.appendingPathComponent(game.library + "/common/" + game.installDir).path, isDirectory: &isFolder),
+              FileManager.default.fileExists(atPath: folder.path, isDirectory: &isFolder),
               isFolder.boolValue else {
             throw DockError.message("Steam does not list this game as fully installed.")
         }
@@ -255,6 +288,9 @@ enum MadeiraDock {
             if result == 45 || result == 48, let error = fields["launch-client-error"].flatMap(Int.init),
                let reason = Self.launchRefusal(error, waited: result == 48) {
                 return reason
+            }
+            if result == 41 {
+                return "Steam did not resolve this game's registered install folder. Reconnect its storage and retry; if this repeats, export the log."
             }
             return "Madeira Dock could not complete the Steam launch (code \(result)). Export the log before trying again."
         }
@@ -415,7 +451,7 @@ enum MadeiraDock {
         setenv("MADEIRA_STEAM_HOST_APPID", String(game.id), 1)
         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
-        setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
+        setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.clientInstallPath, 1)
         setenv("MADEIRA_STEAM_HOST_LOG", "C:\\madeira-dock.txt", 1)
         // The install record lists per-user executables: Dock asks Valve's client to prepare
         // them before it launches. env.MADEIRA_DOCK_CEG = 0 never asks.

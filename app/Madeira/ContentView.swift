@@ -1279,7 +1279,7 @@ struct ContentView: View {
                     sessionBody
                         .navigationBarHidden(true)
                 } else if library.enabled {
-                    LibraryView(play: launchLibraryEntry, enableJIT: enableJIT,
+                    LibraryView(play: { launchLibraryEntry($0) }, enableJIT: enableJIT,
                                 startDock: { startDock($0, compactPool: $1) })
                 } else {
                     developerBody
@@ -2502,16 +2502,27 @@ struct ContentView: View {
     /// Play in the library (Library.swift): checks that a session can start,
     /// applies the entry's launch profile and runs the same full sequence as the
     /// developer interface's buttons.
-    private func launchLibraryEntry(_ entry: LibraryEntry) {
+    private func launchLibraryEntry(_ entry: LibraryEntry, storageChecked: Bool = false) {
+        if entry.storageID != "internal", !storageChecked {
+            Task { @MainActor in
+                do {
+                    let access = try await SteamStorageModel.shared.accessForOperation(libraryID: entry.storageID, write: true)
+                    defer { access?.keepAlive() }
+                    SteamOwnedLibrary.shared.storageReconnected(entry.storageID)
+                    launchLibraryEntry(entry, storageChecked: true)
+                } catch { library.error = error.localizedDescription }
+            }
+            return
+        }
         // A Steam game starts through Madeira Dock with its own launch profile (SteamGames.swift),
         // unless its Game details page chose "The game": then its own program starts below, like
         // any library game (SteamDirectStart).
         if let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
-            guard let game = MadeiraDock.games(drive: MadeiraDock.drive).first(where: { $0.id == appID }) else {
+            guard let game = (SteamGamesModel.shared.games + MadeiraDock.games(drive: MadeiraDock.drive)).first(where: { $0.id == appID && $0.storageID == entry.storageID }) else {
                 library.error = "Steam no longer lists this game as installed. Refresh the library and try again."; return
             }
             LogStore.shared.log("[steam-games] play app=\(appID)")
-            startDock(game, compactPool: MadeiraDockModel.shared.compactPool, profile: entry)
+            startDock(game, compactPool: MadeiraDockModel.shared.compactPool, profile: entry, storageChecked: storageChecked)
             return
         }
         if let appID = entry.steamAppID {
@@ -2539,10 +2550,22 @@ struct ContentView: View {
 
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     private func startLibraryEntry(_ entry: LibraryEntry) {
-        do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
+        if entry.storageID != "internal", SteamStorageModel.shared.sessionAccess?.library.id != entry.storageID {
+            Task { @MainActor in
+                do { try await SteamStorageModel.shared.prepareSession(libraryID: entry.storageID); startLibraryEntry(entry) }
+                catch { library.error = error.localizedDescription }
+            }
+            return
+        }
+        let storageRoot = entry.storageID == "internal" ? nil : SteamStorageModel.shared.sessionAccess?.root
+        do {
+            if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath, root: storageRoot) }
+            try entry.validate(storageRoot: storageRoot)
+        }
         catch {
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
+            SteamStorageModel.shared.releaseSession()
             return
         }
         // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
@@ -3255,7 +3278,18 @@ struct ContentView: View {
     /// show in the library, and the session gets the full-screen game view.
     /// `profile` is a Steam game's library entry (its Game details page): the
     /// session then takes that entry's display, performance and on-screen settings.
-    private func startDock(_ game: DockGame, compactPool: Bool, profile: LibraryEntry? = nil) {
+    private func startDock(_ game: DockGame, compactPool: Bool, profile: LibraryEntry? = nil, storageChecked: Bool = false) {
+        if game.storageID != "internal", !storageChecked {
+            Task { @MainActor in
+                do {
+                    let access = try await SteamStorageModel.shared.accessForOperation(libraryID: game.storageID, write: true)
+                    defer { access?.keepAlive() }
+                    SteamOwnedLibrary.shared.storageReconnected(game.storageID)
+                    startDock(game, compactPool: compactPool, profile: profile, storageChecked: true)
+                } catch { library.error = error.localizedDescription }
+            }
+            return
+        }
         let inLibrary = library.enabled
         guard jitReadyForLaunch(inLibrary: inLibrary, entry: profile?.id,
                                 then: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
@@ -3271,15 +3305,26 @@ struct ContentView: View {
             return
         }
         func fail(_ error: Error) {
+            SteamStorageModel.shared.releaseSession()
             MadeiraDock.cleanup()
             SteamOwnedLibrary.shared.dockEnded()
             MadeiraDockModel.shared.status = error.localizedDescription
             logStore.log("[madeira-dock] not started: \(error.localizedDescription)", level: .error)
             if inLibrary { library.error = error.localizedDescription }
         }
+        if game.storageID != "internal", SteamStorageModel.shared.sessionAccess?.library.id != game.storageID {
+            Task { @MainActor in
+                do {
+                    try await SteamStorageModel.shared.prepareSession(libraryID: game.storageID)
+                    startDock(game, compactPool: compactPool, profile: profile)
+                } catch { fail(error) }
+            }
+            return
+        }
+        let storageRoot = game.storageID == "internal" ? nil : SteamStorageModel.shared.sessionAccess?.root
         do {
-            try MadeiraDock.validate(game, drive: MadeiraDock.drive)
-            try profile?.validate()
+            try MadeiraDock.validate(game, drive: MadeiraDock.drive, libraryRoot: storageRoot)
+            try profile?.validate(storageRoot: storageRoot)
             guard SteamSignIn.isSignedIn else { throw DockError.message("Sign in to Steam in Madeira before starting Dock.") }
         } catch { fail(error); return }
         // Only one sign-in of the account may be online: the app's own Steam connection
@@ -3293,7 +3338,7 @@ struct ContentView: View {
             // a launcher started through a .bat, say) it is key 0, which every Dock start
             // used before; Dock stops at once if Steam names that entry missing.
             let options = await SteamOwnedLibrary.shared.launchOptions(appID: game.id)
-            let installFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir)
+            let installFolder = (storageRoot ?? MadeiraDock.drive).appendingPathComponent(game.library + "/common/" + game.installDir)
             let chosen = options.flatMap { SteamDirectStart.choose($0, installFolder: installFolder)?.launchIndex }
             let launchOption = chosen ?? 0
             LogStore.shared.log("[madeira-dock] launch option \(launchOption)\(chosen == nil ? " (none chosen: the default)" : "")")
@@ -3312,7 +3357,7 @@ struct ContentView: View {
             MadeiraDock.configure(game, launchOption: launchOption)
             // The game's one-time installs (its Steam install script) run first, in the same
             // session. No session runs yet, so the registry files can be read and written.
-            DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix)
+            DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix, externalRoot: storageRoot)
             // Only a start that runs installers turns madsync off, for its own session
             // (build/madsync/madsync.c reads MADEIRA_MADSYNC_SESSION once, when the server starts).
             if DockInstallers.serverSync {

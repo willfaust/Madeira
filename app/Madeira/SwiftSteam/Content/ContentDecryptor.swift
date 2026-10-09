@@ -31,8 +31,11 @@ struct ContentDecryptor {
         guard depotKey.count == 32 else {
             throw SteamError.decryptionFailed("Invalid depot key size: \(depotKey.count), expected 32")
         }
-        guard encryptedData.count > 16 else {
-            throw SteamError.decryptionFailed("Encrypted data too small")
+        // CBC ciphertext must contain complete AES blocks. CommonCrypto can
+        // return decoded prefix bytes for some truncated inputs; reject them
+        // before asking the platform crypto implementation to decrypt.
+        guard encryptedData.count >= 32, (encryptedData.count - 16) % kCCBlockSizeAES128 == 0 else {
+            throw SteamError.decryptionFailed("Encrypted data is not a complete AES payload")
         }
 
         let ivCipher = encryptedData.prefix(16)
