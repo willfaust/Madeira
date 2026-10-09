@@ -80,3 +80,15 @@ rebuild, signing and installation has NOT been performed. Until it is,
 docs/LICENSING.md keeps the relink capability marked unverified. The
 alternative the LGPL offers, shipping the application's object files, is
 not currently done.
+
+## External storage checks
+
+`python3 tests/host/typecheck-ios.py` type-checks the production Swift sources
+with the installed iOS SDK without linking native archives. It is not a complete
+app build. The download integration harness supports macOS and Linux; see
+[EXTERNAL_STORAGE.md](EXTERNAL_STORAGE.md) for commands and validation limits.
+
+The independent data-access probe under `tests/device/ssd-probe` builds with
+XcodeGen and Xcode. Use a separate bundle ID and a dedicated scratch folder.
+Windows execution fixtures live under `tests/device/ssd-execution`; they require
+llvm-mingw. Neither probe is part of the production app target.
