@@ -33,7 +33,11 @@ enum SteamInstallPaths {
 /// running. Preserve existing libraries and unknown fields; refuse malformed
 /// metadata instead of replacing it with an empty document.
 enum SteamLibraryFolders {
-    static func register(externalID: String, name: String, apps: [Int: Int64], drive: URL) throws {
+    /// verifiedAliasOwnerID comes from Madeira's private prefix record, after the
+    /// caller validates the SSD marker and both filesystem mappings. Steam can
+    /// rewrite libraryfolders.vdf without preserving our custom ownership field.
+    static func register(externalID: String, name: String, apps: [Int: Int64], drive: URL,
+                         verifiedAliasOwnerID: String? = nil) throws {
         guard UUID(uuidString: externalID) != nil else { throw SteamStorageError.invalidRecord }
         let file = try SteamStoragePath.native(SteamInstallPaths.libraryRelative + "/libraryfolders.vdf", root: drive)
         var root: [String: SteamValue] = [:]
@@ -52,12 +56,16 @@ enum SteamLibraryFolders {
             let path = $0.value["path"]?.string?.trimmingCharacters(in: CharacterSet(charactersIn: "\\/")).lowercased()
             return path == SteamStoragePath.externalWindowsRoot.lowercased()
         }?.key
-        // Never adopt another library's alias, even when it has no Madeira ID.
-        // An unrelated E: library also remains untouched.
+        // Recover a Steam-rewritten entry only with independent, verified
+        // ownership. An explicit different ID or an unrelated E: stays untouched.
         if let existingAlias, owned != existingAlias {
-            throw SteamStorageError.unavailable(.identityMismatch)
+            guard owned == nil,
+                  folders[existingAlias]?["madeira_library_id"] == nil,
+                  verifiedAliasOwnerID == externalID else {
+                throw SteamStorageError.mappingConflict
+            }
         }
-        let key = owned ?? String((folders.keys.compactMap(Int.init).max() ?? 0) + 1)
+        let key = owned ?? existingAlias ?? String((folders.keys.compactMap(Int.init).max() ?? 0) + 1)
         var entry = folders[key]?.fields ?? [:]
         entry["path"] = .text(SteamStoragePath.externalWindowsRoot)
         entry["label"] = .text(name)

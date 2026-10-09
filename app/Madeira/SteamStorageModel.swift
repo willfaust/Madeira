@@ -234,11 +234,12 @@ import UniformTypeIdentifiers
             // Register the same scoped directory beneath C:, without copying it.
             try SteamStorageMapping.replace(MadeiraDock.drive.appendingPathComponent(SteamStoragePath.externalAlias),
                                             root: access.root, libraryID: libraryID, ownerID: recordedOwner)
-            try Data(libraryID.utf8).write(to: owner, options: .atomic)
             let apps = Dictionary(uniqueKeysWithValues: catalog.assignments.values.filter {
                 $0.location.libraryID == libraryID && $0.installed
             }.map { ($0.appID, $0.bytes ?? 0) })
-            try SteamLibraryFolders.register(externalID: libraryID, name: access.library.name, apps: apps, drive: MadeiraDock.drive)
+            try SteamLibraryFolders.register(externalID: libraryID, name: access.library.name, apps: apps,
+                                             drive: MadeiraDock.drive, verifiedAliasOwnerID: recordedOwner)
+            try Data(libraryID.utf8).write(to: owner, options: .atomic)
             setenv("MADEIRA_EXTERNAL_LIBRARY_ID", libraryID, 1)
         } catch {
             releaseSession()

@@ -819,6 +819,31 @@ func storageChecks() throws {
     catch { aliasRefused = true }
     require(aliasRefused && (try? Data(contentsOf: foldersFile)) == unownedAlias,
             "storage: registration refuses an unowned alias without changing its metadata")
+    do {
+        try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [:], drive: internalDrive,
+                                         verifiedAliasOwnerID: UUID().uuidString)
+        require(false, "storage: mismatched private ownership refuses alias recovery")
+    } catch { require((try? Data(contentsOf: foldersFile)) == unownedAlias,
+                      "storage: mismatched ownership preserves metadata") }
+    for _ in 0..<2 {
+        // Simulate Steam rewriting the file after each successful game session.
+        try unownedAlias.write(to: foldersFile)
+        try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [55: 5678], drive: internalDrive,
+                                         verifiedAliasOwnerID: id)
+        var recoveredParser = try SteamKeyValues(Data(contentsOf: foldersFile))
+        let recovered = try recoveredParser.read()["libraryfolders"]
+        require(recovered?.fields.count == 1 && recovered?["0"]?["madeira_library_id"]?.string == id &&
+                recovered?["0"]?["apps"]?["55"]?.string == "5678",
+                "storage: verified ownership restores Steam-rewritten alias without duplicating it")
+    }
+    let foreignAlias = Data(("\"libraryfolders\" { \"0\" { \"path\" \"C:\\\\MadeiraExternalLibrary\" \"madeira_library_id\" \"" + UUID().uuidString + "\" } }").utf8)
+    try foreignAlias.write(to: foldersFile)
+    do {
+        try SteamLibraryFolders.register(externalID: id, name: "SSD", apps: [:], drive: internalDrive,
+                                         verifiedAliasOwnerID: id)
+        require(false, "storage: explicit foreign identity always refuses alias recovery")
+    } catch { require((try? Data(contentsOf: foldersFile)) == foreignAlias,
+                      "storage: explicit foreign identity preserves metadata") }
     try registeredFolders.write(to: foldersFile)
     let externalApps = external.appendingPathComponent("steamapps")
     try fm.createDirectory(at: externalApps, withIntermediateDirectories: true)

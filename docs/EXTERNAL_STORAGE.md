@@ -136,3 +136,10 @@ upload/conflict continuity and physical iPad low-space/read-only/large-file and
 APFS/exFAT combinations. Desktop visibility during startup remains unexplained.
 One DirectX prerequisite returned a failure despite successful Borderlands play.
 No JIT, graphics, per-game tuning or submodule changes are part of this feature.
+
+The native package's first launch attempt also exposed Steam rewriting
+`libraryfolders.vdf` without Madeira's custom ID. Registration now recovers that
+entry only after the SSD marker and mappings have been validated and the separate
+prefix ownership record matches. Explicit foreign IDs and unowned aliases remain
+refused. Host regression coverage includes repeated rewrites and refusal cases;
+physical relaunch validation remains pending.
