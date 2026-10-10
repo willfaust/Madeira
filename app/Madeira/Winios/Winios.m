@@ -513,7 +513,7 @@ static void winios_census_note_frame(HWND hwnd, int x, int y, int w, int h, int 
 
 /* Wine thread, from the GDI flush: count frames of listed windows only. */
 static void winios_census_note_present(HWND hwnd) {
-    if (!atomic_load_explicit(&g_census_on, memory_order_relaxed)) return;
+    if (atomic_load_explicit(&g_census_on, memory_order_relaxed) != 1) return;
     pthread_mutex_lock(&g_census_lock);
     struct winios_census_window *e = winios_census_find(hwnd);
     if (e && e->presents < 0xffffffffu) e->presents++;
@@ -523,7 +523,7 @@ static void winios_census_note_present(HWND hwnd) {
 /* A desktop-mode swapchain was made for this window (any thread). A swapchain
  * on a child window is not listed; the app also watches DXMT's present count. */
 static void winios_census_note_metal(HWND hwnd) {
-    if (!atomic_load_explicit(&g_census_on, memory_order_relaxed)) return;
+    if (atomic_load_explicit(&g_census_on, memory_order_relaxed) != 1) return;
     pthread_mutex_lock(&g_census_lock);
     struct winios_census_window *e = winios_census_find(hwnd);
     if (e) e->metal = 1;
@@ -538,7 +538,35 @@ static void winios_census_forget(HWND hwnd) {
     pthread_mutex_unlock(&g_census_lock);
 }
 
+/* The census ends when the starting screen finds the game's window, often a
+ * splash or launcher window; the game's main window can be shown for the
+ * first time, minimized, after that. on=2 keeps restoring such windows until
+ * the session ends. MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0 ends with the census,
+ * as before. */
+static int winios_restore_born_minimized_late_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) { const char *e = getenv("MADEIRA_RESTORE_BORN_MINIMIZED_LATE"); enabled = !(e && e[0] == '0'); }   /* 0: a window first shown minimized after a Dock start's starting screen has ended stays minimized */
+    return enabled;
+}
+
 void winios_window_census_enable(int on) {
+    if (on == 2) {
+        pthread_mutex_lock(&g_census_lock);
+        int was = atomic_load(&g_census_on);
+        int keep = was != 0 && winios_restore_born_minimized_enabled() && winios_restore_born_minimized_late_enabled();
+        if (!keep) {
+            g_census_n = 0;
+            g_census_images_n = 0;
+            memset(g_census, 0, sizeof(g_census));
+        }
+        atomic_store(&g_census_on, keep ? 2 : 0);
+        pthread_mutex_unlock(&g_census_lock);
+        if (was) {
+            fprintf(stderr, "[window-census] %s\n", keep ? "off (restoring windows first shown minimized until the session ends)" : "off");
+            fflush(stderr);
+        }
+        return;
+    }
     pthread_mutex_lock(&g_census_lock);
     int was = atomic_load(&g_census_on);
     g_census_n = 0;

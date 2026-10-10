@@ -288,6 +288,7 @@ final class DockStartScreen: ObservableObject {
     /// A library session begins; `game` is set for a Dock start.
     func begin(_ game: DockGame?, at start: Date) {
         endHold(reason: nil)
+        winios_window_census_enable(0)
         active = game != nil; appID = game?.id; failure = nil
         exitObserved = false; hostStarted = false; early = []; started = start
         guard let game, MadeiraConfig.flag("MADEIRA_DOCK_HIDE_DESKTOP") else { return }   // 0: a Dock start's starting screen ends on the desktop's first frame, as before
@@ -300,6 +301,7 @@ final class DockStartScreen: ObservableObject {
     /// The session ended.
     func finish() {
         endHold(reason: "session-ended")
+        winios_window_census_enable(0)
         active = false; appID = nil; failure = nil
     }
 
@@ -377,7 +379,9 @@ final class DockStartScreen: ObservableObject {
         }
         hold = nil
         holding = false; attention = false
-        winios_window_census_enable(0)
+        // 2: the game's window is found, but its main window may still be shown for the first time
+        // minimized; Winios.m goes on restoring such windows until finish() ends the session.
+        winios_window_census_enable(reason == "game-window" ? 2 : 0)
     }
 
     /// Winios.m's census as SteamLaunchScene reads it.

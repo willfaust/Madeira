@@ -86,8 +86,10 @@ require(status.index('DockInstallers.poll(drive: MadeiraDock.drive)') < status.i
         "the status line reads the installs' end after polling them, and times the host from it (or from the start)")
 require('SteamGameArtwork(appID: appID)' in library and 'SteamLaunchBackdrop(appID: appID)' in library,
         "a Dock start shows the game's cover and backdrop by App ID")
-require('winios_window_census_enable(1)' in screen and screen.count('winios_window_census_enable(0)') == 1,
-        'the census runs only while a Dock start holds the desktop back')
+require('winios_window_census_enable(1)' in screen and screen.count('winios_window_census_enable(0)') == 2
+        and 'winios_window_census_enable(reason == "game-window" ? 2 : 0)' in screen,
+        'the census runs only while a Dock start holds the desktop back; after the game window, only the '
+        'born-minimized restore runs, until the session ends or the next one begins')
 require('int winios_drv_foreground_if_owner( HWND hwnd )' in driver and 'GetCurrentThreadId()' in driver and
         'NtUserPostMessage( hwnd, WM_SYSCOMMAND, SC_RESTORE, 0 )' in driver, 'driver helpers: restore posted, front by the own thread')
 events = winios[winios.index('BOOL winios_pProcessEvents(DWORD mask) {'):]
@@ -386,6 +388,16 @@ int main(int argc, char **argv) {
               "MADEIRA_RESTORE_BORN_MINIMIZED=0 leaves a born-minimized window alone");
         return failures ? 1 : 0;
     }
+    if (argc > 1 && !strcmp(argv[1], "late-off")) {
+        /* MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0 in the environment. */
+        HWND born = add(0x701, 0x34c80000, 1, 0x71);
+        winios_window_census_enable(1);
+        winios_window_census_enable(2);
+        winios_census_note_frame(born, -32000, -32000, 160, 24, 1);
+        CHECK(restores == 0 && winios_window_census(out, WINIOS_CENSUS_MAX) == 0,
+              "MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0 ends the restore with the census");
+        return failures ? 1 : 0;
+    }
     HWND desktop = add(0x20, 0x96000000, 0, 1);
     HWND child = add(0x101, 0x50000000, 0, 7);            /* WS_CHILD|WS_VISIBLE */
     HWND dialog = add(0x100, 0x96ca0000, 1, 7);           /* visible dialog */
@@ -459,6 +471,21 @@ int main(int argc, char **argv) {
     int before = image_queries;
     winios_census_note_frame(dialog, 287, 140, 705, 440, 1);
     CHECK(image_queries == before + 1, "a new census forgets cached process paths");
+
+    /* The starting screen ended on a splash or launcher window: on=2 keeps the known windows and
+     * goes on restoring a window first shown minimized, counting nothing else, until the session ends. */
+    HWND born2 = add(0x6000, 0x34c80000, 1, 0x45);
+    winios_window_census_enable(2);
+    int r0 = restores;
+    winios_census_note_present(dialog);
+    winios_census_note_frame(born2, -32000, -32000, 160, 24, 1);
+    n = winios_window_census(out, WINIOS_CENSUS_MAX);
+    CHECK(restores == r0 + 1 && last_restore == born2, "after the census ends, a window first shown minimized still gets SC_RESTORE");
+    CHECK(find(dialog, n) && find(dialog, n)->presents == 0, "restore-only: known windows kept, no frames counted");
+    winios_window_census_enable(0);
+    winios_census_note_frame(add(0x6001, 0x34c80000, 1, 0x45), -32000, -32000, 160, 24, 1);
+    CHECK(restores == r0 + 1, "the session's end stops it");
+    winios_window_census_enable(1);
 
     /* Concurrency: writers on "Wine threads", the app reading on the main thread. */
     for (long t = 0; t < 4; t++) for (int i = 0; i < 16; i++) add(0x9000 + t * 16 + i, 0x94000000, 1, 0x50 + (unsigned)t);
@@ -545,9 +572,13 @@ else:
             print(f'--- census under {name}')
             env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', TSAN_OPTIONS='halt_on_error=1')
             env.pop('MADEIRA_RESTORE_BORN_MINIMIZED', None)
+            env.pop('MADEIRA_RESTORE_BORN_MINIMIZED_LATE', None)
             require(subprocess.run([str(exe)], env=env).returncode == 0, f'census checks ({name})')
             env['MADEIRA_RESTORE_BORN_MINIMIZED'] = '0'
             require(subprocess.run([str(exe), 'restore-off'], env=env).returncode == 0, f'restore switch ({name})')
+            env.pop('MADEIRA_RESTORE_BORN_MINIMIZED', None)
+            env['MADEIRA_RESTORE_BORN_MINIMIZED_LATE'] = '0'
+            require(subprocess.run([str(exe), 'late-off'], env=env).returncode == 0, f'late restore switch ({name})')
         (tmp / 'image.c').write_text(d_prelude + image + d_checks, encoding='utf-8')
         exe = tmp / 'image'
         r = subprocess.run([CC, '-std=gnu11', '-O1', '-g', '-Wall', '-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',

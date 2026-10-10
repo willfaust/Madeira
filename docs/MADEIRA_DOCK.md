@@ -286,6 +286,10 @@ show is minimized gets what a taskbar click sends, once: `WM_SYSCOMMAND` /
 `SC_RESTORE`, posted, and its own thread then brings it to the front from its
 event pump (a fullscreen game pauses without focus). A window that was shown
 and minimized itself later is left alone. `[born-minimized]` logs both steps.
+The starting screen often ends on a splash or launcher window, before the
+game's main window is shown at all, so the restore keeps running after the
+census ends (counting nothing else) until the session ends.
+`MADEIRA_RESTORE_BORN_MINIMIZED_LATE=0` ends it with the census, as before.
 
 The census runs only for a Dock start's starting screen: with it off, each
 hook costs one atomic load, and nothing else changes for any other session,
@@ -380,6 +384,7 @@ never asks. The preparation is Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_INSTALLER_REVEAL` | on | `0`: a one-time installer's dialog never reveals the desktop by itself |
 | `MADEIRA_DOCK_STATUS` | on | `0`: the starting screen does not watch the host's result |
 | `MADEIRA_RESTORE_BORN_MINIMIZED` | on | `0`: while the census runs, a window first shown minimized stays minimized |
+| `MADEIRA_RESTORE_BORN_MINIMIZED_LATE` | on | `0`: after the starting screen ends, a window first shown minimized stays minimized |
 
 ## 64-bit and runtime impact
 
