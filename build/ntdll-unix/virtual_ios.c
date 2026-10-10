@@ -16067,6 +16067,36 @@ static void ios_swap_cfg( int *mode, int *min_mb )
     *min_mb = (int)madeira_cfg_int( "swap-min-mb", 0 );   /* ml1257: madeira.cfg swap-min-mb = N */
 }
 
+/* Zero the COMMITTED guest pages of [start, end), a part of a decommit range that the
+ * host-page mmap-over in decommit_pages cannot cover. Windows accepts a MEM_DECOMMIT that
+ * also spans reserved-but-never-committed pages and leaves those alone, and a host page
+ * whose guest pages are all uncommitted is PROT_NONE: a plain memset over the range then
+ * faults in host code with virtual_mutex held, and the calling thread is lost. Pages that
+ * are not committed are skipped, as on Windows; they were zeroed when they were last
+ * decommitted, or never committed at all. virtual_mutex held. Returns the bytes zeroed. */
+static size_t ios_decommit_zero_committed( char *start, char *end )
+{
+    static unsigned long skipped, logs;
+    size_t zeroed = 0;
+    char *p, *next;
+
+    for (p = start; p < end; p = next)
+    {
+        next = (char *)ROUND_ADDR( p, page_mask ) + page_size;
+        if (next > end) next = end;
+        if (get_page_vprot( p ) & VPROT_COMMITTED)
+        {
+            memset( p, 0, next - p );
+            zeroed += next - p;
+        }
+        else skipped++;
+    }
+    if (zeroed != (size_t)(end - start) && (logs++ < 32 || !(logs % 1024)))
+        dprintf( 2, "[decommit-skip] %p-%p zeroed=0x%lx: uncommitted guest pages left alone (%lu so far)\n",
+                 start, end, (unsigned long)zeroed, skipped );
+    return zeroed;
+}
+
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
 {
     char *host_end, *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
@@ -16173,18 +16203,26 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
             /* Zero the guest sub-ranges on partial host pages the mmap-over
              * couldn't cover — FEX relies on decommit-as-bzero, and stale
              * LookupCache entries surviving at the edges would run wrong
-             * blocks. Edge pages belong to the same committed RW guest heap. */
-            if ((char *)base < host_start) memset( base, 0, host_start - (char *)base );
-            if (host_end < (char *)base + size) memset( host_end, 0, (char *)base + size - host_end );
+             * blocks. Only their committed guest pages: an edge host page
+             * may hold none (see ios_decommit_zero_committed). */
+            if ((char *)base < host_start) ios_decommit_zero_committed( base, host_start );
+            if (host_end < (char *)base + size) ios_decommit_zero_committed( host_end, (char *)base + size );
         }
         else
         {
             /* Range lies within a single host page — no full page to remap;
-             * zero it in place to honour the decommit-as-bzero contract. */
-            memset( base, 0, size );
-            dc_branch = "subpage-memset";
-            dc_verify = base;
-            dc_vsize  = size;
+             * zero its committed guest pages in place to honour the
+             * decommit-as-bzero contract. The read-back below reads base's
+             * guest page, so it runs only if that page was committed: an
+             * uncommitted one was not zeroed and may be PROT_NONE. */
+            size_t zeroed = ios_decommit_zero_committed( base, (char *)base + size );
+            if (zeroed == size) dc_branch = "subpage-memset";
+            else dc_branch = zeroed ? "subpage-memset-partial" : "subpage-uncommitted";
+            if (get_page_vprot( base ) & VPROT_COMMITTED)
+            {
+                dc_verify = base;
+                dc_vsize  = size;
+            }
         }
 
         /* iOS-Madeira ml293 (task #52): VERIFY THE DECOMMIT ZERO CONTRACT IN THE PA ARENAS.
