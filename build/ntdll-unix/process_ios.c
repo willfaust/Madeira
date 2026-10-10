@@ -76,6 +76,8 @@
 #include "wine/condrv.h"
 #include "wine/server.h"
 #include "wine/debug.h"
+#define MADEIRA_REDACT_WINE
+#include "../madeira_redact.h"   /* command lines are logged with credential-like values redacted */
 
 WINE_DEFAULT_DEBUG_CHANNEL(process);
 
@@ -631,7 +633,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     if (winedebug) putenv( winedebug );
 
     ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d)\n",
-        debugstr_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
+        madeira_debugstr_cmdline_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
 
     ret = pthread_create( &child_thread, NULL, ios_child_thread_entry, args );
     if (ret) {
@@ -1117,10 +1119,10 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     if (!process_attr) process_attr = &empty_attr;
 
     TRACE( "%s image %s cmdline %s parent %p machine %x\n", debugstr_us( &path ),
-           debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ), parent, machine );
+           debugstr_us( &params->ImagePathName ), madeira_debugstr_cmdline_us( &params->CommandLine ), parent, machine );
 #ifdef WINE_IOS
     ERR("NtCreateUserProcess: image=%s cmdline=%s\n",
-        debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ));
+        debugstr_us( &params->ImagePathName ), madeira_debugstr_cmdline_us( &params->CommandLine ));
 
     /* TEMP HACK (Steam S3 2026-07-10, task #29): refuse to spawn Steam's
      * minidump reporter. The reporter child hits the deep guest-exception-
@@ -1560,10 +1562,20 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                      * every injected-arg experiment from now on is proven by
                      * this line, not by binary greps or Valve's log. */
                     {
+                        /* The tail of the redacted line: a value cut by the
+                         * tail's start could no longer be recognised. */
+                        size_t cap = 2 * (size_t)o + 64, sn = 0;
+                        unsigned short *shown = malloc( cap * sizeof(*shown) );
                         char tail[136];
-                        int tstart = o > 128 ? o - 128 : 0, ti;
-                        for (ti = 0; ti + tstart < o && ti < 135; ti++)
-                            tail[ti] = (char)nbuf[tstart + ti];
+                        int tstart, ti = 0;
+                        if (shown)
+                        {
+                            sn = madeira_redact_line_w( (const unsigned short *)nbuf, (size_t)o, shown, cap );
+                            tstart = sn > 128 ? (int)sn - 128 : 0;
+                            for (; ti + tstart < (int)sn && ti < 135; ti++)
+                                tail[ti] = (char)shown[tstart + ti];
+                            free( shown );
+                        }
                         tail[ti] = 0;
                         dprintf(2, "[proc-gate] cmdline-tail(ml428): ...%s\n", tail);
                     }

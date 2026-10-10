@@ -61,6 +61,8 @@
 #include "ios_wow.h"
 #include "locale_private.h"
 #include "error.h"
+#define MADEIRA_REDACT_WINE
+#include "../madeira_redact.h"   /* the command line is logged with credential-like values redacted */
 
 #ifdef WINE_IOS
 #include <os/log.h>
@@ -2235,7 +2237,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     cmdline = build_command_line( main_wargv );
 
     TRACE( "image %s cmdline %s dir %s\n",
-           debugstr_w(main_wargv[0]), debugstr_w(cmdline), debugstr_w(curdir) );
+           debugstr_w(main_wargv[0]), madeira_debugstr_cmdline_w(cmdline), debugstr_w(curdir) );
 
     size = (sizeof(*params)
             + MAX_PATH * sizeof(WCHAR)  /* curdir */
