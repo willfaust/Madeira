@@ -6999,6 +6999,33 @@ static int ios_exe_win_small_fixed(void)
     return enabled;
 }
 
+static int ios_exe_win_handoff_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        /* 0 restores the old fixed-base handoff: claims are matched without rounding the
+         * image size to host pages, and a new main image never waits for the previous
+         * owner of the executable window to exit. */
+        const char *e = getenv( "MADEIRA_EXE_WINDOW_HANDOFF" );
+        enabled = !(e && e[0] == '0');
+    }
+    return enabled;
+}
+
+/* A main image waiting in ios_exe_win_wait_for_handoff, and the pseudo-process
+ * (PEB) whose exit it is waiting for. NtCreateUserProcess in that process polls
+ * ios_exe_win_handoff_waits_on so it does not block on the child's start-up,
+ * which cannot finish until the parent has exited. */
+static volatile int ios_exewin_waiters;
+static void * volatile ios_exewin_waiter_owner;
+
+int ios_exe_win_handoff_waits_on( void *peb )
+{
+    return peb && ios_exewin_waiters > 0 && ios_exewin_waiter_owner == peb;
+}
+
 /* Returns 1 if the reservation was released for this request. */
 static int ios_exe_win_claim( const void *addr, size_t size )
 {
@@ -7115,6 +7142,14 @@ void ios_exe_win_commit_claim( void *base, size_t size, int mapped )
     unsigned gen = 0;
     int rolled_back = 0, lost = 0;
 
+    /* The claim was noted by anon_mmap_tryfixed, which map_fixed_area calls with
+     * the size rounded up to host pages; map_image_view passes SizeOfImage. An
+     * image whose size is not a multiple of 16 KB never matched, so its claim
+     * stayed CLAIMING for the rest of the session: it was never OWNED, never
+     * retired at exit, and a second launch of the same program could not get
+     * the base back. */
+    if (ios_exe_win_handoff_enabled()) size = ROUND_SIZE( 0, size, host_page_mask );
+
     pthread_mutex_lock( &ios_exewin_lock );
     if (ios_exewin_st != IOS_EXEWIN_CLAIMING ||
         base != ios_exewin_pending_base || size != ios_exewin_pending_size)
@@ -7191,6 +7226,80 @@ static void ios_exe_win_note_dead_peb( void *dead_peb )
              "the window can be re-granted to the next >=64MB fixed map\n",
              ios_exe_win_generation, ios_exe_win_img_base,
              (unsigned long)ios_exe_win_img_size, dead_peb );
+}
+
+/* A program that starts a copy of itself and then exits works on Windows, where
+ * every process has its own address space. Here the copy maps its main image
+ * while the first instance still holds the fixed base, and an image with
+ * stripped relocations cannot be placed anywhere else, so it fails with
+ * STATUS_CONFLICTING_ADDRESSES. Wait, outside every lock, for the owner's exit
+ * handoff (ios_retire_own_fixed_base_image, then ios_exe_win_mark_ready).
+ * Called by virtual_map_module, which maps only the main image. On timeout the
+ * map goes ahead and fails as before. */
+static void ios_exe_win_wait_for_handoff( const struct pe_image_info *info )
+{
+    static int wait_ms = -1;
+    static int logn;
+    uintptr_t a, size;
+    void *me = NtCurrentTeb()->Peb;
+    int waited = 0, registered = 0;
+    enum ios_exewin_state st = IOS_EXEWIN_FREE;
+    unsigned gen = 0;
+
+    if (wait_ms < 0)
+    {
+        /* how long a new main image with stripped relocations waits for the previous owner of
+         * the executable window to exit, in milliseconds; 0 does not wait */
+        const char *e = getenv( "MADEIRA_EXE_WINDOW_WAIT_MS" );
+        wait_ms = e && *e ? atoi( e ) : 10000;
+        if (wait_ms < 0) wait_ms = 0;
+    }
+    if (!wait_ms || !ios_exe_win_handoff_enabled()) return;
+    if (!(info->image_charact & IMAGE_FILE_RELOCS_STRIPPED)) return;
+    if (info->image_charact & IMAGE_FILE_DLL) return;
+    if (!is_machine_64bit( info->machine ) || info->map_addr) return;
+
+    if (ios_exe_win_state < 0) ios_exe_win_init();
+    if (!ios_exe_win_base) return;
+    a = (uintptr_t)wine_server_get_ptr( info->base );
+    size = ROUND_SIZE( 0, info->map_size, host_page_mask );
+    if (a < ios_exe_win_base || a + size > ios_exe_win_base + ios_exe_win_size) return;
+
+    for (;;)
+    {
+        void *owner;
+        int busy;
+
+        pthread_mutex_lock( &ios_exewin_lock );
+        st    = ios_exewin_st;
+        owner = ios_exe_win_img_peb;
+        gen   = ios_exe_win_generation;
+        pthread_mutex_unlock( &ios_exewin_lock );
+
+        busy = (st == IOS_EXEWIN_OWNED && owner != me) || st == IOS_EXEWIN_RETIRING ||
+               st == IOS_EXEWIN_HELD_NOT_READY || st == IOS_EXEWIN_CLAIMING;
+        if (!busy) break;
+        if (owner) ios_exewin_waiter_owner = owner;
+        if (!registered)
+        {
+            __atomic_add_fetch( &ios_exewin_waiters, 1, __ATOMIC_SEQ_CST );
+            registered = 1;
+            if (logn++ < 16)
+                dprintf( 2, "[exe-window] %p+%#lx has stripped relocations and the fixed base is "
+                         "still held by gen %u (peb=%p, state=%s): waiting up to %d ms for that "
+                         "process to exit (MADEIRA_EXE_WINDOW_WAIT_MS)\n", (void *)a,
+                         (unsigned long)size, gen, owner, ios_exewin_state_name( st ), wait_ms );
+        }
+        if (waited >= wait_ms) break;
+        usleep( 10000 );
+        waited += 10;
+    }
+    if (!registered) return;
+    __atomic_sub_fetch( &ios_exewin_waiters, 1, __ATOMIC_SEQ_CST );
+    if (!ios_exewin_waiters) ios_exewin_waiter_owner = NULL;
+    dprintf( 2, "[exe-window] %s after %d ms (state=%s)\n",
+             waited >= wait_ms ? "gave up waiting for the fixed base" : "fixed base handed back",
+             waited, ios_exewin_state_name( st ) );
 }
 
 static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
@@ -18610,6 +18719,7 @@ NTSTATUS virtual_map_module( HANDLE mapping, void **module, SIZE_T *size, SECTIO
                            module, size, limit_low, limit_high, 0 );
     if (status == STATUS_IMAGE_ALREADY_LOADED)
     {
+        ios_exe_win_wait_for_handoff( image_info );
         status = virtual_map_image( mapping, module, size, shared_file, limit_low, limit_high, 0,
                                     machine, image_info, &nt_name, FALSE, 0 );
         virtual_fill_image_information( image_info, info );

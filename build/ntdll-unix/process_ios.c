@@ -1718,6 +1718,46 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* wait for the new process info to be ready */
 
+#ifdef WINE_IOS
+    {
+        /* All pseudo-processes share one address space. A child whose main image can
+         * only run at the fixed base this process holds waits for this process to exit
+         * (ios_exe_win_wait_for_handoff), so its start-up cannot complete while we
+         * block here. Return to the caller instead: the usual next step for such a
+         * program is to exit, which hands the base over. */
+        extern int ios_exe_win_handoff_waits_on( void *peb );
+        LARGE_INTEGER poll;
+        BOOL handed_off = FALSE;
+
+        poll.QuadPart = -50 * 10000;   /* 50 ms */
+        while (NtWaitForSingleObject( process_info, FALSE, &poll ) == STATUS_TIMEOUT)
+        {
+            if (ios_exe_win_handoff_waits_on( NtCurrentTeb()->Peb ))
+            {
+                handed_off = TRUE;
+                break;
+            }
+        }
+        if (handed_off)
+        {
+            dprintf( 2, "[exe-window] the new process is waiting for this process's fixed base; "
+                     "returning from process creation without waiting for its start-up\n" );
+            success = TRUE;
+            status = STATUS_SUCCESS;
+        }
+        else
+        {
+            SERVER_START_REQ( get_new_process_info )
+            {
+                req->info = wine_server_obj_handle( process_info );
+                wine_server_call( req );
+                success = reply->success;
+                status = reply->exit_code;
+            }
+            SERVER_END_REQ;
+        }
+    }
+#else
     NtWaitForSingleObject( process_info, FALSE, NULL );
     SERVER_START_REQ( get_new_process_info )
     {
@@ -1727,6 +1767,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         status = reply->exit_code;
     }
     SERVER_END_REQ;
+#endif
 
     if (!success)
     {
