@@ -3669,6 +3669,41 @@ int ios_jit_anon_alias_add(void *user_va, size_t size, void *jit_rw_alias)
     return 1;
 }
 
+/* The guest released [base, base+len) (NtFreeVirtualMemory, MEM_RELEASE): drop every anon-RWX alias that starts
+ * inside it. The table is keyed by guest address and was only emptied at process exit or when the pool range was
+ * handed out again, so a later RWX allocation at the same address found the old entry (mprotect_exec reuses a live
+ * alias that covers the range) and kept the old backing: stores routed through the stale alias went to the old pool
+ * slot, not to the new memory. Every allocate/free cycle at a new address also left an entry behind, so the table
+ * filled after 4096 of them. The pool backing itself stays charged to the process until it exits. Called with
+ * virtual_mutex held; takes ios_pool_lock like ios_jit_retire_image. */
+static void ios_jit_anon_alias_retire_range( void *base, size_t len )
+{
+    uintptr_t lo = (uintptr_t)base, hi = lo + len;
+    int i, retired = 0;
+
+    if (!ios_jit_anon_alias_count) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_anon_alias_count; i++)
+    {
+        uintptr_t b = ios_jit_anon_aliases[i].user_va;
+        if (!b || b < lo || (len ? b >= hi : b != lo)) continue;
+        ios_jit_anon_aliases[i].user_va_end = 0;     /* readers match on user_va and the end: close the range first */
+        __sync_synchronize();
+        ios_mono_alias_retire( b );
+        ios_jit_anon_aliases[i].user_va = 0;
+        ios_jit_anon_alias_live--;
+        retired++;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+    if (retired)
+    {
+        static unsigned int logs;
+        if (__sync_fetch_and_add( &logs, 1 ) < 8)
+            dprintf( 2, "[jit-alias] guest free of %p+%#lx: retired %d anon-RWX alias(es)\n",
+                     base, (unsigned long)len, retired );
+    }
+}
+
 /* iOS-Madeira ml625: is [user_va, user_va+size) ALREADY backed by a live anon
  * alias? Used to make the anonymous-RWX remap idempotent -- see the call site in
  * the mprotect(PROT_EXEC) path. Returns 1 and fills the aliases (offset-adjusted
@@ -24280,6 +24315,9 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         break;
     case MEM_RELEASE:
         if (!size) size = view->size;
+#ifdef WINE_IOS
+        ios_jit_anon_alias_retire_range( base, size );   /* its anon-RWX aliases go with it */
+#endif
         status = free_pages( view, base, size );
         break;
     case MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER:
