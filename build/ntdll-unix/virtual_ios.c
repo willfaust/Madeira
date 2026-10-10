@@ -19341,6 +19341,13 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
 {
     struct ntdll_thread_data *thread_data;
     sigset_t sigset;
+#ifdef WINE_IOS
+    /* teb_list holds the threads of every pseudo-process in this task, but a
+     * TLS index belongs to one process: TlsAlloc takes it from that process's
+     * own PEB bitmap, so the same index in another process is unrelated.
+     * Clear it only in the calling process's threads, as Windows does. */
+    void *caller_peb = NtCurrentTeb()->Peb;
+#endif
 
     if (index < TLS_MINIMUM_AVAILABLE)
     {
@@ -19350,6 +19357,11 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
             TEB *teb = CONTAINING_RECORD( thread_data, TEB, GdiTebBatch );
 #ifdef _WIN64
             WOW_TEB *wow_teb = get_wow_teb( teb );
+#endif
+#ifdef WINE_IOS
+            if (teb->Peb != caller_peb) continue;
+#endif
+#ifdef _WIN64
             if (wow_teb) wow_teb->TlsSlots[index] = 0;
             else
 #endif
@@ -19368,6 +19380,11 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
             TEB *teb = CONTAINING_RECORD( thread_data, TEB, GdiTebBatch );
 #ifdef _WIN64
             WOW_TEB *wow_teb = get_wow_teb( teb );
+#endif
+#ifdef WINE_IOS
+            if (teb->Peb != caller_peb) continue;
+#endif
+#ifdef _WIN64
             if (wow_teb)
             {
                 if (wow_teb->TlsExpansionSlots)
