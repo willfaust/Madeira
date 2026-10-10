@@ -603,11 +603,13 @@ check('TouchControlsModel.diameter(control)' in content and 'library.opacity' in
       "touch controls follow the session's size and opacity")
 
 # Owner requests: the starting screen's glyph row, Settings credits last, no drive_c note.
-launch = block(hud, 'private func launchView(')
+launch = block(hud, 'private func launchColumnView(')
+wide = block(hud, 'private func launchWideView(')
 glyph = block(hud, 'private func launchGlyph(')
 row = block(launch, 'HStack(spacing: 14)')
 check('launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs)' in row
-      and 'Button(showLogs ?' not in launch,
+      and 'launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs)' in wide
+      and 'Button(showLogs ?' not in launch and 'Button(showLogs ?' not in wide,
       'starting screen: the live-log control is a glyph in one row')
 check('Image(systemName: symbol)' in glyph and '.accessibilityLabel(label)' in glyph and 'Text(' not in glyph
       and 'Circle()' in glyph, 'starting screen: glyph buttons show no text and keep their words as VoiceOver labels')

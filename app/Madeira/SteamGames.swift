@@ -1060,7 +1060,7 @@ struct SteamCloudSection: View {
             } header: {
                 Text("Steam Cloud")
             } footer: {
-                Text("Saves sync with Steam Cloud when Madeira starts and when this page opens, not while you play: use Upload saves and close Madeira in the game menu when you stop, or what you played is uploaded the next time Madeira starts. A save that differs on both sides, or that is missing on this device, is never replaced without asking, and a save a sync replaces is kept in Files › Madeira › Steam Cloud Backups.")
+                Text("Syncs when Madeira starts and when this page opens, not while you play. Use Upload saves when you stop. Replaced saves go to Files › Madeira › Steam Cloud Backups.")
             }
         }
     }
@@ -1189,7 +1189,7 @@ struct SteamEntrySection: View {
                 if resolving && entry.steamProgram == nil {
                     LabeledContent("Program") { ProgressView() }
                 } else if programs.isEmpty && entry.steamProgram == nil {
-                    Text("No Windows program was found in this game's install folder.")
+                    Text("No Windows program found.")
                         .font(.caption).foregroundStyle(.orange)
                 } else {
                     Picker("Program", selection: Binding(get: { entry.steamProgram ?? "" }, set: { pick($0) })) {
@@ -1198,15 +1198,15 @@ struct SteamEntrySection: View {
                     }.pickerStyle(.navigationLink)
                     if entry.steamProgramSource == "steam" {
                         if (entry.steamProgramArguments ?? "").isEmpty {
-                            Text("From Steam's launch configuration for this game.").font(.caption).foregroundStyle(.secondary)
+                            Text("From Steam's launch settings.").font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("From Steam's launch configuration for this game, with its arguments.").font(.caption).foregroundStyle(.secondary)
+                            Text("From Steam's launch settings, with its arguments.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
             } else {
                 if !dock.clientInstalled {
-                    Text("Madeira Dock needs Valve's client components. Download them in Settings › Steam › Madeira Dock.")
+                    Text("Needs Valve's client: Settings › Steam › Madeira Dock.")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 Toggle("Smaller JIT pool (512 MB) for this launch", isOn: $dock.compactPool)
@@ -1232,8 +1232,6 @@ struct SteamEntrySection: View {
             if downloads, download == nil {
                 Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }
                     .disabled(!steam.signedIn)
-                Text("Checks installed content and downloads missing or changed files from the current Steam build.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             LabeledContent("App ID", value: String(appID))
             if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
@@ -1250,9 +1248,9 @@ struct SteamEntrySection: View {
             Text("Steam")
         } footer: {
             if direct {
-                Text("The game starts its own program in Wine, without Steam. This suits games that run without Steam (DRM-free); a game that needs Steam or its licence check does not start this way, so choose Madeira Dock for it.")
+                Text("Runs the game without Steam. DRM-free games only.")
             } else {
-                Text("Madeira Dock starts the game through Valve's own Steam client, without the Steam desktop window. Valve's client signs in with your account and decides whether the game may run.")
+                Text("Starts through Valve's Steam client, signed in as you.")
             }
         }
         .onAppear { dock.refresh(); games.refresh() }
