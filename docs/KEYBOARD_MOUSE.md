@@ -117,6 +117,22 @@ filter off. The on-screen touch controls are not filtered. AssistiveTouch's own
 cursor cannot be hidden by an app; the program's drawn cursor is the one that
 shows where a click lands.
 
+Two opt-in iPhone experiments (`app/Madeira/PhonePointer.m`), off by default,
+read from `madeira.cfg` when the app starts (restart after changing them):
+
+- `env.MADEIRA_PHONE_HOVER = 1`: UIKit leaves pointer interactions' drivers
+  detached on iPhone, so hover from the AssistiveTouch cursor never reaches the
+  game view. With the switch, an enabled interaction's drivers are attached to
+  its view after UIKit's own update, as on iPad.
+- `env.MADEIRA_PHONE_IPAD_IDIOM = 1`: the app runs with the iPad interface
+  idiom, so the pointer-lock request is made at all (Madeira's own screens use
+  iPad layouts). Whether iOS grants the lock on iPhone is what it tests: the
+  `[hwinput] system pointer lock` line reports `actual`.
+
+Neither changes where iOS sends the mouse: with AssistiveTouch off an iPhone
+still delivers nothing. `[hwinput] phone pointer: phone=1 ipad-idiom=… hover=…`
+says what was applied (`applied`/`installed`, `not taken`, `unavailable`).
+
 ## Cursor
 
 The iOS pointer is hidden over the game view; what shows is the program's own

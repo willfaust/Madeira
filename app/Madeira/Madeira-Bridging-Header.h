@@ -73,3 +73,9 @@ int madeira_d3d12_canary_run(const char *fixture_dir, const char *dylib_path,
 int madeira_d3d12_canary_run_log(const char *fixture_dir, const char *dylib_path,
                                  void (*sink)(const char *), const char *log_path,
                                  const char *build_id);
+
+/* PhonePointer.m: opt-in iPhone pointer experiments (env.MADEIRA_PHONE_HOVER,
+ * env.MADEIRA_PHONE_IPAD_IDIOM). Setup runs in MadeiraApp.init; the status says
+ * what was applied, for the [hwinput] log. */
+void madeira_phone_pointer_setup(void);
+const char *madeira_phone_pointer_status(void);

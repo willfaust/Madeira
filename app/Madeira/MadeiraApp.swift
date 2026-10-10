@@ -3,6 +3,8 @@ import SwiftUI
 @main
 struct MadeiraApp: App {
     init() {
+        // Opt-in iPhone pointer experiments (PhonePointer.m): before any scene exists.
+        madeira_phone_pointer_setup()
         // ml1172: read the screen on the main thread; library entries, whose
         // default Resolution comes from it, are also made on other threads.
         _ = ResolutionChoices.screen

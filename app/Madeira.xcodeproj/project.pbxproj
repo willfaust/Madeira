@@ -104,6 +104,7 @@
 		A1000060 /* libwin32u_unix.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000060 /* libwin32u_unix.a */; };
 		A1000070 /* Winios/Winios.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000070 /* Winios/Winios.m */; };
 		A1000247 /* PadOutput.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000247 /* PadOutput.m */; };
+		A1000F01 /* PhonePointer.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000F01 /* PhonePointer.m */; };
 		A1000080 /* arm64ec-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000080 /* arm64ec-windows */; };
 		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
 		A1000081 /* x86_64-vcruntime in Resources */ = {isa = PBXBuildFile; fileRef = A2000081 /* x86_64-vcruntime */; };
@@ -285,6 +286,7 @@
 		A2000070 /* Winios/Winios.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/Winios.m; sourceTree = "<group>"; };
 		A2000071 /* Winios/Winios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Winios/Winios.h; sourceTree = "<group>"; };
 		A2000247 /* PadOutput.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PadOutput.m; sourceTree = "<group>"; };
+		A2000F01 /* PhonePointer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhonePointer.m; sourceTree = "<group>"; };
 		A2000248 /* PadOutput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PadOutput.h; sourceTree = "<group>"; };
 		A2000080 /* arm64ec-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "arm64ec-windows"; sourceTree = "<group>"; };
 		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
@@ -487,6 +489,7 @@
 				A2000070 /* Winios/Winios.m */,
 				A2000071 /* Winios/Winios.h */,
 				A2000247 /* PadOutput.m */,
+				A2000F01 /* PhonePointer.m */,
 				A2000248 /* PadOutput.h */,
 				A2000034 /* wine_stubs.c */,
 				A2000006 /* Madeira-Bridging-Header.h */,
@@ -785,6 +788,7 @@
 				A1000050 /* IOSDisplayShim.m in Sources */,
 				A1000070 /* Winios/Winios.m in Sources */,
 				A1000247 /* PadOutput.m in Sources */,
+				A1000F01 /* PhonePointer.m in Sources */,
 				A1000035 /* StikJITHelper.swift in Sources */,
 				B1000001 /* JITSetup.swift in Sources */,
 				B1000050 /* JITNetwork.swift in Sources */,
