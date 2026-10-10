@@ -1034,7 +1034,7 @@ struct SteamCloudQuitRow: View {
             guard on != oldValue else { return }
             MadeiraConfig.set("env.MADEIRA_STEAM_CLOUD", on ? nil : "0")
             SteamLog.event("[steam-cloud] setting on=\(on ? 1 : 0)")
-            if on { SteamOwnedLibrary.shared.cloudTurnedOn() } else { SteamOwnedLibrary.shared.objectWillChange.send() }
+            if on { SteamOwnedLibrary.shared.cloudTurnedOn() } else { SteamOwnedLibrary.shared.cloudTurnedOff() }
         }
     }
 }

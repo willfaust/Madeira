@@ -451,15 +451,41 @@ final class SteamOwnedLibrary: ObservableObject {
             .write(to: Self.cloudBaselineURL, options: .atomic)
     }
 
-    /// Steam Cloud saves was turned on in Settings: sync the installed games now.
+    /// Steam Cloud saves was turned on in Settings: forget what earlier checks
+    /// found (a transfer stopped by turning it off ends first) and sync the
+    /// installed games now.
     func cloudTurnedOn() {
         objectWillChange.send()
-        Task { await auditCloudSaves() }
+        Task {
+            for _ in 0..<150 where !cloudBusy.isEmpty { try? await Task.sleep(nanoseconds: 200_000_000) }
+            guard Self.cloudEnabled else { return }
+            cloud.removeAll()
+            if case .working = cloudQuit {} else { cloudQuit = nil }
+            cloudAudited = false
+            await auditCloudSaves()
+        }
+    }
+
+    /// Steam Cloud saves was turned off in Settings: nothing is checked or
+    /// copied any more, a running transfer stops between files, and what the
+    /// checks found is dropped. Saves stay where they are, on both sides.
+    func cloudTurnedOff() {
+        cloud.removeAll()
+        if case .working = cloudQuit {} else { cloudQuit = nil }
+    }
+
+    /// Logs once per app run that Steam Cloud is off by the setting.
+    private var cloudOffLogged = false
+    private func noteCloudOff() {
+        guard Self.enabled, !Self.cloudEnabled, !cloudOffLogged else { return }
+        cloudOffLogged = true
+        SteamLog.event("[steam-cloud] off (setting)")
     }
 
     /// Once per app run: syncs each installed Steam game, then says which
     /// games have saves that need a choice.
     private func auditCloudSaves() async {
+        noteCloudOff()
         guard !cloudAudited, !inSession, Self.cloudEnabled else { return }
         cloudAudited = true
         let games = SteamGamesModel.shared.games.filter(\.installed).prefix(40)
@@ -559,7 +585,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// The user's choice for the saves that differ: the cloud's replace the
     /// device's (which are backed up first), or the device's replace the cloud's.
     func resolveCloud(_ appID: Int, useCloud: Bool) async {
-        guard !cloudBusy.contains(appID), let state = cloud[appID], state.phase == .ready, !state.conflicts.isEmpty else { return }
+        guard Self.cloudEnabled, !cloudBusy.contains(appID), let state = cloud[appID], state.phase == .ready, !state.conflicts.isEmpty else { return }
         cloudBusy.insert(appID)
         defer { cloudBusy.remove(appID) }
         SteamLog.event("[steam-cloud] app=\(appID) choice=\(useCloud ? "cloud" : "device") files=\(state.conflicts.count)")
@@ -588,7 +614,7 @@ final class SteamOwnedLibrary: ObservableObject {
         do {
             guard let context = try await cloudContext(appID) else { throw SteamFileError.invalid("This game's save folders could not be found.") }
             for entry in wanted {
-                guard !inSession else { throw CancellationError() }
+                guard !inSession, Self.cloudEnabled else { throw CancellationError() }
                 guard let place = context.paths.location(cloudPath: entry.path) else { continue }
                 let file = try await cloudFile(appID, entry)
                 let url = SteamCloudPaths.resolve(base: place.base, parts: place.parts)
@@ -655,7 +681,7 @@ final class SteamOwnedLibrary: ObservableObject {
             if !replaced.isEmpty {
                 let backup = Self.cloudBackup(appID).appendingPathComponent("cloud", isDirectory: true)
                 for entry in replaced {
-                    guard !cloudBlocked else { throw CancellationError() }
+                    guard !cloudBlocked, Self.cloudEnabled else { throw CancellationError() }
                     guard let place = context.paths.location(cloudPath: entry.path) else { continue }
                     let file = try await cloudFile(appID, entry)
                     var target = backup.appendingPathComponent(SteamCloudPaths.split(entry.path).root ?? "remote", isDirectory: true)
@@ -677,7 +703,7 @@ final class SteamOwnedLibrary: ObservableObject {
             }
             guard batchID != 0 else { throw SteamFileError.invalid("Steam did not open an upload for this game.") }
             for entry in wanted {
-                guard !cloudBlocked else { throw CancellationError() }
+                guard !cloudBlocked, Self.cloudEnabled else { throw CancellationError() }
                 guard let place = context.paths.location(cloudPath: entry.path) else { continue }
                 let url = SteamCloudPaths.resolve(base: place.base, parts: place.parts)
                 let file = try Data(contentsOf: url)
@@ -753,6 +779,7 @@ final class SteamOwnedLibrary: ObservableObject {
     @Published private(set) var cloudWaitingFor: Int?
 
     func cloudHold(_ appID: Int) -> CloudHold? {
+        guard Self.cloudEnabled else { noteCloudOff(); return nil }
         guard Self.cloudPlayCheck, signedIn, !inSession else { return nil }
         if cloudBusy.contains(appID) { return .syncing }
         guard let state = cloud[appID] else { return .stale }
@@ -770,6 +797,7 @@ final class SteamOwnedLibrary: ObservableObject {
 
     /// Waits for a running sync, syncs once more, and returns what still holds the start.
     func settleCloud(_ appID: Int) async -> CloudHold? {
+        guard Self.cloudPlayCheck else { return nil }
         cloudWaitingFor = appID
         defer { cloudWaitingFor = nil }
         for _ in 0..<600 where cloudBusy.contains(appID) { try? await Task.sleep(nanoseconds: 200_000_000) }

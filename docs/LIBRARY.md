@@ -354,7 +354,8 @@ configuration.
 **Settings › .NET Framework** shows Wine Mono's state, with **Download Wine
 Mono** or **Remove Wine Mono** (hidden in a build that carries it).
 Settings › Steam also shows the signed-in account with **Sign out of Steam**
-(or **Sign in to Steam**), **Madeira Dock** (Dock's sheet, with the last Dock
+(or **Sign in to Steam**), the **Steam Cloud saves** switch
+(`docs/STEAM_CLOUD.md`), **Madeira Dock** (Dock's sheet, with the last Dock
 result under it). A game started from the Dock sheet here runs as a library
 session: full-screen view, starting screen, in-game menu, and the
 one-session-per-run rule. That session is not added to the library.

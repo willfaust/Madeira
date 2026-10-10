@@ -6,9 +6,14 @@ library and downloads use, `docs/STEAM_LIBRARY.md`), which is closed
 while a game session holds the account: saves sync before and after a
 session, and during one only on the game menu's upload button.
 
-It is on by default. **Settings › Steam Cloud saves** turns it off, which
-keeps `env.MADEIRA_STEAM_CLOUD = 0` in `madeira.cfg`; turning it back on
-syncs the installed games at once.
+It is on by default. The **Steam Cloud saves** switch in **Settings › Steam**
+turns it off, which keeps `env.MADEIRA_STEAM_CLOUD = 0` in `madeira.cfg`.
+Off, Madeira checks, downloads and uploads nothing: Play never waits or
+asks, the game page's Steam Cloud section and the game menu's upload button
+are hidden, a running transfer stops between files, and saves stay as they
+are on the device and in the cloud. The log says `[steam-cloud] off (setting)`
+once per app run. Turning it back on drops what earlier checks found and
+syncs the installed games at once against the record of the last sync.
 `env.MADEIRA_STEAM_CLOUD_AUTO = 0` keeps the comparison and the game page
 but copies nothing in either direction unless the user asks there.
 
