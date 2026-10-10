@@ -218,14 +218,15 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
          * old "first 40 lines" cap was exhausted by arrow keys early in the
          * session, so the WASD presses that prompted this fix left no trace at
          * all and the log looked like they were never sent. Log the first few,
-         * then one line per 256 with a running total that is always truthful. */
+         * then one line per 256 with a running total that is always truthful.
+         * The line counts keys and never names them: the first few keys of a
+         * session are often a password. */
         static unsigned cnt, bad;
         if (st) bad++;
         cnt++;
         if (cnt <= 8 || (cnt & 0xff) == 0)
-            dprintf(2, "[winios] ml647 drv_post_key #%u vk=0x%x scan=0x%x flags=0x%x "
-                       "-> status=0x%x (failures=%u)\n",
-                    cnt, vk, scan, flags, (unsigned)st, bad);
+            dprintf(2, "[winios] ml647 drv_post_key #%u -> status=0x%x (failures=%u)\n",
+                    cnt, (unsigned)st, bad);
     }
 }
 
