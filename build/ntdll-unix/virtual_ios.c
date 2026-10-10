@@ -9109,14 +9109,16 @@ extern const void *const dxmt_d3d9_unix_call_wow64_funcs[];
  * which is where the caller's compressed input and PCM output actually live. */
 extern const void *winegstreamer_unix_call_wow64_funcs[];
 
-/* MADEIRA: winegstreamer's unix side is bound for 32-bit (wow64) callers.
- * A 64-bit (ARM64EC) caller gets it only with MADEIRA_WG_64BIT=1 (env, or
- * env.MADEIRA_WG_64BIT = 1 in madeira.cfg); by default it keeps the generic
- * stub table, as upstream. */
-static BOOL ios_wg_64bit_opted_in(void)
+/* MADEIRA: winegstreamer's unix side is bound for 32-bit (wow64) callers, and for
+ * 64-bit (ARM64EC) ones too: without it an x64 program's xWMA voices (FAudio's
+ * WMA decoder DMO, wmadmod -> winegstreamer) decode to silence. A 64-bit caller
+ * gets the WMA transform; its wg_parser stays refused unless MADEIRA_WG_64BIT=1
+ * (winegstreamer_unixlib_ios.c, wgp_create64). MADEIRA_WG_64BIT=0 keeps the
+ * generic stub table for 64-bit callers, as before. */
+static BOOL ios_wg_64bit_enabled(void)
 {
     const char *e = getenv( "MADEIRA_WG_64BIT" );
-    return e && e[0] == '1';
+    return !(e && e[0] == '0');
 }
 
 /* dnsapi's unix side is bound unless MADEIRA_DNSAPI_UNIXLIB=0, which keeps the
@@ -9376,7 +9378,7 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
             libname = "dwrite (rev=ml494)";
             funcs64 = (const void *)dwrite_unix_call_funcs;
             funcs_wow64 = (const void *)dwrite_unix_call_wow64_funcs;
-        } else if (match && strstr(match, "winegstreamer") && (wow || ios_wg_64bit_opted_in())) {
+        } else if (match && strstr(match, "winegstreamer") && (wow || ios_wg_64bit_enabled())) {
             /* MADEIRA 2026-09-19: matched before the generic fallback so the
              * DLL loads at all.  Upstream binds "winegstreamer.so"; the PE
              * export name is "winegstreamer.dll" — "winegstreamer" is the
@@ -9385,12 +9387,10 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
              * its thunks convert the struct wg_media_type / struct wg_sample
              * pointers that the 32-bit layouts place at different offsets.
              *
-             * 64-bit (ARM64EC) callers are OPT-IN: unless MADEIRA_WG_64BIT=1
-             * this branch is not taken for them, so they reach the generic
-             * fallback below exactly as before this table existed and the
-             * 64-bit engine's default behaviour does not change. */
+             * 64-bit (ARM64EC) callers take it too unless MADEIRA_WG_64BIT=0
+             * (ios_wg_64bit_enabled); their parser needs MADEIRA_WG_64BIT=1. */
             libname = wow ? "winegstreamer (wma + wg_parser, libav*)"
-                          : "winegstreamer (wma + wg_parser, libav*; 64-bit opted in)";
+                          : "winegstreamer (wma, libav*; 64-bit)";
             funcs64 = (const void *)winegstreamer_unix_call_funcs;
             funcs_wow64 = (const void *)winegstreamer_unix_call_wow64_funcs;
         } else if (match && strstr(match, "nsi.dll")) {
