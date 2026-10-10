@@ -16,7 +16,13 @@ msvcp140_atomic_wait.dll
 
 ## How to get them
 
-Download the official x64 redistributable from Microsoft
+You can run the fetch helper script:
+
+```sh
+./tools/fetch-vcruntime.sh
+```
+
+Or manually download the official x64 redistributable from Microsoft
 (`VC_redist.x64.exe`) and extract it. On macOS, 7-Zip can do this:
 
 ```sh
