@@ -3669,6 +3669,41 @@ int ios_jit_anon_alias_add(void *user_va, size_t size, void *jit_rw_alias)
     return 1;
 }
 
+/* The guest released [base, base+len) (NtFreeVirtualMemory, MEM_RELEASE): drop every anon-RWX alias that starts
+ * inside it. The table is keyed by guest address and was only emptied at process exit or when the pool range was
+ * handed out again, so a later RWX allocation at the same address found the old entry (mprotect_exec reuses a live
+ * alias that covers the range) and kept the old backing: stores routed through the stale alias went to the old pool
+ * slot, not to the new memory. Every allocate/free cycle at a new address also left an entry behind, so the table
+ * filled after 4096 of them. The pool backing itself stays charged to the process until it exits. Called with
+ * virtual_mutex held; takes ios_pool_lock like ios_jit_retire_image. */
+static void ios_jit_anon_alias_retire_range( void *base, size_t len )
+{
+    uintptr_t lo = (uintptr_t)base, hi = lo + len;
+    int i, retired = 0;
+
+    if (!ios_jit_anon_alias_count) return;
+    pthread_mutex_lock( &ios_pool_lock );
+    for (i = 0; i < ios_jit_anon_alias_count; i++)
+    {
+        uintptr_t b = ios_jit_anon_aliases[i].user_va;
+        if (!b || b < lo || (len ? b >= hi : b != lo)) continue;
+        ios_jit_anon_aliases[i].user_va_end = 0;     /* readers match on user_va and the end: close the range first */
+        __sync_synchronize();
+        ios_mono_alias_retire( b );
+        ios_jit_anon_aliases[i].user_va = 0;
+        ios_jit_anon_alias_live--;
+        retired++;
+    }
+    pthread_mutex_unlock( &ios_pool_lock );
+    if (retired)
+    {
+        static unsigned int logs;
+        if (__sync_fetch_and_add( &logs, 1 ) < 8)
+            dprintf( 2, "[jit-alias] guest free of %p+%#lx: retired %d anon-RWX alias(es)\n",
+                     base, (unsigned long)len, retired );
+    }
+}
+
 /* iOS-Madeira ml625: is [user_va, user_va+size) ALREADY backed by a live anon
  * alias? Used to make the anonymous-RWX remap idempotent -- see the call site in
  * the mprotect(PROT_EXEC) path. Returns 1 and fills the aliases (offset-adjusted
@@ -16067,6 +16102,36 @@ static void ios_swap_cfg( int *mode, int *min_mb )
     *min_mb = (int)madeira_cfg_int( "swap-min-mb", 0 );   /* ml1257: madeira.cfg swap-min-mb = N */
 }
 
+/* Zero the COMMITTED guest pages of [start, end), a part of a decommit range that the
+ * host-page mmap-over in decommit_pages cannot cover. Windows accepts a MEM_DECOMMIT that
+ * also spans reserved-but-never-committed pages and leaves those alone, and a host page
+ * whose guest pages are all uncommitted is PROT_NONE: a plain memset over the range then
+ * faults in host code with virtual_mutex held, and the calling thread is lost. Pages that
+ * are not committed are skipped, as on Windows; they were zeroed when they were last
+ * decommitted, or never committed at all. virtual_mutex held. Returns the bytes zeroed. */
+static size_t ios_decommit_zero_committed( char *start, char *end )
+{
+    static unsigned long skipped, logs;
+    size_t zeroed = 0;
+    char *p, *next;
+
+    for (p = start; p < end; p = next)
+    {
+        next = (char *)ROUND_ADDR( p, page_mask ) + page_size;
+        if (next > end) next = end;
+        if (get_page_vprot( p ) & VPROT_COMMITTED)
+        {
+            memset( p, 0, next - p );
+            zeroed += next - p;
+        }
+        else skipped++;
+    }
+    if (zeroed != (size_t)(end - start) && (logs++ < 32 || !(logs % 1024)))
+        dprintf( 2, "[decommit-skip] %p-%p zeroed=0x%lx: uncommitted guest pages left alone (%lu so far)\n",
+                 start, end, (unsigned long)zeroed, skipped );
+    return zeroed;
+}
+
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
 {
     char *host_end, *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
@@ -16173,18 +16238,26 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size 
             /* Zero the guest sub-ranges on partial host pages the mmap-over
              * couldn't cover — FEX relies on decommit-as-bzero, and stale
              * LookupCache entries surviving at the edges would run wrong
-             * blocks. Edge pages belong to the same committed RW guest heap. */
-            if ((char *)base < host_start) memset( base, 0, host_start - (char *)base );
-            if (host_end < (char *)base + size) memset( host_end, 0, (char *)base + size - host_end );
+             * blocks. Only their committed guest pages: an edge host page
+             * may hold none (see ios_decommit_zero_committed). */
+            if ((char *)base < host_start) ios_decommit_zero_committed( base, host_start );
+            if (host_end < (char *)base + size) ios_decommit_zero_committed( host_end, (char *)base + size );
         }
         else
         {
             /* Range lies within a single host page — no full page to remap;
-             * zero it in place to honour the decommit-as-bzero contract. */
-            memset( base, 0, size );
-            dc_branch = "subpage-memset";
-            dc_verify = base;
-            dc_vsize  = size;
+             * zero its committed guest pages in place to honour the
+             * decommit-as-bzero contract. The read-back below reads base's
+             * guest page, so it runs only if that page was committed: an
+             * uncommitted one was not zeroed and may be PROT_NONE. */
+            size_t zeroed = ios_decommit_zero_committed( base, (char *)base + size );
+            if (zeroed == size) dc_branch = "subpage-memset";
+            else dc_branch = zeroed ? "subpage-memset-partial" : "subpage-uncommitted";
+            if (get_page_vprot( base ) & VPROT_COMMITTED)
+            {
+                dc_verify = base;
+                dc_vsize  = size;
+            }
         }
 
         /* iOS-Madeira ml293 (task #52): VERIFY THE DECOMMIT ZERO CONTRACT IN THE PA ARENAS.
@@ -19341,6 +19414,13 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
 {
     struct ntdll_thread_data *thread_data;
     sigset_t sigset;
+#ifdef WINE_IOS
+    /* teb_list holds the threads of every pseudo-process in this task, but a
+     * TLS index belongs to one process: TlsAlloc takes it from that process's
+     * own PEB bitmap, so the same index in another process is unrelated.
+     * Clear it only in the calling process's threads, as Windows does. */
+    void *caller_peb = NtCurrentTeb()->Peb;
+#endif
 
     if (index < TLS_MINIMUM_AVAILABLE)
     {
@@ -19350,6 +19430,11 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
             TEB *teb = CONTAINING_RECORD( thread_data, TEB, GdiTebBatch );
 #ifdef _WIN64
             WOW_TEB *wow_teb = get_wow_teb( teb );
+#endif
+#ifdef WINE_IOS
+            if (teb->Peb != caller_peb) continue;
+#endif
+#ifdef _WIN64
             if (wow_teb) wow_teb->TlsSlots[index] = 0;
             else
 #endif
@@ -19368,6 +19453,11 @@ NTSTATUS virtual_clear_tls_index( ULONG index )
             TEB *teb = CONTAINING_RECORD( thread_data, TEB, GdiTebBatch );
 #ifdef _WIN64
             WOW_TEB *wow_teb = get_wow_teb( teb );
+#endif
+#ifdef WINE_IOS
+            if (teb->Peb != caller_peb) continue;
+#endif
+#ifdef _WIN64
             if (wow_teb)
             {
                 if (wow_teb->TlsExpansionSlots)
@@ -20294,6 +20384,199 @@ unsigned int virtual_locked_server_call( void *req_ptr )
 }
 
 
+/* Kernel writes into anonymous RWX memory.
+ *
+ * VirtualAlloc(PAGE_EXECUTE_READWRITE) memory that takes the JIT-pool path is the pool's RX view at its guest address
+ * (W^X); guest stores into it fault and the store emulator writes them through the pool's RW alias, but read(),
+ * pread() and recvmsg() into it get EFAULT. The retry below (check_write_access: the guest protection is writable)
+ * failed the same way, so NtReadFile returned STATUS_ACCESS_VIOLATION and recv WSAEFAULT where Windows fills the
+ * buffer (wait_reply in server_ios.c handles the same EFAULT for wineserver replies). A destination that touches an
+ * RW alias is now filled through a bounce buffer and stored through the alias, page by page, like a guest store;
+ * pages without an alias are written directly if they are writable. The check runs before the first read(), so a
+ * partial transfer is never repeated. Write watches are not updated for alias pages (PAGE_EXECUTE_READWRITE with
+ * MEM_WRITE_WATCH is not expected in practice). */
+#define IOS_KW_PAGE   0x1000
+#define IOS_KW_BOUNCE (1024 * 1024)
+
+/* Does [lo, hi) touch the JIT pool's RX range or an anonymous-RWX alias? One pass, lock-free like the lookups. */
+static BOOL ios_kw_has_rw_alias( uintptr_t lo, uintptr_t hi )
+{
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+    size_t pool = ios_jit_pool_size_global;
+    int n = ios_jit_anon_alias_count, i;
+
+    if (rx && pool && lo < rx + pool && rx < hi) return TRUE;
+    for (i = 0; i < n; i++)
+    {
+        uintptr_t b = ios_jit_anon_aliases[i].user_va;
+        if (b && lo < ios_jit_anon_aliases[i].user_va_end && b < hi) return TRUE;
+    }
+    return FALSE;
+}
+
+/* The RW alias of a guest address that is a JIT-pool RX view, or 0. */
+static uintptr_t ios_kw_rw_alias( uintptr_t addr )
+{
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
+    size_t pool = ios_jit_pool_size_global;
+
+    if (rx && rw && pool && addr >= rx && addr - rx < pool) return rw + (addr - rx);
+    return ios_jit_anon_alias_lookup( addr );
+}
+
+/* Can every page of [dst, dst+n) be written, through its RW alias or directly? Checked before reading, so a call that
+ * is going to fail consumes no data (Windows fails it without reading). */
+static BOOL ios_kw_dest_ok( const char *dst, size_t n )
+{
+    while (n)
+    {
+        size_t chunk = IOS_KW_PAGE - ((uintptr_t)dst & (IOS_KW_PAGE - 1));
+
+        if (chunk > n) chunk = n;
+        if (!ios_kw_rw_alias( (uintptr_t)dst ) && !ios_range_writable( dst, chunk )) return FALSE;
+        dst += chunk;
+        n -= chunk;
+    }
+    return TRUE;
+}
+
+/* Store n bytes at guest address dst, page by page: through the RW alias where there is one, else directly if the
+ * page is writable. FALSE as soon as a page is neither. */
+static BOOL ios_kw_store( char *dst, const char *src, size_t n )
+{
+    while (n)
+    {
+        size_t chunk = IOS_KW_PAGE - ((uintptr_t)dst & (IOS_KW_PAGE - 1));
+        uintptr_t rw;
+
+        if (chunk > n) chunk = n;
+        if ((rw = ios_kw_rw_alias( (uintptr_t)dst )))
+        {
+            memcpy( (void *)rw, src, chunk );
+            ios_jit_anon_alias_note_write( (uintptr_t)dst );
+        }
+        else if (ios_range_writable( dst, chunk )) memcpy( dst, src, chunk );
+        else return FALSE;
+        dst += chunk;
+        src += chunk;
+        n -= chunk;
+    }
+    return TRUE;
+}
+
+static void ios_kw_note( const char *what, int fd, const void *addr, size_t size )
+{
+    static unsigned int logs;
+
+    if (__sync_fetch_and_add( &logs, 1 ) < 8)
+        dprintf( 2, "[kw-alias] %s fd=%d dst=%p size=%#lx: anonymous-RWX destination, filled through its RW alias\n",
+                 what, fd, addr, (unsigned long)size );
+}
+
+/* read() (positional = FALSE) or pread() into a destination with an RW alias. read() is done once, as the caller
+ * expects (short reads are normal for it); pread() is repeated until size bytes or a short read (end of file). */
+static ssize_t ios_kw_read( int fd, char *addr, size_t size, off_t offset, BOOL positional )
+{
+    size_t cap = size < IOS_KW_BOUNCE ? size : IOS_KW_BOUNCE, done = 0;
+    char *bounce;
+    int err;
+
+    if (!ios_kw_dest_ok( addr, size ))
+    {
+        errno = EFAULT;
+        return -1;
+    }
+    if (!(bounce = malloc( cap ? cap : 1 )))
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    ios_kw_note( positional ? "pread" : "read", fd, addr, size );
+    for (;;)
+    {
+        size_t want = size - done < cap ? size - done : cap;
+        ssize_t got = positional ? pread( fd, bounce, want, offset + done ) : read( fd, bounce, want );
+
+        if (got < 0)
+        {
+            if (errno == EINTR) continue;
+            if (done) break;
+            err = errno;
+            free( bounce );
+            errno = err;
+            return -1;
+        }
+        if (!ios_kw_store( addr + done, bounce, got ))
+        {
+            if (done) break;
+            free( bounce );
+            errno = EFAULT;
+            return -1;
+        }
+        done += got;
+        if (!positional || done == size || (size_t)got < want) break;
+    }
+    free( bounce );
+    return done;
+}
+
+/* recvmsg() whose iovecs touch an RW alias: receive into one bounce buffer of at most IOS_KW_BOUNCE bytes (a stream
+ * receive then returns fewer bytes, which is allowed; a datagram is at most 64 KB), then scatter into the iovecs. */
+static ssize_t ios_kw_recvmsg( int fd, struct msghdr *hdr, int flags )
+{
+    struct msghdr bh = *hdr;
+    struct iovec iov;
+    size_t total = 0, off = 0, i;
+    char *bounce;
+    ssize_t ret;
+
+    for (i = 0; i < hdr->msg_iovlen; i++)
+    {
+        if (!ios_kw_dest_ok( hdr->msg_iov[i].iov_base, hdr->msg_iov[i].iov_len ))
+        {
+            errno = EFAULT;
+            return -1;
+        }
+        total += hdr->msg_iov[i].iov_len;
+    }
+    if (total > IOS_KW_BOUNCE) total = IOS_KW_BOUNCE;
+    if (!(bounce = malloc( total ? total : 1 )))
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    ios_kw_note( "recvmsg", fd, hdr->msg_iovlen ? hdr->msg_iov[0].iov_base : NULL, total );
+    iov.iov_base = bounce;
+    iov.iov_len = total;
+    bh.msg_iov = &iov;
+    bh.msg_iovlen = 1;
+    if ((ret = recvmsg( fd, &bh, flags )) < 0)
+    {
+        int err = errno;
+        free( bounce );
+        errno = err;
+        return ret;
+    }
+    hdr->msg_namelen = bh.msg_namelen;
+    hdr->msg_controllen = bh.msg_controllen;
+    hdr->msg_flags = bh.msg_flags;
+    for (i = 0; i < hdr->msg_iovlen && off < (size_t)ret; i++)
+    {
+        size_t n = hdr->msg_iov[i].iov_len < (size_t)ret - off ? hdr->msg_iov[i].iov_len : (size_t)ret - off;
+
+        if (!ios_kw_store( hdr->msg_iov[i].iov_base, bounce + off, n ))
+        {
+            free( bounce );
+            errno = EFAULT;
+            return -1;
+        }
+        off += n;
+    }
+    free( bounce );
+    return ret;
+}
+
+
 /***********************************************************************
  *           virtual_locked_read
  */
@@ -20302,8 +20585,10 @@ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
     sigset_t sigset;
     BOOL has_write_watch = FALSE;
     int err = EFAULT;
+    ssize_t ret;
 
-    ssize_t ret = read( fd, addr, size );
+    if (ios_kw_has_rw_alias( (uintptr_t)addr, (uintptr_t)addr + size )) return ios_kw_read( fd, addr, size, 0, FALSE );
+    ret = read( fd, addr, size );
     if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -20327,8 +20612,10 @@ ssize_t virtual_locked_pread( int fd, void *addr, size_t size, off_t offset )
     sigset_t sigset;
     BOOL has_write_watch = FALSE;
     int err = EFAULT;
+    ssize_t ret;
 
-    ssize_t ret = pread( fd, addr, size, offset );
+    if (ios_kw_has_rw_alias( (uintptr_t)addr, (uintptr_t)addr + size )) return ios_kw_read( fd, addr, size, offset, TRUE );
+    ret = pread( fd, addr, size, offset );
     if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -20353,8 +20640,13 @@ ssize_t virtual_locked_recvmsg( int fd, struct msghdr *hdr, int flags )
     size_t i;
     BOOL has_write_watch = FALSE;
     int err = EFAULT;
+    ssize_t ret;
 
-    ssize_t ret = recvmsg( fd, hdr, flags );
+    for (i = 0; i < hdr->msg_iovlen; i++)
+        if (ios_kw_has_rw_alias( (uintptr_t)hdr->msg_iov[i].iov_base,
+                                 (uintptr_t)hdr->msg_iov[i].iov_base + hdr->msg_iov[i].iov_len ))
+            return ios_kw_recvmsg( fd, hdr, flags );
+    ret = recvmsg( fd, hdr, flags );
     if (ret != -1 || use_kernel_writewatch || errno != EFAULT) return ret;
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -24023,6 +24315,9 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         break;
     case MEM_RELEASE:
         if (!size) size = view->size;
+#ifdef WINE_IOS
+        ios_jit_anon_alias_retire_range( base, size );   /* its anon-RWX aliases go with it */
+#endif
         status = free_pages( view, base, size );
         break;
     case MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER:

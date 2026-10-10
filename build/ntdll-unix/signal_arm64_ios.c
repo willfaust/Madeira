@@ -1320,6 +1320,62 @@ static uintptr_t ios_subfloor_translate( uint64_t addr, void *peb );
 extern void *ios_jit_current_peb(void);   /* virtual_ios.c */
 static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *via, void *peb );
 
+/* LSE read-modify-write atomics for the Mach alias-store emulator, each done as
+ * ONE host atomic on the RW alias, which maps the same physical pages as the
+ * view that faulted:
+ *   LD<OP>  size 111 0 00 A R 1 Rs 0 0 op(2) 00 Rn Rt (mask 0x3f20cc00, value
+ *           0x38200000); op 00 LDADD, 01 LDCLR, 10 LDEOR, 11 LDSET. Rt gets the
+ *           old value; Rt = 31 is the ST<OP> alias, which discards it.
+ *   CAS     size 001000 1 L 1 Rs o0 11111 Rn Rt (mask 0x3fa07c00, value
+ *           0x08a07c00). Rs holds the compare value and gets the old value.
+ * Every size (B, H, W, X) and every acquire/release form. The operation is
+ * __ATOMIC_SEQ_CST whatever A/R or L/o0 ask for, which is at least as strong as
+ * each of them (the SWP case does the same); the exception and its reply
+ * already order the faulting thread's own accesses around it. Old values are
+ * zero-extended, as the B, H and W forms define. gpr[0..30] are x0..x30 (x29 =
+ * FP, x30 = LR; FEX's JIT uses both); register 31 is the zero register in
+ * both encodings, so gpr[31] is neither read nor written. Returns 0 with
+ * nothing changed for any other encoding or a misaligned address, which these
+ * builtins cannot do atomically. No Wine logging here. */
+#define IOS_MACH_RMW(type) do { \
+        type *p_ = (type *)rw_addr; \
+        type e_ = (type)s; \
+        if (cas) \
+        { \
+            __atomic_compare_exchange_n( p_, &e_, (type)t, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ); \
+            old = e_; \
+        } \
+        else switch ((insn >> 12) & 3) \
+        { \
+        case 0:  old = __atomic_fetch_add( p_, (type)s, __ATOMIC_SEQ_CST ); break; \
+        case 1:  old = __atomic_fetch_and( p_, (type)~s, __ATOMIC_SEQ_CST ); break; \
+        case 2:  old = __atomic_fetch_xor( p_, (type)s, __ATOMIC_SEQ_CST ); break; \
+        default: old = __atomic_fetch_or( p_, (type)s, __ATOMIC_SEQ_CST ); break; \
+        } \
+    } while (0)
+static int ios_mach_emulate_rmw( uint32_t insn, uintptr_t rw_addr, uint64_t gpr[32] )
+{
+    const unsigned size = insn >> 30, rs = (insn >> 16) & 31, rt = insn & 31;
+    const int cas = (insn & 0x3fa07c00u) == 0x08a07c00u;
+    uint64_t s, t, old = 0;
+
+    if (!cas && (insn & 0x3f20cc00u) != 0x38200000u) return 0;
+    if (!rw_addr || (rw_addr & ((1u << size) - 1))) return 0;
+    s = rs == 31 ? 0 : gpr[rs];
+    t = rt == 31 ? 0 : gpr[rt];
+    switch (size)
+    {
+    case 0:  IOS_MACH_RMW( uint8_t );  break;
+    case 1:  IOS_MACH_RMW( uint16_t ); break;
+    case 2:  IOS_MACH_RMW( uint32_t ); break;
+    default: IOS_MACH_RMW( uint64_t ); break;
+    }
+    if (cas && rs != 31) gpr[rs] = old;
+    else if (!cas && rt != 31) gpr[rt] = old;
+    return 1;
+}
+#undef IOS_MACH_RMW
+
 /* ml974: is the ucontext's NEON state real?
  *
  * The Mach path builds a synthetic ucontext, memsets it to zero and fills
@@ -1448,6 +1504,25 @@ done:
     close( fd );
     dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes)\n",
              why, written, total, path );
+}
+
+/* The [fault-stuck] loop breaker in ios_mach_exception_thread keeps its state per thread, in
+ * 16 slots chosen by thread as the Mach-path delivery's redelivery guard does, and every
+ * exception delivered to the guest starts that thread's count again. It was one app-wide
+ * (page, pc, address) count, so faults of many threads at one instruction, or one thread's
+ * handled int3 or single-step exceptions there, read as a livelock: the thread was diverted
+ * to abort_thread and no exception reached the program. Windows delivers every one. A
+ * livelock is one thread re-faulting with no delivery in between; that is still broken. */
+static volatile unsigned ios_guest_deliv_seq[16];
+
+static inline int ios_fault_slot( uint64_t thread )
+{
+    return (int)((thread * 0x9E3779B97F4A7C15ull) >> 60);
+}
+
+static inline void ios_note_guest_delivery( uint64_t thread )
+{
+    __atomic_add_fetch( &ios_guest_deliv_seq[ios_fault_slot( thread )], 1, __ATOMIC_RELEASE );
 }
 
 static void *ios_mach_exception_thread( void *arg )
@@ -3838,11 +3913,10 @@ static void *ios_mach_exception_thread( void *arg )
                      * alias maps the SAME physical pages as the faulting RX view, so the
                      * atomic applies to the memory the guest actually shares.
                      *
-                     * ⛔ Deliberately NOT extended to LDADD/LDCLR/LDSET/CAS here. Those
-                     * encodings appear in this run only AFTER the SWPAL was mishandled,
-                     * inside FEX's exception path, so they are probably fallout. A wide
-                     * speculative decoder carries more correctness surface than this
-                     * blocker justifies — add families when they actually appear. */
+                     * Not extended to LDADD/LDCLR/LDSET/CAS here: in this run those came
+                     * only AFTER the mishandled SWPAL, inside FEX's exception path, as
+                     * fallout. They have since appeared on their own (a JVM's LDADDAL on
+                     * anonymous RWX memory) and have their own case below. */
                     else if ((insn & 0x3F20FC00) == 0x38208000)
                     {
                         int size_lg2 = (insn >> 30) & 0x3;
@@ -3907,6 +3981,41 @@ static void *ios_mach_exception_thread( void *arg )
                                         (unsigned long long)fault_addr, (unsigned long long)rw_addr,
                                         (unsigned long long)in, (unsigned long long)old);
                             }
+                        }
+                    }
+                    /* LD<OP> and CAS, the other read-modify-write atomics. FEX lowers a guest
+                     * LOCK ADD/SUB/XADD/INC/DEC to LDADDAL, LOCK AND to LDCLRAL, LOCK OR to
+                     * LDSETAL, LOCK XOR to LDEORAL and LOCK CMPXCHG to CASAL. A bundled JVM
+                     * ran LDADDAL W6, W0, [X1] (0xb8e60020) on anonymous RWX memory; with no
+                     * case here the add never happened and the fault went back to the guest.
+                     * ios_mach_emulate_rmw does each as one atomic on the RW alias, in every
+                     * size and ordering, x29/x30 included. CAS only off the pool: FEX's own
+                     * CASAL on the pool keeps the block below. Misaligned is refused, as for
+                     * SWP. */
+                    else if ((insn & 0x3f20cc00u) == 0x38200000u ||               /* LD<OP> */
+                             (!in_jit && (insn & 0x3fa07c00u) == 0x08a07c00u))     /* CAS */
+                    {
+                        uint64_t gpr[32];
+
+                        memcpy( gpr, state.__x, sizeof(state.__x) );
+                        gpr[29] = state.__fp;
+                        gpr[30] = state.__lr;
+                        gpr[31] = state.__sp;
+                        if (ios_mach_emulate_rmw( insn, rw_addr, gpr ))
+                        {
+                            memcpy( state.__x, gpr, sizeof(state.__x) );
+                            state.__fp = gpr[29];
+                            state.__lr = gpr[30];
+                            emulated = 1;
+                        }
+                        {
+                            static int rmw_n;
+                            if (rmw_n < 8)
+                                dprintf(STDERR_FILENO,
+                                    "[mach-rmw] #%d insn=0x%08x pc=0x%llx addr=0x%llx rw=0x%llx %s\n",
+                                    ++rmw_n, insn, (unsigned long long)fault_pc,
+                                    (unsigned long long)fault_addr, (unsigned long long)rw_addr,
+                                    emulated ? "emulated" : "REFUSED: misaligned");
                         }
                     }
                     /* FEX's native backpatch lock uses CASAL on the pool RX
@@ -4673,9 +4782,9 @@ skip_reclaim_band: ;
                      * eating an entire run, and dumps the region layout around it so the
                      * owner can be identified and the real fix aimed correctly. */
                     {
-                        static volatile uint64_t stuck_page;
-                        static volatile uint64_t stuck_pc;
-                        static volatile uint32_t stuck_n;
+                        static struct { uint64_t thread, page, pc, addr; uint32_t n, page_n; unsigned seq; } stk[16];
+                        const int ss = ios_fault_slot( (uint64_t)thread );
+                        const unsigned dseq = __atomic_load_n( &ios_guest_deliv_seq[ss], __ATOMIC_ACQUIRE );
                         /* ml876: exact faulting ADDRESS, and a page-level storm
                          * counter. ml871-875 killed a UE 5.4 game thread here on
                          * every run: an SDK dll walked its import table with the
@@ -4688,8 +4797,6 @@ skip_reclaim_band: ;
                          * = the SAME address re-faulting (ml261 sp-16 push, ml385
                          * NULL write, ml557 un-stuck heal); key on it. Keep a much
                          * larger page-level ceiling as the storm safety net. */
-                        static volatile uint64_t stuck_addr;
-                        static volatile uint32_t stuck_page_n;
                         uint64_t fpage = (uint64_t)fault_addr & ~0x3fffull;
                         /* ml385: NULL-page faults keyed as 1, not 0 — `if (fpage &&`
                          * excluded them entirely and a NULL-write loop in
@@ -4698,25 +4805,35 @@ skip_reclaim_band: ;
                          * had detached). */
                         if (!fpage) fpage = 1;
 
-                        if (fpage == stuck_page && fault_pc_check == stuck_pc &&
-                            (uint64_t)fault_addr != stuck_addr)
+                        /* Another thread in this slot, or an exception delivered to this
+                         * one since its last fault, starts a new run (page 0 never
+                         * matches, so the run is keyed again below). */
+                        if (stk[ss].thread != (uint64_t)thread || stk[ss].seq != dseq)
+                        {
+                            stk[ss].thread = (uint64_t)thread;
+                            stk[ss].seq = dseq;
+                            stk[ss].page = 0;
+                        }
+
+                        if (fpage == stk[ss].page && fault_pc_check == stk[ss].pc &&
+                            (uint64_t)fault_addr != stk[ss].addr)
                         {
                             /* ml876: same page+pc but a NEW address = progress.
                              * Restart the exact-address count; keep the page
                              * storm count (ceiling 20000, logged every 1000). */
-                            uint32_t pn = __sync_add_and_fetch(&stuck_page_n, 1);
-                            stuck_addr = (uint64_t)fault_addr;
-                            stuck_n = 0;
+                            uint32_t pn = __sync_add_and_fetch(&stk[ss].page_n, 1);
+                            stk[ss].addr = (uint64_t)fault_addr;
+                            stk[ss].n = 0;
                             if ((pn % 1000) == 0)
                                 dprintf(STDERR_FILENO,
                                     "[fault-stuck] ml876 page 0x%llx pc 0x%llx: %u faults, addresses advancing (last 0x%llx)\n",
                                     (unsigned long long)fpage, (unsigned long long)fault_pc_check, pn,
                                     (unsigned long long)fault_addr);
-                            if (pn >= 20000) stuck_n = 49;   /* storm ceiling: next fault breaks */
+                            if (pn >= 20000) stk[ss].n = 49;   /* storm ceiling: next fault breaks */
                         }
-                        if (fpage == stuck_page && fault_pc_check == stuck_pc)
+                        if (fpage == stk[ss].page && fault_pc_check == stk[ss].pc)
                         {
-                            uint32_t n = __sync_add_and_fetch(&stuck_n, 1);
+                            uint32_t n = __sync_add_and_fetch(&stk[ss].n, 1);
                             /* ml385 LOOP BREAKER: same page AND same pc 50 times
                              * with zero progress is a livelock, not a recoverable
                              * fault (guard/watch pages resolve in 1-3). Divert the
@@ -4738,7 +4855,7 @@ skip_reclaim_band: ;
                                 thread_set_state( thread, ARM_THREAD_STATE64,
                                                   (thread_state_t)&state, count );
                                 handled = 1;
-                                stuck_n = 0;
+                                stk[ss].n = 0;
                             }
                             /* ml369: was 2048, which NEVER fired — the
                              * debugger script kills the app after 8
@@ -4786,11 +4903,11 @@ skip_reclaim_band: ;
                         }
                         else
                         {
-                            stuck_page = fpage;
-                            stuck_pc = fault_pc_check;
-                            stuck_addr = (uint64_t)fault_addr;
-                            stuck_n = 0;
-                            stuck_page_n = 0;
+                            stk[ss].page = fpage;
+                            stk[ss].pc = fault_pc_check;
+                            stk[ss].addr = (uint64_t)fault_addr;
+                            stk[ss].n = 0;
+                            stk[ss].page_n = 0;
                         }
                     }
 
@@ -7087,6 +7204,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
     NTSTATUS status;
 
     ios_log_guest_exception( "raise", rec, context->Pc );
+    ios_note_guest_delivery( (uint64_t)pthread_mach_thread_np( pthread_self() ) );   /* restarts [fault-stuck] */
 
     status = send_debug_event( rec, context, TRUE, TRUE );
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
@@ -7774,6 +7892,7 @@ dispatch:
     REGn_sig(18, &uc) = thread_teb;
 
     *state = mc.__ss;
+    ios_note_guest_delivery( (uint64_t)thread );   /* restarts [fault-stuck] */
 
     if (deliver_logs < 24 || (deliver_logs % 100) == 0)
         dprintf( 2, "[mach-deliver] rev=ml369 #%d code=%08x pc=0x%llx excaddr=%p addr=0x%llx frame=%p teb=%p disp=%p\n",

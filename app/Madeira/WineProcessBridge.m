@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include "../../build/madeira_cfg.h"   /* ml1095: one config file */
+#include "../../build/madeira_redact.h"   /* the arguments are logged with credential-like values redacted */
 #include <sys/stat.h>
 #include <limits.h>
 #include <string.h>
@@ -1556,8 +1557,13 @@ static void *wine_process_thread(void *arg) {
         for (int i = 0; i < extra_argc; i++) argv[argc++] = extra_argv[i];
         argv[argc] = NULL;
         dprintf(STDERR_FILENO, "[WineProc] argv[1] = %s\n", exe_path);
+        /* An argument may be a credential (a sign-in token, a password): each is
+         * logged as a redacted copy; argv itself is passed on unchanged. */
+        int credential_next = 0;
         for (int i = 0; i < extra_argc; i++) {
-            dprintf(STDERR_FILENO, "[WineProc] argv[%d] = %s\n", 2 + i, extra_argv[i]);
+            char shown[sizeof(args_buf) + 64];
+            madeira_redact_arg_a(extra_argv[i], &credential_next, shown, sizeof(shown));
+            dprintf(STDERR_FILENO, "[WineProc] argv[%d] = %s\n", 2 + i, shown);
         }
 
         /* iOS-Madeira: chdir to the unix path that maps to the exe's Wine
