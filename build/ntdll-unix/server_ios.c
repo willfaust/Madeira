@@ -208,11 +208,20 @@ static int ios_current_fd_socket(void)
 
 /* Per-process process_exiting flag (used by NtTerminateProcess). A global
  * flag poisons every OTHER pseudo-process's exit path once the first one
- * dies (they skip their self-terminate and the server never hears). */
+ * dies (they skip their self-terminate and the server never hears).
+ *
+ * The session's initial process has no slot and gets a flag of its own too:
+ * the global process_exiting must stay FALSE. Wine's mutex_lock() and
+ * mutex_unlock() (unix_private.h) skip the pthread call while it is set, for
+ * every thread of every pseudo-process, so once a launcher that started the
+ * game had exited, virtual_mutex, fd_cache_mutex and every other lock taken
+ * through them stopped excluding anything for the rest of the session. */
+static BOOL ios_initial_process_exiting;
+
 BOOL *ios_process_exiting_ptr(void)
 {
     int i = ios_proc_socket_index();
-    return (i >= 0) ? &ios_proc_sockets[i].exiting : &process_exiting;
+    return (i >= 0) ? &ios_proc_sockets[i].exiting : &ios_initial_process_exiting;
 }
 
 /* ─── ml586 fd-ownership trace ────────────────────────────────────────────
