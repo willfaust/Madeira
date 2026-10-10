@@ -30,6 +30,7 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/mach_vm.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <sys/time.h>
@@ -612,6 +613,129 @@ static BOOL read_reply_data( void *buffer, size_t size )
 }
 
 
+#ifdef WINE_IOS
+/* Reply data for anonymous RWX memory.
+ *
+ * VirtualAlloc(PAGE_EXECUTE_READWRITE) memory that takes the JIT-pool path is the pool's RX view at its guest address
+ * (W^X); guest stores into it fault and the store emulator (signal_arm64_ios.c) writes them through the pool's RW
+ * alias. read() cannot fault its way through: it returns EFAULT, and read_reply_data treated every EFAULT as a fatal
+ * protocol error ("wine client error: read: Bad address"), which killed the calling thread. Any request whose reply
+ * buffer is such memory hit it (NtQueryValueKey, NtQueryObject, NtReadVirtualMemory of another process, ...);
+ * Windows writes the reply.
+ *
+ * So the data part of a reply whose destination touches JIT-pool RX memory is read page by page through a bounce
+ * buffer and stored through the RW alias, as a guest store would be. Every other destination keeps the single read().
+ * If such a read still fails with EFAULT, the rest of the reply is read page by page and the call fails with
+ * STATUS_ACCESS_VIOLATION (what Windows returns for an output buffer it cannot write) instead of the thread dying.
+ * Limit of that fallback: if the failed read() had already consumed a prefix (a pipe-buffer wrap into a destination
+ * that is only partly writable), the drain waits for bytes that never come; the alias case never takes this path. */
+extern void *ios_jit_rx_base_global, *ios_jit_rw_base_global;
+extern size_t ios_jit_pool_size_global;
+extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t addr );
+extern void ios_jit_anon_alias_note_write( unsigned long long addr );
+
+#define IOS_REPLY_PAGE 0x1000   /* guest page: pool ranges and anonymous-RWX aliases are multiples of it */
+
+/* The RW alias of a guest address that is a JIT-pool RX view (not writable at its own address), or 0. */
+static uintptr_t ios_reply_rw_alias( uintptr_t addr )
+{
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
+    size_t size = ios_jit_pool_size_global;
+
+    if (rx && rw && size && addr >= rx && addr - rx < size) return rw + (addr - rx);
+    return ios_jit_anon_alias_lookup( addr );
+}
+
+/* Is all of [addr, addr+size) mapped and writable at its own address? */
+static BOOL ios_reply_host_writable( uintptr_t addr, size_t size )
+{
+    mach_vm_address_t a = addr, end = addr + size;
+
+    while (a < end)
+    {
+        mach_vm_address_t q = a;
+        mach_vm_size_t sz = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+
+        if (mach_vm_region( mach_task_self(), &q, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+                            &cnt, &obj ) != KERN_SUCCESS)
+            return FALSE;
+        if (q > a || !(info.protection & VM_PROT_WRITE)) return FALSE;
+        a = q + sz;
+    }
+    return TRUE;
+}
+
+/* Read size reply bytes for guest memory one guest page at a time through a bounce buffer: a JIT-pool RX page is
+ * stored through its RW alias, a writable page directly, any other page drops its bytes and sets *fault.
+ * Returns FALSE only for a deferred thread exit. */
+static BOOL ios_read_reply_paged( uintptr_t dst, size_t size, BOOL *fault )
+{
+    char bounce[IOS_REPLY_PAGE];
+
+    while (size)
+    {
+        size_t n = IOS_REPLY_PAGE - (dst & (IOS_REPLY_PAGE - 1));
+        uintptr_t rw;
+
+        if (n > size) n = size;
+        if (!read_reply_data( bounce, n )) return FALSE;
+        if ((rw = ios_reply_rw_alias( dst )))
+        {
+            memcpy( (void *)rw, bounce, n );
+            ios_jit_anon_alias_note_write( dst );
+        }
+        else if (ios_reply_host_writable( dst, n )) memcpy( (void *)dst, bounce, n );
+        else *fault = TRUE;
+        dst += n;
+        size -= n;
+    }
+    return TRUE;
+}
+
+/* The data part of a reply (wait_reply). Returns FALSE only for a deferred thread exit; *fault is set when part of
+ * the destination could not be written. req is the request code, for the log only. */
+static BOOL ios_read_reply_guest( void *buffer, size_t size, int req, BOOL *fault )
+{
+    static unsigned int alias_logs, efault_logs;
+    uintptr_t dst = (uintptr_t)buffer, page, end = dst + size;
+    ssize_t ret;
+
+    for (page = dst & ~(uintptr_t)(IOS_REPLY_PAGE - 1); page < end; page += IOS_REPLY_PAGE)
+    {
+        if (!ios_reply_rw_alias( page )) continue;
+        if (__sync_fetch_and_add( &alias_logs, 1 ) < 8)
+            dprintf( 2, "[reply-alias] tid=%04x req=%d dst=%p size=%#lx: reply data stored through the RW alias "
+                     "of anonymous RWX memory\n", (unsigned int)GetCurrentThreadId(), req, buffer,
+                     (unsigned long)size );
+        return ios_read_reply_paged( dst, size, fault );
+    }
+    while (size)
+    {
+        if ((ret = read( ntdll_get_thread_data()->reply_fd, (void *)dst, size )) > 0)
+        {
+            dst += ret;
+            size -= ret;
+            continue;
+        }
+        if (ret < 0 && errno == EINTR) continue;
+        if (ret < 0 && errno == EFAULT)
+        {
+            if (__sync_fetch_and_add( &efault_logs, 1 ) < 8)
+                dprintf( 2, "[reply-efault] tid=%04x req=%d dst=%p size=%#lx: destination not writable and not "
+                         "aliased; read page by page, STATUS_ACCESS_VIOLATION if a page stays unwritable\n",
+                         (unsigned int)GetCurrentThreadId(), req, (void *)dst, (unsigned long)size );
+            return ios_read_reply_paged( dst, size, fault );
+        }
+        return read_reply_data( (void *)dst, size );   /* EOF, EPIPE, anything else: the original handling */
+    }
+    return TRUE;
+}
+#endif
+
+
 /***********************************************************************
  *           wait_reply
  *
@@ -619,10 +743,24 @@ static BOOL read_reply_data( void *buffer, size_t size )
  */
 static inline unsigned int wait_reply( struct __server_request_info *req )
 {
+#ifdef WINE_IOS
+    int code = req->u.req.request_header.req;   /* the reply header overwrites it */
+    BOOL fault = FALSE;
+#endif
+
     if (!read_reply_data( &req->u.reply, sizeof(req->u.reply) )) return STATUS_THREAD_IS_TERMINATING;
+#ifdef WINE_IOS
+    if (req->u.reply.reply_header.reply_size)
+    {
+        if (!ios_read_reply_guest( req->reply_data, req->u.reply.reply_header.reply_size, code, &fault ))
+            return STATUS_THREAD_IS_TERMINATING;
+        if (fault) return STATUS_ACCESS_VIOLATION;
+    }
+#else
     if (req->u.reply.reply_header.reply_size &&
         !read_reply_data( req->reply_data, req->u.reply.reply_header.reply_size ))
         return STATUS_THREAD_IS_TERMINATING;
+#endif
     return req->u.reply.reply_header.error;
 }
 
