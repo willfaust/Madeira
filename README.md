@@ -35,6 +35,12 @@ Wine's server runs as a thread instead of a separate program.
 - **Game library** with artwork, search and a Windows desktop session.
 - **Steam**: sign in, browse the games you own, install and update them, and
   start them through Valve's own Windows Steam client (Madeira Dock).
+- **Windows launchers**: download and run Ubisoft Connect, Epic Games Launcher
+  and Rockstar Games Launcher from their official installers. Ubisoft's legacy
+  Uplay aliases and registry paths are repaired for older Assassin's Creed
+  titles.
+- **Windows runtimes**: Wine Mono for .NET Framework and an official .NET
+  Desktop Runtime installer path for modern WPF/WinForms applications.
 - **Steam Cloud saves**: saves sync with Steam Cloud when Madeira starts and
   before a game starts, and **Upload saves and close Madeira** in the game
   menu sends them when you stop playing. Saves that
@@ -108,6 +114,7 @@ and some inputs that are not in the repository, such as the toolchains.
 | Steam sign-in, library and downloads | [`docs/STEAM_SIGNIN.md`](docs/STEAM_SIGNIN.md), [`docs/STEAM_LIBRARY.md`](docs/STEAM_LIBRARY.md) |
 | Steam Cloud saves | [`docs/STEAM_CLOUD.md`](docs/STEAM_CLOUD.md) |
 | Madeira Dock (the Steam client) | [`docs/MADEIRA_DOCK.md`](docs/MADEIRA_DOCK.md) |
+| Windows launchers and runtimes | [`docs/LAUNCHERS.md`](docs/LAUNCHERS.md) |
 | 32-bit games (WoW64) | [`docs/WOW64.md`](docs/WOW64.md) |
 | Controllers and touch controls | [`docs/CONTROLLERS.md`](docs/CONTROLLERS.md) |
 | Keyboard, mouse and trackpad | [`docs/KEYBOARD_MOUSE.md`](docs/KEYBOARD_MOUSE.md) |

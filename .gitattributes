@@ -1,1 +1,4 @@
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
 app/Frameworks/StikJIT.xcframework/** -whitespace

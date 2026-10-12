@@ -2539,7 +2539,11 @@ struct ContentView: View {
 
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     private func startLibraryEntry(_ entry: LibraryEntry) {
-        do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
+        do {
+            if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }
+            try LauncherSupport.prepare(entry)
+            try entry.validate()
+        }
         catch {
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
@@ -2610,6 +2614,7 @@ struct ContentView: View {
             // precision, frame limit).
             if let profile {
                 profile.applyEnvironment()
+                LauncherSupport.applyEnvironment(for: profile.launcherID)
                 logStore.log("[launch-route] library profile applied")
             } else {
                 _ = try? MadeiraConfig.applyGame(nil)   // no library game: no game's own lines
@@ -3280,6 +3285,12 @@ struct ContentView: View {
         do {
             try MadeiraDock.validate(game, drive: MadeiraDock.drive)
             try profile?.validate()
+            // Ubisoft Connect is often only an entitlement/bootstrap client
+            // for an AC title installed through Steam. Repair the legacy
+            // Uplay aliases and registry views before Dock opens Wine's
+            // registry, even though the Ubisoft launcher is not the entry
+            // being started here.
+            try LauncherSupport.prepareInstalledUbisoftCompatibility()
             guard SteamSignIn.isSignedIn else { throw DockError.message("Sign in to Steam in Madeira before starting Dock.") }
         } catch { fail(error); return }
         // Only one sign-in of the account may be online: the app's own Steam connection

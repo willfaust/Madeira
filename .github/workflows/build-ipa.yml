@@ -1,0 +1,238 @@
+name: Build Madeira IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      build_i386:
+        description: 'Build the optional 32-bit (i386/WoW64) PE set'
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-26
+    timeout-minutes: 360
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up Xcode
+        run: |
+          developer_dir="$(xcode-select -p 2>/dev/null || true)"
+          if [ ! -d "$developer_dir" ]; then
+            developer_dir="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print | sort -V | tail -n 1)/Contents/Developer"
+          fi
+          test -d "$developer_dir" || { echo "No Xcode installation found"; exit 1; }
+          sudo xcode-select -s "$developer_dir"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install build tools via Homebrew
+        run: |
+          brew install cmake ninja meson pkg-config autoconf automake libtool bison flex sevenzip llvm
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix sevenzip)/bin" >> $GITHUB_PATH
+
+      - name: Configure LLVM environment
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
+          echo "LLVM_PREFIX=$LLVM_PREFIX" >> "$GITHUB_ENV"
+          echo "LLVM_CONFIG=$LLVM_PREFIX/bin/llvm-config" >> "$GITHUB_ENV"
+          echo "LLVM_DIR=$LLVM_PREFIX/lib/cmake/llvm" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$LLVM_PREFIX" >> "$GITHUB_ENV"
+          "$LLVM_PREFIX/bin/llvm-config" --version || true
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-${{ hashFiles('tools/build-ipa.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-brew-
+
+      - name: Cache llvm-mingw toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchains/llvm-mingw-*
+          key: ${{ runner.os }}-llvm-mingw-20260421
+
+      - name: Cache LLVM iOS static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+          key: ${{ runner.os }}-llvm-ios-15.0.7-v2
+
+      - name: Cache FEX build
+        uses: actions/cache@v4
+        with:
+          path: FEX/build-ios
+          key: ${{ runner.os }}-fex-ios-cxx20-v8-${{ hashFiles('FEX/**', 'tools/build/build-fex-ios.sh', 'tools/patch_fex_atomic_ref.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-fex-ios-cxx20-v8-
+
+      - name: Clean FEX build tree
+        run: rm -rf FEX/build-ios
+
+      - name: Cache FFmpeg iOS build
+        uses: actions/cache@v4
+        with:
+          path: |
+            toolchains/ffmpeg-ios
+            build/ffmpeg/obj
+          key: ${{ runner.os }}-ffmpeg-ios-v1-${{ hashFiles('build/ffmpeg/build.sh', 'build/ffmpeg/src/SHA256SUMS') }}
+          restore-keys: |
+            ${{ runner.os }}-ffmpeg-ios-v1-
+
+      - name: Cache FreeType iOS build
+        uses: actions/cache@v4
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: ${{ runner.os }}-freetype-ios-v1-${{ hashFiles('tools/build/build-freetype-ios.sh', 'build/freetype-ios/build.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-freetype-ios-v1-
+
+      - name: Cache Wine host build
+        uses: actions/cache@v4
+        with:
+          path: |
+            wine/build-macos
+            wine/build-arm64ec
+          key: ${{ runner.os }}-wine-host-v5-${{ hashFiles('wine/**', 'tools/build-ipa.sh', 'tools/build/build-wine.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-wine-host-v5-
+
+      - name: Clean Wine build trees
+        run: |
+          rm -rf wine/build-macos wine/build-arm64ec wine/build-i386 build/wineserver/obj
+
+      - name: Clean DXMT iOS build tree and VC runtime cache
+        run: |
+          rm -rf build/dxmt-ios/obj app/Madeira/libdxmt_combined.a
+          rm -f toolchains/downloads/vc_redist*
+          rm -rf toolchains/downloads/vc_redist* app/Madeira/x86_64-vcruntime
+
+      - name: Configure Apple compiler environment
+        run: |
+          developer_dir="${DEVELOPER_DIR:-$(xcode-select -p)}"
+          test -d "$developer_dir" || { echo "Selected Xcode is unavailable: $developer_dir"; exit 1; }
+          sudo xcode-select -s "$developer_dir"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun --find clang)"
+          export CXX="$(xcrun --find clang++)"
+          export OBJC="$(xcrun --find clang)"
+          export OBJCXX="$(xcrun --find clang++)"
+          {
+            echo "CC=$CC"
+            echo "CXX=$CXX"
+            echo "OBJC=$OBJC"
+            echo "OBJCXX=$OBJCXX"
+          } >> "$GITHUB_ENV"
+          "$CC" --version
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Fix script permissions
+        run: |
+          find tools build -type f -name '*.sh' -exec chmod +x {} +
+
+      - name: Resolve the 32-bit (i386) build flag
+        id: i386
+        run: |
+          flag=1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.build_i386 }}" = "false" ]; then
+            flag=0
+          fi
+          echo "value=$flag" >> "$GITHUB_OUTPUT"
+          echo "MADEIRA_BUILD_I386=$flag" >> "$GITHUB_ENV"
+          echo "32-bit PE set: MADEIRA_BUILD_I386=$flag"
+
+      - name: Run build-ipa.sh
+        run: |
+          ./tools/build-ipa.sh
+
+      - name: Verify the 32-bit PE set was bundled
+        if: steps.i386.outputs.value == '1'
+        run: |
+          n=$(find app/Madeira/i386-windows -name '*.dll' 2>/dev/null | wc -l | tr -d ' ')
+          echo "i386 PE images collected: $n"
+          if [ "$n" -lt 50 ]; then
+            echo "::error::MADEIRA_BUILD_I386=1 but only $n i386 PE images exist — the WoW64 set was not produced, so this bundle is not 32-bit capable."
+            exit 1
+          fi
+          test -f app/Madeira/i386-windows/ntdll.dll || {
+            echo "::error::i386 set has no ntdll.dll — WoW64 cannot initialise."
+            exit 1
+          }
+          du -sh app/Madeira/i386-windows
+
+      - name: Print failed DXMT compiler logs
+        if: failure()
+        shell: bash
+        run: |
+          if [ -d build/dxmt-ios/obj ]; then
+            find build/dxmt-ios/obj -type f -name '*.err' -print -exec sh -c '
+              echo "===== $1 ====="
+              cat "$1"
+            ' sh {} \;
+          else
+            echo "No DXMT compiler log directory exists."
+          fi
+
+      - name: Print failed ntdll-unix compiler logs
+        if: failure()
+        shell: bash
+        run: |
+          if [ -d build/ntdll-unix/obj ]; then
+            find build/ntdll-unix/obj -type f -name '*.err' -size +0c -print -exec sh -c '
+              echo "===== $1 ====="
+              cat "$1"
+            ' sh {} \;
+          else
+            echo "No ntdll-unix compiler log directory exists."
+          fi
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-ipa
+          path: dist/Madeira.ipa
+          if-no-files-found: error
+
+      - name: Publish Release for SideStore / LiveContainer Auto-Update
+        if: github.ref == 'refs/heads/main' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Madeira Latest"
+          body: |
+            Automated latest build for Madeira.
+            Add this repo source to SideStore or LiveContainer to receive automatic updates:
+            `https://raw.githubusercontent.com/SaimSuhailQu/Madeira/main/apps.json`
+          files: dist/Madeira.ipa
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
