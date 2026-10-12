@@ -180,6 +180,27 @@ echo "=== winemetal unix (Objective-C) ==="
 compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
+echo "=== airconv shader headers (metal -> air -> xxd) ==="
+# airconv_context.cpp embeds three Metal helper shaders as C arrays. DXMT's
+# meson build generates them (src/airconv/meson.build: metalir_generator +
+# hexdump_generator); this script never did, so a clean checkout failed with
+# "'air_msad.h' file not found". Same flags as meson.
+mkdir -p "$BUILD_DIR/shader-headers"
+for s in air_msad air_samplepos air_tessellation; do
+    src="$DXMT_SRC/airconv/shaders/$s.metal"
+    hdr="$BUILD_DIR/shader-headers/$s.h"
+    if [ ! -f "$hdr" ] || [ "$src" -nt "$hdr" ] || [ "$0" -nt "$hdr" ]; then
+        (cd "$BUILD_DIR/shader-headers" \
+         && xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+              -o "$s.air" -c "$src" \
+         && xxd -n "$s" -i "$s.air" "$s.h") \
+            && echo "  $s.h OK" \
+            || { echo "  $s.h FAILED"; exit 1; }
+    else
+        echo "  $s.h CACHED"
+    fi
+done
+
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
@@ -327,5 +348,10 @@ if [ -f "$COMBINED" ]; then
     APP_COPY="$REPO_ROOT/app/Madeira/libdxmt_combined.a"
     if [ -f "$APP_COPY" ]; then cp "$COMBINED" "$APP_COPY"; echo "Staged: $APP_COPY"; fi
 else
-    echo "NOTE: $COMBINED absent; the app links that file, so build it before deploying."
+    # First build: create it as build/dxmt-ios/README.md describes (DXMT objects
+    # plus the LLVM iOS archives airconv needs).
+    echo "=== Creating libdxmt_combined.a ==="
+    xcrun -sdk iphoneos libtool -static -o "$COMBINED" "$OBJ_DIR"/*.o "$LLVM_BUILD"/lib/*.a 2>/dev/null
+    cp "$COMBINED" "$REPO_ROOT/app/Madeira/libdxmt_combined.a"
+    echo "Created + staged: $COMBINED ($(wc -c < "$COMBINED" | tr -d ' ') bytes)"
 fi

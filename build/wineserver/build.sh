@@ -17,8 +17,10 @@ if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
     if [ -f "$APP_LIB" ]; then
         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
     else
-        echo "ERROR: No base libwineserver.a found"
-        exit 1
+        # No prebuilt base: compile the server objects this script does not
+        # replace from the wine submodule (build/wineserver/make-base.sh).
+        echo "No base libwineserver.a found; building one from wine/server"
+        "$BUILD_DIR/make-base.sh" || exit 1
     fi
 fi
 

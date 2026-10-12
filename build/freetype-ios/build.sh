@@ -12,7 +12,10 @@ BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 SRC="$REPO_ROOT/research/freetype"
 
-[ -d "$SRC" ] || { echo "ERROR: clone freetype first (see header)"; exit 1; }
+if [ ! -f "$SRC/CMakeLists.txt" ]; then
+    rm -rf "$SRC"
+    git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git "$SRC"
+fi
 
 cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
   -DCMAKE_SYSTEM_NAME=iOS \
