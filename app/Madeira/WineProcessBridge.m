@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <limits.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/sysctl.h>
@@ -1225,6 +1226,17 @@ static void *wine_process_thread(void *arg) {
                     setenv("MADEIRA_FASTSYNC", "auto", 0);
                     fprintf(stderr, "[madeira-env] sync engine: fastsync (default), MADEIRA_FASTSYNC=auto\n");
                 }
+                /* DXMT's shader caches persist for 64-bit games too: winemetal's
+                 * DXMT_IOS_CACHE_DIR defaults on only for a WoW64 caller, and the
+                 * upstream lookup a 64-bit caller keeps finds no cache directory in
+                 * the iOS sandbox, so every converted shader and Metal pipeline was
+                 * built again in each session (Rocket League stalled up to 327 ms on
+                 * goal explosions and replays). Never overrides a value already set
+                 * (env.DXMT_IOS_CACHE_DIR = 0 in madeira.cfg turns it off). */
+                if (!getenv("DXMT_IOS_CACHE_DIR")) {
+                    setenv("DXMT_IOS_CACHE_DIR", "1", 0);
+                    fprintf(stderr, "[madeira-env] DXMT_IOS_CACHE_DIR=1 (default: shader caches under Library/Caches)\n");
+                }
             }
         }
 
@@ -1557,6 +1569,11 @@ static void *wine_process_thread(void *arg) {
         argv[argc] = NULL;
         dprintf(STDERR_FILENO, "[WineProc] argv[1] = %s\n", exe_path);
         for (int i = 0; i < extra_argc; i++) {
+            /* An Epic game's one-use sign-in code (EpicLibrary.launchArguments) stays out of the log. */
+            if (strncasecmp(extra_argv[i], "-AUTH_PASSWORD=", 15) == 0) {
+                dprintf(STDERR_FILENO, "[WineProc] argv[%d] = -AUTH_PASSWORD=<redacted>\n", 2 + i);
+                continue;
+            }
             dprintf(STDERR_FILENO, "[WineProc] argv[%d] = %s\n", 2 + i, extra_argv[i]);
         }
 
