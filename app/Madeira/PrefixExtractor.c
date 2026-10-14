@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -20,6 +21,7 @@ static int parse_octal(const char *s, size_t n) {
     for (size_t i = 0; i < n && s[i]; i++) {
         if (s[i] == ' ' || s[i] == 0) continue;
         if (s[i] < '0' || s[i] > '7') return -1;
+        if (v > (INT_MAX >> 3)) return -1;   // would overflow int
         v = (v << 3) | (s[i] - '0');
     }
     return v;
@@ -85,6 +87,13 @@ int madeira_extract_prefix_tgz(const char *tgz_path, const char *dest_dir) {
         }
         int size = parse_octal(header + 124, 12);
         char type = header[156];
+        // A bad size field, or one so large that the block padding below
+        // would overflow, means the archive is malformed.
+        if (size < 0 || size > INT_MAX - BLOCK) {
+            fprintf(stderr, "[prefix-extract] bad size field for %s\n", name);
+            gzclose(gz);
+            return -1;
+        }
 
         // Strip leading "prefix/" so files land directly under dest_dir.
         const char *relname = name;
@@ -98,7 +107,7 @@ int madeira_extract_prefix_tgz(const char *tgz_path, const char *dest_dir) {
             snprintf(outpath, sizeof(outpath), "%s", dest_dir);
         }
 
-        if (type == '5' || (type == 0 && name[strlen(name) - 1] == '/')) {
+        if (type == '5' || (type == 0 && name[0] && name[strlen(name) - 1] == '/')) {
             // Directory
             if (*relname) {
                 if (mkdir_p(outpath) != 0) {
