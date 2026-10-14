@@ -687,6 +687,7 @@ struct SteamSettingsSection: View {
     @ObservedObject private var signIn = SteamSignInModel.shared
     @ObservedObject private var dock = MadeiraDockModel.shared
     @ObservedObject private var onboarding = OnboardingModel.shared
+    @ObservedObject private var cloud = SteamCloudSetting.shared
     @State private var confirmSignOut = false
 
     /// Shown when Steam sign-in or Madeira Dock is available.
@@ -699,6 +700,10 @@ struct SteamSettingsSection: View {
                 Button("Sign out of Steam", role: .destructive) { confirmSignOut = true }
             } else {
                 Button { open(.steamSignIn) } label: { Label("Sign in to Steam", systemImage: "person.crop.circle.badge.plus") }
+            }
+            // Off: no Steam Cloud checks, transfers or prompts before Play (docs/STEAM_CLOUD.md).
+            if SteamOwnedLibrary.enabled {
+                Toggle("Steam Cloud saves", isOn: $cloud.on)
             }
             if MadeiraDock.enabled {
                 Button { open(.dock) } label: { Label("Madeira Dock", systemImage: "shippingbox") }

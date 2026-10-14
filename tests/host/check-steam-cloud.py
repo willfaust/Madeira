@@ -6,7 +6,8 @@ save synced before that is now missing on this device is a choice whose mark kee
 that name from going up over the cloud's copy unasked (the reset-prefix case), and runs the
 production comparison (SteamCloudPaths, SteamCloudAudit) over a synthetic prefix: a save folder
 named with {64BitSteamID} gets a cloud name with the ID filled in, the name the cloud lists for
-that file. Source checks: Steam Cloud is on unless turned off, a game not checked yet syncs before
+that file. Source checks: Steam Cloud is on unless Settings › Steam turns it off, and off stops every
+check, transfer and Play prompt; turning it back on starts clean; a game not checked yet syncs before
 Play, every upload that replaces a cloud file backs up the cloud's copy first, and backups are in
 Documents.
 """
@@ -34,6 +35,30 @@ plan = cloud[cloud.index('// MARK: - What to do with a comparison'):cloud.index(
 # ------------------------------------------------------------------ static
 require('SteamSignIn.flag("MADEIRA_STEAM_CLOUD", default: true)' in owned,
         'Steam Cloud is on unless turned off (env.MADEIRA_STEAM_CLOUD = 0)')
+onboarding = (app / 'Onboarding.swift').read_text()
+games = (app / 'SteamGames.swift').read_text()
+steam_settings = onboarding[onboarding.index('struct SteamSettingsSection'):onboarding.index('// MARK: - Madeira Dock in the library')]
+require('Toggle("Steam Cloud saves", isOn: $cloud.on)' in steam_settings and 'SteamCloudSetting.shared' in steam_settings,
+        'Settings › Steam has the Steam Cloud saves switch')
+require('MadeiraConfig.set("env.MADEIRA_STEAM_CLOUD", on ? nil : "0")' in games
+        and 'SteamOwnedLibrary.shared.cloudTurnedOff()' in games,
+        'the switch is kept in madeira.cfg and turning it off reaches the library')
+hold = owned[owned.index('func cloudHold('):owned.index('// MARK: Upload and quit')]
+require('guard Self.cloudEnabled else { noteCloudOff(); return nil }' in hold
+        and 'guard Self.cloudPlayCheck else { return nil }' in hold,
+        'off: Play neither waits nor asks')
+require('static var cloudQuitEnabled: Bool { cloudEnabled &&' in owned and 'if SteamOwnedLibrary.cloudEnabled {' in games
+        and 'if SteamOwnedLibrary.cloudEnabled, !steam.cloudUndecided.isEmpty {' in games,
+        "off: the game page's section, the library's note and the upload button are hidden")
+require(owned.count('Self.cloudEnabled else { throw CancellationError() }') == 3
+        and 'guard Self.cloudEnabled, !cloudBusy.contains(appID)' in owned,
+        'off: a running transfer stops between files and no choice is applied')
+turned_on = owned[owned.index('func cloudTurnedOn()'):owned.index('func cloudTurnedOff()')]
+require('cloud.removeAll()' in turned_on and 'cloudAudited = false' in turned_on
+        and turned_on.index('cloudBusy.isEmpty') < turned_on.index('cloud.removeAll()'),
+        'turning it back on drops earlier results and syncs again once running transfers ended')
+require(owned.count('"[steam-cloud] off (setting)"') == 1 and 'private var cloudOffLogged = false' in owned,
+        'off is logged once per app run')
 require('guard let state = cloud[appID] else { return .stale }' in owned,
         'Play on a game not checked yet in this app run syncs it first, without asking')
 upload = owned[owned.index('private func upload(_ appID: Int'):owned.index('// MARK: Before Play')]
