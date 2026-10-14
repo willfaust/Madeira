@@ -393,7 +393,8 @@ struct SteamCloudDownloadInfo: Sendable {
 
     var url: URL? {
         guard !host.isEmpty, !host.contains("/"), !host.contains("@") else { return nil }
-        return URL(string: (https ? "https://" : "http://") + host + (path.hasPrefix("/") ? path : "/" + path))
+        // Saves and request headers always go over TLS, whatever use_https says.
+        return URL(string: "https://" + host + (path.hasPrefix("/") ? path : "/" + path))
     }
 }
 
@@ -609,7 +610,8 @@ struct SteamCloudUploadBlock: Sendable {
 
     var url: URL? {
         guard !host.isEmpty, !host.contains("/"), !host.contains("@") else { return nil }
-        return URL(string: (https ? "https://" : "http://") + host + (path.hasPrefix("/") ? path : "/" + path))
+        // Saves and request headers always go over TLS, whatever use_https says.
+        return URL(string: "https://" + host + (path.hasPrefix("/") ? path : "/" + path))
     }
 }
 
