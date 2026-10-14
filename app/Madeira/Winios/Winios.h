@@ -108,7 +108,9 @@ struct winios_census_window {
 };
 
 /* Main thread. on=1 starts an empty census (and forgets cached process paths,
- * whose ids a new session may reuse); on=0 stops and empties it. */
+ * whose ids a new session may reuse); on=0 stops and empties it. on=2 ends a
+ * running census but keeps the windows it knows and only goes on restoring a
+ * window first shown minimized, for the rest of the session. */
 void winios_window_census_enable(int on);
 
 /* Main thread. Copies up to `max` entries; returns how many were copied. */
