@@ -91,6 +91,22 @@ int madeira_extract_prefix_tgz(const char *tgz_path, const char *dest_dir) {
         if (strncmp(relname, "prefix/", 7) == 0) relname += 7;
         else if (strcmp(relname, "prefix") == 0) relname = "";
 
+        // Refuse absolute paths and any ".." component so an entry cannot
+        // land outside dest_dir.
+        int unsafe = relname[0] == '/';
+        for (const char *c = relname; !unsafe && *c; ) {
+            const char *end = strchr(c, '/');
+            size_t len = end ? (size_t)(end - c) : strlen(c);
+            if (len == 2 && c[0] == '.' && c[1] == '.') unsafe = 1;
+            c += len;
+            if (*c == '/') c++;
+        }
+        if (unsafe) {
+            fprintf(stderr, "[prefix-extract] unsafe path rejected: %s\n", name);
+            gzclose(gz);
+            return -1;
+        }
+
         char outpath[1200];
         if (*relname) {
             snprintf(outpath, sizeof(outpath), "%s/%s", dest_dir, relname);
