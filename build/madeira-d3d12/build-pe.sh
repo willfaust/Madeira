@@ -62,9 +62,11 @@ mad_kernels_metal() {
 }
 if command -v xcrun > /dev/null 2>&1 &&
    { mad_kernels_metal ||
+     mad_kernels_metal -DMAD_NO_NAN_CLEAN ||
      mad_kernels_metal -DMAD_NO_TEXBUF_PROBE ||
      mad_kernels_metal -DMAD_NO_CLEAR_RECTS ||
-     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS; }; then
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS ||
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS -DMAD_NO_NAN_CLEAN; }; then
     (cd "$OUT" && xxd -i mad_kernels.metallib > mad_kernels_metallib.h)
     EXTRA+=(-DMAD_HAVE_KERNELS -I"$OUT")
     echo "  $(wc -c < "$OUT/mad_kernels.metallib" | tr -d ' ') bytes"
