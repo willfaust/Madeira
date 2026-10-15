@@ -93,7 +93,7 @@ extension GameRecommendations {
     /// The line under Reset to Recommended. `desktop`: the Desktop entry's page.
     static func note(_ rec: GameRecommendation?, desktop: Bool = false) -> String {
         guard let rec else { return "Madeira has no recommended settings for this game yet; resetting empties this game's config." }
-        let lines = GameProfile.parse(rec.config).count
+        let lines = GameProfile.parse(rec.fileText).count
         if rec.id == standard.id {
             return (desktop ? "Madeira recommends its standard settings for the Desktop: "
                             : "Madeira has no list for this game yet, so it recommends its standard settings: ")

@@ -24,6 +24,9 @@
 //      anywhere else a copy from outside Steam (Rockstar Games Launcher or
 //      another store), and each has its own list. Red Dead Redemption 2's
 //      RDR2.exe and PlayRDR2.exe the same way.
+//    - GTA V Legacy only from Steam: App ID 271590, the folder "Grand
+//      Theft Auto V", GTA5.exe, or PlayGTAV.exe beside GTA5.exe and without
+//      GTA5_Enhanced.exe (Enhanced is checked first).
 //    - Any other game, and the Desktop, gets the standard list (owner's
 //      decisions, 2026-10-12; GameRecommendationsApply.swift).
 //
@@ -65,8 +68,19 @@ struct GameRecommendation: Equatable {
     /// Aspect & scaling (DisplayMode raw value); "fit" is the default.
     var display: String? = nil
 
-    /// The config file's text as GameProfile stores it (one trailing newline).
-    var fileText: String { config.hasSuffix("\n") ? config : config + "\n" }
+    /// Lines only a device with less than 12 GB of RAM gets, after `config`
+    /// (GameRecommendations.smallRAMDevice). nil: every device gets the same list.
+    var smallRAMConfig: String? = nil
+
+    /// The config file's text as GameProfile stores it (one trailing newline): `config`,
+    /// and on a device with less than 12 GB of RAM `smallRAMConfig` after it.
+    var fileText: String {
+        var text = config.hasSuffix("\n") ? config : config + "\n"
+        if let extra = smallRAMConfig, GameRecommendations.smallRAMDevice {
+            text += extra.hasSuffix("\n") ? extra : extra + "\n"
+        }
+        return text
+    }
 
     /// A short list of the switches it sets, for Game details.
     var switchSummary: String {
@@ -86,6 +100,16 @@ struct GameRecommendation: Equatable {
 }
 
 enum GameRecommendations {
+    // MARK: The device
+
+    /// Installed RAM (hw.memsize): a 12 GB iPhone reports 11,695 MB, an 8 GB one
+    /// about 7,500 MB. A variable so the host test can try both.
+    static var deviceRAMBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+
+    /// An 8 GB (or smaller) device: under 10 GB installed. It gets a list's
+    /// `smallRAMConfig`; a 12 GB phone or a 16 GB iPad does not.
+    static var smallRAMDevice: Bool { deviceRAMBytes < 10 << 30 }
+
     // MARK: The lists
 
     /// Red Dead Redemption 2 from Steam, through Madeira Dock: the build 463
@@ -305,6 +329,57 @@ enum GameRecommendations {
         avx: false, nvidia: true, wineVCRT: false, fastSync: true, semaphoreFastPath: true, fpsMode: 4,
         display: "fit")
 
+    /// GTA V Legacy from Steam (App ID 271590, DirectX 11 through DXMT): the
+    /// Enhanced list without its D3D12 lines and its DualSense mode (Legacy takes
+    /// XInput only), the Dock keeping Launcher.exe and GTA5.exe, and DXMT's display
+    /// mode table and monitor identity. On madeira-bcd build 547 (2026-10-15,
+    /// log GTA5.exe 13:37:35, a 12 GB iPhone) it played Story Mode into the city
+    /// at 38-60 FPS, after the airconv geometry-shader fix (willfaust/dxmt). With
+    /// vram-mb = 4096 and swap-mb = 3072 the first try had sudden drops and
+    /// stalls; without them it ran smoothly (the DXGI budget then is the default
+    /// 1536 MB). A device with less than 12 GB of RAM still gets the 3 GB RAM
+    /// swap (`smallRAMConfig`); a 12 GB phone or a 16 GB iPad does not. From
+    /// Steam only: another copy (Epic, Rockstar's store) keeps the standard list.
+    static let gta5LegacySteam = GameRecommendation(
+        id: "gta5l-steam", title: "GTA V Legacy (Steam)", version: 1,
+        config: """
+        # Madeira's recommended settings for GTA V Legacy (Steam).
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-low = 1
+        pool-page-fit = 1
+        pool-split = 1
+        env.FEX_VECTORTSOENABLED = 0
+        env.MADEIRA_CHILD_ARGS = PlayGTAV.exe -nobattleye
+        env.MADEIRA_DOCK_GAME_SCM = 1
+        env.MADEIRA_DOCK_KEEP_ALIVE = Launcher.exe;GTA5.exe
+        env.MADEIRA_EXECREQ_LEAVE = 1
+        env.MADEIRA_KMT_ADAPTER = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_POOL_HEAD_RESERVE_MB = 128
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
+        env.MADEIRA_SC_PA_POOLS = 2
+        env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist
+        env.MADEIRA_TOUCH_MOUSE = 1
+        env.MADEIRA_WOW_MIN_FREE_GB = 2
+        env.MADEIRA_X64_GRAPHICS_ENTRY = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.DXMT_WSI_MONITOR_IDENTITY = 1
+        env.DXMT_WSI_MODE_TABLE = 1
+        env.DXMT_SMALL_RINGS = Launcher.exe;SocialClubHelper.exe
+        env.WINEDLLOVERRIDES = video64=
+        env.MADEIRA_DEVICE_STATS = 1
+        env.MADEIRA_METAL_HUD_MAIN = 1
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: false, nvidia: true, wineVCRT: false, fastSync: true, semaphoreFastPath: true, fpsMode: 4,
+        display: "fit", smallRAMConfig: smallRAMSwapLines)
+
     /// GTA V Enhanced started from its own PlayGTAV.exe outside a Steam
     /// library (Rockstar Games Launcher or another store; build 451). Version 2:
     /// the same orphan-lock reaper mode as the Steam copy (its launcher and
@@ -519,6 +594,167 @@ enum GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, fastSync: true, display: "fit")
 
+    /// Horizon Forbidden West (Complete Edition, Steam 2420110), madeira-bcd builds
+    /// 517-534 (2026-10-13/14). The game needs AVX. Memory it frees is released at
+    /// once (with the free delay it reserved the same aligned addresses again and
+    /// looped), and its programs run from their own image, which leaves the JIT pool
+    /// room. Its memory goes to the swap file from 64 KB, and it sees a 3 GB
+    /// video-memory budget with budget events (a smaller one left it on a black
+    /// screen). Horizon Zero Dawn's typed-view alignment and aligned copies keep
+    /// the image right (without the copies, vegetation shot into the sky); the
+    /// copies need the 262,144-entry table and its fixed-cost refresh, and the
+    /// game's float3 typed views a 16-byte-element copy (typed-view-rgb32).
+    /// Render passes stay open across lists. mip0-full gives FSR 3's MipLevels 0
+    /// pyramid its full chain: without it, frame generation showed black squares
+    /// (build 533: gone). Our log lines skip OutputDebugString and the census
+    /// frames; shader libraries wait for a pipeline's first draw; guest threads run
+    /// at the efficiency QoS; the thread samplers are off and Wine's fixme lines are
+    /// quiet. Played with FSR 3 frame generation on: 24 presents a second before
+    /// mip0-full (build 531), 15 with it (533; its GPU cost is still open); the
+    /// sound is robotic (env.MADEIRA_AUDIO_SPATIAL = 0 is the next try). Version 5, as
+    /// madeira-bcd ships it, without its own variant DXGI DLL (this dxgi.dll has the
+    /// budget events).
+    static let horizonForbiddenWest = GameRecommendation(
+        id: "horizon-forbidden-west", title: "Horizon Forbidden West", version: 5,
+        config: """
+        # Madeira's recommended settings for Horizon Forbidden West.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        vram-mb = 3072
+        swap-mb = 8192
+        swap-mode = 2
+        swap-min-mb = 1
+        swap-images = 1
+        typed-view-align = 16
+        typed-view-shadow = 1
+        typed-view-rgb32 = 1
+        mip0-full = 1
+        rp-carry = 1
+        quiet-log = 1
+        pso-lazy-libs = 1
+        eco = 1
+        env.MADEIRA_DXGI_BUDGET_EVENTS = 1
+        env.MADEIRA_SWAP_MIN_KB = 64
+        env.MADEIRA_SWAP_RESERVE_MAX_MB = 9216
+        env.MADEIRA_INPUT_FOREGROUND = 1
+        env.MADEIRA_WGI_HOST_PADS = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_SRV_FGETPATH = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_FREE_DELAY_MS = 0
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_PAD_MODE = hid
+        env.MADEIRA_LEAN_DIAG = 1
+        env.WINEDEBUG = err+all,err-virtual,fixme-all
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: true, nvidia: true, wineVCRT: false, fastSync: true, fpsMode: 3, display: "fit")
+
+    /// Ratchet & Clank: Rift Apart (Steam 1895880), not yet seen past its intro
+    /// video. Like the other Nixxes ports (Ghost of Tsushima, the Horizon games) it
+    /// is a D3D12 game with DirectStorage, so its list is Horizon Forbidden West's
+    /// general lines: AVX and an NVIDIA GPU reported, the swap file and video-memory
+    /// budget, frees released at once, programs run from their own image (its 113
+    /// MB program left a shrunken JIT pool), float3 typed views copied, MipLevels 0
+    /// textures given their full chain, the frame-rate and quiet-log switches and the
+    /// pad lines. Left out: Decima's typed-view alignment and copies, rp-carry, and
+    /// eco. With it (madeira-bcd build 531, 2026-10-14, a tester's iPhone 15 Pro Max
+    /// with 6 GB for the app) the game created its D3D12 device and swapchain and
+    /// played the Bink intro, then thrashed memory there (footprint 3.3-4.1 GB with
+    /// 1.1-2.2 GB compressed); a device with more memory should get further.
+    static let ratchetClankRiftApart = GameRecommendation(
+        id: "ratchet-clank-rift-apart", title: "Ratchet & Clank: Rift Apart", version: 1,
+        config: """
+        # Madeira's recommended settings for Ratchet & Clank: Rift Apart.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        vram-mb = 3072
+        swap-mb = 8192
+        swap-mode = 2
+        swap-min-mb = 1
+        swap-images = 1
+        typed-view-rgb32 = 1
+        mip0-full = 1
+        quiet-log = 1
+        pso-lazy-libs = 1
+        env.MADEIRA_DXGI_BUDGET_EVENTS = 1
+        env.MADEIRA_SWAP_MIN_KB = 64
+        env.MADEIRA_SWAP_RESERVE_MAX_MB = 9216
+        env.MADEIRA_INPUT_FOREGROUND = 1
+        env.MADEIRA_WGI_HOST_PADS = 1
+        env.MADEIRA_LOCK_ORPHAN = stamped
+        env.MADEIRA_SRV_FGETPATH = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_FREE_DELAY_MS = 0
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_PAD_MODE = hid
+        env.MADEIRA_LEAN_DIAG = 1
+        env.WINEDEBUG = err+all,err-virtual,fixme-all
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: true, nvidia: true, wineVCRT: false, fastSync: true, fpsMode: 3, display: "fit")
+
+    /// Crysis Remastered (Steam): madeira-bcd build 528, 2026-10-13 22:08, the owner:
+    /// "mükemmel çalıştı" (it ran perfectly). It ran with the standard list's line and
+    /// every switch off (AVX, NVIDIA, Wine's C++ runtime, MetalFX) at 1408x648 Fit,
+    /// 5.2 GB at most, and closed normally. Its own list keeps those switches and the
+    /// defaults it was tested with when the standard list changes.
+    static let crysisRemastered = GameRecommendation(
+        id: "crysis-remastered", title: "Crysis Remastered", version: 1,
+        config: """
+        # Madeira's recommended settings for Crysis Remastered.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: false, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// Crysis 2 Remastered (Steam 2096600), not yet run with this list. On madeira-bcd
+    /// build 540 (2026-10-14 23:54) it ran with the standard list and every switch off,
+    /// and stopped at its first AVX instruction (c000001d, FEX "DISABLEAVX expected");
+    /// the game needs AVX, on Windows too. Version 1: the standard line with AVX on,
+    /// the other switches off, at Fit.
+    static let crysis2Remastered = GameRecommendation(
+        id: "crysis-2-remastered", title: "Crysis 2 Remastered", version: 1,
+        config: """
+        # Madeira's recommended settings for Crysis 2 Remastered.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: true, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// Crysis 3 Remastered (Steam 2096610), not yet run with this list. On madeira-bcd
+    /// build 540 (2026-10-14 23:55) it ran with the standard list and every switch off,
+    /// and stopped when Microsoft's ARM64EC msvcp140.dll branched to its own image base
+    /// (c000001d on the MZ header). Version 1: the standard line with AVX on and Wine's
+    /// C++ runtime instead of Microsoft's, NVIDIA off, at Fit.
+    static let crysis3Remastered = GameRecommendation(
+        id: "crysis-3-remastered", title: "Crysis 3 Remastered", version: 1,
+        config: """
+        # Madeira's recommended settings for Crysis 3 Remastered.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: true, nvidia: false, wineVCRT: true, display: "fit")
+
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]
     /// reporter was off. It reads code a game's protection rewrites at run time
@@ -537,14 +773,22 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
-    static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
-                      standard]
+    /// The 3 GB RAM swap a device with less than 12 GB of RAM gets in GTA V
+    /// Legacy's list.
+    static let smallRAMSwapLines = "swap-mb = 3072"
+
+    static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, ghostOfTsushima, godOfWar,
+                      horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered, crysis2Remastered,
+                      crysis3Remastered, standard]
 
     // MARK: Recognising a game
 
     /// Steam App IDs.
     static let rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,
-               horizonZeroDawnAppID = 1151640
+               horizonZeroDawnAppID = 1151640, crysisRemasteredAppID = 1715130, crysis2RemasteredAppID = 2096600,
+               crysis3RemasteredAppID = 2096610, horizonForbiddenWestAppID = 2420110, ratchetClankRiftApartAppID = 1895880
+    /// GTA V Legacy, the edition every Steam copy of GTA V also carries.
+    static let gta5LegacyAppID = 271590
 
     /// The recommendation for a game, or nil.
     /// - windowsPath: a program ("C:\Games\GoW\GoW.exe"), or a library Steam
@@ -562,10 +806,20 @@ enum GameRecommendations {
             let installFolder = last == steamFolder ? steamFolder : nil
             if steamAppID == rdr2AppID || installFolder == "red dead redemption 2" { return rdr2Steam }
             if steamAppID == gta5EnhancedAppID || installFolder == "grand theft auto v enhanced" { return gta5EnhancedSteam }
+            if steamAppID == gta5LegacyAppID || installFolder == "grand theft auto v" { return gta5LegacySteam }
             if steamAppID == ghostAppID || installFolder == "ghost of tsushima director's cut"
                 || installFolder == "ghost of tsushima" { return ghostOfTsushima }
             if steamAppID == godOfWarAppID || installFolder == "godofwar" || installFolder == "god of war" { return godOfWar }
             if steamAppID == horizonZeroDawnAppID || installFolder == "horizon zero dawn" { return horizonZeroDawn }
+            if steamAppID == horizonForbiddenWestAppID || installFolder == "horizon forbidden west complete edition" {
+                return horizonForbiddenWest
+            }
+            if steamAppID == ratchetClankRiftApartAppID || installFolder == "ratchet & clank - rift apart" {
+                return ratchetClankRiftApart
+            }
+            if steamAppID == crysisRemasteredAppID || installFolder == "crysis remastered" { return crysisRemastered }
+            if steamAppID == crysis2RemasteredAppID || installFolder == "crysis 2 remastered" { return crysis2Remastered }
+            if steamAppID == crysis3RemasteredAppID || installFolder == "crysis 3 remastered" { return crysis3Remastered }
             return nil
         }
         // A program, wherever it was installed: only the game's own programs, so a
@@ -576,8 +830,14 @@ enum GameRecommendations {
             // GTA V Enhanced (the legacy edition has PlayGTAV.exe too, beside GTA5.exe):
             // inside a Steam library the Steam copy, anywhere else the list for outside Steam.
             let folder = path.lastIndex(of: "\\").map { String(path[..<$0]) } ?? ""
-            guard fileExists(folder + "\\GTA5_Enhanced.exe") else { return nil }
+            guard fileExists(folder + "\\GTA5_Enhanced.exe") else {
+                // GTA V Legacy: PlayGTAV.exe beside GTA5.exe, from Steam only.
+                return last == "playgtav.exe" && inSteam && fileExists(folder + "\\GTA5.exe") ? gta5LegacySteam : nil
+            }
             return inSteam ? gta5EnhancedSteam : gta5EnhancedOther
+        case "gta5.exe":
+            // GTA V Legacy's game program, from Steam only.
+            return inSteam ? gta5LegacySteam : nil
         case "rdr2.exe", "playrdr2.exe":
             return inSteam ? rdr2Steam : rdr2Other
         case "ghostoftsushima.exe":
@@ -586,6 +846,16 @@ enum GameRecommendations {
             return godOfWar
         case "horizonzerodawn.exe":
             return horizonZeroDawn
+        case "horizonforbiddenwest.exe":
+            return horizonForbiddenWest
+        case "riftapart.exe":
+            return ratchetClankRiftApart
+        case "crysisremastered.exe":
+            return crysisRemastered
+        case "crysis2remastered.exe":
+            return crysis2Remastered
+        case "crysis3remastered.exe":
+            return crysis3Remastered
         default:
             return nil
         }
