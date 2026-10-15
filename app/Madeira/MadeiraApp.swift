@@ -4,6 +4,8 @@ import SwiftUI
 @main
 struct MadeiraApp: App {
     init() {
+        // Opt-in iPhone pointer experiments (PhonePointer.m): before any scene exists.
+        madeira_phone_pointer_setup()
         // madeira-bcd: the Metal Performance HUD's performance insights (the
         // notes that stack up left of its panel: shader compiles, similar render
         // passes, blit encoders) cover the game. Off unless madeira.cfg says
