@@ -174,6 +174,14 @@ exported as `d3d9shim.dll` whatever file name it is installed under):
 
 `build/wine-i386/build.sh` installs the shim as `d3d9.dll` and `d3d9shim.dll`
 and the emulated frontend as `d3d9-emulated.dll`.
+
+The ARM64EC `d3d9.dll` that x64 programs load is DXMT's frontend too, built for
+ARM64EC from the same source (`ninja -C build-pe-arm64ec src/d3d9/d3d9.dll` in the
+DXMT tree, stripped). It replaces Wine's, which goes through wined3d's OpenGL
+backend and so always returned NULL from `Direct3DCreate9` here.
+`MADEIRA_D3D9_X64=0` makes `Direct3DCreate9` / `Direct3DCreate9Ex` fail the same
+way again. Not exported, unlike Wine's: `Direct3DCreate9On12`, `PSGPError`,
+`PSGPSampleTexture` (the i386 frontend lacks them as well).
 `tests/x86/build-d3d9-cube.sh` builds the acceptance test, a spinning
 cube through a real device with a dynamic vertex buffer the guest locks every
 frame.
@@ -259,6 +267,7 @@ the switch is only consulted for a WoW64 process, window or thread.
 | `MADEIRA_STRICT_SPLITLOCK` | on | FEX WOW64 | `StrictInProcessSplitLocks` default for 32-bit guests (an explicit FEX setting wins) |
 | `MADEIRA_WOW_SYSCALL_SWEEP` | on | FEX WOW64 | Let the code-buffer sweeper move threads parked in a system call |
 | `MADEIRA_D3D9` | unset (emulated) | i386 `d3d9.dll` | `native`: the D3D9 shim uses the native ARM64 frontend. Also set by the `d3d9` key of `madeira.cfg` |
+| `MADEIRA_D3D9_X64` | on | x64 `d3d9.dll` | `0`: Direct3D 9 creation fails for x64 programs, as it did with Wine's wined3d frontend |
 | `MADEIRA_WOW_RWX_PLAIN` | unset (automatic) | 32-bit | Anonymous RWX memory in a window is plain read/write to the host once Wine Mono's `libmono-2.0-x86.dll` is mapped there; 1: in every window, 0: never (stores go through the JIT pool's alias, as before; also keeps FEX's Mono bridge off) |
 | `MADEIRA_WINEMONO_BRIDGE` | automatic for `libmono-2.0-x86.dll` | FEX WOW64 | FEX's Mono backpatcher bridge (ml712) and, once it finds the backpatcher, SMC detection off for the process (ml1280); 0 keeps both off. The 64-bit runtime still needs 1 |
 | `MADEIRA_MONO_DEFAULTS` | on | Wine Mono | mscoree sets `MONO_THREADS_SUSPEND=coop` and adds `keep-delegates` to `MONO_DEBUG` before Mono loads; values already set win; 0 sets nothing |
