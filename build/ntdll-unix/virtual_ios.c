@@ -18689,7 +18689,7 @@ int ios_jit_copy_module_for_child(void *module_addr, void *child_peb)
  *
  * Call mprotect on a page range, applying the protections from the per-page byte.
  */
-static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+static int mprotect_range_raw( void *base, size_t size, BYTE set, BYTE clear )
 {
     size_t i, count;
     char *addr = ROUND_ADDR( base, host_page_mask );
@@ -18711,6 +18711,19 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
         count = 0;
     }
     return mprotect_exec( addr, count * host_page_size, prot );
+}
+
+
+static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+{
+    int ret = mprotect_range_raw( base, size, set, clear );
+#ifdef WINE_IOS
+    {   /* ml1201: a watched page must lose write access again after any protection change */
+        extern void ios_watch_after_protect( const void *base, size_t size, const char *why );
+        ios_watch_after_protect( base, size, "mprotect" );
+    }
+#endif
+    return ret;
 }
 
 
