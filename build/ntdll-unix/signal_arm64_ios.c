@@ -12538,6 +12538,70 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                         (void*)(uintptr_t)g_wine_return_ring[(ri-7)&7],
                         (void*)(uintptr_t)g_wine_return_ring[(ri-8)&7]);
                 }
+                /* ml1353: GIVE UP ON AN UNRECOVERABLE EXEC FAULT.
+                 *
+                 * A pool page whose max protection has lost EXECUTE can never run
+                 * code again (the ml1351 [pool-poison] class). When the faulting
+                 * code is the process's own ntdll copy, the exception dispatcher
+                 * sits on the same dead pages, so delivering the fault faults
+                 * again at the dispatcher, forever: device log 81, two launched
+                 * children at a full core each for the rest of the session. After
+                 * 32 consecutive faults of one thread at one pc on such a page,
+                 * end this pseudo-process (abort_process, run on the thread
+                 * itself after this handler returns) instead.
+                 * env.MADEIRA_POOL_NOEXEC_GIVEUP = 0 keeps the endless retry. */
+                {
+                    static int giveup = -1;
+                    extern int ios_addr_max_prot( const void *addr, int *prot );
+                    if (giveup < 0)
+                    {
+                        const char *e = getenv( "MADEIRA_POOL_NOEXEC_GIVEUP" );
+                        giveup = !(e && e[0] == '0');
+                    }
+                    if (giveup)
+                    {
+                        int cur = -1, maxp = ios_addr_max_prot( pc, &cur );
+                        if (maxp >= 0 && !(maxp & VM_PROT_EXECUTE))
+                        {
+                            static struct { uintptr_t teb, pc; unsigned int n; } trk[32];
+                            static unsigned int trk_next;
+                            uintptr_t fteb = (uintptr_t)REGn_sig(18, bus_ctx);
+                            unsigned int i, slot = 32, n;
+
+                            for (i = 0; i < 32; i++) if (trk[i].teb == fteb) { slot = i; break; }
+                            if (slot == 32)
+                            {
+                                slot = trk_next++ % 32;
+                                trk[slot].teb = fteb;
+                                trk[slot].pc = 0;
+                                trk[slot].n = 0;
+                            }
+                            if (trk[slot].pc != (uintptr_t)pc)
+                            {
+                                trk[slot].pc = (uintptr_t)pc;
+                                trk[slot].n = 0;
+                            }
+                            n = ++trk[slot].n;
+                            if (n >= 32)
+                            {
+                                TEB *cteb = NtCurrentTeb();
+                                dprintf( 2, "[pool] ml1353 giving up: pid %04x tid %04x pc=%p (pool+0x%lx) "
+                                         "faulted %u times in a row on a page whose max protection has no "
+                                         "EXECUTE (prot=%x/%x); ending this process (c0000005) instead of "
+                                         "retrying forever (env.MADEIRA_POOL_NOEXEC_GIVEUP=0 keeps retrying)\n",
+                                         cteb ? (int)HandleToULong( cteb->ClientId.UniqueProcess ) : 0,
+                                         cteb ? (int)HandleToULong( cteb->ClientId.UniqueThread ) : 0,
+                                         pc, (unsigned long)((uintptr_t)pc - rx), n, cur, maxp );
+                                trk[slot].teb = 0;
+                                REGn_sig(0, bus_ctx) = STATUS_ACCESS_VIOLATION;
+                                SP_sig(bus_ctx) &= ~(uintptr_t)15;
+                                LR_sig(bus_ctx) = 0;
+                                PC_sig(bus_ctx) = (uintptr_t)abort_process;
+                                return;
+                            }
+                        }
+                    }
+                }
                 /* Don't try store emulation, go straight to exception */
                 goto bus_fatal;
             }
@@ -13931,7 +13995,10 @@ void signal_init_process(void)
 
  error:
     perror("sigaction");
-    exit(1);
+    {   /* ml1310: this pseudo-process only, through its normal exit path (server_ios.c) */
+        extern void ios_unix_fatal_exit( int status, const char *why ) __attribute__((noreturn));
+        ios_unix_fatal_exit( 1, "signal handler set-up" );
+    }
 }
 
 

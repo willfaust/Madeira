@@ -4757,6 +4757,42 @@ void process_exit_wrapper( int status )
 
 #ifdef WINE_IOS
 /***********************************************************************
+ *           ios_unix_fatal_exit   (ml1310)
+ *
+ * For the bare exit() calls left in ntdll's unix side (failed shared user data
+ * or ARM64EC map, failed signal set-up). exit() is already the wine_ios_exit
+ * shim, so it never ends the app, but it ends only the calling thread (or
+ * longjmps a pseudo-process's boot thread) without closing that pseudo-
+ * process's master socket: the server never learns the process died, its
+ * waiters hang, and its JIT-pool copies are never reclaimed. A pseudo-process
+ * that has its own server socket now ends through process_exit_wrapper, the
+ * path exit_process and abort_process take. Without one (the session's own
+ * start-up, a child before it registered), plain exit() as before. Idea from
+ * the published patch 0032 of another iOS port.
+ */
+void ios_unix_fatal_exit( int status, const char *why ) __attribute__((noreturn));
+void ios_unix_fatal_exit( int status, const char *why )
+{
+    static int route = -1;
+    int i = ios_proc_socket_index();
+
+    /* MADEIRA_UNIX_EXIT_ROUTE=0: a fatal unix-side error calls plain (shimmed) exit() again (ml1310) */
+    if (route < 0) { const char *e = getenv( "MADEIRA_UNIX_EXIT_ROUTE" ); route = !(e && e[0] == '0'); }
+    dprintf( 2, "[exit-route] ml1310 %s: status %d, %s\n", why, status,
+             route && i >= 0 ? "ending this pseudo-process (socket closed, pool reclaimed)"
+                             : "plain exit (no own server socket, or MADEIRA_UNIX_EXIT_ROUTE=0)" );
+    if (route && i >= 0)
+    {
+        pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+        process_exit_wrapper( status );
+    }
+    exit( status );
+}
+#endif
+
+
+#ifdef WINE_IOS
+/***********************************************************************
  *           ios_create_drive_symlinks
  *
  * Publish \DosDevices\X: objects for the drives that exist in the prefix.
@@ -5573,7 +5609,6 @@ void server_init_process_done(void)
         extern const SECTION_IMAGE_INFORMATION *ios_cur_image_info(void);
         ERR("signal_start_thread: teb=%p peb=%p TransferAddress=%p suspend=%d\n",
             NtCurrentTeb(), peb, ios_cur_image_info()->TransferAddress, suspend);
-
         /* Watchdog: suspend thread and sample registers at 2s and 4s */
         {
             pthread_t wine_pthread = pthread_self();

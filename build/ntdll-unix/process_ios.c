@@ -427,6 +427,7 @@ struct ios_child_args {
     int slot;   /* ios_child_slots index, -1 = none */
 };
 
+
 /* Pseudo-process children that are still running. A launcher stub that
  * starts the game and exits at once (GTA V Enhanced: PlayGTAV.exe starts
  * GTA5_Enhanced.exe and exits ~1 s later) ended the whole session: the main
@@ -1502,11 +1503,52 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         const WCHAR *ip = params->ImagePathName.Buffer;
         int ip_len = params->ImagePathName.Length / sizeof(WCHAR);
         unsigned b;
+        /* ml1357: the full Windows Steam client (steam.exe, started by the in-session
+         * launcher or a library entry) runs its own crash reporter, hardware survey and
+         * GPU probes. These names were refused because, before ml937, a helper's crash or
+         * self-terminate took the whole app down; now each ends only its own
+         * pseudo-process. When the PARENT is steam.exe they may start (Dock sessions
+         * host Valve's client in dockhost.exe, so their spawns keep the gate).
+         * hardwareupdater (pool churn) and the web helper's --type= children (a second
+         * CEF instance, see below) stay refused. env.MADEIRA_PROC_GATE_STEAM=0 refuses
+         * them all as before. */
+        int full_client_parent = 0;
+        {
+            const char *g = getenv( "MADEIRA_PROC_GATE_STEAM" );
+            const RTL_USER_PROCESS_PARAMETERS *cur = NtCurrentTeb()->Peb->ProcessParameters;
+            if (!(g && g[0] == '0') && cur && cur->ImagePathName.Buffer &&
+                ios_image_name_is( cur->ImagePathName.Buffer, cur->ImagePathName.Length / sizeof(WCHAR),
+                                   "steam.exe" ))
+                full_client_parent = 1;
+        }
 
         for (b = 0; b < sizeof(blocked_names)/sizeof(blocked_names[0]); b++)
         {
             const char *blocked = blocked_names[b];
             int bl = (int)strlen( blocked ), k, j;
+
+            if (full_client_parent && b < 4)
+            {
+                /* the first four names: steamerrorreporter, gldriverquery,
+                 * vulkandriverquery, steamsysinfo (keep that order above) */
+                int hit = 0;
+                for (k = 0; k + bl <= ip_len && !hit; k++)
+                {
+                    for (j = 0; j < bl; j++)
+                    {
+                        WCHAR c = ip[k + j];
+                        if (c >= 'A' && c <= 'Z') c += 32;
+                        if (c != (WCHAR)blocked[j]) break;
+                    }
+                    if (j == bl) hit = 1;
+                }
+                if (hit)
+                    dprintf( 2, "[proc-gate] ml1357 allowing %s: started by the full Steam client "
+                             "(steam.exe), whose own helpers run in this session "
+                             "(env.MADEIRA_PROC_GATE_STEAM=0 refuses them as before)\n",
+                             debugstr_us( &params->ImagePathName ) );
+                continue;
+            }
 
             for (k = 0; k + bl <= ip_len; k++)
             {
@@ -3986,7 +4028,11 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                              MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
                              MEM_EXECUTE_OPTION_PERMANENT;
         else
-            *(ULONG *)info = execute_flags;
+        {
+            /* ml1354: a 32-bit pseudo-process's own flags (virtual_ios.c ios_dep_per_process) */
+            extern ULONG ios_wow_exec_flags_current( ULONG fallback );
+            *(ULONG *)info = ios_wow_exec_flags_current( execute_flags );
+        }
         break;
 
     case ProcessPriorityClass:
@@ -4272,9 +4318,16 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
 
     case ProcessExecuteFlags:
         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
-        if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
-        else
         {
+            /* ml1354: DEP is per process. The flags were one session-wide value, so a
+             * 32-bit browser making DEP permanent for itself also locked every later
+             * 32-bit process out of turning it off. */
+            extern ULONG ios_wow_exec_flags_current( ULONG fallback );
+            if (ios_wow_exec_flags_current( execute_flags ) & MEM_EXECUTE_OPTION_PERMANENT)
+                return STATUS_ACCESS_DENIED;
+        }
+        {
+            extern int ios_wow_exec_flags_store_current( ULONG flags );
             BOOL enable;
             switch (*(ULONG *)info & (MEM_EXECUTE_OPTION_ENABLE|MEM_EXECUTE_OPTION_DISABLE))
             {
@@ -4287,7 +4340,8 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
             default:
                 return STATUS_INVALID_PARAMETER;
             }
-            execute_flags = *(ULONG *)info;
+            /* the session-wide value stays for processes without a guest window */
+            if (!ios_wow_exec_flags_store_current( *(ULONG *)info )) execute_flags = *(ULONG *)info;
             virtual_set_force_exec( enable );
         }
         break;

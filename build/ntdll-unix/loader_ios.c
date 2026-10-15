@@ -3945,6 +3945,26 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
 
             if (ios_jit_copy_module_for_child(pLdrInitializeThunk, child_peb) != 0)
             {
+                /* ml1356: do not start a process on the SHARED ntdll copy. Its .data
+                 * (PEB-derived loader state, module list, loader lock) belongs to
+                 * another process: device log 95's conhost (started by a 32-bit
+                 * browser's AllocConsole while the JIT pool was exhausted) read a NULL
+                 * [peb+0x18] (PEB.Ldr) in that copy and crashed at once. End the start
+                 * cleanly instead; the parent's CreateProcess fails with
+                 * STATUS_NO_MEMORY. env.MADEIRA_CHILD_NTDLL_STRICT=0 runs it anyway. */
+                const char *strict = getenv( "MADEIRA_CHILD_NTDLL_STRICT" );
+                if (!(strict && strict[0] == '0'))
+                {
+                    dprintf( STDERR_FILENO, "[launch] ml1356 pid %04x (%s): no JIT-pool room for this "
+                             "process's own ntdll copy; ending its start with STATUS_NO_MEMORY instead of "
+                             "running it on the shared copy, whose loader data belongs to another process "
+                             "(env.MADEIRA_CHILD_NTDLL_STRICT=0 runs it anyway)\n",
+                             (int)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ),
+                             NtCurrentTeb()->Peb->ProcessParameters
+                                 ? debugstr_us( &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName )
+                                 : "?" );
+                    NtTerminateProcess( GetCurrentProcess(), STATUS_NO_MEMORY );
+                }
                 dprintf(STDERR_FILENO, "[Wine child] ntdll copy FAILED — falling back to SHARED ntdll (module lists will collide!)\n");
             }
             else

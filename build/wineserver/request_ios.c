@@ -297,6 +297,50 @@ static void send_reply( union generic_reply *reply )
         fatal_protocol_error( current, "reply write: %s\n", strerror( errno ));
 }
 
+/* ml1310: RegFlushKey writes the registry to disk, as on Windows. Wine's flush_key
+ * handler does nothing and leaves it to the periodic save and the server's exit,
+ * but iOS kills the app without a clean server exit (and Madeira's server lives as
+ * long as the app), so a setting a program flushed could be lost. Saves of
+ * unchanged branches cost nothing (save_branch skips clean keys); a burst of
+ * flushes is folded into one save a second later. Idea from the published patch
+ * 0015 of another iOS port. */
+static struct timeout_user *ios_regflush_timer;
+static timeout_t ios_regflush_last;
+
+static void ios_regflush_save( const char *how )
+{
+    static unsigned int saves;
+
+    ios_regflush_last = monotonic_time;
+    flush_registry();
+    if (++saves <= 8 || !(saves % 64))
+        fprintf( stderr, "[reg-flush] ml1310 RegFlushKey: registry saved %s (#%u; "
+                 "MADEIRA_REGFLUSH_SAVE=0 leaves it to the periodic save)\n", how, saves );
+}
+
+static void ios_regflush_deferred( void *arg )
+{
+    ios_regflush_timer = NULL;
+    ios_regflush_save( "after a burst" );
+}
+
+static void ios_regflush_request(void)
+{
+    static int enabled = -1;
+
+    /* MADEIRA_REGFLUSH_SAVE=0: RegFlushKey does nothing again; the registry is saved periodically and at exit (ml1310) */
+    if (enabled < 0) { const char *e = getenv( "MADEIRA_REGFLUSH_SAVE" ); enabled = !(e && e[0] == '0'); }
+    if (!enabled) return;
+    if (ios_regflush_last && monotonic_time - ios_regflush_last < TICKS_PER_SEC)
+    {
+        if (!ios_regflush_timer)
+            ios_regflush_timer = add_timeout_user( -(ios_regflush_last + TICKS_PER_SEC - monotonic_time),
+                                                   ios_regflush_deferred, NULL );
+        return;
+    }
+    ios_regflush_save( "now" );
+}
+
 /* madeira-bcd: the ml1055 request census, moved out of call_req_handler unchanged so a
  * direct request (ios_srv_direct_call) is counted the same way. current is thread. */
 static void ios_req_census( struct thread *thread, enum request req )
@@ -447,6 +491,7 @@ static void call_req_handler( struct thread *thread )
         req_handlers[req]( &current->req, &reply );
     else
         set_error( STATUS_NOT_IMPLEMENTED );
+    if (req == REQ_flush_key && current && !current->error) ios_regflush_request();   /* ml1310 */
 
     if (current)
     {

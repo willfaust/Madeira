@@ -183,3 +183,28 @@ private final class HelperRequest {
         NSError(domain: "MadeiraBuiltInJIT", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }
+
+/// ml1310: the opt-in extension-process probe (docs/PROCESS_MODEL_ML1310.md). With
+/// env.MADEIRA_EXT_PROBE = 1 in madeira.cfg, each session start asks the JIT helper
+/// extension what its own process may map and logs the answer as "[ext-probe] ml1310 ...".
+/// Read-only in the helper; it needs no pairing file and never waits behind JIT.
+@MainActor
+enum MadeiraExtensionProbe {
+    static func runIfRequested() {
+        // MADEIRA_EXT_PROBE=1: at session start the JIT helper extension reports the address space and memory limit its own process gets (ml1310 feasibility probe for extension processes)
+        guard MadeiraConfig.flag("MADEIRA_EXT_PROBE", fallback: false) else { return }
+        if let reason = MadeiraBuiltInJIT.unavailableReason {
+            LogStore.shared.log("[ext-probe] ml1310 skipped: \(reason)")
+            return
+        }
+        LogStore.shared.log("[ext-probe] ml1310 asking the helper extension")
+        MadeiraBuiltInJIT.send(.probe) { result in
+            switch result {
+            case .success(let response):
+                LogStore.shared.log("[ext-probe] ml1310 \(response.message)")
+            case .failure(let error):
+                LogStore.shared.log("[ext-probe] ml1310 failed: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+}
