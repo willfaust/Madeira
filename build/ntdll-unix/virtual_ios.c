@@ -22980,6 +22980,10 @@ done:
 }
 
 
+#ifdef WINE_IOS
+static unsigned int ios_fd_reuse( const void *addr, SIZE_T size, ULONG type );   /* madeira-bcd: defined below */
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -23110,6 +23114,10 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
         return res;
     }
 
+#ifdef WINE_IOS
+    /* madeira-bcd: a view at the program's own address over its held releases (ios_fd_reuse) */
+    if (base && !(alloc_type & MEM_REPLACE_PLACEHOLDER)) ios_fd_reuse( base, size, MEM_RESERVE );
+#endif
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
     res = map_view( &view, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
@@ -27913,6 +27921,8 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
                 else { *ret = saved; *size_ptr = want; }   /* fall back to normal */
                 }   /* ml462 per-tid cap else-block */
             }
+            /* madeira-bcd: a reservation at the program's own address over its held releases (ios_fd_reuse) */
+            if (!ios_steered && *ret) ios_fd_reuse( *ret, *size_ptr, type );
             if (!ios_steered)
                 st = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 
@@ -29598,6 +29608,8 @@ retry_code_carve_reuse:
                     caged = 1;
                 }
             }
+            /* madeira-bcd: a reservation at the program's own address over its held releases (ios_fd_reuse) */
+            if (!caged && *ret) ios_fd_reuse( *ret, *size_ptr, type );
             if (!caged)
                 st = allocate_virtual_memory( ret, size_ptr, type, protect,
                                               limit_low, limit_high, align, attributes );
@@ -29707,7 +29719,7 @@ retry_code_carve_reuse:
  * survive. Off by default because it holds up to 128 MB more for every game,
  * and a block cannot be reallocated at its own address while it is held. */
 #define IOS_FD_N 256
-static struct { char *base; size_t size; unsigned int ms; } ios_fd_ring[IOS_FD_N];
+static struct { char *base; size_t size; unsigned int ms; void *peb; } ios_fd_ring[IOS_FD_N];
 static unsigned int ios_fd_n;
 static size_t ios_fd_bytes;
 static pthread_mutex_t ios_fd_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -29796,6 +29808,7 @@ static int ios_fd_take( char *base, SIZE_T *out_size )
     if (ios_fd_n < IOS_FD_N)
     {
         ios_fd_ring[ios_fd_n].base = base; ios_fd_ring[ios_fd_n].size = vsize; ios_fd_ring[ios_fd_n].ms = ios_fd_now();
+        ios_fd_ring[ios_fd_n].peb = ios_jit_current_peb();   /* madeira-bcd: whose release it is (ios_fd_reuse) */
         ios_fd_n++; ios_fd_bytes += vsize;
     }
     else ok = 0;
@@ -29809,6 +29822,119 @@ static int ios_fd_take( char *base, SIZE_T *out_size )
                      said, base, (unsigned long)vsize, ios_fd_ms(), ios_fd_n );
     }
     return ok;
+}
+/* madeira-bcd: a held release is free memory to the program that released it.
+ * Horizon Forbidden West (build 517, log 2026-10-13 08:49) allocated 2 MB or
+ * 4 MB-4 KB, released it at once and then reserved the 2 MB-aligned address
+ * inside it: the hold refused that with STATUS_CONFLICTING_ADDRESSES and the
+ * game asked again forever (22.6 million failed requests in 70 s, no frame). A
+ * reservation at an explicit address -- NtAllocateVirtualMemory[Ex] with
+ * MEM_RESERVE, NtMapViewOfSection[Ex] with a base -- whose range meets the
+ * same program's held releases and no other view now frees those held ranges
+ * first, so it finds the address free, as on Windows. The delay cannot keep
+ * alive memory that the program maps again itself; every other held range
+ * keeps it. A range that also meets a live view, or a release by another
+ * program of the session (they share one address space here, unlike on
+ * Windows), fails as before, and placement without an address never comes
+ * here. MADEIRA_FREE_DELAY_REUSE=0 keeps the old refusal. Returns how many
+ * held ranges were freed. */
+static int ios_fd_reuse_enabled( void )
+{
+    static int v = -1;
+    /* MADEIRA_FREE_DELAY_REUSE=0: a reservation over held releases fails until the delay
+     * runs out, as before; default 1: those held ranges are freed at once */
+    if (v < 0) { const char *e = getenv( "MADEIRA_FREE_DELAY_REUSE" ); v = !(e && !strcmp( e, "0" )); }
+    return v;
+}
+static unsigned int ios_fd_reuse( const void *addr, SIZE_T size, ULONG type )
+{
+    char *start, *end, *cur, *todo[IOS_FD_N];
+    unsigned int idx[IOS_FD_N], n = 0, i, j;
+    struct file_view *view;
+    size_t bytes = 0;
+    sigset_t sigset;
+    void *peb;
+    int live = 0;
+
+    if (!(type & MEM_RESERVE) || (type & MEM_REPLACE_PLACEHOLDER) || !addr || !size || !ios_fd_ms()) return 0;
+    start = ROUND_ADDR( addr, granularity_mask );   /* allocate_virtual_memory's rounding */
+    end = ROUND_ADDR( (UINT_PTR)addr + size + page_mask, page_mask );
+    if (end <= start) return 0;
+    pthread_mutex_lock( &ios_fd_lock );
+    for (i = 0; i < ios_fd_n; i++)
+        if (ios_fd_ring[i].base < end && ios_fd_ring[i].base + ios_fd_ring[i].size > start) break;
+    j = i < ios_fd_n;
+    pthread_mutex_unlock( &ios_fd_lock );
+    if (!j) return 0;   /* nothing held there: every other request */
+    if (!ios_fd_reuse_enabled())
+    {
+        static int said_off;
+        if (!said_off++)
+            dprintf( 2, "[free-delay] MADEIRA_FREE_DELAY_REUSE=0: a reservation at %p+0x%lx over a held "
+                        "release fails until the delay runs out\n", start, (unsigned long)(end - start) );
+        return 0;
+    }
+
+    peb = ios_jit_current_peb();
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    pthread_mutex_lock( &ios_fd_lock );
+    /* the held releases the range meets, by address; another program's refuses as a live view does */
+    for (i = 0; i < ios_fd_n; i++)
+    {
+        if (ios_fd_ring[i].base >= end || ios_fd_ring[i].base + ios_fd_ring[i].size <= start) continue;
+        if (ios_fd_ring[i].peb != peb) live = 1;
+        for (j = n; j && ios_fd_ring[idx[j - 1]].base > ios_fd_ring[i].base; j--) idx[j] = idx[j - 1];
+        idx[j] = i;
+        n++;
+    }
+    /* each still one whole view, and no other view anywhere in the range */
+    for (j = 0, cur = start; j < n && !live; j++)
+    {
+        char *b = ios_fd_ring[idx[j]].base;
+        if (b > cur && find_view_range( cur, b - cur )) live = 1;
+        else if (!(view = find_view( b, 0 )) || view->base != b || view->size != ios_fd_ring[idx[j]].size) live = 1;
+        cur = b + ios_fd_ring[idx[j]].size;
+    }
+    if (!live && cur < end && find_view_range( cur, end - cur )) live = 1;
+    if (!live)
+    {
+        /* out of the ring before they are freed, as in the drain: never freed twice */
+        for (j = 0; j < n; j++)
+        {
+            todo[j] = ios_fd_ring[idx[j]].base;
+            bytes += ios_fd_ring[idx[j]].size;
+            ios_fd_ring[idx[j]].size = 0;
+        }
+        for (i = j = 0; i < ios_fd_n; i++) if (ios_fd_ring[i].size) ios_fd_ring[j++] = ios_fd_ring[i];
+        ios_fd_n = j;
+        ios_fd_bytes -= bytes;
+    }
+    pthread_mutex_unlock( &ios_fd_lock );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    if (live || !n)
+    {
+        static unsigned long kept;
+        if (live && (++kept <= 8 || !(kept % 1024)))
+            dprintf( 2, "[free-delay] #%lu reservation at %p+0x%lx also meets a live view or another "
+                        "program's release: its %u held release(s) stay held\n", kept, start,
+                     (unsigned long)(end - start), n );
+        return 0;
+    }
+    for (j = 0; j < n; j++)
+    {
+        void *b = todo[j]; SIZE_T sz = 0;
+        ios_fd_bypass = 1;
+        NtFreeVirtualMemory( NtCurrentProcess(), &b, &sz, MEM_RELEASE );
+        ios_fd_bypass = 0;
+    }
+    {
+        static unsigned long said;
+        if (++said <= 8 || !(said % 1024))
+            dprintf( 2, "[free-delay] #%lu reservation at %p+0x%lx: %u held release(s) from %p (0x%lx bytes) "
+                        "freed at once (%u in flight)\n", said, start, (unsigned long)(end - start), n, todo[0],
+                     (unsigned long)bytes, ios_fd_n );
+    }
+    return n;
 }
 #endif
 
