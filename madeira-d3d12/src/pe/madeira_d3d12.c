@@ -1609,20 +1609,31 @@ static ULONG STDMETHODCALLTYPE fence_Release(ID3D12Fence *This) {
  * with SetEventOnCompletion called only ~4 times a frame. One call in 2^18 scans
  * its own stack for return addresses inside the game executable (the x64 frames
  * sit on the same stack in ARM64EC) and tallies the nearest two, with the
- * thread's name, so the loop can be read in the executable. Diagnostic only. */
+ * thread's name, so the loop can be read in the executable. Diagnostic only.
+ * The scan stays below the TEB's StackBase, and without a TEB it does not run.
+ * NtCurrentTeb() is a copy of x18, which the x18 patcher can only run "via x18"
+ * (see mad_teb_self). On Horizon Forbidden West's FSR 3 frame interpolation
+ * thread it gave no usable TEB, so the 32 KB scan ran off that thread's shallow
+ * stack: madeira_d3d12.dll+0x57700 read StackBase itself (2026-10-13 10:55). */
 static LONG g_gcv_calls;
 static struct { ULONG_PTR r0, r1; DWORD tid; LONG n; } g_gcv_site[16];
 static void mad_gcv_sample(struct mad_fence *f, UINT64 v) {
     static ULONG_PTR exe_lo, exe_hi; static LONG samples;
-    ULONG_PTR hit[2] = { 0, 0 }, *p, *end; unsigned nh = 0, i; NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    ULONG_PTR hit[2] = { 0, 0 }, *p, *end; unsigned nh = 0, i; NT_TIB *tib;
     volatile ULONG_PTR here = 0;
+#ifdef __arm64ec__
+    __asm__ volatile("ldr %0, [x18, #0x30]" : "=r"(tib));   /* NT_TIB.Self in one load, as mad_teb_self */
+#else
+    tib = (NT_TIB *)NtCurrentTeb();
+#endif
     if (!exe_lo) {
         HMODULE m = GetModuleHandleW(NULL); IMAGE_DOS_HEADER *dh = (IMAGE_DOS_HEADER *)m;
         IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)((BYTE *)m + dh->e_lfanew);
         exe_lo = (ULONG_PTR)m; exe_hi = exe_lo + nt->OptionalHeader.SizeOfImage;
     }
-    p = (ULONG_PTR *)&here; end = p + 4096;
-    if (tib && (ULONG_PTR)tib->StackBase > (ULONG_PTR)p && (ULONG_PTR *)tib->StackBase < end) end = (ULONG_PTR *)tib->StackBase;
+    p = (ULONG_PTR *)&here; end = p;
+    if (tib && (ULONG_PTR)tib->StackBase > (ULONG_PTR)p)
+        end = (ULONG_PTR *)tib->StackBase < p + 4096 ? (ULONG_PTR *)tib->StackBase : p + 4096;
     for (; p < end && nh < 2; p++) if (*p >= exe_lo + 0x1000 && *p < exe_hi) hit[nh++] = *p - exe_lo;
     for (i = 0; i < 16; i++) {
         if (g_gcv_site[i].n && g_gcv_site[i].r0 == hit[0] && g_gcv_site[i].r1 == hit[1] && g_gcv_site[i].tid == GetCurrentThreadId()) { g_gcv_site[i].n++; break; }
