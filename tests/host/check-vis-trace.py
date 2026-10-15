@@ -130,8 +130,9 @@ check('readback-swap: on by default (as before); off keeps only READBACK buffers
       '            (heap_type != D3D12_HEAP_TYPE_READBACK || mad_readback_swap_on())) {' in pe and
       'ConfigOption(key: "readback-swap"' in catalog)
 configs = [c.split('"""')[0] for c in recs.split('config: """')[1:]]
-check('typed-view-shadow is in Horizon Zero Dawn\'s and Ghost of Tsushima\'s lists only; the experiments in none',
-      len(configs) == 8 and sum('typed-view-shadow = 1' in c for c in configs) == 2 and
+check('typed-view-shadow is on in the Horizon games\' and Ghost of Tsushima\'s lists only; the experiments in none',
+      len(configs) == 13 and sum('typed-view-shadow = 1' in c for c in configs) == 3 and
+      sum('typed-view-shadow = 0' in c for c in configs) == 0 and
       not any(k in c for c in configs for k in ('vis-trace', 'readback-far', 'fence-strict', 'desc-guard', 'readback-swap')))
 
 harness = r'''

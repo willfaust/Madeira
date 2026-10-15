@@ -192,7 +192,24 @@ if m:
     check(re.search(r"^\s*quiet-log = 1$", cfg, re.M) is not None, "Horizon Zero Dawn's list sets quiet-log = 1")
     check(re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", cfg, re.M) is not None,
           "Horizon Zero Dawn's list sets env.MADEIRA_SRV_FGETPATH = 1")
-others = rec.replace(m.group(0), "") if m else rec
+hfw = re.search(r'static let horizonForbiddenWest = GameRecommendation\(\s*id: "horizon-forbidden-west", '
+                r'title: "Horizon Forbidden West", version: (\d+),.*?config: """(.*?)"""', rec, re.S)
+check(bool(hfw), "Horizon Forbidden West's list found")
+if hfw:
+    check(re.search(r"^\s*quiet-log = 1$", hfw.group(2), re.M) is not None
+          and re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", hfw.group(2), re.M) is not None,
+          "Horizon Forbidden West's list sets both switches")
+rca = re.search(r'static let ratchetClankRiftApart = GameRecommendation\(\s*id: "ratchet-clank-rift-apart", '
+                r'title: "Ratchet & Clank: Rift Apart", version: (\d+),.*?config: """(.*?)"""', rec, re.S)
+check(bool(rca), "Ratchet & Clank: Rift Apart's list found")
+if rca:
+    check(re.search(r"^\s*quiet-log = 1$", rca.group(2), re.M) is not None
+          and re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", rca.group(2), re.M) is not None,
+          "Rift Apart's list sets both switches (HFW's general lines)")
+others = rec
+for found in (m, hfw, rca):
+    if found:
+        others = others.replace(found.group(0), "")
 check("quiet-log" not in re.sub(r"///.*", "", others) and "MADEIRA_SRV_FGETPATH" not in re.sub(r"///.*", "", others),
       "no other game's list sets either switch")
 
