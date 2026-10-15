@@ -32193,12 +32193,68 @@ void virtual_fill_image_information( const struct pe_image_info *pe_info, SECTIO
  * Rockstar Games Launcher). Windows 10+ never uses an app-local UCRT either.
  * Report such an image as built for another machine, so open_dll_file ->
  * is_valid_binary rejects it and the search goes on to system32 / the sysx64
- * mixed-arch fallback. MADEIRA_APP_UCRT=1 turns this off. */
+ * mixed-arch fallback. MADEIRA_APP_UCRT=1 turns this off.
+ *
+ * madeira-bcd [app-dll-shadow]: env.MADEIRA_APP_DLL_SHADOW = name;name (off by
+ * default) refuses the named DLLs the same way, when they are plain x64 images
+ * outside C:\windows (the program's own folder), so the loader binds the
+ * system's. Crysis 3 Remastered (build 547, log 2026-10-15 15:08:17) ships
+ * Microsoft's x64 vcruntime140.dll beside its exe but not msvcp140.dll, so
+ * Wine's ARM64EC msvcp140.dll (sysx64) imported that x64 memcpy. Its import
+ * stub has no exit thunk for it (x10 = the image base), so the call branched
+ * to msvcp140's own MZ header: c000001d, "MSVCP140.dll failed to initialize".
+ * With vcruntime140.dll named, msvcp140 pairs with Wine's vcruntime140, as in
+ * every Steam game whose folder carries neither. */
+static BOOL ios_app_dll_listed( const char *list, const WCHAR *name, USHORT len )
+{
+    const char *p = list;
+
+    while (*p)
+    {
+        USHORT i = 0;
+
+        while (*p == ';' || *p == ',' || *p == ' ') p++;
+        while (i < len && p[i] && p[i] != ';' && p[i] != ',' && p[i] != ' ')
+        {
+            WCHAR a = name[i], b = (unsigned char)p[i];
+            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
+            if (a != b) break;
+            i++;
+        }
+        if (i == len && (!p[i] || p[i] == ';' || p[i] == ',' || p[i] == ' ')) return TRUE;
+        while (*p && *p != ';' && *p != ',' && *p != ' ') p++;
+    }
+    return FALSE;
+}
+
+/* madeira-bcd [app-dll-shadow]: whether an NT path lies under a \windows\ folder
+ * (system32, sysx64, syswow64, ...), which the switch never refuses. */
+static BOOL ios_path_in_windows( const WCHAR *path, USHORT len )
+{
+    static const char dir[] = "\\windows\\";
+    USHORT i, j;
+
+    for (i = 0; i + sizeof(dir) - 1 <= len; i++)
+    {
+        for (j = 0; j < sizeof(dir) - 1; j++)
+        {
+            WCHAR c = path[i + j];
+            if (c == '/') c = '\\';
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != (WCHAR)dir[j]) break;
+        }
+        if (j == sizeof(dir) - 1) return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL ios_ucrt_shadow_refused( HANDLE handle, const struct pe_image_info *pi )
 {
     extern int ios_is_arm64ec_cur(void);
     static const char ucrt[] = "ucrtbase.dll";
-    static int opt = -1, logged;
+    static int opt = -1, logged, shadow_logged;
+    const char *shadow;
     struct pe_image_info *info = NULL;
     unsigned int sec_flags;
     mem_size_t full_size;
@@ -32212,7 +32268,9 @@ static BOOL ios_ucrt_shadow_refused( HANDLE handle, const struct pe_image_info *
     if (pi->machine != IMAGE_FILE_MACHINE_AMD64 || pi->is_hybrid || pi->wine_builtin) return FALSE;
     if (!ios_is_arm64ec_cur()) return FALSE;
     if (opt < 0) { const char *e = getenv( "MADEIRA_APP_UCRT" ); opt = (e && e[0] == '1'); }
-    if (opt) return FALSE;
+    shadow = getenv( "MADEIRA_APP_DLL_SHADOW" );   /* madeira-bcd [app-dll-shadow]; read at every image */
+    if (shadow && !*shadow) shadow = NULL;
+    if (opt && !shadow) return FALSE;
     memset( &nt_name, 0, sizeof(nt_name) );
     if (get_mapping_info( handle, SECTION_QUERY, &sec_flags, &full_size, &shared_file,
                           &info, &nt_name, &exp_name )) return FALSE;
@@ -32223,7 +32281,7 @@ static BOOL ios_ucrt_shadow_refused( HANDLE handle, const struct pe_image_info *
     for (i = 0; i < len; i++)
         if (nt_name.Buffer[i] == '\\' || nt_name.Buffer[i] == '/') name = nt_name.Buffer + i + 1;
     if (name) len -= name - nt_name.Buffer;
-    if (name && len == sizeof(ucrt) - 1)
+    if (!opt && name && len == sizeof(ucrt) - 1)
     {
         for (i = 0; i < len; i++)
         {
@@ -32240,6 +32298,15 @@ static BOOL ios_ucrt_shadow_refused( HANDLE handle, const struct pe_image_info *
                             "searching and binds the system UCRT, as Windows 10+ does "
                             "(MADEIRA_APP_UCRT=1 reverts)\n", debugstr_us(&nt_name) );
         }
+    }
+    if (!ret && shadow && name && len && ios_app_dll_listed( shadow, name, len )
+        && !ios_path_in_windows( nt_name.Buffer, nt_name.Length / sizeof(WCHAR) ))
+    {
+        ret = TRUE;
+        if (shadow_logged++ < 16)
+            dprintf( 2, "[app-dll-shadow] %s: plain x64 DLL in the program's own folder, named by "
+                        "MADEIRA_APP_DLL_SHADOW -- reported as not loadable so the loader binds the "
+                        "system's\n", debugstr_us(&nt_name) );
     }
     free( info );
     return ret;

@@ -50,6 +50,15 @@ OVERLAY = {
                         "data live; does not recycle executable ranges or change GPU capabilities. Restart the "
                         "session after changing it.",
                 "sources": ["madeira-d3d12/src/pe/madeira_d3d12.c"]},
+    "env.MADEIRA_APP_DLL_SHADOW": {"category": "Wine core (ntdll)", "title": "Ignore these DLLs in the game's folder",
+                "kind": "text", "default": "",
+                "note": "Default empty. DLL names separated by ';' (e.g. vcruntime140.dll): a plain x64 copy of one of "
+                        "them outside C:\\windows (the game's own folder) is reported as not loadable, so the loader "
+                        "binds the system's, as it already does for ucrtbase.dll. For a game that ships Microsoft's "
+                        "x64 vcruntime140.dll but not msvcp140.dll: Wine's msvcp140 cannot call that x64 copy "
+                        "(Crysis 3 Remastered: \"MSVCP140.dll failed to initialize\", c000001d). Logged as "
+                        "[app-dll-shadow]. Read at every DLL load.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
     "env.MADEIRA_PRELOAD_DLLS": {"category": "Memory & JIT pool", "title": "Load these DLLs with the D3D12 device",
                 "kind": "text", "default": "",
                 "note": "Default empty. DLL names separated by ';' (e.g. xinput1_4.dll): each program loads and pins "
