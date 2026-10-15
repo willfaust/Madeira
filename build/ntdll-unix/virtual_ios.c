@@ -1046,6 +1046,7 @@ static unsigned ios_warmer_sweep_cycles( void )
     return v;
 }
 
+static void ios_swap_heat_tick( void );   /* madeira-bcd swap-heat (opt-in), after the swap tier's core */
 static void *ios_pool_warmer_thread( void *arg )
 {
     unsigned cycle = 0;
@@ -1090,6 +1091,7 @@ static void *ios_pool_warmer_thread( void *arg )
             }
             last_full = now_ts;
         }
+        ios_swap_heat_tick();   /* madeira-bcd swap-heat (opt-in, MADEIRA_SWAP_HEAT) */
         volatile const char *rw = (volatile const char *)ios_jit_rw_base_global;
         /* ml121: warm the RX ALIAS TOO. The warmer only ever touched the RW
          * alias, but execution faults on the RX one -- they are two separate
@@ -20461,9 +20463,28 @@ static int ios_swap_churn_is( unsigned i )
     return ios_swap_churn[i].hits >= IOS_SWAP_CHURN_MIN_YOUNG &&
            ios_swap_churn[i].hits * 2 >= ios_swap_churn[i].backs;
 }
+/* madeira-bcd swap-heat (opt-in, env.MADEIRA_SWAP_HEAT = 2; the sampler is
+ * ios_swap_heat_tick, after the core): sizes whose file-backed extents keep
+ * being paged back in after the system evicted them. New blocks of such a size
+ * stay anonymous -- counted with the churn filter's -- while the sampler says
+ * the footprint has room (ios_swap_heat_room). Published by the sampler only:
+ * the entry first, then the count. Nothing already backed moves. */
+static size_t ios_swap_heat_hot[32];
+static unsigned ios_swap_heat_nhot;            /* entries published (release) */
+static int ios_swap_heat_room;                 /* 1: the footprint is below MADEIRA_SWAP_HEAT_FP_MB */
+static unsigned long long ios_swap_heat_skips; /* blocks left anonymous by it */
+static int ios_swap_heat_skip( size_t size )
+{
+    unsigned i, n;
+    if (!__atomic_load_n( &ios_swap_heat_room, __ATOMIC_ACQUIRE )) return 0;
+    n = __atomic_load_n( &ios_swap_heat_nhot, __ATOMIC_ACQUIRE );
+    for (i = 0; i < n; i++) if (ios_swap_heat_hot[i] == size) { ios_swap_heat_skips++; return 1; }
+    return 0;
+}
 static int ios_swap_churny( size_t size )
 {
     int i;
+    if (ios_swap_heat_skip( size )) return 1;   /* madeira-bcd swap-heat (opt-in) */
     if (!ios_swap_broad) return 0;
     i = ios_swap_churn_find( size, 0 );
     return i >= 0 && ios_swap_churn_is( (unsigned)i );
@@ -20926,6 +20947,178 @@ static int ios_swap_image_map( char *va, size_t len, uint64_t off )
     return 1;
 }
 /* swap-tier core end */
+
+/* madeira-bcd swap-heat: env.MADEIRA_SWAP_HEAT = 1 (census) or 2 (census and
+ * filter), opt-in. Horizon Forbidden West on build 531 (2026-10-14) paged in
+ * 470-1,500 pages a second in play on average ([xp] pin=), in bursts: half of
+ * the time under 100 a second, 3-12 % of it above 1,000. Nothing said which
+ * extents: guest memory the system evicted and the game touched again (the
+ * cost the memory report counts at ~300 us a re-read), first touches of fresh
+ * file pages, or game files. Every ~2 s (the warmer's full cycle) this asks
+ * mincore() about up to 4 fixed pages of every backed extent, without
+ * virtual_mutex (an extent changing meanwhile only skews one sample), and
+ * counts by extent size: pages in memory, pages the pager holds (paged out),
+ * evictions (in memory -> not) and RE-READS (not in memory after having been,
+ * or paged out -> in memory again). Every ~20 s one [swap] heat line: per size
+ * class the extents, MB, shares in memory / paged out, evictions and re-reads
+ * with an estimate of the MB they stand for, and the block sizes re-read most.
+ * 2 also keeps NEW blocks of a size anonymous once its extents were re-read at
+ * least MADEIRA_SWAP_HEAT_MIN times (default 6) in at least two extents, while
+ * the footprint ([footprint] fast, the warmer's) is below MADEIRA_SWAP_HEAT_FP_MB
+ * (default 6656: 1.5 GB under Game Mode's 8,192 MB); above that line the filter
+ * pauses and those sizes are backed again. Costs ~10k mincore calls every 2 s
+ * on the warmer thread. Unset or 0: nothing runs. */
+#define IOS_HEAT_CLASSES 7
+static const char * const ios_heat_class_name[IOS_HEAT_CLASSES] = { "<256K", "256K-1M", "1-4M", "4-16M", "16-64M", ">=64M", "images" };
+static struct { char *va; unsigned char last, ever, paged; } ios_heat_st[16384];
+static struct { size_t key; unsigned rereads, extents; } ios_heat_key[128];
+static unsigned ios_heat_nkey;
+static int ios_heat_class( size_t len, int img )
+{
+    if (img) return 6;
+    return len < (256u << 10) ? 0 : len < (1u << 20) ? 1 : len < (4u << 20) ? 2 : len < (16u << 20) ? 3 : len < (64u << 20) ? 4 : 5;
+}
+static int ios_swap_heat_level( void )
+{
+    static int lvl = -1;
+    if (lvl < 0)
+    {
+        const char *e = getenv( "MADEIRA_SWAP_HEAT" );   /* 1: [swap] heat census of re-read swap extents; 2: plus new blocks of re-read sizes stay anonymous while the footprint has room; unset/0: off */
+        int v = e && *e ? atoi( e ) : 0;
+        lvl = v < 0 ? 0 : v > 2 ? 2 : v;
+    }
+    return lvl;
+}
+static void ios_heat_key_note( size_t key, int first_for_extent )
+{
+    unsigned i;
+    for (i = 0; i < ios_heat_nkey; i++) if (ios_heat_key[i].key == key) break;
+    if (i == ios_heat_nkey)
+    {
+        if (ios_heat_nkey == 128) return;
+        ios_heat_key[i].key = key; ios_heat_key[i].rereads = 0; ios_heat_key[i].extents = 0; ios_heat_nkey++;
+    }
+    ios_heat_key[i].rereads++;
+    if (first_for_extent) ios_heat_key[i].extents++;
+}
+static void ios_swap_heat_tick( void )
+{
+    static int ticks, min_rereads = -1;
+    static unsigned long long fp_limit_mb;
+    static unsigned long long sampled[IOS_HEAT_CLASSES], incore[IOS_HEAT_CLASSES], pagedout[IOS_HEAT_CLASSES],
+                              evict[IOS_HEAT_CLASSES], reread[IOS_HEAT_CLASSES], reread_mb[IOS_HEAT_CLASSES];
+    unsigned long long ext[IOS_HEAT_CLASSES] = {0}, ext_mb[IOS_HEAT_CLASSES] = {0};
+    size_t hps = host_page_size;
+    unsigned i, n;
+    int lvl = ios_swap_heat_level();
+
+    if (!lvl || ios_swap_fd < 0 || !hps) return;
+    if (min_rereads < 0)
+    {
+        const char *m = getenv( "MADEIRA_SWAP_HEAT_MIN" );   /* swap-heat 2: re-reads of a block size (in two extents or more) before its new blocks stay anonymous (6) */
+        const char *f = getenv( "MADEIRA_SWAP_HEAT_FP_MB" ); /* swap-heat 2: the filter pauses while the footprint is at or above this (MB, 6656) */
+        min_rereads = m && *m ? atoi( m ) : 6;
+        if (min_rereads < 1) min_rereads = 1;
+        fp_limit_mb = f && *f ? strtoull( f, NULL, 10 ) : 6656;
+        dprintf( 2, "[swap] heat madeira-bcd on (MADEIRA_SWAP_HEAT=%d): mincore census of the swap extents every ~2 s%s\n", lvl,
+                 lvl >= 2 ? "; sizes re-read often stay anonymous while the footprint has room" : "" );
+    }
+    n = __atomic_load_n( &ios_swap_n, __ATOMIC_RELAXED );
+    if (n > 16384) n = 16384;
+    for (i = 0; i < n; i++)
+    {
+        char *va = ios_swap_ext[i].va;
+        size_t len = ios_swap_ext[i].len, npages, k, j;
+        int cls = ios_heat_class( len, ios_swap_ext[i].img ), counted = 0;
+        if (!va || !len) continue;
+        if (ios_heat_st[i].va != va) { ios_heat_st[i].va = va; ios_heat_st[i].last = ios_heat_st[i].ever = ios_heat_st[i].paged = 0; }
+        else counted = (ios_heat_st[i].ever & 0x80) != 0;
+        npages = len / hps;
+        if (!npages) continue;
+        k = npages < 4 ? npages : 4;
+        ext[cls]++; ext_mb[cls] += len;
+        for (j = 0; j < k; j++)
+        {
+            size_t page = ((((uintptr_t)va >> 14) * 2654435761u) + j * (npages / k)) % npages;
+            unsigned char bit = (unsigned char)(1u << j);
+            char v = 0;
+            int in, out;
+            if (mincore( va + page * hps, hps, &v )) continue;   /* gone or changed meanwhile */
+            in = (v & MINCORE_INCORE) != 0;
+            out = (v & MINCORE_PAGED_OUT) != 0;
+            sampled[cls]++; incore[cls] += in; pagedout[cls] += out;
+            if (in && !(ios_heat_st[i].last & bit) && ((ios_heat_st[i].ever & bit) || (ios_heat_st[i].paged & bit)))
+            {
+                reread[cls]++; reread_mb[cls] += len / k;
+                ios_heat_key_note( ios_swap_ext[i].key, !counted );
+                counted = 1; ios_heat_st[i].ever |= 0x80;
+            }
+            if (!in && (ios_heat_st[i].last & bit)) evict[cls]++;
+            if (in) { ios_heat_st[i].ever |= bit; ios_heat_st[i].last |= bit; } else ios_heat_st[i].last &= (unsigned char)~bit;
+            if (out) ios_heat_st[i].paged |= bit; else ios_heat_st[i].paged &= (unsigned char)~bit;
+        }
+    }
+    if (lvl >= 2)
+    {
+        extern unsigned long long ios_last_footprint_mb;
+        int room = !ios_last_footprint_mb || ios_last_footprint_mb < fp_limit_mb;
+        unsigned nhot = ios_swap_heat_nhot;
+        for (i = 0; i < ios_heat_nkey && nhot < 32; i++)
+        {
+            unsigned h;
+            if (ios_heat_key[i].rereads < (unsigned)min_rereads || ios_heat_key[i].extents < 2) continue;
+            for (h = 0; h < nhot; h++) if (ios_swap_heat_hot[h] == ios_heat_key[i].key) break;
+            if (h < nhot) continue;
+            ios_swap_heat_hot[nhot] = ios_heat_key[i].key;
+            __atomic_store_n( &ios_swap_heat_nhot, nhot + 1, __ATOMIC_RELEASE );
+            nhot++;
+            dprintf( 2, "[swap] heat madeira-bcd: blocks of 0x%zx were re-read %u times in %u extents -- new ones stay anonymous "
+                        "while the footprint is below %llu MB (%u sizes)\n",
+                     ios_heat_key[i].key, ios_heat_key[i].rereads, ios_heat_key[i].extents, fp_limit_mb, nhot );
+        }
+        if (room != ios_swap_heat_room)
+        {
+            __atomic_store_n( &ios_swap_heat_room, room, __ATOMIC_RELEASE );
+            if (nhot) dprintf( 2, "[swap] heat madeira-bcd: footprint %llu MB -- the filter %s\n", ios_last_footprint_mb,
+                               room ? "keeps hot sizes anonymous again" : "pauses (hot sizes are backed again)" );
+        }
+    }
+    if (++ticks % 10 == 0)
+    {
+        char line[1400];
+        int len = 0, c;
+        unsigned long long tot = 0;
+        for (c = 0; c < IOS_HEAT_CLASSES; c++) tot += sampled[c];
+        len = snprintf( line, sizeof(line), "[swap] heat: last %d cycles, %llu pages sampled |", 10, tot );
+        for (c = 0; c < IOS_HEAT_CLASSES && len < (int)sizeof(line) - 160; c++)
+        {
+            if (!ext[c] && !reread[c]) continue;
+            len += snprintf( line + len, sizeof(line) - len, " %s: %llu ext %llu MB, %llu%% in memory, %llu%% paged out, %llu evictions, %llu re-reads (~%llu MB) |",
+                             ios_heat_class_name[c], ext[c], ext_mb[c] >> 20,
+                             sampled[c] ? 100 * incore[c] / sampled[c] : 0, sampled[c] ? 100 * pagedout[c] / sampled[c] : 0,
+                             evict[c], reread[c], reread_mb[c] >> 20 );
+        }
+        {   /* the three sizes re-read most */
+            unsigned best[3] = { ~0u, ~0u, ~0u }, b, q;
+            for (b = 0; b < 3; b++)
+                for (q = 0; q < ios_heat_nkey; q++)
+                {
+                    if (q == best[0] || q == best[1]) continue;
+                    if (best[b] == ~0u || ios_heat_key[q].rereads > ios_heat_key[best[b]].rereads) best[b] = q;
+                }
+            len += snprintf( line + len, sizeof(line) - len, " most re-read sizes:" );
+            for (b = 0; b < 3 && len < (int)sizeof(line) - 60; b++)
+                if (best[b] != ~0u && ios_heat_key[best[b]].rereads)
+                    len += snprintf( line + len, sizeof(line) - len, " 0x%zx x%u (%u ext)", ios_heat_key[best[b]].key,
+                                     ios_heat_key[best[b]].rereads, ios_heat_key[best[b]].extents );
+            if (lvl >= 2 && len < (int)sizeof(line) - 80)
+                len += snprintf( line + len, sizeof(line) - len, " | filter: %u sizes, %llu blocks left anonymous, %s",
+                                 ios_swap_heat_nhot, ios_swap_heat_skips, ios_swap_heat_room ? "active" : "paused (footprint)" );
+        }
+        dprintf( 2, "%s\n", line );
+        for (c = 0; c < IOS_HEAT_CLASSES; c++) sampled[c] = incore[c] = pagedout[c] = evict[c] = reread[c] = reread_mb[c] = 0;
+    }
+}
 static unsigned long long ios_swap_footprint_mb( void )
 {
     task_vm_info_data_t vmi;
@@ -31253,6 +31446,23 @@ static void fill_working_set_info( struct fill_working_set_info_data *d, struct 
 #else
 static int pagemap_fd = -2;
 
+/* madeira-bcd wsex-mincore: env.MADEIRA_WSEX_MINCORE = 1 (opt-in). On iOS the
+ * pagemap file below never opens, so QueryWorkingSetEx answered "not resident"
+ * for every page. With the switch it asks mincore() instead, one page at a
+ * time. madeira-d3d12 uses it, with the same switch, for the default-buffer-swap
+ * residency census (are a GPU-only file-backed buffer's pages still in memory
+ * when the GPU gets slow?). Unset or 0: as before. */
+static int ios_wsex_mincore_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_WSEX_MINCORE" );   /* 1: QueryWorkingSetEx's Valid bit from mincore() (iOS has no /proc pagemap); unset/0: every page reads as not resident, as before */
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+
 struct fill_working_set_info_data
 {
     UINT64 pm_buffer[256];
@@ -31314,6 +31524,16 @@ static void fill_working_set_info( struct fill_working_set_info_data *d, struct 
             d->buffer_len = len / sizeof(pagemap);
         }
         pagemap = d->pm_buffer[page - d->buffer_start];
+        if (pagemap_fd == -1 && ios_wsex_mincore_on())
+        {
+            /* madeira-bcd wsex-mincore (opt-in): iOS has no /proc/self/pagemap, so
+             * every page read as not resident; mincore says whether it is in memory
+             * (the page's object, mapped into this pmap or not: a GPU-only page of a
+             * file-backed buffer counts) */
+            char vec = 0;
+            if (!mincore( (void *)(page * host_page_size), host_page_size, &vec ) && (vec & MINCORE_INCORE))
+                pagemap = 1ull << 63;
+        }
 
         p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && (pagemap >> 63);
         p->VirtualAttributes.Shared = !is_view_valloc( view ) && ((pagemap >> 61) & 1);

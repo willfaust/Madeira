@@ -1270,6 +1270,66 @@ void ios_eco_native_self( const char *who )
     dprintf( 2, "[eco-native] madeira-bcd %s thread at utility QoS%s (MADEIRA_ECO_NATIVE)\n", who, r ? ": refused" : "" );
 }
 
+/* madeira-bcd eco-prio: env.MADEIRA_ECO_PRIO = 1 or 2 (opt-in). With eco on
+ * (madeira.cfg eco = 1, the ECO pill, the power governor) every guest thread
+ * runs at the eco QoS class, which keeps it on the efficiency cores. Horizon
+ * Forbidden West on build 531 (2026-10-14) ran that way with 6-8 threads waiting
+ * for a core on a full efficiency cluster while the performance cores did
+ * 0.4-0.5 of a core of work ([xp] P= / E= / run=), and the threads a frame waits
+ * on most directly -- madeira-d3d12's fence worker, which advances a fence once
+ * the GPU is done, and its submission workers (async-submit = 1) -- queued for
+ * the same cores as the game's job workers. With the switch, a thread that sets
+ * ITS OWN priority (SetThreadPriority on itself) to THREAD_PRIORITY_TIME_CRITICAL
+ * (1), or to THREAD_PRIORITY_HIGHEST and above (2), keeps the user-interactive
+ * QoS while eco is on; setting a lower priority later returns it to the eco
+ * class. madeira-d3d12's own worker threads ask for TIME_CRITICAL when the
+ * switch is set. Another thread's priority is never touched (its pthread could
+ * be gone by then), and a thread raised before eco came on is not moved. The
+ * next ECO switch re-applies the eco class to every thread, these included.
+ * Unset or 0: nothing changes. [eco-prio] names the first 32 threads moved. */
+static int ios_eco_prio_level( void )
+{
+    static int lvl = -1;
+    if (lvl < 0)
+    {
+        const char *e = getenv( "MADEIRA_ECO_PRIO" );   /* 1: under eco, a thread that raises itself to TIME_CRITICAL keeps user-interactive QoS; 2: HIGHEST and above; unset/0: off */
+        int v = e && *e ? atoi( e ) : 0;
+        lvl = v < 0 ? 0 : v > 2 ? 2 : v;
+    }
+    return lvl;
+}
+
+static __thread int ios_eco_prio_raised;   /* this thread holds user-interactive QoS through eco-prio */
+
+static void ios_eco_prio_note( HANDLE handle, LONG priority )
+{
+    extern int madeira_get_eco( void );
+    extern void ios_eco_apply_self( void );
+    static int said;
+    int lvl = ios_eco_prio_level(), raise, r;
+    char name[64] = "";
+
+    if (!lvl) return;
+    raise = priority >= (lvl >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_TIME_CRITICAL) && priority < 16;
+    if (raise == ios_eco_prio_raised) return;   /* nothing to change for the calling thread */
+    if (raise && !madeira_get_eco()) return;   /* eco off: every guest thread is user-interactive already */
+    if (handle != GetCurrentThread())
+    {
+        THREAD_BASIC_INFORMATION tbi;
+        if (NtQueryInformationThread( handle, ThreadBasicInformation, &tbi, sizeof(tbi), NULL ) ||
+            HandleToULong( tbi.ClientId.UniqueThread ) != GetCurrentThreadId())
+            return;   /* another thread: never touched */
+    }
+    if (raise) r = pthread_set_qos_class_self_np( QOS_CLASS_USER_INTERACTIVE, 0 );
+    else { ios_eco_apply_self(); r = 0; }   /* back to whatever eco says now */
+    ios_eco_prio_raised = raise && !r;
+    pthread_getname_np( pthread_self(), name, sizeof(name) );
+    if (__atomic_fetch_add( &said, 1, __ATOMIC_RELAXED ) < 32)
+        dprintf( 2, "[eco-prio] madeira-bcd thread %04x '%s' set itself to priority %d: %s (MADEIRA_ECO_PRIO=%d)\n",
+                 (unsigned)GetCurrentThreadId(), name, (int)priority,
+                 !raise ? "back to the eco QoS class" : r ? "user-interactive QoS REFUSED" : "user-interactive QoS while eco is on", lvl );
+}
+
 /***********************************************************************
  *           start_thread
  *
@@ -3133,6 +3193,7 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
             status = wine_server_call( req );
         }
         SERVER_END_REQ;
+        if (!status) ios_eco_prio_note( handle, (LONG)*base_priority );   /* madeira-bcd eco-prio (opt-in) */
         return status;
     }
 
