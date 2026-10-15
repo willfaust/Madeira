@@ -2879,6 +2879,13 @@ struct ContentView: View {
                 dxmtOptions.append("dxgi.customDeviceId=2544")
                 logStore.log("DXMT config: dxgi.customDeviceId=2544 via Report an NVIDIA GPU")
             }
+            // DXMT's memory census reports from the encode thread several times a second in a
+            // 64-bit game (a third of a log, and its scans on the frame path). DXMT throttles
+            // it to one report every 10 s by default only in its 32-bit build; turn that on for
+            // every session unless madeira.cfg sets env.DXMT_CENSUS_THROTTLE itself.
+            if MadeiraConfig.get("env.DXMT_CENSUS_THROTTLE") == nil && getenv("DXMT_CENSUS_THROTTLE") == nil {
+                setenv("DXMT_CENSUS_THROTTLE", "1", 0)
+            }
             // madeira-bcd: the game's options from BCDLaunch.applyExtras (LibraryPrefs'
             // NVIDIA device id), last, as before the merge. An option whose key is already
             // set above is replaced, not repeated: DXMT reads at most 259 characters.
