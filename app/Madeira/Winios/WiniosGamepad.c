@@ -170,3 +170,39 @@ int winios_gamepad_rumble_caps(void)
 {
     return __atomic_load_n(&rumble_caps, __ATOMIC_RELAXED);
 }
+
+/* ml2170: per-slot battery for XInputGetBatteryInformation. Its own lock: the
+ * app writes it at most once a second per slot, a game may read it every frame. */
+static pthread_mutex_t battery_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct winios_gamepad_battery batteries[WINIOS_GAMEPAD_MAX];
+
+int winios_gamepad_set_battery(int index, const struct winios_gamepad_battery *battery)
+{
+    struct winios_gamepad_battery next = {0};
+    int changed = 0;
+    if (index < 0 || index >= WINIOS_GAMEPAD_MAX) return 0;
+    if (battery && battery->valid) {
+        next.valid = 1;
+        next.type = battery->type;
+        next.level = battery->level;
+    }
+    pthread_mutex_lock(&battery_lock);
+    if (memcmp(&next, &batteries[index], sizeof(next))) {
+        batteries[index] = next;
+        changed = 1;
+    }
+    pthread_mutex_unlock(&battery_lock);
+    return changed;
+}
+
+int winios_gamepad_get_battery(int index, struct winios_gamepad_battery *out)
+{
+    struct winios_gamepad_battery value = {0};
+    if (index >= 0 && index < WINIOS_GAMEPAD_MAX) {
+        pthread_mutex_lock(&battery_lock);
+        value = batteries[index];
+        pthread_mutex_unlock(&battery_lock);
+    }
+    if (out) *out = value;
+    return value.valid != 0;
+}

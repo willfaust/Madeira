@@ -94,6 +94,33 @@ uint32_t winios_gamepad_get_vibration(int index, struct winios_gamepad_vibration
 void winios_gamepad_set_rumble_caps(int on);
 int winios_gamepad_rumble_caps(void);
 
+/* ml2170: XInputGetBatteryInformation for slots 0-3, read by win32u's
+ * ios_gamepad_query (op 4, NtUserGamepadOp_Battery). `type` and `level` are
+ * XInput's BATTERY_TYPE_* / BATTERY_LEVEL_* values, mapped by the app from
+ * GCDeviceBattery (GamepadInput.swift). `valid` 0 means nothing is published
+ * (env.MADEIRA_XINPUT_BATTERY = 0, or the slot was cleared): the op then
+ * answers 0 and xinput keeps its old "unknown" battery. Kept apart from the
+ * input snapshot so a battery change never advances XInput's packet number. */
+#define WINIOS_BATTERY_TYPE_DISCONNECTED 0x00
+#define WINIOS_BATTERY_TYPE_WIRED        0x01
+#define WINIOS_BATTERY_TYPE_ALKALINE     0x02
+#define WINIOS_BATTERY_TYPE_NIMH         0x03
+#define WINIOS_BATTERY_TYPE_UNKNOWN      0xff
+#define WINIOS_BATTERY_LEVEL_EMPTY  0x00
+#define WINIOS_BATTERY_LEVEL_LOW    0x01
+#define WINIOS_BATTERY_LEVEL_MEDIUM 0x02
+#define WINIOS_BATTERY_LEVEL_FULL   0x03
+struct winios_gamepad_battery {
+    uint8_t valid;
+    uint8_t type;
+    uint8_t level;
+    uint8_t reserved;
+};
+/* NULL clears the slot. Returns 1 when the stored value changed. */
+int winios_gamepad_set_battery(int index, const struct winios_gamepad_battery *battery);
+/* Copies slot `index`'s battery into *out (zeros when invalid); returns `valid`. */
+int winios_gamepad_get_battery(int index, struct winios_gamepad_battery *out);
+
 /* ml2106: called after winios_hidpad_set_output or winios_gamepad_set_vibration
  * changed something, outside every lock, on the writer's thread (the
  * wineserver's, or a game thread in win32u). The app's handler only schedules

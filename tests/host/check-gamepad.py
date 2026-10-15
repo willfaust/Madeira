@@ -28,6 +28,23 @@ typedef uint32_t DWORD;
 typedef unsigned int UINT;
 typedef uintptr_t ULONG_PTR;
 #define C_ASSERT(x) _Static_assert(x, #x)
+#include <stdlib.h>
+/* ml2115: the foreground query's win32u calls, faked. */
+typedef void *HWND;
+static HWND fake_foreground;
+static DWORD fake_owner_pid, fake_self_pid = 0x24;
+static HWND NtUserGetForegroundWindow(void) { return fake_foreground; }
+static DWORD get_window_thread(HWND hwnd, DWORD *pid) { if (!hwnd) return 0; if (pid) *pid = fake_owner_pid; return 0x30; }
+#define GetCurrentProcessId() fake_self_pid
+/* ml2181 (this fork): the state line's focus evidence reads the GUI thread info; faked empty. */
+typedef struct { DWORD cbSize, flags; HWND hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+                 struct { long left, top, right, bottom; } rcCaret; } GUITHREADINFO;
+static int NtUserGetGUIThreadInfo(DWORD tid, GUITHREADINFO *info) { (void)tid; memset(info, 0, sizeof(*info)); info->cbSize = sizeof(*info); return 1; }
+#define GA_ROOT 2
+static HWND NtUserGetAncestor(HWND hwnd, UINT flags) { (void)flags; return hwnd; }
+#define GetCurrentThreadId() 0x30u
+static void fake_err(const char *fmt, ...) { (void)fmt; }
+#define ERR fake_err
 '''
 tests = r'''
 static atomic_int finished;
@@ -45,6 +62,26 @@ int main(void) {
     struct winios_gamepad state = {0}, result;
     struct ios_xinput_state output;
     struct ios_xinput_caps caps;
+    DWORD flags;
+    /* ml2115: NtUserGamepadOp_Foreground (op 3), any slot state, index ignored. */
+    const char *rule = getenv("MADEIRA_XINPUT_ENABLE_FOREGROUND");
+    if (rule && *rule == '0') {
+        fake_foreground = (HWND)0x10010; fake_owner_pid = 0x24;
+        flags = 0xffffffff;
+        assert(!ios_gamepad_query(0, 3, &flags) && flags == 0x2);   /* owner, switch off */
+        fake_owner_pid = 0x40;
+        assert(!ios_gamepad_query(0, 3, &flags) && flags == 0);
+        return 0;
+    }
+    flags = 0xffffffff;
+    assert(!ios_gamepad_query(0, 3, &flags) && flags == 0x1);        /* no foreground window */
+    fake_foreground = (HWND)0x10010; fake_owner_pid = 0x40;
+    assert(!ios_gamepad_query(0, 3, &flags) && flags == 0x1);        /* another process */
+    fake_owner_pid = 0x24;
+    assert(ios_gamepad_query(0, 3, &flags) && flags == 0x3);         /* this process */
+    assert(ios_gamepad_query(3, 3, &flags) && !ios_gamepad_query(4, 3, &flags));
+    assert(!ios_gamepad_query(0, 3, NULL));
+    fake_foreground = NULL;
     assert(sizeof(state) == 20);
     assert(!winios_gamepad_get_state(-1, &result) && !result.connected);
     assert(!winios_gamepad_get_state(4, &result));
@@ -95,7 +132,26 @@ int main(void) {
         winios_gamepad_set_vibration(0, 5, 5);
         assert(notified == 2 && winios_gamepad_get_vibration(0, &v) == 3);
     }
-    assert(!ios_gamepad_query(0, 3, &caps) && !ios_gamepad_query(4, 0, &output));
+    /* ml2170: op 4 (NtUserGamepadOp_Battery) and the wireless caps flag. */
+    {
+        struct winios_gamepad_battery b = {0};
+        BYTE info[2] = {0xaa, 0xaa};
+        assert(!ios_gamepad_query(0, 4, info) && info[0] == 0xaa);   /* nothing published */
+        assert(ios_gamepad_query(0, 1, &caps) && caps.flags == 0);
+        b.valid = 1; b.type = WINIOS_BATTERY_TYPE_NIMH; b.level = WINIOS_BATTERY_LEVEL_LOW;
+        assert(winios_gamepad_set_battery(0, &b) == 1 && winios_gamepad_set_battery(0, &b) == 0);
+        assert(ios_gamepad_query(0, 4, info) && info[0] == 3 && info[1] == 1);
+        assert(ios_gamepad_query(0, 1, &caps) && caps.flags == 0x0002);
+        b.type = WINIOS_BATTERY_TYPE_WIRED; b.level = WINIOS_BATTERY_LEVEL_FULL;
+        assert(winios_gamepad_set_battery(0, &b) == 1);
+        assert(ios_gamepad_query(0, 1, &caps) && caps.flags == 0);
+        assert(winios_gamepad_set_battery(1, &b) == 1 && !ios_gamepad_query(1, 4, info)); /* no pad in slot 1 */
+        assert(winios_gamepad_set_battery(0, NULL) == 1 && !ios_gamepad_query(0, 4, info));
+        assert(!winios_gamepad_get_battery(0, &b) && !b.valid && !b.type);
+        assert(!winios_gamepad_set_battery(4, &b) && !winios_gamepad_get_battery(-1, &b));
+        assert(winios_gamepad_set_battery(1, NULL) == 1);
+    }
+    assert(!ios_gamepad_query(0, 5, &caps) && !ios_gamepad_query(4, 0, &output));   /* an unknown op */
     assert(!ios_gamepad_query(0, 0, NULL));
     for (int i = 1; i < 4; ++i) {
         state.buttons = (uint16_t)(1 << i);
@@ -133,5 +189,8 @@ with tempfile.TemporaryDirectory(prefix='madeira-gamepad-') as tmp:
                     '-O2', '-pthread', '-I', str(root / 'build/win32u-unix'), str(source),
                     str(root / 'app/Madeira/Winios/WiniosGamepad.c'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
+    env = dict(os.environ, MADEIRA_XINPUT_ENABLE_FOREGROUND='0')
+    subprocess.run([str(binary)], check=True, env=env)
 print('PASS: packet changes, ranges, four slots, disconnect/reconnect, query ABI, concurrent snapshots, '
-      'rumble caps, XInput vibration op (ml2106)')
+      'rumble caps, XInput vibration op (ml2106), battery op and wireless flag (ml2170), '
+      'foreground query (op 3, ml2115) and its switch')

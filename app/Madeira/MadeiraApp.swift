@@ -9,6 +9,9 @@ struct MadeiraApp: App {
         // passes, blit encoders) cover the game. Off unless madeira.cfg says
         // env.MTL_HUD_INSIGHTS_ENABLED = 1, which is exported later and wins.
         setenv("MTL_HUD_INSIGHTS_ENABLED", "0", 0)
+        // Host pads as Windows.Gaming.Input gamepads (upstream's opt-in provider, willfaust/wine #40):
+        // on by default here; madeira.cfg env.MADEIRA_WGI_HOST_PADS = 0 is exported later and wins.
+        setenv("MADEIRA_WGI_HOST_PADS", "1", 0)
         // ml1172: read the screen on the main thread; library entries, whose
         // default Resolution comes from it, are also made on other threads.
         _ = ResolutionChoices.screen

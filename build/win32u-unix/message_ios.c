@@ -2613,6 +2613,21 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+#ifdef WINE_IOS
+/* ml2181: a button press on a window that is already active gives its
+ * top-level window keyboard focus when nothing in it has focus (Wine moves
+ * the focus only while activating). See winios_click_focus in driver_ios.c;
+ * MADEIRA_CLICK_FOCUS=0 turns it off. */
+extern int winios_click_focus( HWND hwnd, const char *why );
+
+static void ios_click_focus( const MSG *msg )
+{
+    if (msg->message == WM_LBUTTONDOWN || msg->message == WM_RBUTTONDOWN ||
+        msg->message == WM_MBUTTONDOWN || msg->message == WM_XBUTTONDOWN)
+        winios_click_focus( msg->hwnd, "click" );
+}
+#endif
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2819,6 +2834,9 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
 
     if (!remove || info.hwndCapture)
     {
+#ifdef WINE_IOS
+        if (remove) ios_click_focus( msg );   /* ml2181: a captured click activates nothing */
+#endif
         msg->message = message;
         return TRUE;
     }
@@ -2866,6 +2884,9 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                 }
             }
         }
+#ifdef WINE_IOS
+        ios_click_focus( msg );   /* ml2181: an active window is not activated again */
+#endif
     }
 
     /* send the WM_SETCURSOR message */
