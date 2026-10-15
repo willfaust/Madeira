@@ -17,7 +17,7 @@ if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
     if [ -f "$APP_LIB" ]; then
         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
     else
-        echo "ERROR: No base libwineserver.a found"
+        echo "ERROR: No base libwineserver.a found; run build/wineserver/bootstrap-base.sh first"
         exit 1
     fi
 fi
@@ -87,6 +87,8 @@ PATCHED_FILES=(
     "window:$BUILD_DIR/window_ios.c:window.o"
     "user:$WINE_SRC/server/user.c:user.o"
     "mapping:$BUILD_DIR/mapping_ios.c:mapping.o"
+    # Madeira: GC64 LuaJIT substitution, called from mapping_ios.c (both lists).
+    "luajit_compat:$BUILD_DIR/luajit_compat.c:luajit_compat.o"
     "class:$WINE_SRC/server/class.c:class.o"
     "region:$WINE_SRC/server/region.c:region.o"
     "queue:$BUILD_DIR/queue_ios.c:queue.o"
@@ -174,6 +176,7 @@ REPLACEMENTS=(
     "region.o:region.o"
     "queue.o:queue.o"
     "mapping.o:mapping.o"
+    "luajit_compat.o:luajit_compat.o"
     "winstation.o:winstation.o"
     "thread.o:thread.o"
     "sock.o:sock.o"

@@ -898,7 +898,7 @@ static WCHAR *get_initial_environment( SIZE_T *pos, SIZE_T *size )
         /* iOS DIAGNOSTIC: log env vars containing "Steam" or known Thumper-relevant keys */
         if (STARTS_WITH(str, "Steam") || STARTS_WITH(str, "SteamAppPath") ||
             STARTS_WITH(str, "SteamGameId") || STARTS_WITH(str, "SteamAppId") ||
-            STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") ||
+            STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") || STARTS_WITH(str, "LOVE_") ||
             STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
             fprintf(stderr, "[iOS env] processing: %s\n", str);
 
@@ -931,7 +931,7 @@ static WCHAR *get_initial_environment( SIZE_T *pos, SIZE_T *size )
 
         ptr += ntdll_umbstowcs( str, strlen(str) + 1, ptr, end - ptr );
         if (STARTS_WITH(str, "Steam") || STARTS_WITH(str, "FNA3D_") || STARTS_WITH(str, "MONO_") ||
-            STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
+            STARTS_WITH(str, "LOVE_") || STARTS_WITH(str, "MADEIRA_JIT_WRITE_OFFSET"))
             fprintf(stderr, "[iOS env] INCLUDED: %s\n", str);
     }
     *pos = ptr - env;

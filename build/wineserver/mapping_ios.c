@@ -181,6 +181,7 @@ struct mapping
 
 static void mapping_dump( struct object *obj, int verbose );
 static struct fd *mapping_get_fd( struct object *obj );
+extern int madeira_luajit_compat_fd( int unix_fd, off_t file_size );   /* luajit_compat.c */
 static void mapping_destroy( struct object *obj );
 static enum server_fd_type mapping_get_fd_type( struct fd *fd );
 
@@ -1141,7 +1142,25 @@ static struct mapping *create_mapping( struct object *root, const struct unicode
         }
         if (flags & SEC_IMAGE)
         {
-            unsigned int err = get_image_params( mapping, st.st_size, unix_fd );
+            unsigned int err;
+            /* Madeira: an x64 LuaJIT that needs memory below 2 GB is mapped from
+             * the bundled GC64 build instead (luajit_compat.c). */
+            int compat_fd = madeira_luajit_compat_fd( unix_fd, st.st_size );
+            if (compat_fd != -1)
+            {
+                struct stat compat_st;
+                struct fd *compat = create_anonymous_fd( &mapping_fd_ops, compat_fd, &mapping->obj,
+                                                         FILE_SYNCHRONOUS_IO_NONALERT );
+                if (compat && fstat( compat_fd, &compat_st ) != -1)
+                {
+                    release_object( mapping->fd );
+                    mapping->fd = compat;
+                    unix_fd = compat_fd;
+                    st = compat_st;
+                }
+                else if (compat) release_object( compat );
+            }
+            err = get_image_params( mapping, st.st_size, unix_fd );
             if (!err) return mapping;
             set_error( err );
             goto error;
