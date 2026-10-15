@@ -1,0 +1,12 @@
+--- a/src/gallium/targets/osmesa/meson.build	2026-09-26 15:48:44
++++ b/src/gallium/targets/osmesa/meson.build	2026-09-26 15:49:28
+@@ -39,6 +39,9 @@
+   ],
+   dependencies : [
+     dep_ws2_32, dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++    # Madeira: link Zink too, so GALLIUM_DRIVER=zink selects it at runtime;
++    # Zink reads its options through driconf (xmlconfig).
++    driver_zink, idep_xmlconfig,
+   ],
+   name_prefix : host_machine.system() == 'windows' ? '' : [],  # otherwise mingw will create libosmesa.dll
+   soversion : host_machine.system() == 'windows' ? '' : '8',

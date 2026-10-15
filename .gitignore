@@ -49,6 +49,21 @@ build/ffmpeg/obj/
 # win32u-unix build artifacts
 build/win32u-unix/obj/
 
+# Mesa (OSMesa + Zink) build tree; the product is app/Madeira/gl/libOSMesa.dylib
+build/mesa-ios/obj/
+
+# Script-built OpenGL support (see the README in each folder):
+#   build/mesa-ios/build.sh    -> gl/libOSMesa.dylib, licenses/Mesa-license.rst
+#   build/moltenvk-ios/build.sh -> gl/libMoltenVK.dylib and the MoltenVK,
+#                                  SPIRV-Cross, SPIRV-Tools, cereal licence texts
+app/Madeira/gl/*.dylib
+app/Madeira/gl/*.version
+app/Madeira/licenses/Mesa-license.rst
+app/Madeira/licenses/MoltenVK-Apache-2.0.txt
+app/Madeira/licenses/SPIRV-Cross-Apache-2.0.txt
+app/Madeira/licenses/SPIRV-Tools-Apache-2.0.txt
+app/Madeira/licenses/cereal-BSD-3-Clause.txt
+
 # DXMT build artifacts
 build/dxmt-ios/obj/
 build/dxmt-ios/shader-headers/
