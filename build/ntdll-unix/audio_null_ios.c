@@ -1578,10 +1578,35 @@ static NTSTATUS ios_get_mix_format(void *args) {
     return STATUS_SUCCESS;
 }
 
+/* The shared-mode engine period, in 100 ns units. A client that keeps one period
+ * queued (IAudioClient3) must cover a whole RemoteIO slice, or every render callback
+ * empties its queue and plays silence for the rest: at least two slices of the
+ * IOBufferDuration the app was granted (MADEIRA_AUDIO_IO_US, WineProcessBridge.m),
+ * and never under 10 ms. MADEIRA_AUDIO_PERIOD_MS sets it outright (10 = as before). */
+static REFERENCE_TIME ios_engine_period(void) {
+    static REFERENCE_TIME period = -1;
+    if (period < 0) {
+        const char *e = getenv( "MADEIRA_AUDIO_PERIOD_MS" );
+        REFERENCE_TIME hns = 100000;
+        double ms = e && *e ? atof( e ) : 0;
+        if (ms >= 1 && ms <= 200) hns = (REFERENCE_TIME)(ms * 10000);
+        else {
+            const char *io = getenv( "MADEIRA_AUDIO_IO_US" );
+            long long us = io ? atoll( io ) : 0;
+            if (us > 0 && us * 20 > hns) hns = us * 20;
+        }
+        period = hns;
+        fprintf( stderr, "[audio] engine period %.2f ms (io slice %s us)\n", period / 10000.0,
+                 getenv( "MADEIRA_AUDIO_IO_US" ) ? getenv( "MADEIRA_AUDIO_IO_US" ) : "?" );
+    }
+    return period;
+}
+
 static NTSTATUS ios_get_device_period(void *args) {
     struct get_device_period_params *p = args;
-    if (p->def_period) *p->def_period = 100000; /* 10 ms in 100ns units */
-    if (p->min_period) *p->min_period = 50000;  /* 5 ms */
+    REFERENCE_TIME period = ios_engine_period();
+    if (p->def_period) *p->def_period = period;
+    if (p->min_period) *p->min_period = period > 100000 ? period : 50000;  /* 5 ms floor as before */
     p->result = S_OK;
     return STATUS_SUCCESS;
 }

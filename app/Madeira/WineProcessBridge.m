@@ -1026,11 +1026,29 @@ static void *wine_process_thread(void *arg) {
             if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
             aerr = nil;
+            /* A shared-mode client that keeps only one 10 ms engine period queued
+             * (IAudioClient3 low latency) loses audio when RemoteIO pulls a larger
+             * slice per callback (iOS's default is ~1024 frames, 21 ms): every
+             * callback empties the queue and plays silence for the rest. Ask for a
+             * 5 ms slice; the driver reports an engine period of at least two
+             * slices (MADEIRA_AUDIO_IO_US, audio_null_ios.c). MADEIRA_AUDIO_IO_MS
+             * sets the slice; 0 keeps the system's. */
+            {
+                const char *io = getenv("MADEIRA_AUDIO_IO_MS");
+                double ms = io && *io ? atof(io) : 5.0;
+                if (ms > 0 && ![session setPreferredIOBufferDuration:ms / 1000.0 error:&aerr])
+                    LOG("AVAudioSession setPreferredIOBufferDuration(%.1fms) failed: %{public}s",
+                        ms, aerr.localizedDescription.UTF8String);
+                aerr = nil;
+            }
             [session setActive:YES error:&aerr];
             if (aerr) LOG("AVAudioSession setActive failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
-            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms",
-                     session.sampleRate, session.outputLatency * 1000.0);
+            else LOG("AVAudioSession active: rate=%.0f latency=%.1fms io-buffer=%.2fms",
+                     session.sampleRate, session.outputLatency * 1000.0, session.IOBufferDuration * 1000.0);
+            char io_us[32];
+            snprintf(io_us, sizeof io_us, "%lld", (long long)(session.IOBufferDuration * 1e6));
+            setenv("MADEIRA_AUDIO_IO_US", io_us, 1);
         }
 
         /* 2026-07-04 BISECT RESULT: arm A (this env set, all handler fixes
