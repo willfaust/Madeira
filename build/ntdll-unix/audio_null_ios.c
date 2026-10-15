@@ -1115,6 +1115,40 @@ static NTSTATUS ios_get_endpoint_ids(void *args) {
     return STATUS_SUCCESS;
 }
 
+/* madeira-bcd: MADEIRA_AUDIO_SPATIAL=0 (opt-in) leaves Wine's spatial audio out.
+ * Horizon Forbidden West's Wwise renders its main mix through Wine's
+ * ISpatialAudioObjectRenderStream, a 7.1.4 bed of 12 channels, and delivered
+ * 23 % of the audio that stream needed (2.3 s in every 10 s, ml1230): robotic,
+ * broken sound, while its stereo stream ran at 100 %. Refusing the 12-channel
+ * stream (build 533) made Wwise give up on audio altogether. Before it creates
+ * an ISpatialAudioClient, mmdevapi (spatialaudio.c, SpatialAudioClient_Create)
+ * asks whether shared mode takes its object format, mono 32-bit float at
+ * 48 kHz, and fails the activation with whatever error comes back; the game
+ * then sees no spatial audio, as on Windows 7 or a PC with spatial sound off,
+ * and renders through a plain stream. This answers exactly that probe with
+ * AUDCLNT_E_UNSUPPORTED_FORMAT; everything else is accepted as before. */
+static int ios_audio_spatial_off(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        /* 0: no spatial audio (a game falls back to a plain stream); unset or 1: Wine's spatial audio, as before */
+        const char *e = getenv("MADEIRA_AUDIO_SPATIAL");
+        cached = (e && e[0] == '0' && !e[1]) ? 1 : 0;
+        if (cached)
+            fprintf(stderr, "[ios_audio] madeira-bcd MADEIRA_AUDIO_SPATIAL=0: spatial audio is left out (its mono-float probe is refused)\n");
+    }
+    return cached;
+}
+
+/* The format SpatialAudioClient_Create probes: shared render, WAVE_FORMAT_IEEE_FLOAT,
+ * one channel, 48 kHz, 32 bits. */
+static int ios_audio_is_spatial_probe(const struct is_format_supported_params *p)
+{
+    const struct WAVEFORMATEX_stub *f = p->fmt_in;
+    return p->flow == eRender && p->share == 0 && f && f->wFormatTag == 3 && f->nChannels == 1 &&
+           f->nSamplesPerSec == 48000 && f->wBitsPerSample == 32;
+}
+
 static NTSTATUS ios_create_stream(void *args) {
     LOG_FN_CALL(4, "create_stream");
     struct create_stream_params *p = args;
@@ -1537,7 +1571,15 @@ static NTSTATUS ios_release_capture_buffer(void *args) {
 static NTSTATUS ios_is_format_supported(void *args) {
     struct is_format_supported_params *p = args;
     LOG_FN_CALL(14, "is_format_supported");
-    /* Accept anything. */
+    /* Accept anything, except spatial audio's probe with MADEIRA_AUDIO_SPATIAL=0. */
+    if (ios_audio_spatial_off() && ios_audio_is_spatial_probe(p)) {
+        static int said;
+        if (said++ < 4)
+            fprintf(stderr, "[ios_audio] madeira-bcd refused spatial audio's mono-float probe (MADEIRA_AUDIO_SPATIAL=0): "
+                    "no ISpatialAudioClient\n");
+        p->result = (HRESULT)0x88890008L; /* AUDCLNT_E_UNSUPPORTED_FORMAT */
+        return STATUS_SUCCESS;
+    }
     p->result = S_OK;
     return STATUS_SUCCESS;
 }
