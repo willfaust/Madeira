@@ -1104,9 +1104,9 @@ static void madeira_steam_session_log( const UNICODE_STRING *image )
     name[n] = 0;
     if (!n) return;
     /* Helpers a game spawns (a shader compiler such as fxc.exe, installers,
-     * crash reporters) are not the game. */
+     * crash reporters such as Nixxes' crs-handler.exe) are not the game. */
     {
-        static const char * const helpers[] = { "fxc", "redist", "dxsetup", "crash", "setup", "install" };
+        static const char * const helpers[] = { "fxc", "redist", "dxsetup", "crash", "crs-handler", "setup", "install" };
         char lower[64];
         for (i = 0; i <= n; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
         for (i = 0; i < sizeof(helpers) / sizeof(helpers[0]); i++) if (strstr( lower, helpers[i] )) return;
