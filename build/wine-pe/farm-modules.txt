@@ -1,0 +1,10 @@
+# Stock Wine modules shipped in the ARM64EC farm for programs that import them (build-modules.sh's
+# default list reads this file). One line per group; names are wine/dlls directories.
+atl atl80 atl90 atl100 atl110 crtdll msvcirt msvcm80 msvcm90 msvcp60 msvcp70 msvcp71 msvcp80 msvcp90 msvcp100 msvcp120 msvcp120_app msvcp_win msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcr120_app msvcrt20 msvcrt40 vccorlib140 vcomp vcomp90 vcomp100 vcomp110 vcomp120 vcomp140
+d2d1 d3d8 d3d8thk ddraw ddrawex d3dim d3dim700 d3drm d3dx11_42 dxcore dxdiagn dxva2 glu32 dciman32 wing32 t2embed mscms
+xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7
+dmband dmcompos dmime dmloader dmscript dmstyle dmsynth dmusic dmusic32 dswave dsdmo hrtfapo msacm32.drv imaadp32.acm msadp32.acm msg711.acm msgsm32.acm l3codeca.acm midimap mciseq mciwave mcicda mp3dmod gameux gameinput xinputuap wintab32 ninput
+dplay dplayx dpnaddr dpnet dpnhpast dpnhupnp dpnlobby dpvoice dpwsockx httpapi websocket webservices icmp fwpuclnt rasapi32 sensapi netprofm qwave traffic
+apphelp faultrep wer profapi sxs fusion tdh tzres dbgeng sfc sfc_os srclient rstrtmgr shfolder shdocvw url hlink dispex scrrun vbscript jscript msxml msxml2 msxml4 msi oledlg olepro32 mapi32 iertutil uianimation directmanipulation coremessaging threadpoolwinrt twinapi.appcore cryptowinrt bcp47langs rometadata loadperf slc sppc winsta amsi magnification
+windows.applicationmodel windows.devices.enumeration windows.gaming.ui.gamebar windows.globalization windows.media windows.media.devices windows.media.mediacontrol windows.networking windows.networking.connectivity windows.networking.hostname windows.security.credentials.ui.userconsentverifier windows.storage windows.storage.applicationdata windows.system.profile.systemid windows.system.profile.systemmanufacturers windows.ui.core.textinput windows.perception.stub windows.graphics windows.web geolocation
+mspatcha odbccp32
