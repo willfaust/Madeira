@@ -51,15 +51,31 @@
 #include <strings.h>
 #include "../madeira_cfg.h"   /* before Wine's headers, which poison strncpy */
 
+#include <pthread.h>
+
+/* D3DKMT's Vulkan instance (get_d3dkmt_vulkan_instance, the file's only
+ * pthread_once) is NULL on a thread that is inside Vulkan's own set-up: that
+ * set-up loads the display driver, which lists Vulkan's GPUs through this
+ * instance, which would enter Vulkan's set-up again inside its pthread_once
+ * (vulkan_ios.c). Vulkan is off unless the session asks for it. */
+extern int madeira_vulkan_init_on_this_thread( void );
+static int madeira_d3dkmt_pthread_once( pthread_once_t *once, void (*init)(void) )
+{
+    if (madeira_vulkan_init_on_this_thread()) return 0;
+    return pthread_once( once, init );
+}
+
 #define NtGdiDdDDIOpenAdapterFromHdc            upstream_NtGdiDdDDIOpenAdapterFromHdc
 #define NtGdiDdDDIQueryAdapterInfo              upstream_NtGdiDdDDIQueryAdapterInfo
 #define NtGdiDdDDIQueryStatistics               upstream_NtGdiDdDDIQueryStatistics
 #define NtGdiDdDDIQueryVideoMemoryInfo          upstream_NtGdiDdDDIQueryVideoMemoryInfo
+#define pthread_once( once, init )              madeira_d3dkmt_pthread_once( once, init )
 #include "../../wine/dlls/win32u/d3dkmt.c"
 #undef NtGdiDdDDIOpenAdapterFromHdc
 #undef NtGdiDdDDIQueryAdapterInfo
 #undef NtGdiDdDDIQueryStatistics
 #undef NtGdiDdDDIQueryVideoMemoryInfo
+#undef pthread_once
 
 #include "madeira_kmt.h"
 

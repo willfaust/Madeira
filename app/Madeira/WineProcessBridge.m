@@ -631,6 +631,254 @@ static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSSt
     madeira_link_wbem(fm, prefix, @"syswow64", [bundle stringByAppendingPathComponent:@"i386-windows"]);
 }
 
+/* d3d9 = wined3d (madeira.cfg or the game's own lines; MADEIRA_D3D9=wined3d in
+ * the environment otherwise): this session's d3d9.dll is Wine's own frontend on
+ * wined3d's OpenGL renderer (opengl32 -> the winios WGL driver -> Zink on
+ * MoltenVK), not DXMT's. Unset, "emulated" and "native" keep DXMT's.
+ *
+ * The farms ship Wine's d3d9 as d3d9-wined3d.dll beside DXMT's d3d9.dll (ARM64EC
+ * for x64 programs, i386 for 32-bit ones). The links made for this session are
+ * re-pointed: system32\d3d9.dll when it names the ARM64EC DXMT file, sysx64\ and
+ * syswow64\d3d9.dll. Every session relinks the farms first, so the next session
+ * without the setting gets DXMT's again. No load-order override is needed: the
+ * iOS unix loader maps the PE file the link names (load_builtin in
+ * build/ntdll-unix/loader_ios.c returns STATUS_IMAGE_ALREADY_LOADED).
+ * wined3d.dll, d3d8.dll and ddraw.dll are Wine's in both farms already; d3d8 and
+ * ddraw always draw through wined3d. */
+static BOOL madeira_d3d9_wined3d_wanted(void)
+{
+    char v[32] = "";
+    const char *e;
+
+    if (madeira_cfg_get("d3d9", v, sizeof v) && v[0]) return !strcasecmp(v, "wined3d");
+    e = getenv("MADEIRA_D3D9");   /* the d3d9 key's value: emulated (default) or native = DXMT's i386 shim; wined3d = Wine's d3d9 on wined3d/OpenGL for 32- and 64-bit programs */
+    return e && !strcasecmp(e, "wined3d");
+}
+
+/* <dir>\d3d9.dll -> <farm>/d3d9-wined3d.dll. 1 linked, 0 link failed, -1 the farm has no such file. */
+static int madeira_link_d3d9_wined3d_in(NSFileManager *fm, NSString *dir, NSString *farm)
+{
+    NSString *src = [farm stringByAppendingPathComponent:@"d3d9-wined3d.dll"];
+    NSString *dst = [dir stringByAppendingPathComponent:@"d3d9.dll"];
+
+    if (access(src.fileSystemRepresentation, R_OK) != 0) return -1;
+    [fm removeItemAtPath:dst error:nil];
+    return [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil] ? 1 : 0;
+}
+
+static void madeira_link_d3d9_wined3d(NSFileManager *fm, NSString *prefix, NSString *bundle, BOOL has_i386_set)
+{
+    NSString *win = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSString *ec = [bundle stringByAppendingPathComponent:@"arm64ec-windows"];
+    NSString *sys32 = [win stringByAppendingPathComponent:@"system32"];
+    NSString *cur = [fm destinationOfSymbolicLinkAtPath:[sys32 stringByAppendingPathComponent:@"d3d9.dll"] error:nil];
+    const char *backend = getenv("MADEIRA_GL_BACKEND");
+    const char *extmax;
+    int s32 = -2, s64, s32wow = -2;
+
+    /* system32 holds the ARM64EC farm in an x64 session and, through the
+     * cross-link pass, in an ARM64 one whose farm has no d3d9.dll. */
+    if ([cur isEqualToString:[ec stringByAppendingPathComponent:@"d3d9.dll"]])
+        s32 = madeira_link_d3d9_wined3d_in(fm, sys32, ec);
+    s64 = madeira_link_d3d9_wined3d_in(fm, [win stringByAppendingPathComponent:@"sysx64"], ec);
+    if (has_i386_set)
+        s32wow = madeira_link_d3d9_wined3d_in(fm, [win stringByAppendingPathComponent:@"syswow64"],
+                                              [bundle stringByAppendingPathComponent:@"i386-windows"]);
+    setenv("MADEIRA_D3D9", "wined3d", 1);
+    /* wined3d asks for a context without a profile mask, gets a compatibility
+     * one and reads glGetString(GL_EXTENSIONS); the 3072-byte cut that 32-bit
+     * contexts get for engines that copy the string into a fixed buffer would
+     * hide extensions from it. overwrite=0: madeira.cfg can still set a limit. */
+    setenv("MADEIRA_GL_EXTENSIONS_MAX", "0", 0);
+    extmax = getenv("MADEIRA_GL_EXTENSIONS_MAX");   /* byte limit of GL_EXTENSIONS in 32-bit OpenGL contexts (opengl32, patches/wine-opengl-winios.patch): unset = 3072, 0 = none; d3d9 = wined3d makes it 0 unless set */
+    dprintf(STDERR_FILENO, "[WineProc] d3d9 = wined3d: Wine's d3d9 on wined3d/OpenGL (system32 %d, sysx64 %d, "
+            "syswow64 %d; 1 = linked, -1 = farm has no d3d9-wined3d.dll, -2 = not this session's), "
+            "MADEIRA_GL_BACKEND=%s, MADEIRA_GL_EXTENSIONS_MAX=%s\n", s32, s64, s32wow,
+            backend ? backend : "(unset)", extmax ? extmax : "(unset)");
+    if (!backend || strcmp(backend, "zink"))
+        dprintf(STDERR_FILENO, "[WineProc] d3d9 = wined3d needs desktop OpenGL (gl-backend = zink, the bundle's gl/ "
+                "folder); with OpenGL ES wined3d finds no usable context and Direct3DCreate9 returns NULL\n");
+}
+
+/* Vulkan, and vkd3d-proton as a second Direct3D 12 route (docs/BUILDING.md,
+ * "winevulkan and vkd3d-proton"). madeira.cfg, or the game's own lines:
+ *
+ *   vulkan = moltenvk | kosmickrisp | off | <path>.dylib
+ *            the Vulkan library winevulkan loads: gl/libMoltenVK.dylib (the one
+ *            Zink uses), gl/libvulkan_kosmickrisp.dylib, or a file named by path
+ *            (absolute, or relative to the app bundle). Unset: MoltenVK whenever
+ *            Vulkan is on.
+ *   d3d12  = vkd3d
+ *            this session's d3d12.dll and d3d12core.dll are vkd3d-proton's
+ *            (vulkan/arm64ec-windows in the bundle) instead of madeira-d3d12's.
+ *   d3d11  = dxvk
+ *            this session's d3d11.dll, d3d10core.dll and dxgi.dll are DXVK's
+ *            (vulkan/arm64ec-windows/dxvk-*.dll, build/dxvk/build.sh) instead of
+ *            DXMT's; docs/DXVK.md. DXVK's d3d11 needs its own dxgi, and DXMT's
+ *            dxgi is then gone, so Direct3D 12 must be vkd3d-proton (the usual
+ *            DXVK + vkd3d-proton pairing): with d3d12 unset this implies
+ *            d3d12 = vkd3d for the session.
+ *
+ * Vulkan is on for a session when `vulkan` names a library, d3d12 = vkd3d or
+ * d3d11 = dxvk.
+ * Off (the default) changes nothing: the prefix gets no vulkan-1.dll or
+ * winevulkan.dll (no farm holds them, so a program that probes for Vulkan
+ * finds none, as before), MADEIRA_VULKAN_LIBRARY stays unset, and win32u lists
+ * no Vulkan GPU (build/win32u-unix/vulkan_ios.c). On: MADEIRA_VULKAN_LIBRARY
+ * names the library and system32 (in an x64 session) and sysx64 get links to
+ * the ARM64EC vulkan-1.dll and winevulkan.dll; with d3d12 = vkd3d also to
+ * vkd3d-proton's d3d12.dll and d3d12core.dll, replacing the farm's links. Every
+ * session relinks the farms first, so the next session without the setting
+ * gets madeira-d3d12 again; the two Vulkan DLLs, which no farm relinks, are
+ * removed here when they name the bundle's vulkan folder. x64 programs only:
+ * the unix side binds no 32-bit table yet (build/ntdll-unix/virtual_ios.c). */
+static BOOL madeira_d3d11_dxvk_wanted(void)
+{
+    char v[32] = "";
+
+    return madeira_cfg_get("d3d11", v, sizeof v) && !strcasecmp(v, "dxvk");
+}
+
+/* d3d12 = vkd3d, or d3d12 unset with d3d11 = dxvk (DXVK's dxgi has no
+ * madeira-d3d12 swapchain; vkd3d-proton presents through it). */
+static BOOL madeira_d3d12_vkd3d_wanted(void)
+{
+    char v[32] = "";
+
+    if (madeira_cfg_get("d3d12", v, sizeof v) && v[0]) return !strcasecmp(v, "vkd3d");
+    return madeira_d3d11_dxvk_wanted();
+}
+
+/* The Vulkan library for this session, or nil when Vulkan stays off. */
+static NSString *madeira_vulkan_library(NSString *bundle)
+{
+    char v[512] = "";
+    BOOL set = madeira_cfg_get("vulkan", v, sizeof v) && v[0];
+
+    if (set && (!strcasecmp(v, "off") || !strcmp(v, "0"))) return nil;
+    if (!set && !madeira_d3d12_vkd3d_wanted() && !madeira_d3d11_dxvk_wanted()) return nil;
+    if (!set || !strcasecmp(v, "moltenvk"))
+        return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
+    if (!strcasecmp(v, "kosmickrisp"))
+        return [bundle stringByAppendingPathComponent:@"gl/libvulkan_kosmickrisp.dylib"];
+    if (strchr(v, '/'))
+        return v[0] == '/' ? [NSString stringWithUTF8String:v]
+                           : [bundle stringByAppendingPathComponent:[NSString stringWithUTF8String:v]];
+    dprintf(STDERR_FILENO, "[vulkan] unknown madeira.cfg vulkan = %s (moltenvk, kosmickrisp, off or a .dylib path); "
+            "using MoltenVK\n", v);
+    return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
+}
+
+/* <dir>\<name> -> <src>. 1 linked, 0 failed. */
+static int madeira_link_vulkan_file(NSFileManager *fm, NSString *dir, NSString *name, NSString *src)
+{
+    NSString *dst = [dir stringByAppendingPathComponent:name];
+
+    [fm removeItemAtPath:dst error:nil];
+    return [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil] ? 1 : 0;
+}
+
+static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *bundle, BOOL use_arm64ec)
+{
+    NSString *win = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSString *stack = [bundle stringByAppendingPathComponent:@"vulkan/arm64ec-windows"];
+    NSArray<NSString *> *vulkan_dlls = @[@"winevulkan.dll", @"vulkan-1.dll"];
+    NSArray<NSString *> *vkd3d_dlls = @[@"d3d12.dll", @"d3d12core.dll"];
+    /* Link names in the prefix; DXVK's files are dxvk-<name> in the vulkan folder. */
+    NSArray<NSString *> *dxvk_dlls = @[@"d3d11.dll", @"d3d10core.dll", @"dxgi.dll"];
+    NSArray<NSString *> *dirs = use_arm64ec ? @[@"system32", @"sysx64"] : @[@"sysx64"];
+    NSString *lib = madeira_vulkan_library(bundle);
+    BOOL vkd3d = madeira_d3d12_vkd3d_wanted();
+    BOOL dxvk = madeira_d3d11_dxvk_wanted();
+    int linked = 0, vkd3d_linked = 0, dxvk_linked = 0;
+
+    /* A previous session's Vulkan links (no farm pass replaces these two). */
+    for (NSString *dir in @[@"system32", @"sysx64"])
+        for (NSString *dll in vulkan_dlls) {
+            NSString *path = [[win stringByAppendingPathComponent:dir] stringByAppendingPathComponent:dll];
+            NSString *dest = [fm destinationOfSymbolicLinkAtPath:path error:nil];
+            if (dest && [dest rangeOfString:@"/vulkan/arm64ec-windows/"].location != NSNotFound)
+                [fm removeItemAtPath:path error:nil];
+        }
+
+    if (!lib) {
+        unsetenv("MADEIRA_VULKAN_LIBRARY");
+        if (vkd3d)
+            dprintf(STDERR_FILENO, "[vulkan] d3d12 = vkd3d with vulkan = off: madeira-d3d12 stays this session's D3D12\n");
+        if (dxvk)
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk with vulkan = off: DXMT stays this session's D3D10/11 and DXGI\n");
+        return;
+    }
+    if (access(lib.fileSystemRepresentation, R_OK) != 0 ||
+        access([stack stringByAppendingPathComponent:@"winevulkan.dll"].fileSystemRepresentation, R_OK) != 0 ||
+        access([stack stringByAppendingPathComponent:@"vulkan-1.dll"].fileSystemRepresentation, R_OK) != 0) {
+        unsetenv("MADEIRA_VULKAN_LIBRARY");
+        dprintf(STDERR_FILENO, "[vulkan] Vulkan stays off: %s or the bundle's vulkan/arm64ec-windows/{winevulkan,vulkan-1}.dll "
+                "is missing%s%s\n", lib.UTF8String, vkd3d ? " (d3d12 = vkd3d ignored: madeira-d3d12 stays)" : "",
+                dxvk ? " (d3d11 = dxvk ignored: DXMT stays)" : "");
+        return;
+    }
+    setenv("MADEIRA_VULKAN_LIBRARY", lib.UTF8String, 1);   /* read by build/win32u-unix/vulkan_ios.c */
+
+    for (NSString *dir in dirs)
+        for (NSString *dll in vulkan_dlls)
+            linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                               [stack stringByAppendingPathComponent:dll]);
+    if (vkd3d) {
+        if (access([stack stringByAppendingPathComponent:@"d3d12.dll"].fileSystemRepresentation, R_OK) == 0 &&
+            access([stack stringByAppendingPathComponent:@"d3d12core.dll"].fileSystemRepresentation, R_OK) == 0) {
+            for (NSString *dir in dirs)
+                for (NSString *dll in vkd3d_dlls)
+                    vkd3d_linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                                             [stack stringByAppendingPathComponent:dll]);
+        } else {
+            dprintf(STDERR_FILENO, "[vulkan] d3d12 = vkd3d, but the bundle has no vulkan/arm64ec-windows/d3d12.dll and "
+                    "d3d12core.dll (build/vkd3d-proton/build.sh): madeira-d3d12 stays\n");
+        }
+    }
+    if (dxvk) {
+        BOOL have = YES;
+
+        for (NSString *dll in dxvk_dlls)
+            if (access([stack stringByAppendingPathComponent:[@"dxvk-" stringByAppendingString:dll]].fileSystemRepresentation,
+                       R_OK) != 0)
+                have = NO;
+        if (have) {
+            const char *level;
+            char d3d12v[32] = "";
+            BOOL d3d12_set = madeira_cfg_get("d3d12", d3d12v, sizeof d3d12v) && d3d12v[0];
+
+            for (NSString *dir in dirs)
+                for (NSString *dll in dxvk_dlls)
+                    dxvk_linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,
+                                                            [stack stringByAppendingPathComponent:
+                                                                [@"dxvk-" stringByAppendingString:dll]]);
+            /* Under Wine DXVK logs through __wine_dbg_output (the session log),
+             * and writes no log file unless DXVK_LOG_PATH names a folder;
+             * overwrite=0 keeps a madeira.cfg env.DXVK_LOG_LEVEL. */
+            setenv("DXVK_LOG_LEVEL", "info", 0);
+            level = getenv("DXVK_LOG_LEVEL");   /* DXVK's log level (none, error, warn, info, debug, trace); d3d11 = dxvk makes it info unless set */
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk: DXVK's d3d11.dll, d3d10core.dll and dxgi.dll for this session "
+                    "(links %d in %s); D3D12 = %s%s; DXVK_LOG_LEVEL=%s\n", dxvk_linked,
+                    use_arm64ec ? "system32 + sysx64" : "sysx64", vkd3d_linked ? "vkd3d-proton" : "madeira-d3d12",
+                    vkd3d_linked && !d3d12_set ? " (d3d12 unset: d3d11 = dxvk implies d3d12 = vkd3d)" : "",
+                    level ? level : "(unset)");
+            if (!vkd3d_linked)
+                dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk without vkd3d-proton (d3d12 = %s): madeira-d3d12 cannot "
+                        "present through DXVK's dxgi, so Direct3D 12 programs get no swapchain this session\n",
+                        d3d12_set ? d3d12v : "vkd3d, DLLs missing");
+        } else {
+            dprintf(STDERR_FILENO, "[vulkan] d3d11 = dxvk, but the bundle has no vulkan/arm64ec-windows/dxvk-d3d11.dll, "
+                    "dxvk-d3d10core.dll and dxvk-dxgi.dll (build/dxvk/build.sh): DXMT stays\n");
+        }
+    }
+    dprintf(STDERR_FILENO, "[vulkan] on: MADEIRA_VULKAN_LIBRARY=%s; %d Vulkan DLL links in %s; D3D12 = %s (%d links); "
+            "D3D10/11 = %s (%d links)\n",
+            lib.UTF8String, linked, use_arm64ec ? "system32 + sysx64" : "sysx64",
+            vkd3d_linked ? "vkd3d-proton" : "madeira-d3d12", vkd3d_linked,
+            dxvk_linked ? "DXVK" : "DXMT", dxvk_linked);
+}
+
 /* ml1275: C:\windows\mono\mono-2.0 -> the bundle's Wine Mono, when the build
  * carries one (the "Bundle Wine Mono" build phase); otherwise the copy Madeira
  * downloaded from WineHQ (WineMono.swift, Library/Application Support/WineMono/
@@ -977,6 +1225,33 @@ static void *wine_process_thread(void *arg) {
          * audio+video driver names), and env_ios.c logs an [iOS env] INCLUDED line for it
          * so the next log proves it arrived rather than leaving us to infer it. */
         setenv("FNA3D_FORCE_DRIVER", "D3D11", 0);
+
+        /* OpenGL backend for the winios GL driver (build/win32u-unix/opengl_ios.c):
+         *   zink - desktop OpenGL 3.3-4.x: Mesa OSMesa + Zink on MoltenVK, from the
+         *          bundle's gl/ folder (build/mesa-ios, build/moltenvk-ios)
+         *   gles - Apple's OpenGL ES 3.0 (EAGL); desktop-GL-only apps fail
+         * madeira.cfg `gl-backend = zink|gles` chooses; otherwise zink when its
+         * dylibs are bundled. MADEIRA_GL_BACKEND in the environment wins over both.
+         * The driver falls back to gles by itself if Zink cannot start. */
+        {
+            NSString *glDir = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"gl"];
+            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:
+                                [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"]];
+            char glb[16] = "";
+            if (!madeira_cfg_get("gl-backend", glb, sizeof glb) || !glb[0])
+                strlcpy(glb, haveZink ? "zink" : "gles", sizeof glb);
+            setenv("MADEIRA_GL_BACKEND", glb, 0);
+            setenv("MADEIRA_GL_DIR", glDir.UTF8String, 1);
+            LOG("OpenGL backend: %{public}s (zink bundled: %d)", getenv("MADEIRA_GL_BACKEND"), haveZink);
+
+            /* With the GLES backend there is no desktop GL context, so make LOVE ask
+             * for OpenGL ES first. LOVE 11 checks this SDL hint (read from the
+             * environment) before trying desktop GL; SDL then creates the context
+             * through WGL_EXT_create_context_es2_profile, which that backend
+             * advertises. overwrite=0: an explicit setting still wins. */
+            if (!strcmp(getenv("MADEIRA_GL_BACKEND"), "gles"))
+                setenv("LOVE_GRAPHICS_USE_OPENGLES", "1", 0);
+        }
 
         /* ml720: make Mono report unhandled exceptions and assembly-load failures.
          *
@@ -1478,6 +1753,9 @@ static void *wine_process_thread(void *arg) {
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);
+            if (madeira_d3d9_wined3d_wanted())
+                madeira_link_d3d9_wined3d(fm, prefix, bundlePath, has_i386_set);
+            madeira_setup_vulkan(fm, prefix, bundlePath, use_arm64ec);
 
             /* ml719: REPAIR THE SHELL FOLDERS. They ship as symlinks to the BUILD
              * MACHINE's home directory.

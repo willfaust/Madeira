@@ -72,7 +72,7 @@ struct AllSettingsView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Every other option Madeira reads from madeira.cfg. JIT pool, video memory, the swap tier, the sync engine and eco mode are in Settings › Memory & sync. Most options are read when Madeira starts, so close it from the app switcher after a change. Default leaves the option out of the file. Swipe left on a row to reset it.")
+                    Text("Every other option Madeira reads from madeira.cfg. JIT pool, video memory, the swap tier, the sync engine and eco mode are in Settings › Memory & sync; the Direct3D 9/12 routes, the Vulkan driver and windowed mode in Settings › Graphics. Most options are read when Madeira starts, so close it from the app switcher after a change. Default leaves the option out of the file. Swipe left on a row to reset it.")
                         .font(.footnote).foregroundStyle(.secondary)
                     if changed {
                         Text("Restart Madeira (close it from the app switcher) for changes to apply.").font(.footnote).foregroundStyle(.orange)
@@ -184,7 +184,7 @@ struct ConfigOptionRow: View {
 }
 
 /// Settings search: the All settings options that match, editable in place.
-/// The options with a row of their own in Settings › Memory & sync are left out.
+/// The options with a row of their own in Settings › Memory & sync or Settings › Graphics are left out.
 struct SettingsSearchResults: View {
     let query: String
     /// Bumped when a Settings sheet closes, so the rows re-read madeira.cfg.

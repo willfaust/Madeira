@@ -58,6 +58,22 @@ Library/Application Support/WineMono, with the same mscorlib patch):
   wine-mono-11.0.0-src.tar.xz from https://dl.winehq.org/wine/wine-mono/11.0.0/
   (SHA-256 c504cb0b91ce09b72869e063844ce114564d4ac340479a82aa6789f51510e520).
 Dynamically loaded at runtime:
+- Mesa 25.0.7 OSMesa with the Zink and softpipe drivers (gl/libOSMesa.dylib,
+  built by build/mesa-ios/build.sh with the patches in build/mesa-ios/patches):
+  MIT and the other permissive licences listed in Mesa-license.rst (copied by
+  that script).
+- MoltenVK 1.4.2 (gl/libMoltenVK.dylib, built by build/moltenvk-ios/build.sh):
+  Apache-2.0 (MoltenVK-Apache-2.0.txt). It contains SPIRV-Cross
+  (SPIRV-Cross-Apache-2.0.txt), SPIRV-Tools (SPIRV-Tools-Apache-2.0.txt) and
+  cereal (cereal-BSD-3-Clause.txt); the script copies all four texts.
+- vkd3d-proton 750061ae2b (vulkan/arm64ec-windows/d3d12.dll, d3d12core.dll,
+  built by build/vkd3d-proton/build.sh with three patches from NutsEmu,
+  LGPL-2.1-or-later): LGPL-2.1-or-later (vkd3d-proton-LGPL-2.1.txt). It
+  contains dxil-spirv (dxil-spirv-MIT.txt) and dxbc-spirv (dxbc-spirv-MIT.txt).
+- DXVK v3.1.1 (vulkan/arm64ec-windows/dxvk-d3d11.dll, dxvk-d3d10core.dll,
+  dxvk-dxgi.dll, built by build/dxvk/build.sh with one Madeira patch; altered
+  from the original): zlib (DXVK-zlib.txt). It contains dxbc-spirv
+  (dxbc-spirv-MIT.txt) and libdisplay-info (libdisplay-info-MIT.txt).
 - Apple Metal Shader Converter dynamic library: Apple proprietary, under the
   agreement in d3d12/METAL-SHADER-CONVERTER-AGREEMENT.txt (section 2.B:
   distribution solely for shader conversion). Its headers: Apache-2.0

@@ -113,6 +113,22 @@ compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+# OpenGL: opengl32's unix side (wrappers + generated thunks). It dispatches to
+# win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c.
+compile_unixlib "$WINE_SRC/dlls/opengl32/unix_wgl.c" "opengl32_wgl" "opengl32" \
+    -I"$WINE_SRC/dlls/opengl32"
+compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "opengl32" \
+    -I"$WINE_SRC/dlls/opengl32"
+# Vulkan: winevulkan's unix side (instance/device wrappers + generated thunks).
+# It dispatches to win32u's Vulkan layer (build/win32u-unix/vulkan_ios.c), which
+# loads the session's Vulkan library (MADEIRA_VULKAN_LIBRARY; off by default).
+# Bound for 64-bit callers only (virtual_ios.c): the wow64 thunks pass 32-bit
+# guest pointers through UlongToPtr, without the window base a 32-bit program
+# here needs (ios_wow_host_ptr), like opengl32's before its regenerated thunks.
+compile_unixlib "$WINE_SRC/dlls/winevulkan/vulkan.c" "winevulkan_vulkan" "winevulkan" \
+    -I"$WINE_SRC/dlls/winevulkan"
+compile_unixlib "$WINE_SRC/dlls/winevulkan/vulkan_thunks.c" "winevulkan_thunks" "winevulkan" \
+    -I"$WINE_SRC/dlls/winevulkan"
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"
@@ -211,7 +227,8 @@ ar rcs "$OBJ_DIR/libntdll_unix.a" \
     "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \
     "$OBJ_DIR/bcrypt_unixlib.o" "$OBJ_DIR/secur32_unixlib.o" "$OBJ_DIR/crypt32_unixlib.o" \
-    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/dnsapi_unixlib.o" \
+    "$OBJ_DIR/dwrite_unixlib.o" "$OBJ_DIR/dnsapi_unixlib.o" "$OBJ_DIR/opengl32_wgl.o" "$OBJ_DIR/opengl32_thunks.o" \
+    "$OBJ_DIR/winevulkan_vulkan.o" "$OBJ_DIR/winevulkan_thunks.o" \
     "$OBJ_DIR/winegstreamer_unixlib.o" "$OBJ_DIR/wg_parser_apple_ios.o" \
     "$OBJ_DIR/cdrom.o" "$OBJ_DIR/debug.o" "$OBJ_DIR/env.o" "$OBJ_DIR/file.o" \
     "$OBJ_DIR/loader.o" "$OBJ_DIR/loadorder.o" "$OBJ_DIR/process.o" "$OBJ_DIR/registry.o" \

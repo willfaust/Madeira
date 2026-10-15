@@ -191,7 +191,7 @@ final class MetalBackedView: UIView {
     /// presented into it (before that it is the 800x600 seed or the last
     /// session's size, and Aspect would letterbox against the wrong shape).
     private func drawableAspect() -> CGSize {
-        guard madeira_get_present_count() != Self.presentCountAtLaunch else { return .zero }
+        guard madeira_frame_count() != Self.presentCountAtLaunch else { return .zero }
         let d = MetalHostView.shared.metalLayer.drawableSize
         return (d.width > 0 && d.height > 0) ? d : .zero
     }
@@ -2906,7 +2906,11 @@ struct ContentView: View {
             // d3d9-emulated.dll, DXMT's D3D9 frontend built for i386 and translated
             // by FEX like the program. "native" makes the shim bind its unix side
             // and run the frontend as native ARM64 code in libdxmt_combined.a.
-            // Only the i386 shim reads MADEIRA_D3D9; 64-bit programs are unaffected.
+            // Only the i386 shim reads those two; 64-bit programs are unaffected.
+            // "wined3d" replaces DXMT for 32- and 64-bit programs alike: Wine's own
+            // d3d9 (shipped as d3d9-wined3d.dll) on wined3d's OpenGL renderer, i.e.
+            // opengl32 and the winios WGL driver on Zink/MoltenVK (gl-backend = zink).
+            // WineProcessBridge.m re-points the session's d3d9.dll links to it.
             if let txt = MadeiraConfig.get("d3d9") {
                 let v = txt.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !v.isEmpty {
@@ -3305,7 +3309,7 @@ struct ContentView: View {
                 // loop actually observes so that can't happen silently again.
                 if now - lastHeartbeat > 30 {
                     lastHeartbeat = now
-                    logStore.log("detach-wait: presents=\(madeira_get_present_count()) running=\(wine_process_is_running()) elapsed=\(Int(now - pollStart))s")
+                    logStore.log("detach-wait: presents=\(madeira_frame_count()) running=\(wine_process_is_running()) elapsed=\(Int(now - pollStart))s")
                 }
                 // Task #25: the present heuristic is meaningless in desktop
                 // mode — ANY child presenting (cube, a game window) trips it
@@ -3314,7 +3318,7 @@ struct ContentView: View {
                 // attached until the desktop exits (or the safety cap).
                 let isDesktopSession = getenv("MADEIRA_DESKTOP").map { $0.pointee == 49 } ?? false
                 if !isDesktopSession {
-                    if presentingSince == nil && madeira_get_present_count() >= 1 {
+                    if presentingSince == nil && madeira_frame_count() >= 1 {
                         presentingSince = now
                         logStore.log("Game is presenting (#1, splash) — early detach in \(Int(settleAfterFirstPresent))s")
                     }

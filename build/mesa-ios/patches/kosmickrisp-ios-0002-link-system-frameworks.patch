@@ -1,0 +1,21 @@
+--- a/src/kosmickrisp/vulkan/meson.build
++++ b/src/kosmickrisp/vulkan/meson.build
+@@ -158,10 +158,17 @@
+ 
+ # Happens with macOS ld linker:
+ # "-Wl,-undefined,dynamic_lookup" required, otherwise, linker will complain about undefined symbols
++# The weak entrypoints are the only symbols meant to be looked up that way;
++# link the system libraries the bridge and WSI use so their symbols are bound
++# to their images (needed on iOS, where nothing else guarantees them).
++kk_link_args = [ld_args_build_id, '-Wl,-undefined,dynamic_lookup']
++if host_machine.system() == 'darwin'
++  kk_link_args += ['-framework', 'Foundation', '-framework', 'CoreGraphics', '-lobjc']
++endif
+ libvulkan_kosmickrisp = shared_library(
+   'vulkan_kosmickrisp',
+   link_whole: [libkk],
+-  link_args: [ld_args_build_id, '-Wl,-undefined,dynamic_lookup'],
++  link_args: kk_link_args,
+   gnu_symbol_visibility : 'hidden',
+   install : true,
+ )

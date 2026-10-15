@@ -1,0 +1,14 @@
+--- a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h	2026-09-26 15:49:05
++++ b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h	2026-09-26 15:49:05
+@@ -29,6 +29,11 @@
+ #include "d3d12/d3d12_public.h"
+ #endif
+ 
++/* Madeira: OSMesa links Zink (see 0002); declare its entry point here. */
++#ifdef GALLIUM_ZINK
++#include "zink/zink_public.h"
++#endif
++
+ static inline struct pipe_screen *
+ sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
+ {

@@ -1,0 +1,34 @@
+vkd3d-proton: the layered-API properties are not asked for
+
+From NutsEmu 0.0.1 build 1382, patches/vkd3d-proton/0002-no-layered-api-properties.patch
+(NutsEmu, Evan Bolton; first added 2026-10-05; LGPL-2.1-or-later like vkd3d-proton).
+Madeira copy: unchanged (2026-10-12).
+
+With VK_KHR_maintenance7 vkd3d-proton chains a layered-API list into its properties query,
+each entry with its own properties chain, only to name a layered driver's real one. Wine's
+winevulkan faulted converting that nested chain back (an access violation in the unix call
+of vkGetPhysicalDeviceProperties2), and a Vulkan-on-Metal driver is not layered.
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 9e2eb476..ea415bf7 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -1480,6 +1480,10 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
+         vk_prepend_struct(&info->features2, &info->maintenance_7_features);
+         vk_prepend_struct(&info->properties2, &info->maintenance_7_properties);
+ 
++#if 0
++        /* NutsEmu: not asked. Only to name a layered driver's real one; Wine's winevulkan
++         * crashed converting this nested chain (lists of properties with their own chains)
++         * on the way back, and KosmicKrisp isn't layered (test t12). */
+         layered_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_KHR;
+ 
+         /* assume a potentially single-layered implementation: at some point in the future it might be interesting to go deeper */
+@@ -1493,6 +1497,7 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
+ 
+         real_driver_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR;
+         vk_prepend_struct(&vk_layered_props.properties, &real_driver_props);
++#endif
+     }
+ 
+     if (vulkan_info->KHR_maintenance8)

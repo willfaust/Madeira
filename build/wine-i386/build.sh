@@ -21,10 +21,13 @@
 # missing.
 #
 # DXMT owns d3d11/dxgi/d3d10core/winemetal on i386 as on 64-bit: Wine's own
-# d3d11/dxgi/d3d10core are wined3d frontends and wined3d has no backend in this
-# port (no OpenGL, --without-vulkan), so those are never installed from Wine.
-# d3d9 is DXMT's too: its thin shim ships as d3d9.dll and forwards to the
+# d3d11/dxgi/d3d10core are wined3d frontends, so those are never installed from
+# Wine. d3d9 is DXMT's too: its thin shim ships as d3d9.dll and forwards to the
 # emulated frontend (d3d9-emulated.dll) unless madeira.cfg says d3d9 = native.
+# Wine's own d3d9 ships beside it as d3d9-wined3d.dll (wined3d's OpenGL
+# renderer on the patched opengl32, docs/BUILDING.md step 6); madeira.cfg
+# d3d9 = wined3d links it in for a session (WineProcessBridge.m).
+#   build/wine-i386/build.sh d3d9-wined3d    only that one
 set -euo pipefail
 
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -69,7 +72,7 @@ SKIP_REASON=(
   "aero.msstyles=7.4 MiB of theme data nothing in the prefix selects"
   "winedbg.exe=4.5 MiB debugger only the (unshown) crash dialog spawns; dbghelp.dll ships"
   "d3d11.dll|dxgi.dll|d3d10core.dll|winemetal.dll=DXMT-owned (installed below); Wine's are wined3d frontends with no backend here"
-  "d3d9.dll=DXMT-owned: the shim and the emulated frontend are installed below"
+  "d3d9.dll=DXMT-owned: the shim and the emulated frontend are installed below; Wine's goes in as d3d9-wined3d.dll"
 )
 SKIP=()
 for e in "${SKIP_REASON[@]}"; do IFS='|' read -r -a n <<< "${e%%=*}"; SKIP+=("${n[@]}"); done
@@ -86,6 +89,9 @@ while IFS= read -r t; do
     fi
     TARGETS+=("$t")
 done < <(grep -oE '^(dlls|programs)/[^/]+/i386-windows/[^/ :]+' "$B/Makefile" | grep -E "$EXT_RE" | sort -u)
+# Wine's d3d9, installed as d3d9-wined3d.dll below (d3d9.dll is the DXMT shim).
+D3D9_WINED3D=dlls/d3d9/i386-windows/d3d9.dll
+if [ $# -eq 0 ] || is_in d3d9-wined3d "$@"; then TARGETS+=("$D3D9_WINED3D"); fi
 [ ${#TARGETS[@]} -gt 0 ] || { echo "no i386 targets matched" >&2; exit 2; }
 echo "== ${#TARGETS[@]} i386 modules (skipped by policy: ${#SKIP[@]} names) =="
 
@@ -108,6 +114,7 @@ fi
 mkdir -p "$DEST"
 for t in "${TARGETS[@]}"; do
     b="$(basename "$t")"
+    [ "$t" = "$D3D9_WINED3D" ] && b=d3d9-wined3d.dll
     cp -f "$t" "$DEST/$b.tmp"
     case "$b" in *.tlb) ;; *) "$STRIP" --strip-debug "$DEST/$b.tmp" ;; esac
     mv -f "$DEST/$b.tmp" "$DEST/$b"

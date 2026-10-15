@@ -1,0 +1,130 @@
+DXVK: four features upstream requires become optional (Vulkan on Metal)
+
+Madeira, 2026-10-13, for DXVK v3.1.1 (b1a1c99ab5); zlib licence like DXVK.
+
+KosmicKrisp (Mesa 26.2.4) has no geometryShader, no fillModeNonSolid and no
+VK_EXT_depth_clip_enable; MoltenVK 1.4.2 has no geometry shaders, no
+VK_EXT_depth_clip_enable and no cull distances. Upstream refuses such a device
+("Device does not support required feature ..."), so the DXGI factory lists
+no adapter. With this patch the device is created, one warning per missing
+feature is logged, and:
+- geometryShader: D3D11 geometry shaders are not bound (BindShader drops
+  them, one warning); those draws run with the vertex/domain shader output.
+- fillModeNonSolid: wireframe rasterizer states draw solid.
+- VK_EXT_depth_clip_enable: depth clip is expressed through depthClampEnable
+  (Vulkan clips when depth clamp is off), in pipelines and pipeline libraries.
+- shaderCullDistance: not enabled; a shader that writes cull distances
+  fails to compile into a pipeline.
+Devices that have the features take the upstream paths unchanged.
+
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -767,6 +767,16 @@
+     if (!m_featuresEnabled.extDescriptorHeap.descriptorHeap && m_properties.core.properties.limits.maxPushConstantsSize < MaxTotalPushDataSize)
+       return str::format("Device does not support ", MaxTotalPushDataSize, " of push data");
+ 
++    // Madeira: features upstream requires, optional here (build/dxvk/patches/PATCHES.md).
++    if (!m_featuresEnabled.core.features.geometryShader)
++      Logger::warn("Madeira: no geometryShader: D3D11 geometry shaders are not bound, those draws run without them");
++    if (!m_featuresEnabled.core.features.fillModeNonSolid)
++      Logger::warn("Madeira: no fillModeNonSolid: wireframe rasterizer states draw solid");
++    if (!m_featuresEnabled.core.features.shaderCullDistance)
++      Logger::warn("Madeira: no shaderCullDistance: pipelines whose shaders write cull distances fail");
++    if (!m_featuresEnabled.extDepthClipEnable.depthClipEnable)
++      Logger::warn("Madeira: no VK_EXT_depth_clip_enable: depth clip off is emulated with depth clamp");
++
+     return std::nullopt;
+   }
+ 
+@@ -828,10 +838,10 @@
+       ENABLE_FEATURE(core.features, depthClamp, true),
+       ENABLE_FEATURE(core.features, drawIndirectFirstInstance, false),
+       ENABLE_FEATURE(core.features, dualSrcBlend, true),
+-      ENABLE_FEATURE(core.features, fillModeNonSolid, true),
++      ENABLE_FEATURE(core.features, fillModeNonSolid, false),   /* Madeira: optional, wireframe drawn solid */
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      ENABLE_FEATURE(core.features, geometryShader, false),     /* Madeira: optional, D3D11 GS not bound */
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, largePoints, false),
+@@ -844,7 +854,7 @@
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, true),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, false), /* Madeira: optional */
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, true),
+@@ -929,7 +939,7 @@
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, false), /* Madeira: optional, emulated with depth clamp */
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -586,10 +586,20 @@
+     rsInfo.polygonMode              = state.rs.polygonMode();
+     rsInfo.lineWidth                = 1.0f;
+ 
++    // Madeira: without fillModeNonSolid, wireframe is drawn solid.
++    if (!device->features().core.features.fillModeNonSolid)
++      rsInfo.polygonMode = VK_POLYGON_MODE_FILL;
++
+     // Set up depth clip state. Require depth clip support,
+     // this is *not* equivalent to disabling depth clamp.
+-    rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
+-    rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    // Madeira: without VK_EXT_depth_clip_enable, Vulkan clips exactly
++    // when depth clamp is off, the closest match to D3D's DepthClipEnable.
++    if (device->features().extDepthClipEnable.depthClipEnable) {
++      rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
++      rsDepthClipInfo.depthClipEnable = state.rs.depthClipEnable();
++    } else {
++      rsInfo.depthClampEnable = state.rs.depthClipEnable() ? VK_FALSE : VK_TRUE;
++    }
+ 
+     // Set up conservative rasterization if requested by the application.
+     if (state.rs.conservativeMode() != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) {
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -401,7 +401,10 @@
+     rsInfo.lineWidth          = 1.0f;
+ 
+     // Only use the fixed depth clip state if we can't make it dynamic
+-    if (!m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable) {
++    if (!m_device->features().extDepthClipEnable.depthClipEnable) {
++      // Madeira: no VK_EXT_depth_clip_enable: depth clip on = depth clamp off.
++      rsInfo.depthClampEnable = VK_FALSE;
++    } else if (!m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable) {
+       rsDepthClipInfo.pNext = std::exchange(rsInfo.pNext, &rsDepthClipInfo);
+       rsDepthClipInfo.depthClipEnable = VK_TRUE;
+     }
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -3583,6 +3583,19 @@
+   template<D3D11ShaderType ShaderStage>
+   void D3D11CommonContext<ContextType>::BindShader(
+     const D3D11CommonShader*    pShaderModule) {
++    // Madeira: a device without geometryShader (Vulkan on Metal) runs
++    // the draw without the application's geometry shader.
++    if constexpr (ShaderStage == D3D11ShaderType::eGeometry) {
++      if (pShaderModule && !m_device->features().core.features.geometryShader) {
++        static std::atomic<bool> s_warned = { false };
++
++        if (!s_warned.exchange(true))
++          Logger::warn("Madeira: device has no geometry shaders; D3D11 geometry shaders are not bound");
++
++        pShaderModule = nullptr;
++      }
++    }
++
+     uint64_t oldUavMask = m_state.lazy.bindingsUsed[ShaderStage].uavMask;
+ 
+     if (pShaderModule) {
