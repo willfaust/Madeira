@@ -394,12 +394,17 @@ static void sigtrap_handler(int sig, siginfo_t *info, void *context) {
 }
 
 void jit_install_trap_handler(void) {
-    // Only install if no debugger is attached.
-    // When StikDebug is attached, it handles BRK/SIGTRAP directly.
-    // Our handler would steal signals from the debugger and break the protocol.
+    /* madeira: install unconditionally.
+     *
+     * The original returned early when jit_check_debugged() was already true,
+     * to avoid stealing traps from StikDebug. But a debugger holds the Mach
+     * exception port, which gets first refusal; a BSD SIGTRAP handler only
+     * runs for traps the Mach layer declined. So this cannot pre-empt a
+     * debugger that is actually servicing the protocol -- and when one is
+     * attached but NOT servicing it (a generic JIT-enabler script), the early
+     * return left an unserviced BRK to kill the process. */
     if (jit_check_debugged()) {
-        jit_log("Debugger attached — skipping SIGTRAP handler (debugger handles BRK)");
-        return;
+        jit_log("Debugger attached — installing SIGTRAP handler anyway (fallback only)");
     }
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
