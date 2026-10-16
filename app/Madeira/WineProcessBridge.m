@@ -339,6 +339,29 @@ static char *g_prefix_path = NULL;
  * env.MADEIRA_CFG_EARLY_DOCS = 0 in madeira.cfg. Pure C, host-tested
  * (tests/host/check-cfg-early-docs.py). */
 static const char *g_madeira_docs_early = "not-run";
+/* madeira-env-locked: MADEIRA_ENV_LOCKED is a comma-separated list of names
+ * the host set on purpose. Without it a madeira.cfg line -- or a library
+ * game's own config -- could replace the program the front end was asked to
+ * launch, and the user taps one thing while another starts, with nothing on
+ * screen to say so. The match is on the whole name between commas, so a lock
+ * on MADEIRA_EXE does not also catch MADEIRA_EXEC_FOO. Nothing is locked
+ * unless a host asks for it. */
+static int madeira_env_is_locked(const char *name)
+{
+    const char *locked = getenv("MADEIRA_ENV_LOCKED");
+    if (!locked || !*locked || !name || !*name) return 0;
+    size_t n = strlen(name);
+    for (const char *p = locked; *p; ) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        const char *end = p;
+        while (end > start && end[-1] == ' ') end--;
+        if ((size_t)(end - start) == n && !strncmp(start, name, n)) return 1;
+    }
+    return 0;
+}
+
 static int madeira_cfg_off_word(const char *v)
 {
     return v && (!strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "no"));
@@ -1260,6 +1283,11 @@ static void *wine_process_thread(void *arg) {
                                 k.UTF8String, getenv(k.UTF8String), v.UTF8String);
                         continue;
                     }
+                    if (madeira_env_is_locked(k.UTF8String)) {
+                        fprintf(stderr, "[madeira-env] %s is set by the app; "
+                                "the config value is ignored\n", k.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
@@ -1280,6 +1308,11 @@ static void *wine_process_thread(void *arg) {
                     NSString *k = [[line substringWithRange:NSMakeRange(4, eq.location - 4)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     NSString *v = [[line substringFromIndex:eq.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                     if (!k.length) continue;
+                    if (madeira_env_is_locked(k.UTF8String)) {
+                        fprintf(stderr, "[madeira-env] %s is set by the app; "
+                                "the config value is ignored\n", k.UTF8String);
+                        continue;
+                    }
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("game config env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] game %s=%s\n", k.UTF8String, v.UTF8String);
