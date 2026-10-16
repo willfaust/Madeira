@@ -120,4 +120,11 @@ extern unsigned long madeira_early_intruder_base, madeira_early_intruder_size;  
 extern unsigned madeira_early_intruder_tag, madeira_early_intruder_prot;
 extern unsigned long madeira_early_pool_size;
 
+/* The same two facts, as functions. A C global `var` is shared mutable state
+ * under Swift 6 strict concurrency and cannot be read at all from Swift; these
+ * can. Both are written once by the constructor before main and are constant
+ * thereafter, so no synchronisation is implied or needed. */
+void madeira_early_pool_placeholder(unsigned long *base, unsigned long *size);
+void madeira_early_pool_intruder(unsigned long *base, unsigned long *size, unsigned *tag);
+
 #endif // JIT_ALLOCATOR_H

@@ -908,6 +908,20 @@ unsigned long madeira_early_pool_base, madeira_early_pool_size;
 unsigned long madeira_early_intruder_base, madeira_early_intruder_size;   /* ml1135 */
 unsigned madeira_early_intruder_tag, madeira_early_intruder_prot;
 
+/* Read-only views of the above, for callers that cannot take a mutable global.
+ * The values are written once by the constructor below, before main runs, and
+ * never change afterwards -- so this is an access-shape fix, not a lock. */
+void madeira_early_pool_placeholder(unsigned long *base, unsigned long *size) {
+    if (base) *base = madeira_early_pool_base;
+    if (size) *size = madeira_early_pool_size;
+}
+
+void madeira_early_pool_intruder(unsigned long *base, unsigned long *size, unsigned *tag) {
+    if (base) *base = madeira_early_intruder_base;
+    if (size) *size = madeira_early_intruder_size;
+    if (tag)  *tag  = madeira_early_intruder_tag;
+}
+
 __attribute__((constructor(101), used)) static void madeira_early_va_claim(void)
 {
     const vm_address_t win = 0x140000000ul, winsz = 0x8000000ul;       /* 128MB, see ml1037 */
