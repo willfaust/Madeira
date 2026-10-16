@@ -39,6 +39,12 @@
 // Each Wine "process" thread has its own jmpbuf so child processes can exit independently.
 _Thread_local jmp_buf wine_ios_exit_jmpbuf;
 _Thread_local volatile int wine_ios_exit_code = 0;
+
+/* Non-thread-local copy of the above, published when the Wine thread unwinds.
+ * Valid once wine_process_is_running() returns 0. */
+/* Not volatile: the atomics below provide the ordering, and volatile would
+ * only obscure that they are doing so. */
+static int g_wine_exit_code = 0;
 _Thread_local pthread_t wine_ios_main_thread;
 _Thread_local int wine_ios_exit_initialized = 0;
 
@@ -1810,6 +1816,13 @@ static void *wine_process_thread(void *arg) {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
         }
 
+        /* wine_ios_exit_code is _Thread_local, so copy it somewhere the app
+         * thread can read. RELEASE so a reader that sees g_wine_running == 0
+         * is guaranteed to see this value too -- volatile alone does not order
+         * these on arm64. */
+        __atomic_store_n(&g_wine_exit_code, (int)wine_ios_exit_code,
+                         __ATOMIC_RELEASE); /* madeira-exit-code */
+
         /* A launcher stub that starts the game and exits at once (GTA V
          * Enhanced: PlayGTAV.exe -> GTA5_Enhanced.exe) must not end the
          * session -- stopping the wineserver here killed the game while it
@@ -1945,6 +1958,10 @@ int wine_process_start(const char *prefix_path) {
 
 int wine_process_is_running(void) {
     return g_wine_running;
+}
+
+int wine_process_exit_code(void) {
+    return __atomic_load_n(&g_wine_exit_code, __ATOMIC_ACQUIRE);
 }
 
 int madeira_write_continue_flag(void) {

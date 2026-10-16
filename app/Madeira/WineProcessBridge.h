@@ -14,6 +14,10 @@ int wine_process_start(const char *prefix_path);
 // Check if Wine process is running
 int wine_process_is_running(void);
 
+/* How the last guest program ended. Only meaningful once
+ * wine_process_is_running() returns 0. */
+int wine_process_exit_code(void);
+
 // Session exit report (the library front end). ntdll calls
 // wine_launched_process_did_exit() when the program the app launched (the
 // session's initial process) exits; other processes are not reported.
