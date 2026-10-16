@@ -885,6 +885,56 @@ static void madeira_publish_host_probe(void)
     dprintf(STDERR_FILENO, "[WineProc] FEX host feature probe: %s\n", buf);
 }
 
+/* Decode Windows argument quoting before Wine rebuilds its command line from
+ * argv. Based on Wine's CommandLineToArgvW non-executable argument rules:
+ * backslashes escape quotes only when immediately followed by a quote.
+ * Never silently discard arguments or truncate the caller's command. */
+static int madeira_split_launch_args(const char *input, char *storage, size_t storage_capacity,
+                                     char **argv_out, size_t argv_capacity) {
+    const char *s = input ? input : "";
+    char *d = storage;
+    size_t length, argc = 0;
+    if (!storage || !storage_capacity || (!argv_out && argv_capacity)) return -1;
+    length = strnlen(s, storage_capacity);
+    if (length >= storage_capacity) return -1;
+    for (size_t i = 0; i < length; i++)
+        if ((unsigned char)s[i] < 32 && s[i] != '\t') return -1;
+    while (*s) {
+        unsigned int quotes = 0, backslashes = 0;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) break;
+        if (argc == argv_capacity) return -2;
+        argv_out[argc++] = d;
+        while (*s && !((*s == ' ' || *s == '\t') && !quotes)) {
+            if (*s == '\\') {
+                *d++ = *s++;
+                backslashes++;
+            } else if (*s == '"') {
+                if (!(backslashes & 1)) {
+                    d -= backslashes / 2;
+                    quotes++;
+                } else {
+                    d -= backslashes / 2 + 1;
+                    *d++ = '"';
+                }
+                s++;
+                backslashes = 0;
+                while (*s == '"') {
+                    if (++quotes == 3) { *d++ = '"'; quotes = 0; }
+                    s++;
+                }
+                if (quotes == 2) quotes = 0;
+            } else {
+                *d++ = *s++;
+                backslashes = 0;
+            }
+        }
+        if (quotes) return -1;
+        *d++ = 0;
+    }
+    return (int)argc;
+}
+
 static void *wine_process_thread(void *arg) {
     @autoreleasepool {
         /* Perf: the guest main thread runs ON this pthread. Promote to
@@ -1680,35 +1730,23 @@ static void *wine_process_thread(void *arg) {
             snprintf(exe_path, sizeof(exe_path), "C:\\windows\\system32\\%s", madeira_exe);
         }
 
-        // Optional MADEIRA_ARGS env var: args appended to argv, split in place.
-        // ml1163: double quotes group a token, so a game path such as
-        // "C:\Program Files\Game\game.exe" (a library game started in the Wine
-        // desktop hands explorer one) stays ONE argument. The quotes themselves are
-        // dropped: Wine re-quotes any argv entry with a space when it builds the
-        // command line. Up to 64 extra tokens (was 16, split on spaces only).
+        // Optional MADEIRA_ARGS: Windows command-line quoting (CommandLineToArgvW
+        // rules), at most 64 arguments in 4 KB. Malformed or oversized input
+        // fails the launch instead of silently dropping or splitting arguments.
         static char args_buf[4096];
         char *extra_argv[64] = {0};
-        int extra_argc = 0;
         const char *madeira_args = getenv("MADEIRA_ARGS");
-        if (madeira_args && *madeira_args) {
-            strncpy(args_buf, madeira_args, sizeof(args_buf) - 1);
-            args_buf[sizeof(args_buf) - 1] = 0;
-            char *r = args_buf, *w = args_buf;   /* w never passes r: tokens only shrink */
-            while (*r && extra_argc < 64) {
-                while (*r == ' ' || *r == '\t') r++;
-                if (!*r) break;
-                extra_argv[extra_argc++] = w;
-                int quoted = 0;
-                while (*r && (quoted || (*r != ' ' && *r != '\t'))) {
-                    if (*r == '"') { quoted = !quoted; r++; continue; }
-                    *w++ = *r++;
-                }
-                if (*r) r++;
-                *w++ = 0;
-            }
+        int extra_argc = madeira_split_launch_args(madeira_args, args_buf, sizeof(args_buf),
+                                                   extra_argv, sizeof(extra_argv) / sizeof(extra_argv[0]));
+        if (extra_argc < 0) {
+            dprintf(STDERR_FILENO, "[WineProc] launch rejected: invalid or oversized arguments (parser=%d)\n", extra_argc);
+            wine_launched_process_did_exit((int)0xc000000d); /* STATUS_INVALID_PARAMETER */
+            g_wine_running = 0;
+            wineserver_stop();
+            return NULL;
         }
 
-        char *argv[72];
+        char *argv[67]; /* wine + executable + 64 arguments + NULL */
         int argc = 0;
         argv[argc++] = "wine";
         argv[argc++] = exe_path;

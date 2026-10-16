@@ -582,7 +582,7 @@ struct LibraryEntry: Codable, Identifiable {
         }
         let command = desktop == true ? (exe: "explorer.exe", args: launchArguments) : launchCommand
         setenv("MADEIRA_EXE", command.exe, 1)
-        setenv("MADEIRA_ARGS", command.args, 1)
+        setenv("MADEIRA_ARGS", LaunchArgumentText.plain(command.args), 1)
         if desktop == true || runsInDesktop { setenv("MADEIRA_DESKTOP", "1", 1) } else { unsetenv("MADEIRA_DESKTOP") }
         if startsSteamGameDirectly, let steamAppID {
             // The game's own Steam identity (SteamAppId, SteamGameId, SteamAppPath = its install
@@ -3102,9 +3102,9 @@ struct LibraryDetail: View {
                 // A Steam game starts with Steam's own launch option through Madeira Dock.
                 if entry.desktop != true && entry.steamAppID == nil {
                     Section {
-                        TextField("Launch arguments", text: $entry.arguments, axis: .vertical)
+                        TextField("Launch arguments", text: $entry.arguments.plainLaunchArguments, axis: .vertical)
                             .font(.body.monospaced()).lineLimit(1...4)
-                            .autocorrectionDisabled().textInputAutocapitalization(.never)
+                            .autocorrectionDisabled().textInputAutocapitalization(.never).smartPunctuationOff()
                         LaunchFlagChips(arguments: $entry.arguments)
                         // What the next start runs (ml1163: in the Wine desktop, a batch file or
                         // the services batch, what starts the program).
@@ -3112,6 +3112,18 @@ struct LibraryDetail: View {
                             .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                     } header: { Text("Launch arguments") } footer: {
                         Text("Passed to the program on every start; the line above is the command that runs. The flags add or remove themselves; the renderer flags exclude each other, as do -windowed and -fullscreen.")
+                    }
+                }
+                // A Steam game: Madeira Dock hands these to Steam, which appends them to the
+                // game's own launch option (as Steam's per-game launch options do on a PC).
+                if entry.desktop != true && entry.steamAppID != nil {
+                    Section {
+                        TextField("Launch arguments", text: $entry.arguments.plainLaunchArguments, axis: .vertical)
+                            .font(.body.monospaced()).lineLimit(1...4)
+                            .autocorrectionDisabled().textInputAutocapitalization(.never).smartPunctuationOff()
+                        LaunchFlagChips(arguments: $entry.arguments)
+                    } header: { Text("Launch arguments") } footer: {
+                        Text("Steam adds these to the game's launch option on every start. At most 64 arguments in 4 KB, with balanced double quotes.")
                     }
                 }
                 Section {
@@ -4491,5 +4503,67 @@ enum EndedSessionSurface {
         hiddenByUs = false
         _ = winios_compositor_set_hidden(0)
         LogStore.shared.log("[library-surface] desktop shown for the new session")
+    }
+}
+
+// MARK: - Launch arguments are command lines, not prose
+
+/// iOS Smart Punctuation turns `--` into an em dash and straight quotes into
+/// curly ones, which breaks flags such as `--rendering-driver opengl3` and
+/// quoted paths.
+enum LaunchArgumentText {
+    static func plain(_ s: String) -> String {
+        var out = s
+        for (from, to) in [("\u{2014}", "--"), ("\u{2013}", "--"), ("\u{2212}", "-"),
+                           ("\u{201C}", "\""), ("\u{201D}", "\""), ("\u{201E}", "\""),
+                           ("\u{2018}", "'"), ("\u{2019}", "'")] {
+            out = out.replacingOccurrences(of: from, with: to)
+        }
+        return out
+    }
+}
+
+extension Binding where Value == String {
+    var plainLaunchArguments: Binding<String> {
+        Binding(get: { LaunchArgumentText.plain(wrappedValue) },
+                set: { wrappedValue = LaunchArgumentText.plain($0) })
+    }
+}
+
+/// Finds the UIKit text view behind a SwiftUI TextField and turns off smart
+/// dashes and quotes on it (SwiftUI has no modifier for these traits).
+private struct SmartPunctuationOff: UIViewRepresentable {
+    final class Probe: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+        func apply() {
+            var node: UIView? = superview
+            for _ in 0..<4 {
+                guard let n = node else { break }
+                if Self.disable(in: n) { return }
+                node = n.superview
+            }
+        }
+        static func disable(in view: UIView) -> Bool {
+            if let t = view as? UITextView {
+                t.smartDashesType = .no; t.smartQuotesType = .no; t.smartInsertDeleteType = .no
+                return true
+            }
+            if let t = view as? UITextField {
+                t.smartDashesType = .no; t.smartQuotesType = .no; t.smartInsertDeleteType = .no
+                return true
+            }
+            return view.subviews.contains { disable(in: $0) }
+        }
+    }
+    func makeUIView(context: Context) -> Probe { let p = Probe(); p.isUserInteractionEnabled = false; return p }
+    func updateUIView(_ uiView: Probe, context: Context) { DispatchQueue.main.async { uiView.apply() } }
+}
+
+extension View {
+    func smartPunctuationOff() -> some View {
+        background(SmartPunctuationOff().frame(width: 0, height: 0))
     }
 }
