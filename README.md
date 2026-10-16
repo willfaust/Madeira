@@ -35,6 +35,9 @@ Wine's server runs as a thread instead of a separate program.
 - **Game library** with artwork, search and a Windows desktop session.
 - **Steam**: sign in, browse the games you own, install and update them, and
   start them through Valve's own Windows Steam client (Madeira Dock).
+- **Epic Games**: sign in, browse the games you own, and install and start
+  them directly, without Epic's launcher. The installer is a Swift port of
+  [Legendary](https://github.com/derrod/legendary).
 - **Steam Cloud saves**: saves sync with Steam Cloud when Madeira starts and
   before a game starts, and **Upload saves and close Madeira** in the game
   menu sends them when you stop playing. Saves that
@@ -106,6 +109,7 @@ and some inputs that are not in the repository, such as the toolchains.
 | StikDebug and built-in JIT setup | [`docs/JIT.md`](docs/JIT.md) |
 | The game library | [`docs/LIBRARY.md`](docs/LIBRARY.md) |
 | Steam sign-in, library and downloads | [`docs/STEAM_SIGNIN.md`](docs/STEAM_SIGNIN.md), [`docs/STEAM_LIBRARY.md`](docs/STEAM_LIBRARY.md) |
+| Epic Games sign-in, library and installs | [`docs/EPIC.md`](docs/EPIC.md) |
 | Steam Cloud saves | [`docs/STEAM_CLOUD.md`](docs/STEAM_CLOUD.md) |
 | Madeira Dock (the Steam client) | [`docs/MADEIRA_DOCK.md`](docs/MADEIRA_DOCK.md) |
 | 32-bit games (WoW64) | [`docs/WOW64.md`](docs/WOW64.md) |
