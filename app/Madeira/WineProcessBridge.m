@@ -500,6 +500,9 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
  * target take exactly the code path they took before.
  * ========================================================================= */
 #define MADEIRA_IMAGE_FILE_MACHINE_I386 0x014c
+#define MADEIRA_IMAGE_FILE_MACHINE_AMD64 0x8664
+#define MADEIRA_IMAGE_FILE_MACHINE_ARM64 0xaa64
+#define MADEIRA_IMAGE_FILE_MACHINE_ARM64EC 0xa641
 
 /* build/ntdll-unix/virtual_ios.c: nonzero when this session's MAIN image is
  * 32-bit. The unix side reserves the process's guest window before its first
@@ -532,8 +535,7 @@ static uint16_t madeira_pe_machine(const char *unix_path)
  * known (the caller then treats the target as 64-bit, as before).
  *  - "C:\...\app.exe": the file under the prefix's drive_c.
  *  - a bare name: the launch resolves it as C:\windows\system32\<name>, which
- *    links the 64-bit farms, so a name present in a 64-bit farm is not probed
- *    any further. Otherwise it is looked up in the bundle's i386-windows. To
+ *    links the 64-bit farms; the first farm copy's PE header is probed. Otherwise it is looked up in the bundle's i386-windows. To
  *    launch the 32-bit build of a name both sets carry (explorer.exe, cmd.exe),
  *    give its full path, C:\windows\syswow64\<name>.
  *  - any other form (another drive, a relative Win32 path) is not probed. */
@@ -556,14 +558,30 @@ static uint16_t madeira_target_machine(const char *exe, const char *prefix, NSSt
     {
         for (size_t i = 0; i < sizeof(farms64) / sizeof(farms64[0]); i++)
         {
-            snprintf(probe, sizeof(probe), "%s/%s/%s", bundle.fileSystemRepresentation, farms64[i], exe);
-            if (access(probe, R_OK) == 0) return 0;
+            if (snprintf(probe, sizeof(probe), "%s/%s/%s", bundle.fileSystemRepresentation, farms64[i], exe)
+                    >= (int)sizeof(probe))
+                return 0;
+            if (access(probe, R_OK) == 0) return madeira_pe_machine(probe);
         }
         if (snprintf(probe, sizeof(probe), "%s/i386-windows/%s", bundle.fileSystemRepresentation, exe)
                 >= (int)sizeof(probe))
             return 0;
     }
     return madeira_pe_machine(probe);
+}
+
+/* Select the core by the executable's machine, not its spelling. The explicit
+ * force switch stays available; the i386 (WoW64) rule still takes precedence.
+ * Unknown or unreadable targets keep the original name/path heuristic. */
+static BOOL madeira_use_arm64ec_for_target(const char *exe, const char *force_ec,
+                                           uint16_t machine, BOOL has_i386_set)
+{
+    if (has_i386_set && machine == MADEIRA_IMAGE_FILE_MACHINE_I386) return NO;
+    if (force_ec && *force_ec == '1') return YES;
+    if (machine == MADEIRA_IMAGE_FILE_MACHINE_AMD64 || machine == MADEIRA_IMAGE_FILE_MACHINE_ARM64EC)
+        return YES;
+    if (machine == MADEIRA_IMAGE_FILE_MACHINE_ARM64) return NO;
+    return strstr(exe, "x64") != NULL || strchr(exe, '\\') != NULL;
 }
 
 /* The bundle carries the i386 Wine set. */
@@ -1354,9 +1372,6 @@ static void *wine_process_thread(void *arg) {
         // Otherwise: detect "x64" in the exe name (cube-x64, fib-x64, etc.)
         // OR a Win32 full path (real game launches typically need ARM64EC).
         const char *force_ec = getenv("MADEIRA_USE_ARM64EC");
-        BOOL use_arm64ec = (force_ec && *force_ec == '1') ||
-                           (strstr(madeira_exe, "x64") != NULL) ||
-                           (strchr(madeira_exe, '\\') != NULL);
 
         /* WoW64: a 32-bit (i386) target, from the PE header on disk rather
          * than the name. Its 64-bit half runs on the plain aarch64 core (the
@@ -1370,7 +1385,11 @@ static void *wine_process_thread(void *arg) {
         dprintf(STDERR_FILENO, "[WineProc] PE probe: machine=0x%x%s\n", target_machine,
                 is_i386_target ? " (i386: WoW64)" :
                 target_machine == MADEIRA_IMAGE_FILE_MACHINE_I386 ? " (i386, but the bundle has no i386-windows)" : "");
-        if (is_i386_target) use_arm64ec = NO;
+        const BOOL use_arm64ec = madeira_use_arm64ec_for_target(madeira_exe, force_ec,
+                                                               target_machine, has_i386_set);
+        dprintf(STDERR_FILENO, "[WineProc] PE routing: machine=0x%04x bundle=%s i386-set=%d force-ec=%d\n",
+                target_machine, use_arm64ec ? "arm64ec-windows" : "aarch64-windows",
+                has_i386_set, force_ec && *force_ec == '1');
         const char *bundle_subdir = use_arm64ec ? "arm64ec-windows" : "aarch64-windows";
         LOG("Target exe: %{public}s (bundle=%{public}s)", madeira_exe, bundle_subdir);
         dprintf(STDERR_FILENO, "[WineProc] Target exe: %s (bundle=%s)\n", madeira_exe, bundle_subdir);
