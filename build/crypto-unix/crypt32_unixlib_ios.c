@@ -867,30 +867,25 @@ static void ios_load_roots_locked(void)
     ios_roots_loaded = TRUE;
 }
 
+/* madeira-root-cursor: walk the list, do not consume it.
+ *
+ * This used to hand back the head of root_cert_list and then list_remove and
+ * free it. The list is process-global and loaded once, so the first guest
+ * process to enumerate roots took all of them and every later process got
+ * STATUS_NO_MORE_ENTRIES on its first call -- which crypt32 reads as "the host
+ * has no roots" rather than "ask again", and removes them from the shared
+ * store. Every chain afterwards is CERT_TRUST_IS_PARTIAL_CHAIN.
+ *
+ * ios_enum_root_certs_wow() below already does this correctly, with a
+ * per-thread cursor and an idle reset; it was written that way because the
+ * WoW64 caller re-asks for the same certificate after growing its buffer. The
+ * 64-bit caller happens to size its buffer right first time, which is why the
+ * destructive version survived until something ran two guest processes. */
+static NTSTATUS ios_enum_root_certs_wow( struct enum_root_certs_params *params );
+
 static NTSTATUS enum_root_certs( void *args )
 {
-    struct enum_root_certs_params *params = args;
-    struct list *ptr;
-    struct root_cert *cert;
-    NTSTATUS status = STATUS_SUCCESS;
-
-    pthread_mutex_lock( &ios_root_lock );
-    ios_load_roots_locked();
-
-    if (!(ptr = list_head( &root_cert_list ))) status = STATUS_NO_MORE_ENTRIES;
-    else
-    {
-        cert = LIST_ENTRY( ptr, struct root_cert, entry );
-        *params->needed = cert->size;
-        if (cert->size <= params->size)
-        {
-            memcpy( params->buffer, cert->data, cert->size );
-            list_remove( &cert->entry );
-            free( cert );
-        }
-    }
-    pthread_mutex_unlock( &ios_root_lock );
-    return status;
+    return ios_enum_root_certs_wow( args );
 }
 
 /* The WoW64 enumeration: each thread keeps its own position; the rootstore
