@@ -4738,6 +4738,23 @@ void process_exit_wrapper( int status )
     }
     else
     {
+        /* madeira-orphan-exit: "no slot" is not proof of being the session.
+         * A thread of a child process that has already exited also has no
+         * slot -- its slot was cleared when the process went -- and on iOS
+         * such a thread is still running, because a pthread cannot be stopped
+         * from outside. Treating it as the session closed the session's
+         * master socket and ended every program in it. Compare the caller's
+         * PEB with the session's own; anything else exits only itself. */
+        extern void *ios_session_peb_get( void );
+        void *caller = ios_jit_current_peb();
+        void *session = ios_session_peb_get();
+        if (caller && session && caller != session)
+        {
+            wine_log_write( "[Wine ntdll/server] process_exit_wrapper(%d): orphaned thread "
+                            "of an exited process (peb=%p); exiting this thread only",
+                            status, caller );
+            pthread_exit( NULL );
+        }
         /* No slot: this is the session's initial process, the program the app
          * itself handed to __wine_main (WineProcessBridge.m). Its exit status
          * is how the app's library tells a crash from a normal quit. A weak

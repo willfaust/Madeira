@@ -9792,6 +9792,10 @@ int ios_main_image_i386 = 0;
  * it back to something that still exists — see ios_wow_window_teardown(). */
 static PEB *ios_session_peb;
 
+/* madeira-orphan-exit: read-only access for process_exit_wrapper, which has
+ * to tell the session's own exit from an orphaned thread's. */
+void *ios_session_peb_get(void) { return ios_session_peb; }
+
 /* OVERRUN GUARD PAGE.
  *
  * FEX adds a raw immediate offset AFTER the base for ldp/stp and the
