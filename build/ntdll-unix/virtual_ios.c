@@ -6730,6 +6730,28 @@ int ios_image_section_describe( unsigned long long va, char *buf, size_t len, un
     return 0;
 }
 
+/* alloc_tls_slot runs in PE-side ntdll after the image's JIT-pool snapshot was
+ * made. Its write to AddressOfIndex otherwise leaves native ARM64EC code
+ * reading the image's initial zero index from the pool copy. That selects
+ * TLS[0] instead of this DLL's slot, so a thread_local pointer can become
+ * arbitrary bytes from the main EXE's TLS template. Keep the Unix call narrow:
+ * it copies only the loader's four-byte index, and verifies the executable
+ * copy before the newly loaded DLL is allowed to run. */
+NTSTATUS unixcall_ios_sync_pe_write(void *args)
+{
+    struct ios_sync_pe_write_params *p = args;
+    void *copy;
+
+    if (!p || !p->address || p->size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
+    p->synced = 0;
+    copy = ios_jit_translate_addr(p->address);
+    if (copy == p->address) return STATUS_SUCCESS; /* image not copied yet */
+    ios_jit_sync_write(p->address, p->size);
+    if (memcmp(copy, p->address, p->size)) return STATUS_UNSUCCESSFUL;
+    p->synced = 1;
+    return STATUS_SUCCESS;
+}
+
 /***********************************************************************
  *           ios_jit_patch_x18  (x18 → TPIDR_EL0 binary patcher)
  *

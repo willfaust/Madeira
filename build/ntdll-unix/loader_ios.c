@@ -1399,6 +1399,7 @@ extern NTSTATUS unixcall_ios_register_hold_release(void *args);  /* ml618, virtu
 extern NTSTATUS unixcall_ios_jit_alias_probe(void *args);        /* ml631, virtual_ios.c */
 extern NTSTATUS unixcall_ios_mono_bridge_ptr(void *args);        /* ml648, virtual_ios.c */
 extern NTSTATUS unixcall_ios_get_fex_arena(void *args);          /* ml800, virtual_ios.c */
+extern NTSTATUS unixcall_ios_sync_pe_write(void *args);          /* loader TLS index, virtual_ios.c */
 
 static NTSTATUS ios_wrap_0(void *a) { return ios_wrap_unix_call(0, a, load_so_dll); }
 static NTSTATUS ios_wrap_1(void *a) { return ios_wrap_unix_call(1, a, unwind_builtin_dll); }
@@ -1504,6 +1505,7 @@ static NTSTATUS ios_wrap_9(void *a) { return ios_wrap_unix_call(9, a, unixcall_i
 static NTSTATUS ios_wrap_10(void *a) { return ios_wrap_unix_call(10, a, unixcall_ios_jit_alias_probe); }
 static NTSTATUS ios_wrap_11(void *a) { return ios_wrap_unix_call(11, a, unixcall_ios_mono_bridge_ptr); }
 static NTSTATUS ios_wrap_12(void *a) { return ios_wrap_unix_call(12, a, unixcall_ios_get_fex_arena); }
+static NTSTATUS ios_wrap_13(void *a) { return ios_wrap_unix_call(13, a, unixcall_ios_sync_pe_write); }
 
 static const unixlib_entry_t unix_call_funcs[] =
 {
@@ -1511,6 +1513,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     ios_wrap_4, ios_wrap_5, ios_wrap_6, ios_wrap_7,
     ios_wrap_8, ios_wrap_9, ios_wrap_10, ios_wrap_11,   /* ml648 */
     ios_wrap_12,                                        /* ml800 */
+    ios_wrap_13,                                        /* loader TLS index */
 };
 #else
 static const unixlib_entry_t unix_call_funcs[] =
@@ -1528,6 +1531,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_ios_jit_alias_probe,
     unixcall_ios_mono_bridge_ptr,   /* ml648 */
     unixcall_ios_get_fex_arena,     /* ml800 */
+    unixcall_ios_sync_pe_write,     /* loader TLS index */
 };
 #endif
 
@@ -1561,6 +1565,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_ios_unsupported,               /* ml631 ios_jit_alias_probe */
     wow64_ios_unsupported,               /* ml648 ios_mono_bridge_ptr */
     wow64_ios_unsupported,               /* ml800 ios_get_fex_arena */
+    wow64_ios_unsupported,               /* ios_sync_pe_write */
 };
 
 #endif  /* _WIN64 */
