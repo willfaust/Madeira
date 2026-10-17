@@ -187,7 +187,9 @@ final class SteamOwnedLibrary: ObservableObject {
     static var enabled: Bool { MadeiraDock.enabled && SteamSignIn.flag("MADEIRA_STEAM_LIBRARY", default: true) }
 
     @Published private(set) var signedIn = false
-    @Published private(set) var owned: [SteamOwnedGame] = []
+    @Published private(set) var owned: [SteamOwnedGame] = [] { didSet { ownedRevision &+= 1 } }
+    /// Changes with every write to `owned`, so a reader can keep what it derived from the records.
+    private(set) var ownedRevision = 0
     @Published private(set) var refreshing = false
     @Published private(set) var libraryUpdated: Date?
     /// Steam's playtime and last played, by App ID.

@@ -365,6 +365,18 @@ enum SteamDirectStart {
     private var rescan = false
     private var lastCount = -1
 
+    /// The last scan's result, kept so the next launch's first page already has the installed games (their pills, sizes
+    /// and update badges) and the scan only confirms it.
+    private struct Snapshot: Codable { var games: [DockGame]; var builds: [Int: Int] }
+    private static let snapshotKey = "madeiraSteamInstalledSnapshot.v1"
+
+    private init() {
+        guard LibraryGridArm.enabled, MadeiraDock.enabled,
+              let data = UserDefaults.standard.data(forKey: Self.snapshotKey),
+              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
+        games = snapshot.games; builds = snapshot.builds; lastCount = snapshot.games.count
+    }
+
     /// Reads the install records again, off the main thread.
     func refresh() {
         guard MadeiraDock.enabled else { return }
@@ -386,6 +398,13 @@ enum SteamDirectStart {
                 self.rescan = false
                 if self.games != found { self.games = found }
                 if self.builds != recorded { self.builds = recorded }
+                if LibraryGridArm.enabled {
+                    let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+                    if let data = try? encoder.encode(Snapshot(games: found, builds: recorded)),
+                       data != UserDefaults.standard.data(forKey: Self.snapshotKey) {
+                        UserDefaults.standard.set(data, forKey: Self.snapshotKey)
+                    }
+                }
                 if found.count != self.lastCount {
                     self.lastCount = found.count
                     LogStore.shared.log("[steam-games] installed=\(found.count) ready=\(found.filter(\.installed).count)")
@@ -679,7 +698,7 @@ private func formatBytes(_ bytes: Int64) -> String {
     ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .file)
 }
 
-private extension SteamOwnedLibrary.Download {
+extension SteamOwnedLibrary.Download {
     var transfer: SteamGamesRules.Transfer {
         switch state {
         case .queued: return .queued

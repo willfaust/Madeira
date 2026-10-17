@@ -280,12 +280,15 @@ assert 'return inSteam ? rdr2Steam : rdr2Other' in match
 assert 'guard fileExists(folder + "\\\\GTA5_Enhanced.exe") else { return nil }' in match and 'default:\n            return nil' in match
 
 # Where the app applies them.
-save = block(library, '    func save(_ entry: LibraryEntry) {', '\n    }\n')
+save = block(library, '    func save(_ entry: LibraryEntry, metadata: Bool = false) {', '\n    }\n')
 assert save.index('let isNew = !next.contains { $0.id == entry.id || (entry.steamAppID != nil && $0.steamAppID == entry.steamAppID) }') \
-    < save.index('GameRecommendations.prepare(&entry, new: isNew)') < save.index('persist(next)')
-init = block(library, '    private init() {', '\n    }\n')
+    < save.index('GameRecommendations.prepare(&entry, new: isNew)') < save.index('persist(next, metadata:')
+init = block(library, '    private init() {\n        refreshFlag()', '\n    }\n')
 assert init.index('resetPhoneResolution()') < init.index('applyRecommendations()')
 apply_all = block(library, '    private func applyRecommendations() {', '\n    }\n')
+# The new grid writes Steam metadata results itself (applySteamMetadata); it asks for the same recommendations.
+steam_apply = block(library, '    private func applySteamMetadata() {', '\n    }\n')
+assert 'GameRecommendations.prepare(&fresh, new: true)' in steam_apply and 'GameRecommendations.prepare(&next[i])' in steam_apply
 assert 'guard !readOnly' in apply_all and 'GameRecommendations.prepare(&next[i])' in apply_all and 'persist(next)' in apply_all
 detail = block(library, 'struct LibraryDetail: View {', '\n/// madeira-bcd: a game\'s own options as the fork stores them')
 assert '.onAppear {\n                migrateEntryOptions()\n                prepareRecommendation()\n                reloadBCD()\n            }' in detail

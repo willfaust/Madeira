@@ -27,7 +27,7 @@ enum DockError: LocalizedError {
 
 /// A game Steam's client has installed in the prefix, read from its
 /// `steamapps/appmanifest_<appid>.acf`.
-struct DockGame: Identifiable, Equatable, Sendable {
+struct DockGame: Identifiable, Equatable, Sendable, Codable {
     let id: Int                 // App ID
     let name: String
     let installDir: String      // one folder name under <library>/common

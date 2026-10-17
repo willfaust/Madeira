@@ -12,11 +12,15 @@ struct MadeiraApp: App {
         // ml1172: read the screen on the main thread; library entries, whose
         // default Resolution comes from it, are also made on other threads.
         _ = ResolutionChoices.screen
+        // The new library grid builds its first page before any view's onAppear, so the account's cached library and
+        // playtime are read now: its cards carry their played lines from the first page.
+        if LibraryGridArm.enabled, SteamOwnedLibrary.enabled { SteamOwnedLibrary.shared.start() }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .background(InteractionFrameRateInstaller())   // touch frame-rate request (New library grid)
                 .modifier(ClaimGamepadEvents())
                 .onAppear {
                     GamepadInput.shared.start()

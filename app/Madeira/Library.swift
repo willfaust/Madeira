@@ -604,12 +604,101 @@ struct LibraryEntry: Codable, Identifiable {
     }
 }
 
+/// Writes madeira-library.json off the main thread (encoding the whole library on main cost a frame per save, and a Steam refresh
+/// saves once per game). Snapshots coalesce (only the newest is written), and the app finishes the last write before it suspends.
+final class LibraryFileWriter: @unchecked Sendable {
+    static let shared = LibraryFileWriter()
+    private struct Document: Codable { var version: Int; var entries: [LibraryEntry] }
+    private let queue = DispatchQueue(label: "madeira.library-writer", qos: .utility)
+    private let lock = NSLock()
+    private var latest: (entries: [LibraryEntry], file: URL, failed: (Error) -> Void)?
+
+    private nonisolated(unsafe) static var created = false
+    private static let createdLock = NSLock()
+
+    /// Waits for a queued write to land, so a direct write after it is never overtaken by an older snapshot. Does nothing, and creates
+    /// nothing, when the writer was never used.
+    static func drain() {
+        createdLock.lock(); let used = created; createdLock.unlock()
+        if used { shared.queue.sync {} }
+    }
+
+    private init() {
+        Self.createdLock.lock(); Self.created = true; Self.createdLock.unlock()
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [queue] _ in
+            queue.sync {}   // returns once the queued write has finished
+        }
+    }
+
+    static func encode(_ entries: [LibraryEntry], to file: URL) throws {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(Document(version: 1, entries: entries)).write(to: file, options: .atomic)
+    }
+
+    func writeNow(_ entries: [LibraryEntry], to file: URL) throws {
+        try queue.sync {
+            lock.lock(); latest = nil; lock.unlock()   // this snapshot is newer than any waiting one
+            try Self.encode(entries, to: file)
+        }
+    }
+
+    func write(_ entries: [LibraryEntry], to file: URL, failed: @escaping @MainActor (Error) -> Void) {
+        lock.lock()
+        let idle = latest == nil
+        latest = (entries, file, { error in DispatchQueue.main.async { MainActor.assumeIsolated { failed(error) } } })
+        lock.unlock()
+        guard idle else { return }   // the queued drain takes the newest
+        queue.async { [self] in
+            lock.lock(); let job = latest; latest = nil; lock.unlock()
+            guard let job else { return }
+            do { try Self.encode(job.entries, to: job.file) } catch { job.failed(error) }
+        }
+    }
+}
+
+/// What one change of the library document was, for the readers that can do less than a full rebuild.
+/// `metadata`: only facts the app read about installed files (size, bits, graphics API) changed, on `ids`.
+/// `edit`: anything else (the user's own change, an import, a removal).
+struct LibraryPublication {
+    enum Kind { case edit, metadata }
+    var revision: Int
+    var kind: Kind
+    var ids: Set<UUID>
+}
+
 final class LibraryModel: ObservableObject {
     static let shared = LibraryModel()
-    static var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] }
-    static var drive: URL { documents.appendingPathComponent("wine/drive_c", isDirectory: true).resolvingSymlinksInPath() }
+    static let documents: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    /// drive_c with its symlinks resolved. Resolving stats every path component, and the new grid reads this for each card
+    /// that appears, so with it on the answer is kept once the folder exists (until then each read looks again). With it
+    /// off every read resolves, as it always did.
+    static var drive: URL {
+        driveLock.lock(); defer { driveLock.unlock() }
+        let keeps = LibraryGridArm.enabled
+        if keeps, let resolvedDrive { return resolvedDrive }
+        let folder = documents.appendingPathComponent("wine/drive_c", isDirectory: true).resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        if keeps, FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue { resolvedDrive = folder }
+        return folder
+    }
+    private nonisolated(unsafe) static var resolvedDrive: URL?
+    private static let driveLock = NSLock()
     @Published var enabled = false
     @Published var entries: [LibraryEntry] = []
+    /// The library document's change counter and the last changes (newest last). `persist` is the only writer.
+    private(set) var revision = 0
+    private var publicationLog: [LibraryPublication] = []
+    /// What changed after `revision`, oldest first; nil when the log no longer reaches back that far.
+    func publications(since revision: Int) -> [LibraryPublication]? {
+        if revision == self.revision { return [] }
+        guard let first = publicationLog.first, first.revision <= revision + 1 else { return nil }
+        return publicationLog.filter { $0.revision > revision }
+    }
+    private func record(_ kind: LibraryPublication.Kind, _ ids: Set<UUID>) {
+        revision += 1
+        publicationLog.append(LibraryPublication(revision: revision, kind: kind, ids: ids))
+        if publicationLog.count > 32 { publicationLog.removeFirst(publicationLog.count - 32) }
+    }
     @Published var current: UUID?
     @Published var activeEntry: LibraryEntry?
     @Published var menu = false
@@ -667,6 +756,8 @@ final class LibraryModel: ObservableObject {
     }
     private var readOnly = false
     private var metadataInFlight = Set<UUID>()
+    /// Entries whose scan result waits for the scroll to end (a card that reappears meanwhile does not scan again).
+    private var metadataPending = Set<UUID>()
     private var steamMetadataInFlight = Set<Int>()
     private var savedControls: [TouchControl] = []
     private var savedLayout: String?
@@ -719,7 +810,7 @@ final class LibraryModel: ObservableObject {
         if reset > 0 {
             var next = entries
             for i in next.indices where next[i].resolution == phone { next[i].resolution = ResolutionChoices.defaultValue }
-            guard persist(next) else { return }   // try again at the next start
+            guard persist(next, wait: true) else { return }   // try again at the next start
         }
         UserDefaults.standard.set(true, forKey: key)
         LogStore.shared.log("[library] ml1172 resolution default \(ResolutionChoices.defaultValue); \(reset) entries reset from \(phone)")
@@ -734,7 +825,7 @@ final class LibraryModel: ObservableObject {
         LibraryController.shared.configure(enabled: allowed, ownsInput: allowed)
     }
 
-    func save(_ entry: LibraryEntry) {
+    func save(_ entry: LibraryEntry, metadata: Bool = false) {
         guard !readOnly else { error = "The library file could not be read. Preserve or repair it before making changes."; return }
         var next = entries
         var entry = entry
@@ -755,7 +846,7 @@ final class LibraryModel: ObservableObject {
             }
             next[i] = entry
         } else { next.append(entry) }
-        persist(next)
+        persist(next, metadata: metadata ? [entry.id] : nil)
     }
     func remove(_ id: UUID) {
         persist(entries.filter { $0.id != id })
@@ -785,25 +876,45 @@ final class LibraryModel: ObservableObject {
     }
     /// A Steam game was uninstalled: its entry goes with its files.
     func removeSteam(appID: Int) {
+        steamMetadataWaiting[appID] = nil
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
     }
+    /// Publishes `next` and writes it. The write (encoding the whole library and replacing the file) happens off the
+    /// main thread, newest snapshot wins; `wait` writes before returning and reports whether it worked (start-up).
     @discardableResult
-    private func persist(_ next: [LibraryEntry]) -> Bool {
+    private func persist(_ next: [LibraryEntry], wait: Bool = false, metadata: Set<UUID>? = nil) -> Bool {
         guard !readOnly else { return false }
-        do {
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(Document(version: 1, entries: next)).write(to: file, options: .atomic)
+        // The background writer and the change log belong to the new grid; with it off, the library is written as it always was.
+        if !LibraryGridArm.enabled {
+            LibraryFileWriter.drain()   // a snapshot queued while the setting was on lands before this one
+            do {
+                try LibraryFileWriter.encode(next, to: file)
+                entries = next
+                return true
+            } catch { self.error = "Could not save the library: " + error.localizedDescription; return false }
+        }
+        if wait {
+            do { try LibraryFileWriter.shared.writeNow(next, to: file) } catch {
+                self.error = "Could not save the library: " + error.localizedDescription; return false
+            }
+            record(metadata == nil ? .edit : .metadata, metadata ?? [])
             entries = next
             return true
-        } catch { self.error = "Could not save the library: " + error.localizedDescription; return false }
+        }
+        record(metadata == nil ? .edit : .metadata, metadata ?? [])
+        entries = next
+        LibraryFileWriter.shared.write(next, to: file) { [weak self] error in
+            self?.error = "Could not save the library: " + error.localizedDescription
+        }
+        return true
     }
 
     /// Install size and graphics API, at most once a day per entry.
     @MainActor
     func refreshMetadata(_ id: UUID) async {
         let revision = 12
-        guard !metadataInFlight.contains(id), let entry = entries.first(where: { $0.id == id }), entry.desktop != true,
+        guard !metadataInFlight.contains(id), !metadataPending.contains(id), let entry = entries.first(where: { $0.id == id }), entry.desktop != true,
               entry.metadataRevision != revision || Date().timeIntervalSince(entry.metadataChecked ?? .distantPast) > 86400,
               let url = try? Self.executable(entry.relativePath) else { return }
         metadataInFlight.insert(id)
@@ -812,7 +923,19 @@ final class LibraryModel: ObservableObject {
         guard !Task.isCancelled, var updated = entries.first(where: { $0.id == id }) else { return }
         updated.folderBytes = result.bytes
         if let api = result.api { updated.graphicsAPI = api }
-        updated.metadataChecked = Date(); updated.metadataRevision = revision; save(updated)
+        updated.metadataChecked = Date(); updated.metadataRevision = revision
+        if LibraryGridArm.enabled {
+            let facts = updated
+            metadataPending.insert(id)
+            // Only the facts read are applied, onto the entry as it is when the grid is still: its settings may have changed meanwhile.
+            DeferredMainWork.shared.whenScrollIdle("metadata.\(id)") { [weak self] in
+                self?.metadataPending.remove(id)
+                guard let self, var current = self.entries.first(where: { $0.id == id }) else { return }
+                current.folderBytes = facts.folderBytes; current.graphicsAPI = facts.graphicsAPI
+                current.metadataChecked = facts.metadataChecked; current.metadataRevision = facts.metadataRevision
+                self.save(current, metadata: true)
+            }
+        } else { save(updated) }
         fputs("[library-metadata] install scan api=\(updated.graphicsAPI ?? "unknown") bytes=\(result.bytes ?? -1)\n", stderr)
     }
 
@@ -836,7 +959,7 @@ final class LibraryModel: ObservableObject {
             (build: SteamInstallFiles.buildID(appID: game.id, steamApps: steamApps),
              size: SteamInstallFiles.sizeOnDisk(appID: game.id, steamApps: steamApps))
         }.value
-        let stored = entries.first { $0.steamAppID == game.id }
+        let stored = steamMetadataWaiting[game.id] ?? entries.first { $0.steamAppID == game.id }
         let picked = stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil
         let known = SteamOwnedLibrary.shared.game(game.id)?.launches != nil
         let install = "\(folder)#\(record.build ?? 0)#\(picked ?? "")#\(known ? 1 : 0)"
@@ -853,7 +976,7 @@ final class LibraryModel: ObservableObject {
         var api = program?.api
         if let program, let scanned = await LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false).api { api = scanned }
         guard !Task.isCancelled else { return }
-        var updated = entries.first { $0.steamAppID == game.id } ?? LibraryEntry(title: title, relativePath: folder, bits: 0)
+        var updated = steamMetadataWaiting[game.id] ?? entries.first { $0.steamAppID == game.id } ?? LibraryEntry(title: title, relativePath: folder, bits: 0)
         updated.steamAppID = game.id
         updated.relativePath = folder
         updated.bits = program?.bits ?? 0
@@ -861,8 +984,53 @@ final class LibraryModel: ObservableObject {
         updated.folderBytes = record.size ?? updated.folderBytes
         updated.steamMetadataInstall = install
         updated.metadataChecked = Date(); updated.metadataRevision = revision
-        save(updated)
+        landSteamMetadata(updated)
         LogStore.shared.log("[steam-games] metadata app=\(game.id) bits=\(updated.bits) api=\(api ?? "unknown")")
+    }
+
+    /// Steam metadata results not applied yet, by App ID. A result waits for a short beat (so a launch's results land as one update)
+    /// and for the grid to stop scrolling (DeferredMainWork.whenScrollIdle), because applying one republishes the library and
+    /// rebuilds the page. Each is the full entry the refresh computed, so a later refresh of the same game reads it as the stored one.
+    private var steamMetadataWaiting: [Int: LibraryEntry] = [:]
+    private var steamMetadataFlushScheduled = false
+
+    private func landSteamMetadata(_ updated: LibraryEntry) {
+        guard LibraryGridArm.enabled, let id = updated.steamAppID else { save(updated); return }
+        steamMetadataWaiting[id] = updated
+        guard !steamMetadataFlushScheduled else { return }
+        steamMetadataFlushScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            DeferredMainWork.shared.whenScrollIdle("steam-metadata") { self?.applySteamMetadata() }
+        }
+    }
+
+    /// Every waiting result, applied as ONE update and one write. Only the metadata fields are taken, onto the
+    /// entry as it is now: the game's settings may have changed in the details page while the result waited.
+    private func applySteamMetadata() {
+        steamMetadataFlushScheduled = false
+        let waiting = steamMetadataWaiting; steamMetadataWaiting = [:]
+        guard !waiting.isEmpty else { return }
+        guard !readOnly else { return }
+        var next = entries
+        var changed = Set<UUID>()
+        for (id, result) in waiting {
+            // save() prepares Madeira's recommended settings (madeira-bcd) for a game seen for the first time and
+            // for an existing entry; this path writes the library directly, so it asks for them too.
+            guard let i = next.firstIndex(where: { $0.steamAppID == id }) else {
+                var fresh = result
+                GameRecommendations.prepare(&fresh, new: true)
+                next.append(fresh); changed.insert(fresh.id); continue
+            }
+            GameRecommendations.prepare(&next[i])
+            if (next[i].metadataChecked ?? .distantPast) > (result.metadataChecked ?? .distantPast) { continue }
+            next[i].relativePath = result.relativePath
+            next[i].bits = result.bits; next[i].graphicsAPI = result.graphicsAPI; next[i].folderBytes = result.folderBytes
+            next[i].steamMetadataInstall = result.steamMetadataInstall
+            next[i].metadataChecked = result.metadataChecked; next[i].metadataRevision = result.metadataRevision
+            changed.insert(next[i].id)
+        }
+        persist(next, metadata: changed)
     }
 
     /// What an entry can start: an executable, or (ml1163) a batch file run through cmd.exe.
@@ -1021,6 +1189,8 @@ final class LibraryModel: ObservableObject {
         MetalBackedView.presentCountAtLaunch = launchPresent; laidOutAfterFirstPresent = false
         launching = true; overlayFields = entry.overlayFields ?? ["FPS", "Frame time", "RAM", "Battery"]
         displayMode = entry.displayMode
+        MainActor.assumeIsolated { InteractionFrameRate.shared.end() }   // a game owns the panel's rate (ProMotionIntent)
+        if LibraryGridArm.enabled { NotificationCenter.default.post(name: LibraryGridArm.releaseMemory, object: nil) }
         activeEntry = entry; current = entry.id; menu = false; performance = entry.performance; liveLogs = entry.liveLogs
         LogStore.shared.setDisplayActive(entry.liveLogs)
         fpsMode = entry.fpsMode; sessionMessage = "Starting…"
@@ -1298,6 +1468,13 @@ enum LibraryRendererBadge {
         if known.count == 1 { return known[0] }
         return known.isEmpty && !detected.contains("/") ? detected : nil   // e.g. "Wine desktop"
     }
+
+    /// What a card's pill reads for a detected API: Direct3D as "DX" and DirectDraw as "DDraw", so the
+    /// pills stay short on small cards. Display only: the stored value and `compact` keep the scan's names.
+    static func display(_ api: String) -> String { displayNames[api] ?? api }
+    private static let displayNames = [
+        "D3D12": "DX12", "D3D11": "DX11", "D3D10": "DX10", "D3D9": "DX9", "D3D8": "DX8", "DirectDraw": "DDraw",
+    ]
 }
 
 /// "Madeira" as a large title at the leading edge of the navigation bar, on the
@@ -1630,6 +1807,33 @@ struct LibraryArtwork: View {
     }
 }
 
+/// Which glow is drawn. `original` is the original grid's gradient glow; `new` is the zoomable grid's Metal glow (LibraryGlowView);
+/// `off` is MADEIRA_LIBRARY_AMBIENT=0.
+enum AmbientGlowMode: String, CaseIterable { case original, new, off }
+
+/// The glow follows the "New library grid" setting: on, the Metal glow; off, the original one. MADEIRA_LIBRARY_AMBIENT=0
+/// turns the light off in either case.
+final class AmbientGlowSettings: ObservableObject {
+    static let shared = AmbientGlowSettings()
+    static let changed = Notification.Name("AmbientGlowSettings.changed")
+    /// The library's ambient light: a glow behind every grid card that has reported its frame (only the cards the lazy grids have built). MADEIRA_LIBRARY_AMBIENT=0 turns it off.
+    private static let ambient = MadeiraConfig.flag("MADEIRA_LIBRARY_AMBIENT")
+    var mode: AmbientGlowMode {
+        return !Self.ambient ? .off : LibraryGridArm.enabled ? .new : .original
+    }
+    private var observer: NSObjectProtocol?
+    private init() {
+        var last = LibraryGridArm.enabled
+        observer = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            let now = LibraryGridArm.enabled
+            guard now != last else { return }
+            last = now
+            self?.objectWillChange.send()
+            NotificationCenter.default.post(name: Self.changed, object: nil)
+        }
+    }
+}
+
 /// A pseudo-random sequence from a seed (SplitMix64), so each card's "movie" is its own
 /// but stays the same for the whole run.
 struct AmbientRandom {
@@ -1800,6 +2004,7 @@ struct AmbientGlow: View {
     var pressed = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var settings = AmbientGlowSettings.shared
 
     private func layer(_ angle: Double, _ mirror: Bool, frame: CGSize) -> some View {
         func art() -> some View {
@@ -1823,6 +2028,15 @@ struct AmbientGlow: View {
     }
 
     var body: some View {
+        switch settings.mode {
+        case .original: originalBody
+        default: EmptyView()   // the zoomable grid draws its own light (LibraryGlowView)
+        }
+    }
+
+
+    /// The original grid's gradient glow (used when the new library grid is off).
+    @ViewBuilder private var originalBody: some View {
         // Kept tight, so neighbouring cards' light stays apart in the gaps between them.
         let spread = size.width * 0.17
         let frame = CGSize(width: size.width + spread * 2, height: size.height + spread * 2)
@@ -1896,7 +2110,8 @@ struct AmbientGlowKey: PreferenceKey {
 /// its frame (only the cards the lazy grids have built). MADEIRA_LIBRARY_AMBIENT=0
 /// turns it off.
 struct AmbientGlowLayer: View {
-    static let enabled = MadeiraConfig.flag("MADEIRA_LIBRARY_AMBIENT")
+    static var enabled: Bool { AmbientGlowSettings.shared.mode != .off }
+    @ObservedObject private var settings = AmbientGlowSettings.shared
     let items: [AmbientGlowItem]
     var body: some View {
         if Self.enabled {
@@ -2061,14 +2276,23 @@ struct LibraryBadges: View {
     }
     private var format: some View {
         HStack(spacing: 4) {
-            if entry.bits == 32 || entry.bits == 64 { badge("\(entry.bits)-bit") }
-            if entry.isBatch { badge("Batch") }   // ml1163
-            if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { badge(api) }
-            if let note { badge(note) }
+            ForEach(Self.formatTexts(entry, note: note), id: \.self) { badge($0) }
         }
     }
     @ViewBuilder private var size: some View {
-        if let bytes = entry.folderBytes { badge(String(format: bytes < 1_000_000_000 ? "%.2f GB" : "%.1f GB", Double(bytes) / 1_000_000_000)) }
+        if let text = Self.sizeText(entry) { badge(text) }
+    }
+    /// The format pills' texts, in order (also the zoomable grid's measured labels).
+    static func formatTexts(_ entry: LibraryEntry, note: String?) -> [String] {
+        var texts: [String] = []
+        if entry.bits == 32 || entry.bits == 64 { texts.append("\(entry.bits)-bit") }
+        if entry.isBatch { texts.append("Batch") }   // ml1163
+        if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { texts.append(LibraryRendererBadge.display(api)) }
+        if let note { texts.append(note) }
+        return texts
+    }
+    static func sizeText(_ entry: LibraryEntry) -> String? {
+        entry.folderBytes.map { String(format: $0 < 1_000_000_000 ? "%.2f GB" : "%.1f GB", Double($0) / 1_000_000_000) }
     }
     private func badge(_ text: String) -> some View {
         Text(text).font(.caption2.weight(.medium)).lineLimit(1).minimumScaleFactor(0.8)
@@ -2441,6 +2665,10 @@ struct LibraryView: View {
     @State private var settingsSheet: SettingsSheet?
     @State private var settingsRefresh = 0
     @AppStorage("madeiraLibraryLayout") private var layout = "cards"
+    /// The new grid (LibraryGridPage.swift): off by default, and its stored size (a position on the levels).
+    @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
+    @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    @AppStorage(LibraryGridSize.key) private var gridPosition: Double = -1
     @AppStorage("madeiraLibrarySort") private var sort = "played"
     @AppStorage("madeiraLibraryGroup") private var group = "platform"
     @AppStorage("madeiraLibraryCollapsedGroups") private var collapsedGroups = ""
@@ -2481,7 +2709,8 @@ struct LibraryView: View {
         // glass selection slides between the tabs and follows a drag. Icons only; the
         // names stay for VoiceOver.
         TabView(selection: Binding(get: { tab }, set: { switchTab(to: $0) })) {
-            library
+            // The card layouts: the zoomable page or the original one (LibraryGridArm).
+            Group { if LibraryGridArm.zoomable(setting: zoomableGrid, layout: layout) { zoomableLibrary } else { library } }
                 .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
                 .tag(0)
@@ -2536,11 +2765,27 @@ struct LibraryView: View {
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                Picker("Library layout", selection: $layout) {
-                    Label("Cards", systemImage: "square.grid.2x2").tag("cards")
-                    Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
-                    Label("List", systemImage: "list.bullet").tag("list")
-                    Label("Compact list", systemImage: "list.dash").tag("compactList")
+                if zoomableGrid {
+                    // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
+                    // stands for the grid (either stored size), and the pinched size is kept.
+                    Picker("Library layout", selection: Binding(
+                        get: { layout == "compact" ? "cards" : layout },
+                        set: { picked in
+                            if picked == "cards", layout == "cards" || layout == "compact" { return }
+                            layout = picked
+                        })) {
+                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                        Label("List", systemImage: "list.bullet").tag("list")
+                        Label("Compact list", systemImage: "list.dash").tag("compactList")
+                    }
+                } else {
+                    // Cards and Compact cards also reset the zoomable grid's pinched size.
+                    Picker("Library layout", selection: Binding(get: { layout }, set: { layout = $0; gridPosition = -1 })) {
+                        Label("Cards", systemImage: "square.grid.2x2").tag("cards")
+                        Label("Compact cards", systemImage: "square.grid.3x3").tag("compact")
+                        Label("List", systemImage: "list.bullet").tag("list")
+                        Label("Compact list", systemImage: "list.dash").tag("compactList")
+                    }
                 }
                 Picker("Group by", selection: $group) {
                     Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
@@ -2614,6 +2859,16 @@ struct LibraryView: View {
                     Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
                 }
             }
+            if settingsShow("appearance", "grid", "library", "new", "zoom", "pinch", "haptics", "cards") {
+                Section {
+                    Toggle("New library grid", isOn: $zoomableGrid)
+                    if zoomableGrid {
+                        Toggle("Zoom haptics", isOn: $zoomHaptics)
+                    }
+                } footer: {
+                    Text("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size.")
+                }
+            }
             if settingsShow("interface", "developer") {
                 Section {
                     Toggle("Use developer interface", isOn: Binding(get: { developerUI }, set: { on in
@@ -2665,30 +2920,7 @@ struct LibraryView: View {
         ScrollViewReader { reader in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    Button { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry } label: {
-                        if liquidMetal.on {
-                            // On the chrome's middle band (dark, or light in light mode), with a soft
-                            // halo of the other tone for the moments a highlight passes under it.
-                            let light = colorScheme == .light
-                            Label("Desktop", systemImage: "desktopcomputer")
-                                .font(.subheadline.weight(.semibold)).foregroundStyle(light ? .black : .white)
-                                .shadow(color: (light ? Color.white : .black).opacity(0.75), radius: 2.5)
-                                .padding(.horizontal, 14).frame(minHeight: 44)
-                                .background(LiquidMetalFill())
-                                // ml1217: the fill does not hit-test, so without this only the
-                                // glyphs took a tap (the plain fill's Capsule did).
-                                .contentShape(Capsule())
-                        } else {
-                            Label("Desktop", systemImage: "desktopcomputer")
-                                .font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(minHeight: 44)
-                                .background(Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
-                        }
-                    }.buttonStyle(.plain)
-                        .animation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.4), value: liquidMetal.on)
-                        .id(LibraryEntry.desktopID)
-                        .overlay(RoundedRectangle(cornerRadius: 22).stroke(focused == LibraryEntry.desktopID && controller.connected ? Color.cyan : .clear, lineWidth: 3))
-                }
+                desktopButton
                 // The library's sections, as in the fork: Steam (installed and downloading
                 // Steam games, then Not installed), then Other games, the games you added.
                 // Steam games start through Madeira Dock (SteamGames.swift); an installed one
@@ -2757,36 +2989,7 @@ struct LibraryView: View {
                 withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.18)) { focused = ids[(index + delta + ids.count) % ids.count] }
             }
         }
-        .sheet(isPresented: $browser) {
-            NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
-                // madeira-bcd: the page shows the entry as stored, with its recommended settings.
-                model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
-            } }
-        }
-        .sheet(item: $selected) { entry in
-            // The details page stays up until the session's starting screen takes
-            // over (or an error needs the library's alert), instead of showing the
-            // library for the moment a start spends preparing.
-            LibraryDetail(entry: entry, play: { profile in
-                play(profile)
-                // Not while Play is still enabling JIT: the session's start, an error, or
-                // JIT setup closes the page then.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-                    if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
-                }
-            })
-        }
-        .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
-        .onChange(of: model.error) { _, error in if error != nil { selected = nil } }
-        .onChange(of: model.restartNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: model.jitNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: model.cloudNotice) { _, notice in if notice != nil { selected = nil } }
-        .onChange(of: jit.showSetup) { _, show in if show { selected = nil } }
-        .onChange(of: model.showDetail) { _, id in
-            guard let id else { return }
-            model.showDetail = nil
-            selected = model.entries.first { $0.id == id }
-        }
+        .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, play: play, jit: jit))
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
         .onAppear {
             if focused == nil { focused = LibraryEntry.desktopID }
@@ -2796,6 +2999,61 @@ struct LibraryView: View {
             if let id { withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { reader.scrollTo(id, anchor: .center) } }
         }
         }
+        }
+    }
+    /// The Desktop button at the top of the page (both grids).
+    private var desktopButton: some View {
+        HStack {
+            Button { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry } label: {
+                if liquidMetal.on {
+                    // On the chrome's middle band (dark, or light in light mode), with a soft
+                    // halo of the other tone for the moments a highlight passes under it.
+                    let light = colorScheme == .light
+                    Label("Desktop", systemImage: "desktopcomputer")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(light ? .black : .white)
+                        .shadow(color: (light ? Color.white : .black).opacity(0.75), radius: 2.5)
+                        .padding(.horizontal, 14).frame(minHeight: 44)
+                        .background(LiquidMetalFill())
+                        // ml1217: the fill does not hit-test, so without this only the
+                        // glyphs took a tap (the plain fill's Capsule did).
+                        .contentShape(Capsule())
+                } else {
+                    Label("Desktop", systemImage: "desktopcomputer")
+                        .font(.subheadline.weight(.medium)).padding(.horizontal, 14).frame(minHeight: 44)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: Capsule())
+                }
+            }.buttonStyle(.plain)
+                .animation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.4), value: liquidMetal.on)
+                .id(LibraryEntry.desktopID)
+                .overlay(RoundedRectangle(cornerRadius: 22).stroke(focused == LibraryEntry.desktopID && controller.connected ? Color.cyan : .clear, lineWidth: 3))
+        }
+    }
+    /// The zoomable page (LibraryGridPage.swift): the card layouts as one pinchable collection view, with the same sheets and rules as `library`.
+    private var zoomableLibrary: some View {
+        LibraryGridPage(search: search, sort: sort, group: group, layout: $layout, others: entries,
+                        hideOthers: $hideOthers, focused: controller.connected ? focused : nil,
+                        open: { selected = $0 },
+                        desktop: { AnyView(desktopButton) })
+        .onReceive(controller.commands) { command in
+            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
+            let items = focusOrder
+            let ids = [LibraryEntry.desktopID] + items.map(\.id)
+            let index = ids.firstIndex(where: { $0 == focused }) ?? 0
+            if command == "add" { browser = true }
+            else if command == "accept" {
+                if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
+                else { selected = items[index - 1] }
+            }
+            else if ["left", "right", "up", "down"].contains(command) {
+                let delta = command == "left" || command == "up" ? -1 : 1
+                withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.18)) { focused = ids[(index + delta + ids.count) % ids.count] }
+            }
+        }
+        .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, play: play, jit: jit))
+        .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
+        .onAppear {
+            if focused == nil { focused = LibraryEntry.desktopID }
+            GlassSkin.shared.start()
         }
     }
     private func cells(_ items: [LibraryEntry], width viewportWidth: CGFloat) -> some View {
@@ -2839,6 +3097,47 @@ struct LibraryView: View {
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(focused == entry.id && controller.connected ? Color.accentColor : .clear, lineWidth: 2))
             .id(entry.id)
             .task(id: entry.id, priority: .utility) { await model.refreshMetadata(entry.id) }
+    }
+}
+
+/// The library page's sheets (both grids): Add executable, and Game details, which
+/// closes when a session, an error or a notice takes over.
+private struct LibrarySheets: ViewModifier {
+    @ObservedObject var model: LibraryModel
+    @Binding var browser: Bool
+    @Binding var selected: LibraryEntry?
+    var play: (LibraryEntry) -> Void
+    @ObservedObject var jit: JITCoordinator
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $browser) {
+                NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
+                    // madeira-bcd: the page shows the entry as stored, with its recommended settings.
+                    model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
+                } }
+            }
+            .sheet(item: $selected) { entry in
+                // The details page stays up until the session's starting screen takes over (or an error needs the library's alert).
+                LibraryDetail(entry: entry, play: { profile in
+                    play(profile)
+                    // Not while Play is still enabling JIT: the session's start, an error, or
+                    // JIT setup closes the page then.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                        if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
+                    }
+                })
+            }
+            .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
+            .onChange(of: model.error) { _, error in if error != nil { selected = nil } }
+            .onChange(of: model.restartNotice) { _, notice in if notice != nil { selected = nil } }
+            .onChange(of: model.jitNotice) { _, notice in if notice != nil { selected = nil } }
+            .onChange(of: model.cloudNotice) { _, notice in if notice != nil { selected = nil } }
+            .onChange(of: jit.showSetup) { _, show in if show { selected = nil } }
+            .onChange(of: model.showDetail) { _, id in
+                guard let id else { return }
+                model.showDetail = nil
+                selected = model.entries.first { $0.id == id }
+            }
     }
 }
 
@@ -3255,7 +3554,8 @@ struct LibraryDetail: View {
                           let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85) else { throw LibraryError.message("This image could not be opened.") }
                     let dir = LibraryModel.documents.appendingPathComponent("madeira-art", isDirectory: true)
                     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    let name = entry.id.uuidString + ".jpg"; try jpeg.write(to: dir.appendingPathComponent(name), options: .atomic); entry.coverFile = name
+                    let name = entry.id.uuidString + ".jpg"; try jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)
+                    LibraryCoverCache.Source.coverFileChanged(named: name); entry.coverFile = name
                 } catch { self.error = error.localizedDescription }
             }
             .confirmationDialog("Remove this library entry? Your executable and saves stay in drive_c.", isPresented: $remove, titleVisibility: .visible) {

@@ -46,7 +46,8 @@ body = between(section, '    var body: some View {', '    private func cell(')
 # ------------------------------------------------------------------ order of the page
 steam_at = page.index('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,')
 others_at = page.index('LibrarySectionHeader(title: "Other games"')
-require(page.index('Label("Desktop", systemImage: "desktopcomputer")') < steam_at < others_at,
+# The Desktop button is LibraryView.desktopButton (both grids show it).
+require(page.index('desktopButton') < steam_at < others_at and 'Label("Desktop", systemImage: "desktopcomputer")' in view,
         'page order: Desktop, then Steam, then Other games')
 require('let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled' in page[:steam_at]
         and 'part: .installed, open: { selected = $0 })' in page[steam_at:others_at]

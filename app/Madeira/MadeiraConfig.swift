@@ -34,10 +34,32 @@ enum MadeiraConfig {
     static var present: Bool { url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
 
     /// All key/value pairs of madeira.cfg (empty when the file is absent).
+    ///
+    /// Cached: the library reads switches while it builds a page, which is the main thread in the middle
+    /// of a scroll, and reading and parsing the file each time cost frames. Each call stats the file (a change by
+    /// anyone is seen at once) and parses it again only when its modification time or size moved.
     static func all() -> [String: String] {
-        guard let u = url, let text = try? String(contentsOf: u, encoding: .utf8) else { return [:] }
-        return parse(text)
+        guard let u = url else { return [:] }
+        var info = stat()
+        let stamp: String = stat(u.path, &info) == 0 ? "\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec).\(info.st_size)" : ""
+        cache.lock.lock()
+        defer { cache.lock.unlock() }
+        if let hit = cache.value, cache.stamp == stamp { return hit }
+        let parsed = stamp.isEmpty ? [:] : ((try? String(contentsOf: u, encoding: .utf8)).map(parse) ?? [:])
+        cache.value = parsed; cache.stamp = stamp; cache.exists = !stamp.isEmpty
+        return parsed
     }
+
+    private final class Cache: @unchecked Sendable {
+        let lock = NSLock()
+        var value: [String: String]?
+        var stamp = ""
+        var exists = false
+    }
+    private static let cache = Cache()
+    /// `present`, from the same cache as `all()`: no file system call per read.
+    private static var presentCached: Bool { _ = all(); cache.lock.lock(); defer { cache.lock.unlock() }; return cache.exists }
+    private static func invalidate() { cache.lock.lock(); cache.value = nil; cache.lock.unlock() }
 
     /// The key/value pairs of text in madeira.cfg's syntax, the last line winning.
     static func parse(_ text: String) -> [String: String] {
@@ -56,7 +78,7 @@ enum MadeiraConfig {
     /// The value for `key`, trimmed, or nil when unset. Falls back to the legacy
     /// file ONLY when madeira.cfg does not exist.
     static func get(_ key: String) -> String? {
-        if present { return all()[key] }
+        if presentCached { return all()[key] }
         guard let d = documents,
               let txt = try? String(contentsOf: d.appendingPathComponent("madeira-\(key).txt"), encoding: .utf8)
         else { return nil }
@@ -172,6 +194,7 @@ enum MadeiraConfig {
         }
         if let value { lines.append("\(key) = \(value)") }
         let out = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        defer { invalidate() }
         do { try out.write(to: u, atomically: true, encoding: .utf8); return true } catch { return false }
     }
 
@@ -179,7 +202,7 @@ enum MadeiraConfig {
     /// madeira.cfg, else the process environment, else `fallback`. Any value
     /// other than "0" means on.
     static func flag(_ name: String, fallback: Bool = true) -> Bool {
-        if present, let v = all()["env." + name] { return v != "0" }
+        if presentCached, let v = all()["env." + name] { return v != "0" }
         return getenv(name).map { String(cString: $0) != "0" } ?? fallback
     }
 
@@ -216,6 +239,7 @@ enum MadeiraConfig {
             migrated.append("env")
         }
         guard !migrated.isEmpty else { return [] }
+        defer { invalidate() }
         do {
             try (lines.joined(separator: "\n") + "\n").write(to: u, atomically: true, encoding: .utf8)
             log("madeira.cfg written from legacy files (\(migrated.joined(separator: ", "))); the madeira-*.txt files are now ignored and can be deleted")

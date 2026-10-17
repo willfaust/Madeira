@@ -101,8 +101,10 @@ require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ ent
         "an installed game's card shows the library pills (and Update), any other state its own pill, in all three "
         "layouts (dense list, list, grid); no Dock or Steam pill")
 badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibraryStatus: View {')]
-require(badges.index('badge("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
-        badges.index('if let note { badge(note) }') < badges.index('private var size'),
+# The pills' texts are one rule (LibraryBadges.formatTexts, also the zoomable grid's measured labels).
+require(badges.index('texts.append("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
+        badges.index('if let note { texts.append(note) }') and
+        badges.index('ForEach(Self.formatTexts(entry, note: note)') < badges.index('private var size'),
         'the pills in order: bits, graphics API, Update, then the size')
 require('await library.refreshSteamMetadata(game, title: item.name)' in cell and 'if status.showsFormat, let game = item.installed' in cell,
         "an installed game's card reads its format through its library entry")
@@ -122,11 +124,11 @@ require('stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil' in
         'LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false)' in steam_meta,
         'the program is the one "The game" starts; bits from its PE header, the API as for any library game')
 require(steam_meta.count('Task.detached(priority: .utility)') == 3 and 'updated.folderBytes = record.size ?? updated.folderBytes' in steam_meta
-        and 'guard !Task.isCancelled else { return }' in steam_meta and 'save(updated)' in steam_meta,
+        and 'guard !Task.isCancelled else { return }' in steam_meta and 'landSteamMetadata(updated)' in steam_meta,
         "file reads off the main thread; the size is the install record's; the result is kept on the game's entry")
 require('LogStore.shared.log("[steam-games] metadata app=\\(game.id) bits=\\(updated.bits) api=\\(api ?? "unknown")")' in steam_meta
         and steam_meta.count('LogStore') == 1, '[steam-games] metadata logs the App ID, bits and API only')
-save_body = library[library.index('    func save(_ entry: LibraryEntry) {'):library.index('    func remove(_ id: UUID) {')]
+save_body = library[library.index('    func save(_ entry: LibraryEntry, metadata: Bool = false) {'):library.index('    func remove(_ id: UUID) {')]
 require('next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID })' in save_body and
         'entry.bits = next[i].bits; entry.steamMetadataInstall = next[i].steamMetadataInstall' in save_body,
         "a Steam game keeps one entry, and a details page saved later keeps the card's newer format")

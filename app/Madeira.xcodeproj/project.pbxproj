@@ -134,6 +134,23 @@
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
 		A1000400 /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000400 /* Library.swift */; };
+		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
+		A1000976 /* LibraryGridZoomStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000976 /* LibraryGridZoomStart.swift */; };
+		A1000975 /* LibraryGridZoomIdle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000975 /* LibraryGridZoomIdle.swift */; };
+		A1000974 /* LibraryGridZoomHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000974 /* LibraryGridZoomHaptics.swift */; };
+		A1000973 /* DeferredMainWork.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000973 /* DeferredMainWork.swift */; };
+		A1000972 /* InteractionFrameRate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000972 /* InteractionFrameRate.swift */; };
+		A1000970 /* LibraryGridZoomBlend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000970 /* LibraryGridZoomBlend.swift */; };
+		A1000969 /* LibraryGridGlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000969 /* LibraryGridGlow.swift */; };
+		A1000968 /* LibraryGridCardCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000968 /* LibraryGridCardCell.swift */; };
+		A1000967 /* LibraryGridZoomStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000967 /* LibraryGridZoomStage.swift */; };
+		A1000966 /* LibraryGridZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000966 /* LibraryGridZoom.swift */; };
+		A1000965 /* LibraryGridPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000965 /* LibraryGridPage.swift */; };
+		A1000964 /* LibraryGridHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000964 /* LibraryGridHost.swift */; };
+		A1000963 /* LibraryCoverCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000963 /* LibraryCoverCache.swift */; };
+		A1000962 /* LibraryGridZoomScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000962 /* LibraryGridZoomScene.swift */; };
+		A1000961 /* LibraryGridZoomModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000961 /* LibraryGridZoomModel.swift */; };
+		A1000960 /* LibraryGridLevels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000960 /* LibraryGridLevels.swift */; };
 		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
 		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
 		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
@@ -322,6 +339,23 @@
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
 		A2000400 /* Library.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Library.swift; sourceTree = "<group>"; };
+		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
+		A2000976 /* LibraryGridZoomStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStart.swift"; sourceTree = "<group>"; };
+		A2000975 /* LibraryGridZoomIdle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomIdle.swift"; sourceTree = "<group>"; };
+		A2000974 /* LibraryGridZoomHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomHaptics.swift"; sourceTree = "<group>"; };
+		A2000973 /* DeferredMainWork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DeferredMainWork.swift"; sourceTree = "<group>"; };
+		A2000972 /* InteractionFrameRate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "InteractionFrameRate.swift"; sourceTree = "<group>"; };
+		A2000970 /* LibraryGridZoomBlend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomBlend.swift"; sourceTree = "<group>"; };
+		A2000969 /* LibraryGridGlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridGlow.swift"; sourceTree = "<group>"; };
+		A2000968 /* LibraryGridCardCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridCardCell.swift"; sourceTree = "<group>"; };
+		A2000967 /* LibraryGridZoomStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStage.swift"; sourceTree = "<group>"; };
+		A2000966 /* LibraryGridZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoom.swift"; sourceTree = "<group>"; };
+		A2000965 /* LibraryGridPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridPage.swift"; sourceTree = "<group>"; };
+		A2000964 /* LibraryGridHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridHost.swift"; sourceTree = "<group>"; };
+		A2000963 /* LibraryCoverCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverCache.swift"; sourceTree = "<group>"; };
+		A2000962 /* LibraryGridZoomScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomScene.swift"; sourceTree = "<group>"; };
+		A2000961 /* LibraryGridZoomModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomModel.swift"; sourceTree = "<group>"; };
+		A2000960 /* LibraryGridLevels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridLevels.swift"; sourceTree = "<group>"; };
 		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestDisplay.swift; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
 		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
@@ -469,6 +503,23 @@
 				A2000911 /* GameRecommendations.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
 				A2000400 /* Library.swift */,
+				A2000977 /* LibraryCoverSpot.swift */,
+				A2000976 /* LibraryGridZoomStart.swift */,
+				A2000975 /* LibraryGridZoomIdle.swift */,
+				A2000974 /* LibraryGridZoomHaptics.swift */,
+				A2000973 /* DeferredMainWork.swift */,
+				A2000972 /* InteractionFrameRate.swift */,
+				A2000970 /* LibraryGridZoomBlend.swift */,
+				A2000969 /* LibraryGridGlow.swift */,
+				A2000968 /* LibraryGridCardCell.swift */,
+				A2000967 /* LibraryGridZoomStage.swift */,
+				A2000966 /* LibraryGridZoom.swift */,
+				A2000965 /* LibraryGridPage.swift */,
+				A2000964 /* LibraryGridHost.swift */,
+				A2000963 /* LibraryCoverCache.swift */,
+				A2000962 /* LibraryGridZoomScene.swift */,
+				A2000961 /* LibraryGridZoomModel.swift */,
+				A2000960 /* LibraryGridLevels.swift */,
 				A2000401 /* GuestDisplay.swift */,
 				A2000004 /* JITAllocator.c */,
 				A2000005 /* JITAllocator.h */,
@@ -798,6 +849,23 @@
 				A1000911 /* GameRecommendations.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,
 				A1000400 /* Library.swift in Sources */,
+				A1000977 /* LibraryCoverSpot.swift in Sources */,
+				A1000976 /* LibraryGridZoomStart.swift in Sources */,
+				A1000975 /* LibraryGridZoomIdle.swift in Sources */,
+				A1000974 /* LibraryGridZoomHaptics.swift in Sources */,
+				A1000973 /* DeferredMainWork.swift in Sources */,
+				A1000972 /* InteractionFrameRate.swift in Sources */,
+				A1000970 /* LibraryGridZoomBlend.swift in Sources */,
+				A1000969 /* LibraryGridGlow.swift in Sources */,
+				A1000968 /* LibraryGridCardCell.swift in Sources */,
+				A1000967 /* LibraryGridZoomStage.swift in Sources */,
+				A1000966 /* LibraryGridZoom.swift in Sources */,
+				A1000965 /* LibraryGridPage.swift in Sources */,
+				A1000964 /* LibraryGridHost.swift in Sources */,
+				A1000963 /* LibraryCoverCache.swift in Sources */,
+				A1000962 /* LibraryGridZoomScene.swift in Sources */,
+				A1000961 /* LibraryGridZoomModel.swift in Sources */,
+				A1000960 /* LibraryGridLevels.swift in Sources */,
 				A1000401 /* GuestDisplay.swift in Sources */,
 				A1000004 /* JITAllocator.c in Sources */,
 				A1000005 /* EntitlementChecker.swift in Sources */,

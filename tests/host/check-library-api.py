@@ -68,6 +68,9 @@ assert(LibraryRendererBadge.compact("D3D10/D3D9") == nil)
 assert(LibraryRendererBadge.compact("D3D11 / DirectDraw") == nil)
 assert(LibraryRendererBadge.compact("Wine desktop") == "Wine desktop")
 assert(LibraryRendererBadge.compact(nil) == nil)
+assert(LibraryRendererBadge.display("D3D12") == "DX12" && LibraryRendererBadge.display("D3D8") == "DX8")
+assert(LibraryRendererBadge.display("DirectDraw") == "DDraw" && LibraryRendererBadge.display("Vulkan") == "Vulkan")
+assert(LibraryRendererBadge.display("OpenGL") == "OpenGL" && LibraryRendererBadge.display("Wine desktop") == "Wine desktop")
 print("PASS: dynamic renderer detection, ASCII/UTF16/case folding, terminated names, tail lookup, read budget and the API badge")
 '''
 with tempfile.TemporaryDirectory() as tmp:
