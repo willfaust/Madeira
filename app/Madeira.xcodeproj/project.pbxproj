@@ -84,6 +84,8 @@
 		B1000002 /* JITBuiltInHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* JITBuiltInHost.swift */; };
 		B1000003 /* JITBuiltInMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
 		B1000040 /* JITPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000040 /* JITPairing.swift */; };
+		B1000060 /* SigningRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000060 /* SigningRefresh.swift */; };
+		B1000061 /* AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000061 /* AppleSignIn.swift */; };
 		B1000041 /* libmadeira_rppairing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000041 /* libmadeira_rppairing.a */; };
 		B1000004 /* madeira-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B2000004 /* madeira-jit.js */; };
 		B1000051 /* Madeira JIT.shortcut in Resources */ = {isa = PBXBuildFile; fileRef = B2000051 /* Madeira JIT.shortcut */; };
@@ -267,6 +269,8 @@
 		B2000002 /* JITBuiltInHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInHost.swift; sourceTree = "<group>"; };
 		B2000003 /* JITBuiltInMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInMessages.swift; sourceTree = "<group>"; };
 		B2000040 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPairing.swift; sourceTree = "<group>"; };
+		B2000060 /* SigningRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigningRefresh.swift; sourceTree = "<group>"; };
+		B2000061 /* AppleSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSignIn.swift; sourceTree = "<group>"; };
 		B2000041 /* libmadeira_rppairing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libmadeira_rppairing.a; sourceTree = "<group>"; };
 		B2000042 /* MadeiraRPPairing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MadeiraRPPairing.h; sourceTree = "<group>"; };
 		B2000004 /* madeira-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "madeira-jit.js"; sourceTree = "<group>"; };
@@ -485,6 +489,8 @@
 				B2000002 /* JITBuiltInHost.swift */,
 				B2000003 /* JITBuiltInMessages.swift */,
 				B2000040 /* JITPairing.swift */,
+				B2000060 /* SigningRefresh.swift */,
+				B2000061 /* AppleSignIn.swift */,
 				B2000042 /* MadeiraRPPairing.h */,
 				B2000004 /* madeira-jit.js */,
 				B2000051 /* Madeira JIT.shortcut */,
@@ -624,14 +630,14 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1600;
-				LastUpgradeCheck = 1600;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					A5000001 = {
 						CreatedOnToolsVersion = 16.0;
 					};
 					B5000001 = {
 						CreatedOnToolsVersion = 27.0;
-						DevelopmentTeam = V8NU3FX3TL;
+						DevelopmentTeam = X53M69UJ7U;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -815,6 +821,8 @@
 				B1000002 /* JITBuiltInHost.swift in Sources */,
 				B1000003 /* JITBuiltInMessages.swift in Sources */,
 				B1000040 /* JITPairing.swift in Sources */,
+				B1000060 /* SigningRefresh.swift in Sources */,
+				B1000061 /* AppleSignIn.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -863,7 +871,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MADEIRA_BUNDLE_IDENTIFIER = com.willfaust.madeora;
+				MADEIRA_BUNDLE_IDENTIFIER = com.willfaust.madeora.test;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -892,7 +900,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MADEIRA_BUNDLE_IDENTIFIER = com.willfaust.madeora;
+				MADEIRA_BUNDLE_IDENTIFIER = com.willfaust.madeora.test;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
@@ -909,7 +917,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
-				DEVELOPMENT_TEAM = V8NU3FX3TL;
+				DEVELOPMENT_TEAM = X53M69UJ7U;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -960,7 +968,7 @@
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
-				DEVELOPMENT_TEAM = V8NU3FX3TL;
+				DEVELOPMENT_TEAM = X53M69UJ7U;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1010,7 +1018,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
-				DEVELOPMENT_TEAM = V8NU3FX3TL;
+				DEVELOPMENT_TEAM = X53M69UJ7U;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MadeiraJITHelper/Info.plist;
@@ -1041,7 +1049,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
-				DEVELOPMENT_TEAM = V8NU3FX3TL;
+				DEVELOPMENT_TEAM = X53M69UJ7U;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MadeiraJITHelper/Info.plist;

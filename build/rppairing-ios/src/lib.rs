@@ -13,19 +13,37 @@
 //! The protocol is idevice's `PairableHost` (MIT, jkcoxson/idevice). This file
 //! only binds the listener, hands the advertisement to Swift and returns the
 //! pairing file as bytes.
+//!
+//! The same pairing file also renews Madeira's signing
+//! (`madeira_rppairing_install_profile`, app/Madeira/SigningRefresh.swift): a
+//! tunnel to the device through LocalDevVPN, as StikJIT opens one, then the
+//! new provisioning profile goes to the device's misagent service. The Apple
+//! ID sign-in that asks Apple for that profile, for a copy no installer left
+//! one for, is in `apple_id`.
+
+mod apple_id;
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use idevice::remote_pairing::{PairableHost, PairableHostInfo, RpPairingFile, RpPairingSocket};
+use idevice::RsdService;
+use idevice::misagent::MisagentClient;
+use idevice::remote_pairing::{
+    PairableHost, PairableHostInfo, RemotePairingClient, RpPairingFile, RpPairingSocket, connect_tls_psk_tunnel_native,
+};
+use idevice::rsd::RsdHandshake;
+use idevice::tcp::adapter::Adapter;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
 /// iOS shows the host as a computer; keep this a Mac model identifier.
 const HOST_MODEL: &str = "Mac17,7";
+/// The name Madeira gives when it connects with a pairing file it holds.
+const INSTALL_HOST: &str = "Madeira";
 
 pub struct MadeiraRPPairing {
     port: u16,
@@ -306,6 +324,151 @@ pub unsafe extern "C" fn madeira_rppairing_cancel(session: *const MadeiraRPPairi
 pub unsafe extern "C" fn madeira_rppairing_free(session: *mut MadeiraRPPairing) {
     if !session.is_null() {
         drop(unsafe { Box::from_raw(session) });
+    }
+}
+
+/// Why a profile could not be installed, as `madeira_rppairing_install_profile` returns it.
+enum InstallFailure {
+    /// Nothing answered at the device's address: LocalDevVPN is off or not routing.
+    Unreachable(String),
+    /// The device answered and does not accept this pairing file.
+    Pairing(String),
+    Other(String),
+}
+
+impl InstallFailure {
+    fn code(&self) -> i32 {
+        match self {
+            InstallFailure::Unreachable(_) => 1,
+            InstallFailure::Pairing(_) => 2,
+            InstallFailure::Other(_) => 3,
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            InstallFailure::Unreachable(m) | InstallFailure::Pairing(m) | InstallFailure::Other(m) => m,
+        }
+    }
+}
+
+impl From<idevice::IdeviceError> for InstallFailure {
+    fn from(e: idevice::IdeviceError) -> Self {
+        InstallFailure::Other(e.to_string())
+    }
+}
+
+impl From<std::io::Error> for InstallFailure {
+    fn from(e: std::io::Error) -> Self {
+        InstallFailure::Other(e.to_string())
+    }
+}
+
+/// Opens a tunnel to the device at `address` (its remote-pairing port, reached
+/// through LocalDevVPN) with `file`, and installs `profile` there.
+async fn install_profile(mut file: RpPairingFile, address: SocketAddr, profile: Vec<u8>) -> Result<(), InstallFailure> {
+    let stream = tokio::net::TcpStream::connect(address)
+        .await
+        .map_err(|e| InstallFailure::Unreachable(format!("could not reach this device: {e}")))?;
+    let mut client = RemotePairingClient::new(RpPairingSocket::new(stream), INSTALL_HOST);
+    // Verify only. `connect` would go on to a new pairing when the device
+    // refuses the file, and wait for a code nobody is shown.
+    client
+        .attempt_pair_verify()
+        .await
+        .map_err(|e| InstallFailure::Pairing(format!("this device refused the pairing: {e}")))?;
+    client
+        .validate_pairing(&mut file)
+        .await
+        .map_err(|e| InstallFailure::Pairing(format!("this device no longer accepts the pairing file: {e}")))?;
+
+    // The device opens a port for the tunnel and names no host: it is the
+    // address the device answered at.
+    let port = client.create_tcp_listener().await?;
+    let stream = tokio::net::TcpStream::connect((address.ip(), port)).await?;
+    let tunnel = connect_tls_psk_tunnel_native(stream, client.encryption_key()).await?;
+
+    let parse = |address: &str| {
+        address.parse::<IpAddr>().map_err(|e| InstallFailure::Other(format!("the tunnel gave an invalid address: {e}")))
+    };
+    let (ours, theirs) = (parse(&tunnel.info.client_address)?, parse(&tunnel.info.server_address)?);
+    let (mtu, rsd_port) = (tunnel.info.mtu as usize, tunnel.info.server_rsd_port);
+    let mut adapter = Adapter::new(Box::new(tunnel.into_inner()), ours, theirs);
+    adapter.set_mss(mtu.saturating_sub(60));
+    let mut adapter = adapter.to_async_handle();
+
+    let mut handshake = RsdHandshake::new(adapter.connect(rsd_port).await?).await?;
+    let mut misagent = MisagentClient::connect_rsd(&mut adapter, &mut handshake).await?;
+    misagent.install(profile).await?;
+    Ok(())
+}
+
+/// Installs a provisioning profile (the bytes of a `.mobileprovision`) on the
+/// device that `pairing` (an RPPairing plist) belongs to, reached at
+/// `host`:`port` (10.7.0.1:49152 through LocalDevVPN). An app the profile
+/// covers stays valid until the profile expires, without being installed again.
+/// Blocks, for at most `timeout_seconds`.
+///
+/// Returns 0 on success; otherwise `*error` is set (free it with
+/// `madeira_rppairing_string_free`) and the result is 1 when the device could
+/// not be reached, 2 when it does not accept the pairing file, 3 for anything
+/// else.
+///
+/// # Safety
+/// `pairing`/`pairing_len` and `profile`/`profile_len` must be readable; `host`
+/// a valid NUL-terminated string; `error` NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn madeira_rppairing_install_profile(
+    pairing: *const u8,
+    pairing_len: usize,
+    host: *const c_char,
+    port: u16,
+    profile: *const u8,
+    profile_len: usize,
+    timeout_seconds: u32,
+    error: *mut *mut c_char,
+) -> i32 {
+    if pairing.is_null() || profile.is_null() || host.is_null() || profile_len == 0 {
+        set_error(error, "missing pairing file, profile or address");
+        return 3;
+    }
+    let file = match RpPairingFile::from_bytes(unsafe { std::slice::from_raw_parts(pairing, pairing_len) }) {
+        Ok(file) => file,
+        Err(e) => {
+            set_error(error, format!("the pairing file could not be read: {e}"));
+            return 2;
+        }
+    };
+    let address = match unsafe { CStr::from_ptr(host) }.to_str().ok().and_then(|host| host.parse::<IpAddr>().ok()) {
+        Some(ip) => SocketAddr::new(ip, port),
+        None => {
+            set_error(error, "invalid device address");
+            return 3;
+        }
+    };
+    let profile = unsafe { std::slice::from_raw_parts(profile, profile_len) }.to_vec();
+
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            set_error(error, format!("could not start the runtime: {e}"));
+            return 3;
+        }
+    };
+    let limit = Duration::from_secs(timeout_seconds.max(1).into());
+    let result = runtime.block_on(async {
+        match tokio::time::timeout(limit, install_profile(file, address, profile)).await {
+            Ok(result) => result,
+            Err(_) => Err(InstallFailure::Unreachable("this device did not answer in time".to_string())),
+        }
+    });
+    match result {
+        Ok(()) => 0,
+        Err(failure) => {
+            let code = failure.code();
+            set_error(error, failure.message());
+            code
+        }
     }
 }
 

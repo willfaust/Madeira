@@ -35,7 +35,8 @@ enum JITPairingSource: String {
 /// the Files app and every Windows program in Madeira could read it. Its bytes
 /// go only to the bundled helper, over XPC, for one request. A copy an earlier
 /// build left at Documents/StikJIT/pairingFile.plist moves into the Keychain
-/// and is deleted.
+/// and is deleted; an installer that already holds this device's pairing file
+/// (SideInstaller) hands it over by writing it there.
 enum JITPairingFileStore {
     private static let service = "MadeiraJITPairing"
     private static let account = "rppairing"
@@ -102,7 +103,8 @@ enum JITPairingFileStore {
         UserDefaults.standard.set(source.rawValue, forKey: sourceKey)
     }
 
-    /// Documents/StikJIT/pairingFile.plist, where builds before the Keychain kept it.
+    /// Documents/StikJIT/pairingFile.plist, where builds before the Keychain kept it,
+    /// and where an installer leaves one for Madeira to take in.
     private static var legacyFolder: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("StikJIT", isDirectory: true)

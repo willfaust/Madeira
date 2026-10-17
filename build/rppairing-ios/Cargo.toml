@@ -10,7 +10,18 @@ crate-type = ["staticlib"]
 path = "src/lib.rs"
 
 [dependencies]
-idevice = { version = "=0.1.68", default-features = false, features = ["remote_pairing", "ring"] }
+idevice = { version = "=0.1.68", default-features = false, features = ["remote_pairing", "tunnel_tcp_stack", "rsd", "tcp", "misagent", "ring"] }
+# The Apple ID sign-in (src/apple_id.rs). It builds only with `install`, which
+# asks idevice for two services nothing here calls.
+isideload = { version = "=0.4.4", default-features = false, features = ["install", "tokio-mt"] }
+base64 = "0.22"
+# What Apple answers a verification code with, and isideload's sign-in data.
+plist = "1"
+rootcause = "0.12"
+# isideload's HTTPS client is built without a crypto provider and takes the
+# process default, which apple_id.rs sets to ring, as idevice uses.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "net", "sync", "macros", "time"] }
 
 [profile.release]

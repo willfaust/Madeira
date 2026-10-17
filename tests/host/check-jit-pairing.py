@@ -56,7 +56,7 @@ gitignore = (root / '.gitignore').read_text()
 # ------------------------------------------------------------------ the C interface
 exported = set(re.findall(r'#\[unsafe\(no_mangle\)\]\s*pub (?:unsafe )?extern "C" fn (\w+)', rust))
 declared = set(re.findall(r'\b(madeira_rppairing_\w+)\s*\(', header))
-require(len(exported) == 11 and exported == declared,
+require(len(exported) == 12 and exported == declared,
         f'MadeiraRPPairing.h declares exactly the exported functions ({sorted(exported ^ declared) or "in step"})')
 require('#import "MadeiraRPPairing.h"' in bridging, 'the bridging header imports the pairing interface')
 require('PairableHost' in rust and 'RpPairingSocket::new_device' in rust and 'mdns' not in rust.lower().replace('mdns_txt_records', ''),
