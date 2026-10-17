@@ -43,6 +43,12 @@ void winios_post_touch_up(int x, int y);
  * down=1 press, down=0 release. */
 void winios_post_key(int vk, int down);
 
+/* Text-only paste: one Unicode scalar, optionally represented by a US-layout
+ * virtual key. Returns 0 when the queue is busy; retry without advancing.
+ * Cancel invalidates text already queued, without discarding physical input. */
+int winios_try_post_text(unsigned int scalar, int vk, int shift, int interval_ms);
+void winios_cancel_text(void);
+
 /* S2 desktop compositor placement. Called by the Swift presentation
  * placeholder (MetalBackedView) with its bounds in UIWindow coords —
  * the wine virtual desktop renders aspect-fit inside this frame, like

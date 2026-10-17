@@ -241,3 +241,43 @@ Device checklist:
 - the iPhone AssistiveTouch hint and click filter;
 - the right-stick mouse on and off;
 - each switch at its non-default value.
+
+## Clipboard text paste
+
+Copy text on the iPad, focus a text field in the Windows program, then press
+**Command-V** on a hardware keyboard. Open Keyboard from the Session menu to
+use the Paste button on its accessory bar, including when no hardware
+keyboard is connected. The bar stays open for repeated pastes. Only plain text
+is accepted. This types into the current Windows input target; it does not sync
+the Windows clipboard, copy text back to iPadOS, or transfer files/images.
+
+ASCII uses the same US-layout virtual keys as the software keyboard. Other
+Unicode scalars use `KEYEVENTF_UNICODE` / `VK_PACKET`, including UTF-16 surrogate
+pairs. Windows programs that translate keyboard messages can receive those
+characters; a game that only reads raw scan codes, rejects a character, or lacks
+the corresponding font may not. Caps Lock is accounted for when typing letters.
+Newlines type Enter and tabs type Tab, so they can submit a single-line dialog
+or change its focus, just as keyboard input would.
+
+Paste reads the iPad clipboard only on an explicit paste action. It sends one
+scalar every 10 ms, retries under queue pressure, and reserves queue slots for
+physical releases. Losing focus, disconnecting the keyboard, typing another
+key or closing the keyboard cancels the remaining text. Rapid repeated pastes
+are queued as complete requests, in order. Held modifiers are
+released and stay suppressed until physically released. Command-V is consumed
+locally; Ctrl-V and other Command chords retain their Windows behavior. Native
+iOS text fields keep their usual paste behavior. The paste bridge does not log
+clipboard contents. A single nonblocking consumer keeps queued input in FIFO
+order across concurrent Wine pumps. The minimum character interval is enforced
+at delivery too, so a stalled pump cannot flush pasted characters in a burst.
+
+For compatibility testing, `env.MADEIRA_PASTE_INTERVAL_MS = 5` in a game's
+advanced config selects a 5 ms character interval after relaunch. The default
+is 10 ms; the supported range is 5–100 ms. This affects simulated clipboard
+typing, not the ordering or timing of physical hardware keyboard events.
+
+Host regression: `python3 tests/host/check-clipboard-paste.py`.
+The Unicode contract is described in Microsoft's
+[KEYBDINPUT reference](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput).
+Apple documents explicit keyboard paste intent in its
+[UIPasteboard reference](https://developer.apple.com/documentation/uikit/uipasteboard).

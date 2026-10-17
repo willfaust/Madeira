@@ -801,12 +801,14 @@ void winios_pWindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 
 extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data, void *hwnd);
 extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
+extern void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift);
 extern void winios_dump_window_tree(void);
 extern void ios_dump_all_thread_stacks(void);
 
 #define WINIOS_RING_SIZE 256
 #define WINIOS_EV_MOUSE 0
 #define WINIOS_EV_KEY   1
+#define WINIOS_EV_TEXT  2
 #define KEYEVENTF_KEYUP 0x0002
 typedef struct {
     unsigned int type;       /* WINIOS_EV_MOUSE / WINIOS_EV_KEY */
@@ -821,6 +823,42 @@ static struct {
     unsigned int tail;       /* consumer cursor (Wine drain) */
     pthread_mutex_t lock;
 } g_input_q = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static _Atomic unsigned int g_text_generation;
+/* One consumer owns delivery order across concurrent Wine event pumps. */
+static pthread_mutex_t g_input_drain_lock = PTHREAD_MUTEX_INITIALIZER;
+static double g_text_ready_at;
+static unsigned int g_text_paced_generation;
+
+int winios_try_post_text(unsigned int scalar, int vk, int shift, int interval_ms) {
+    if (interval_ms < 5) interval_ms = 5;
+    if (interval_ms > 100) interval_ms = 100;
+    int accepted = 0;
+    pthread_mutex_lock(&g_input_q.lock);
+    unsigned int used = (g_input_q.head + WINIOS_RING_SIZE - g_input_q.tail) % WINIOS_RING_SIZE;
+    /* Leave room for physical key/button releases while the game is busy. */
+    if (used < WINIOS_RING_SIZE - 16) {
+        g_input_q.buf[g_input_q.head] = (winios_input_event_t){
+            WINIOS_EV_TEXT, (int)scalar, vk, ((unsigned int)interval_ms << 8) | (shift != 0),
+            atomic_load(&g_text_generation)
+        };
+        g_input_q.head = (g_input_q.head + 1) % WINIOS_RING_SIZE;
+        accepted = 1;
+    }
+    pthread_mutex_unlock(&g_input_q.lock);
+    return accepted;
+}
+
+void winios_cancel_text(void) {
+    atomic_fetch_add(&g_text_generation, 1);
+}
+
+static int winios_drain_text(const winios_input_event_t *e) {
+    if (e->type != WINIOS_EV_TEXT) return 0;
+    if (e->data == atomic_load(&g_text_generation))
+        winios_drv_post_text((unsigned int)e->x, (unsigned short)e->y, (e->flags & 1) != 0);
+    return 1;
+}
 
 static void winios_q_push_ev(unsigned int type, int x, int y, unsigned int flags, unsigned int data) {
     pthread_mutex_lock(&g_input_q.lock);
@@ -868,6 +906,46 @@ void winios_post_key(int vk, int down) {
     winios_q_push_ev(WINIOS_EV_KEY, vk, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
 }
 
+/* Serial, nonblocking consumer: keys remain FIFO even with several Wine
+ * threads polling at once. Only the queue owner injects into wineserver. */
+static BOOL winios_drain_input(void) {
+    if (pthread_mutex_trylock(&g_input_drain_lock)) return FALSE;
+    BOOL drained = FALSE;
+    for (;;) {
+        winios_input_event_t e;
+        pthread_mutex_lock(&g_input_q.lock);
+        if (g_input_q.tail == g_input_q.head) {
+            pthread_mutex_unlock(&g_input_q.lock);
+            break;
+        }
+        e = g_input_q.buf[g_input_q.tail];
+        if (e.type == WINIOS_EV_TEXT && e.data == atomic_load(&g_text_generation)
+            && e.data == g_text_paced_generation && CACurrentMediaTime() < g_text_ready_at) {
+            pthread_mutex_unlock(&g_input_q.lock);
+            break; /* Never catch up a delayed queue as a burst of keystrokes. */
+        }
+        g_input_q.tail = (g_input_q.tail + 1) % WINIOS_RING_SIZE;
+        pthread_mutex_unlock(&g_input_q.lock);
+
+        if (winios_drain_text(&e)) {
+            if (e.data == atomic_load(&g_text_generation)) {
+                g_text_paced_generation = e.data;
+                g_text_ready_at = CACurrentMediaTime() + (e.flags >> 8) / 1000.0;
+            }
+            drained = TRUE;
+            continue; /* Clipboard contents must not enter the input log. */
+        }
+        fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
+        if (e.type == WINIOS_EV_KEY)
+            winios_drv_post_key((unsigned short)e.x, e.flags);
+        else
+            winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
+        drained = TRUE;
+    }
+    pthread_mutex_unlock(&g_input_drain_lock);
+    return drained;
+}
+
 BOOL winios_pProcessEvents(DWORD mask) {
     /* The restored born-minimized window's own thread brings it to the front
      * (see g_restore_foreground); other threads leave the request in place. */
@@ -897,26 +975,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
             winios_dump_window_tree();
         }
     }
-    BOOL drained = FALSE;
-    for (;;) {
-        winios_input_event_t e;
-        pthread_mutex_lock(&g_input_q.lock);
-        if (g_input_q.tail == g_input_q.head) {
-            pthread_mutex_unlock(&g_input_q.lock);
-            break;
-        }
-        e = g_input_q.buf[g_input_q.tail];
-        g_input_q.tail = (g_input_q.tail + 1) % WINIOS_RING_SIZE;
-        pthread_mutex_unlock(&g_input_q.lock);
-
-        fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
-        if (e.type == WINIOS_EV_KEY)
-            winios_drv_post_key((unsigned short)e.x, e.flags);
-        else
-            winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
-        drained = TRUE;
-    }
-    return drained;
+    return winios_drain_input();
 }
 
 /* ============================================================ *

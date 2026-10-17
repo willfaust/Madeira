@@ -233,6 +233,56 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
     }
 }
 
+/* Same key input as the hardware bridge, without logging pasted text. */
+static void winios_text_key(unsigned short vk, unsigned int flags)
+{
+    INPUT input = {0};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = NtUserMapVirtualKeyEx( vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0) ) & 0xff;
+    input.ki.dwFlags = flags;
+    send_hardware_message( NULL, 0, &input, 0 );
+}
+
+/* A complete pasted character is emitted on the Wine event-pump thread. */
+void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift)
+{
+    INPUT input = {0};
+    unsigned short units[2];
+    unsigned int count, i;
+
+    if (vk)
+    {
+        if (vk >= 'A' && vk <= 'Z' && (NtUserGetKeyState( VK_CAPITAL ) & 1)) shift = !shift;
+        ios_foreground_if_none( "pasted text" );
+        if (shift) winios_text_key( VK_SHIFT, 0 );
+        winios_text_key( vk, 0 );
+        winios_text_key( vk, KEYEVENTF_KEYUP );
+        if (shift) winios_text_key( VK_SHIFT, KEYEVENTF_KEYUP );
+        return;
+    }
+    if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) return;
+    if (scalar > 0xffff)
+    {
+        scalar -= 0x10000;
+        units[0] = 0xd800 + (scalar >> 10);
+        units[1] = 0xdc00 + (scalar & 0x3ff);
+        count = 2;
+    }
+    else { units[0] = scalar; count = 1; }
+
+    input.type = INPUT_KEYBOARD;
+    ios_foreground_if_none( "pasted text" );
+    for (i = 0; i < count; i++)
+    {
+        input.ki.wScan = units[i];
+        input.ki.dwFlags = KEYEVENTF_UNICODE;
+        send_hardware_message( NULL, 0, &input, 0 );
+        input.ki.dwFlags |= KEYEVENTF_KEYUP;
+        send_hardware_message( NULL, 0, &input, 0 );
+    }
+}
+
 /* [winios-tree] window-tree dump: every top-level window with class,
  * title, style and rects. Driven from the app side (Winios.m
  * ProcessEvents drain) every few seconds in desktop mode — ground truth
