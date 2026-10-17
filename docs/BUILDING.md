@@ -19,7 +19,7 @@ remediation; steps marked UNVERIFIED have not yet been re-run from scratch.
 | Input | Why absent | How to obtain | Verified from clean |
 |---|---|---|---|
 | `toolchains/llvm-mingw-20260421-ucrt-macos-universal/` | 122 MB third-party toolchain | `llvm-mingw-20260421-ucrt-macos-universal.tar.xz` from https://github.com/mstorsjo/llvm-mingw/releases/tag/20260421, SHA-256 `bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7`, extracted under `toolchains/` | tarball hash recorded; download UNVERIFIED |
-| `toolchains/llvm-project/` + `toolchains/llvm-ios-build/` + `toolchains/llvm-host-build/` | LLVM built for iOS (hours) | upstream llvm-project at commit `8dfdcc7b7` ("[libc++] Fix memory leaks when throwing inside std::vector constructor"); configure `llvm-ios-build` with `-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_BUILD_TYPE=Release -DLLVM_HOST_TRIPLE=arm64-apple-ios17.0 -DLLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-ios17.0 -DLLVM_TARGET_ARCH=host -DLLVM_TARGETS_TO_BUILD= -DLLVM_ENABLE_PROJECTS= -DLLVM_BUILD_TOOLS=Off -DLLVM_INCLUDE_TESTS=Off -DLLVM_ENABLE_ZLIB=Off` (values read back from the existing CMakeCache); a host build for tablegen lives in `llvm-host-build` | recipe reconstructed; UNVERIFIED |
+| `toolchains/llvm-project/` + `toolchains/llvm-ios-build/` + `toolchains/llvm-host-build/` | LLVM built for iOS | upstream llvm-project at commit `8dfdcc7b7`; configure `llvm-ios-build` with `-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_MACOSX_BUNDLE=OFF -DCMAKE_BUILD_TYPE=Release -DLLVM_HOST_TRIPLE=arm64-apple-ios17.0 -DLLVM_DEFAULT_TARGET_TRIPLE=arm64-apple-ios17.0 -DLLVM_TARGET_ARCH=host -DLLVM_TARGETS_TO_BUILD= -DLLVM_ENABLE_PROJECTS= -DLLVM_BUILD_TOOLS=OFF -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_TABLEGEN=<absolute path to llvm-host-build/bin/llvm-tblgen>`. First build the host `llvm-tblgen` target; then build iOS targets `LLVMPasses LLVMBitWriter`. | these targets built with Xcode 26.6 on 2026-10-17 |
 | `research/GPTK/Metal Shader Converter 4.0 beta 2.pkg` | Apple installer, 30 MB, licence-bound | Apple developer downloads; SHA-256 `1acc33c87ea663933df89721a998d066106685473020bcbe007cee7a16155734` (pinned in `build/madeira-d3d12/deps.sh`). Only needed to REBUILD the converter fetch; the library itself is tracked | n/a |
 | `app/Madeira/x86_64-vcruntime/` | Microsoft Visual C++ 2015-2022 x64 runtime DLLs (concrt140, msvcp140*, vcamp140, vccorlib140, vcruntime140*), redistributable under Microsoft's terms, not under this repository's licence | extract from Microsoft's `vc_redist.x64.exe` (or copy from `C:\Windows\System32` of a licensed Windows install) into that folder | UNVERIFIED |
 | `build/wine-mono/wine-mono-11.0.0/` (optional) | Wine Mono, the .NET Framework runtime Wine's mscoree loads (not Microsoft code; licences in `build/wine-mono/COPYING` and `THIRD-PARTY-NOTICES.md`), 41.6 MB download, 228 MB unpacked | `bash build/wine-mono/fetch.sh` downloads `wine-mono-11.0.0-x86.tar.xz` from https://dl.winehq.org/wine/wine-mono/11.0.0/ and checks its SHA-256; `--source` also fetches the matching source tarball. Version and hashes are pinned in `build/wine-mono/pin.sh`, which does not follow `WINE_MONO_VERSION` in `wine/dlls/mscoree/mscoree_private.h`. The Xcode phase "Bundle Wine Mono" runs `build/wine-mono/bundle.sh`, which copies it into `Madeira.app/wine-mono` without the `lib/mono/*-api` reference assemblies and patches the bundled `mscorlib.dll`: **a dirty hack** (4 IL bytes: `GC.Collect` with `GCCollectionMode.Optimized` returns, for Terraria), pinned to the exact file by SHA-256 so the build stops on any other mscorlib; TODO: replace it with a Wine Mono built from source or an upstream fix (see the TODO in `bundle.sh`). Without the folder the app builds without Mono, and .NET Framework programs fail with "Wine Mono is not installed". **Release builds leave Wine Mono out** (2026-10-06): the packaging step deletes `Madeira.app/wine-mono`, and the app downloads it from WineHQ on first use (setup or Settings › .NET Framework, `app/Madeira/WineMono.swift`) | fetch + bundle run on the development machine 2026-10-05; not from a clean checkout |
@@ -72,6 +72,39 @@ git-ignored and consumed by the app project.
    `wow64win.dll`; see docs/WOW64.md, "Building". UNVERIFIED on macOS.
 
 ## Status of the LGPL relink question
+
+### Native app rebuild, 2026-10-17
+
+The app's Debug target linked successfully with Xcode 26.6 (iPhoneOS 26.5 SDK)
+after building FEX's native `FEXCore`, `FEXCore_Base` and `JemallocLibs`, the
+three Wine unix archives, FreeType, FFmpeg, rppairing and DXMT plus the LLVM
+targets above. Wine's macOS configuration needs the llvm-mingw and bison 3
+directories on PATH; `make -j6 include/all` generates the IDL headers the unix
+builds consume. Clone FreeType as described in `build/freetype-ios/build.sh`.
+Run `build/stage-licenses.sh` before the app build.
+
+The scripts now bootstrap the wineserver archive from Wine's unchanged server
+sources, generate airconv's three shader headers, and create the combined
+DXMT/LLVM archive on first use. FEX explicitly selects arm64 and cortex-a78
+instead of probing Linux's `/proc/cpuinfo`. The optional page-wait diagnostic
+counter is compile-probed; SDKs without that field report `pgw=-1`.
+
+This run reused the release's i386 PE farm and the tracked PE resources, with
+separately rebuilt ARM64EC ntdll and aarch64 wow64win. It did not rebuild every
+PE module or the Windows FEX modules, so it does not establish a complete
+clean-machine release build. The Microsoft x64 runtime resources came from
+Microsoft's `vc_redist.x64.exe`, as described above. Device installation and
+game compatibility are separate checks from successful native compilation.
+
+Development signing also needs a provisioning profile authorizing both
+`com.apple.developer.kernel.increased-memory-limit` and
+`com.apple.developer.kernel.extended-virtual-addressing`. An existing wildcard
+profile without those capabilities can sign an app which installs but cannot
+reserve the WoW64 guest window. Use an explicit app identifier and regenerate
+its profile through Xcode's normal signing workflow; retain those entitlements
+in the app signature. On the tested M1 iPad this changed the observed task map
+from 17 GB to 63 GB. This removes that reservation limit; it is not proof that
+every 32-bit child process starts successfully.
 
 A recipient of a built package can obtain the complete corresponding
 source of every LGPL library (Wine fork, GnuTLS, Nettle, GMP, FFmpeg) from the

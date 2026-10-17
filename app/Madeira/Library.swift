@@ -583,7 +583,9 @@ struct LibraryEntry: Codable, Identifiable {
         let command = desktop == true ? (exe: "explorer.exe", args: launchArguments) : launchCommand
         setenv("MADEIRA_EXE", command.exe, 1)
         setenv("MADEIRA_ARGS", command.args, 1)
-        if desktop == true || runsInDesktop { setenv("MADEIRA_DESKTOP", "1", 1) } else { unsetenv("MADEIRA_DESKTOP") }
+        // Export both choices: unsetting Directly lets a global env.MADEIRA_DESKTOP=1
+        // turn the desktop back on when the bridge applies madeira.cfg.
+        setenv("MADEIRA_DESKTOP", desktop == true || runsInDesktop ? "1" : "0", 1)
         if startsSteamGameDirectly, let steamAppID {
             // The game's own Steam identity (SteamAppId, SteamGameId, SteamAppPath = its install
             // folder) instead of the bridge's fixed one.
@@ -3089,7 +3091,7 @@ struct LibraryDetail: View {
                         }))
                     } header: { Text("Launch") } footer: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Directly: the game is Wine's first program, with no desktop; small windows such as launchers and message boxes are drawn over the game, a window drawn without DirectX that fills the screen is not. In the Wine desktop: the game starts inside the Wine desktop at the Resolution above, where every window shows.")
+                            Text("Directly: DirectX draws to the game display, with small launcher windows and message boxes over it. In the Wine desktop: every window shows inside the desktop at the Resolution above; use this for games drawn with GDI. A small game window stays small inside that desktop. Select the game's own fullscreen mode or resolution to enlarge it.")
                             Text("The working folder is a C:\\ path, for example C:\\Games\\Some Game. Start Windows services first is for launchers that need them (Steam-style COM); Madeira writes a batch file for it in C:\\madeira-games.")
                             if !entry.runsInDesktop && (entry.isBatch || entry.startServices == true) {
                                 // Wine stops with its first process (the ml1163 open risk).

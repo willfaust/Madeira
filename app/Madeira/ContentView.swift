@@ -171,12 +171,22 @@ final class MetalBackedView: UIView {
     /// really resizes it, so it is read back on every use rather than taken
     /// from MADEIRA_SCREEN_W/H once; a mode change re-lays-out through
     /// `observeModeChanges`. It is 1024x768 unless a session chose otherwise.
-    private func guestSize() -> CGSize {
+    func guestSize() -> CGSize {
         Self.observeModeChanges()
         var w: Int32 = 0, h: Int32 = 0
         winios_screen_size(&w, &h)
         guard w > 0, h > 0 else { return CGSize(width: 1024, height: 768) }
         return CGSize(width: CGFloat(w), height: CGFloat(h))
+    }
+
+    /// Windows screen coordinates represented by the fullscreen game layer.
+    /// A windowed game's client can be smaller than its rendered backbuffer.
+    func pointerRect() -> CGRect {
+        var x: Int32 = 0, y: Int32 = 0, w: Int32 = 0, h: Int32 = 0
+        if winios_game_client_rect(&x, &y, &w, &h) != 0 {
+            return CGRect(x: Int(x), y: Int(y), width: Int(w), height: Int(h))
+        }
+        return CGRect(origin: .zero, size: guestSize())
     }
 
     /// The layout used for the presented layer and for touch mapping: a
@@ -316,7 +326,7 @@ final class MetalBackedView: UIView {
     /// Same mapping for any point (a multi-finger midpoint, a touch's down
     /// point). In a desktop session the compositor letterboxes the desktop in
     /// its own frame, so it does the mapping.
-    private func mapPoint(_ p: CGPoint) -> (Int32, Int32) {
+    func mapPoint(_ p: CGPoint) -> (Int32, Int32) {
         if desktopMode {
             let w = convert(p, to: nil)
             var px: Int32 = 0, py: Int32 = 0
@@ -324,9 +334,9 @@ final class MetalBackedView: UIView {
             Self.cursor = CGPoint(x: CGFloat(px), y: CGFloat(py))   // keep the trackpad cursor in step
             return (px, py)
         }
-        let g = GameSurfaceLayout.map(point: p, guest: guestSize(), aspect: drawableAspect(),
-                                      bounds: bounds, mode: effectiveDisplayMode())
-        return (Int32(g.x), Int32(g.y))
+        let client = pointerRect()
+        let g = GameSurfaceLayout.map(point: p, guest: client.size, bounds: gameRect(), mode: .stretch)
+        return (Int32(client.minX + g.x), Int32(client.minY + g.y))
     }
 
     // ==================================================================

@@ -136,7 +136,7 @@ game.arguments = "-windowed \"-name=a b\""
 game.configureLaunch()
 expect(env("MADEIRA_EXE") == "C:\\Games\\Some Game\\bin\\game.exe", "direct executable path")
 expect(env("MADEIRA_ARGS") == "-windowed \"-name=a b\"", "direct arguments verbatim")
-expect(env("MADEIRA_DESKTOP") == nil, "desktop state cleared")
+expect(env("MADEIRA_DESKTOP") == "0", "direct mode explicitly disables the desktop")
 // Every entry's Resolution becomes the session's virtual monitor.
 expect(game.resolution == "1152x800", "ml1172: new entries default to the screen's shape at 720p's pixels (1152x800 on an 11-inch iPad)")
 expect(env("MADEIRA_SCREEN_W") == "1152" && env("MADEIRA_SCREEN_H") == "800" && env("MADEIRA_SCREEN_SRC") == "knob",
@@ -271,7 +271,7 @@ bat.resolution = "1280x720"; bat.arguments = "fast"
 expect(bat.isBatch && LibraryEntry(title: "C", relativePath: "a/b.CMD", bits: 0).isBatch && !game.isBatch, ".bat and .cmd are batch files")
 bat.configureLaunch()
 expect(env("MADEIRA_EXE") == "C:\\windows\\system32\\cmd.exe" && env("MADEIRA_ARGS") == "/c \"C:\\Games\\Tool\\run game.bat\" fast"
-       && env("MADEIRA_DESKTOP") == nil && env("MADEIRA_WORKDIR") == "C:\\Games\\Tool", "direct .bat: cmd.exe /c, in its folder")
+       && env("MADEIRA_DESKTOP") == "0" && env("MADEIRA_WORKDIR") == "C:\\Games\\Tool", "direct .bat: cmd.exe /c, in its folder")
 bat.launchMode = "desktop"; bat.configureLaunch()
 expect(env("MADEIRA_ARGS") == "/desktop=shell,1280x720 cmd /c \"C:\\Games\\Tool\\run game.bat\" fast", "desktop .bat: cmd /c inside the desktop")
 var svc = inDesk; svc.startServices = true

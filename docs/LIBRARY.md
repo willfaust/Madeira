@@ -185,7 +185,8 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
 
 A switch the game's page exports for a launch (the x87, AVX, CPU core,
 anisotropy and frame generation choices, the fastsync switches, the
-DirectInput controller choice) wins over the same `env.` key in madeira.cfg:
+DirectInput controller choice, and the launch's desktop mode) wins over the same
+`env.` key in madeira.cfg:
 that cfg line is skipped and logged as `[madeira-env] ml1184 KEY=... kept`.
 These keys are unset when the session ends (ml1184). The game's own config
 lines come after both and win.
@@ -204,6 +205,19 @@ and command are Dock's:
   shows. A `.bat`/`.cmd` runs as `cmd.exe /c "<file>"` directly, or
   `cmd /c "<file>"` inside the desktop. For **The game** the program is Steam's
   (or the one chosen under **Program**) with Steam's arguments.
+  Directly exports `MADEIRA_DESKTOP=0`, and the Wine desktop exports `1`, so a
+  global `env.MADEIRA_DESKTOP` cannot undo the choice. The game's own config
+  still wins over both. Desktop mode shows GDI windows; Directly presents
+  DirectX to the game display. A small window stays small inside the desktop:
+  choose fullscreen or a higher resolution in the game itself to enlarge it.
+  Enlarging the desktop alone does not increase the game's rendering resolution.
+  For a direct-mode game which draws in monitor pixels but leaves its original
+  small Windows client unchanged, its own config can set
+  `env.MADEIRA_DIRECT_WINDOW_SIZE = 1`. After creating its Metal view, Madeira
+  asks the window's owner thread to size its client to the selected resolution,
+  preserving its border widths, and repeats this if the engine shrinks it
+  again after startup. This is opt-in: ordinary windowed games keep
+  their requested size and use client-coordinate input mapping.
 - **Working folder** (`workingDirectory`): a `C:\` folder; empty means Steam's
   working folder for **The game**, else the program's own folder. It is
   exported as `MADEIRA_WORKDIR` (the bridge reads and clears it) whenever what

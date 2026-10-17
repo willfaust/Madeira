@@ -348,29 +348,6 @@ enum StickVelocity {
 }
 
 
-/// Where a point on the game view lands on the Windows screen. The screen is
-/// drawn aspect-fit and centred in the view: MetalBackedView.gameRect for a
-/// program on the game view (its touch mapping, mapTouch, is the same
-/// arithmetic) and the desktop compositor (Winios.m) for the desktop
-/// session. A point in the letterbox clamps to the nearest edge.
-enum ScreenMap {
-    static func fit(viewW: Double, viewH: Double, screenW: Int, screenH: Int)
-        -> (originX: Double, originY: Double, scale: Double) {
-        let sw = Double(max(screenW, 1)), sh = Double(max(screenH, 1))
-        let s = max(min(viewW / sw, viewH / sh), .leastNormalMagnitude)
-        return ((viewW - sw * s) / 2, (viewH - sh * s) / 2, s)
-    }
-
-    static func toScreen(x: Double, y: Double, viewW: Double, viewH: Double,
-                         screenW: Int, screenH: Int) -> (x: Int32, y: Int32) {
-        guard x.isFinite, y.isFinite, viewW > 0, viewH > 0 else { return (0, 0) }
-        let f = fit(viewW: viewW, viewH: viewH, screenW: screenW, screenH: screenH)
-        let sx = min(max((x - f.originX) / f.scale, 0), Double(max(screenW, 1) - 1))
-        let sy = min(max((y - f.originY) / f.scale, 0), Double(max(screenH, 1) - 1))
-        return (Int32(sx), Int32(sy))
-    }
-}
-
 /// Keys (or buttons) the user holds, and which of them the program may see.
 /// Losing focus hides everything held; a key pressed while the program does
 /// not have focus stays hidden from it until it is released, even if focus
@@ -1120,12 +1097,13 @@ final class HardwareInput: ObservableObject {
     /// Absolute route: put the program's cursor where the iOS pointer is on
     /// the game view. Main thread.
     private func postAbsolute(_ p: CGPoint, in view: UIView) {
+        guard let gameView = view as? MetalBackedView,
+              p.x.isFinite, p.y.isFinite, view.bounds.width > 0, view.bounds.height > 0 else { return }
         let desktop = Self.desktopMode
-        let desk = Self.desktopSize()
-        let sw = desktop ? desk.w : DirectCursorOverlay.screenW
-        let sh = desktop ? desk.h : DirectCursorOverlay.screenH
-        let s = ScreenMap.toScreen(x: Double(p.x), y: Double(p.y), viewW: Double(view.bounds.width),
-                                   viewH: Double(view.bounds.height), screenW: sw, screenH: sh)
+        // Use the finger's mapping, including the active resolution, the
+        // library's scaling mode and any fitted desktop window.
+        let (x, y) = gameView.mapPoint(p)
+        let s = (x: x, y: y)
         setMouseInUse(true)
         if let last = lastAbsolute, last.x == s.x, last.y == s.y { return }
         lastAbsolute = s
@@ -1842,11 +1820,9 @@ final class PointerFallback: NSObject {
 /// it moves and scales with it; created the first time a mouse is used there.
 /// The image and hotspot are the program's (driver_ios.c extracts them exactly
 /// as for the desktop compositor); positions are Wine screen pixels on the
-/// 1024x768 surface that MetalBackedView.mapTouch also maps to. Main thread.
+/// live guest surface that MetalBackedView.mapPoint also maps to. Main thread.
 final class DirectCursorOverlay {
     static let shared = DirectCursorOverlay()
-    static let screenW = 1024
-    static let screenH = 768
 
     private var layer: CALayer?
     private var image = winios_direct_cursor_state()
@@ -1882,13 +1858,16 @@ final class DirectCursorOverlay {
         CATransaction.setDisableActions(true)
         l.isHidden = !visible
         if visible {
-            let k = MetalHostView.shared.bounds.width / CGFloat(Self.screenW)
+            let client = MetalBackedView.keyboardTarget?.pointerRect() ?? CGRect(x: 0, y: 0, width: 1024, height: 768)
+            let kx = MetalHostView.shared.bounds.width / client.width
+            let ky = MetalHostView.shared.bounds.height / client.height
             let w = serial != 0 ? Int(image.w) : Self.arrowSize.w
             let h = serial != 0 ? Int(image.h) : Self.arrowSize.h
             let hx = serial != 0 ? Int(image.hot_x) : 0
             let hy = serial != 0 ? Int(image.hot_y) : 0
-            l.bounds = CGRect(x: 0, y: 0, width: CGFloat(w) * k, height: CGFloat(h) * k)
-            l.position = CGPoint(x: CGFloat(Int(x) - hx) * k, y: CGFloat(Int(y) - hy) * k)
+            l.bounds = CGRect(x: 0, y: 0, width: CGFloat(w) * kx, height: CGFloat(h) * ky)
+            l.position = CGPoint(x: (CGFloat(Int(x) - hx) - client.minX) * kx,
+                                 y: (CGFloat(Int(y) - hy) - client.minY) * ky)
         }
         CATransaction.commit()
     }

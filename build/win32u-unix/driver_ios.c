@@ -395,6 +395,33 @@ int winios_drv_foreground_if_owner( HWND hwnd )
     return NtUserSetForegroundWindow( hwnd ) ? 1 : -1;
 }
 
+/* Opt-in for engines which draw and read mouse positions in monitor pixels
+ * while leaving their initial small HWND unchanged. Keep normal windowed
+ * games alone; the app queues this only for MADEIRA_DIRECT_WINDOW_SIZE=1. */
+int winios_drv_size_game_window( HWND hwnd, int width, int height )
+{
+    static _Thread_local BOOL resizing;
+    struct window_rects rects;
+    int cw, ch, outer_w, outer_h;
+    BOOL ok;
+
+    if (resizing || !hwnd || get_window_thread( hwnd, NULL ) != GetCurrentThreadId()) return 0;
+    if (width <= 0 || height <= 0 || !get_window_rects( hwnd, COORDS_SCREEN, &rects, get_thread_dpi() )) return -1;
+    cw = rects.client.right - rects.client.left;
+    ch = rects.client.bottom - rects.client.top;
+    if (cw == width && ch == height) return 1;
+    outer_w = width + rects.window.right - rects.window.left - cw;
+    outer_h = height + rects.window.bottom - rects.window.top - ch;
+    resizing = TRUE;
+    ok = NtUserSetWindowPos( hwnd, 0, rects.window.left - rects.client.left,
+                           rects.window.top - rects.client.top, outer_w, outer_h,
+                           SWP_NOZORDER | SWP_NOACTIVATE );
+    resizing = FALSE;
+    dprintf( 2, "[winios] direct window size hwnd=%p client=%dx%d -> %dx%d ok=%d\n",
+             hwnd, cw, ch, width, height, ok );
+    return ok ? 1 : -1;
+}
+
 /* ============================================================ *
  * winios window surfaces (S2): GDI window content → app compositor.
  * Modeled on win32u's offscreen surface (dce.c): the generic

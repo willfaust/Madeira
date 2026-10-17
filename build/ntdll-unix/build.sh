@@ -11,6 +11,13 @@ APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# Newer SDKs expose an extra diagnostic counter in rusage_info_v6.
+RUSAGE_FLAGS=()
+if printf '#include <sys/resource.h>\nint main(void) { struct rusage_info_v6 r; return (int)r.ri_page_wait_time_mach; }\n' | \
+    xcrun -sdk iphoneos clang -arch arm64 -isysroot "$SDK" -x c -fsyntax-only - >/dev/null 2>&1; then
+    RUSAGE_FLAGS=(-DMADEIRA_HAVE_RUSAGE_PAGE_WAIT=1)
+fi
+
 SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
@@ -23,6 +30,7 @@ compile_one() {
     if xcrun -sdk iphoneos clang \
         -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
+        "${RUSAGE_FLAGS[@]}" \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$WINE_BUILD/include/config.h" \
         -include "$BUILD_DIR/shims/wine_ios_exit.h" \

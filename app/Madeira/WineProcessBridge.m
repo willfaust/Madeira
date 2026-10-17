@@ -1237,6 +1237,7 @@ static void *wine_process_thread(void *arg) {
                  * applyEnvironment exports belongs here (check-frontend). The game's own
                  * config lines ($MADEIRA_CFG_GAME, below) come after and win over both. */
                 static const char *const per_launch[] = {
+                    "MADEIRA_DESKTOP",          /* the game's Directly / In the Wine desktop choice */
                     "MADEIRA_FASTSYNC", "MADEIRA_FASTSYNC_SEM", "MADEIRA_CPU_COUNT", "DXMT_D9_ANISO_LIMIT",
                     "FEX_X87REDUCEDPRECISION",   /* ml1184: the game's "Reduced-precision x87" */
                     "MADEIRA_DINPUT_PAD",        /* ml1240: the game's "XInput and DirectInput" */
@@ -1851,6 +1852,8 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
         unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
         unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */
+        unsetenv("MADEIRA_DESKTOP");           /* each launch chooses its own presentation mode */
+        unsetenv("MADEIRA_DIRECT_WINDOW_SIZE"); /* a game's opt-in must not resize the next game */
         /* madeira-bcd: Horizon Zero Dawn's per-game switches must not reach a later game
          * of this app run (GTA V Enhanced runs without them). */
         unsetenv("MADEIRA_SRV_FGETPATH");

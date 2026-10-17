@@ -5,7 +5,7 @@ Four parts:
   1. The pure section of app/Madeira/HardwareInput.swift (key map, mouse button
      edges, held-set diffing, motion carry, wheel notches, the AssistiveTouch
      classifier, the desktop cursor clamp, the right-stick velocity, the
-     view-to-screen mapping, focus gating of held keys, click focus, the
+     focus gating of held keys, click focus, the
      pointer route and the automatic pointer lock) is compiled with swiftc and
      exercised.
   2. Every HID keyboard usage is taken through the production chain
@@ -142,25 +142,7 @@ let stalled = StickVelocity.frame(x: 1, y: 0, gain: 1, dt: 5)
 assert(abs(stalled.dx - 24.0) < 1e-9)                       // dt clamped to 1/15 s
 assert(StickVelocity.frame(x: .nan, y: 0, gain: 1, dt: 0.016) == (0, 0))
 
-// View to screen: the same aspect fit as MetalBackedView.gameRect/mapTouch.
-func mapTouch(_ x: Double, _ y: Double, _ bw: Double, _ bh: Double) -> (Int32, Int32) {
-    let scale = min(bw / 1024, bh / 768), w = 1024 * scale, h = 768 * scale
-    let rx = (bw - w) / 2, ry = (bh - h) / 2
-    return (Int32(min(max((x - rx) * 1024 / w, 0), 1023)), Int32(min(max((y - ry) * 768 / h, 0), 767)))
-}
-for (bw, bh) in [(1024.0, 768.0), (834.0, 1194.0), (1366.0, 1024.0), (393.0, 852.0), (852.0, 393.0)] {
-    for (px, py) in [(0.0, 0.0), (bw / 2, bh / 2), (bw - 0.5, bh - 0.5), (bw * 0.3, bh * 0.7), (-5.0, bh + 9)] {
-        let s = ScreenMap.toScreen(x: px, y: py, viewW: bw, viewH: bh, screenW: 1024, screenH: 768)
-        let m = mapTouch(px, py, bw, bh)
-        assert(s.x == m.0 && s.y == m.1, "ScreenMap differs from mapTouch at \(px),\(py) in \(bw)x\(bh)")
-    }
-}
-// Desktop session: a 1280x720 desktop letterboxed in a 4:3 view; centre and corners.
-assert(ScreenMap.toScreen(x: 512, y: 384, viewW: 1024, viewH: 768, screenW: 1280, screenH: 720) == (640, 360))
-assert(ScreenMap.toScreen(x: 0, y: 0, viewW: 1024, viewH: 768, screenW: 1280, screenH: 720) == (0, 0))
-assert(ScreenMap.toScreen(x: 1024, y: 768, viewW: 1024, viewH: 768, screenW: 1280, screenH: 720) == (1279, 719))
-assert(ScreenMap.toScreen(x: .nan, y: 1, viewW: 1024, viewH: 768, screenW: 1024, screenH: 768) == (0, 0))
-assert(ScreenMap.toScreen(x: 5, y: 5, viewW: 0, viewH: 0, screenW: 1024, screenH: 768) == (0, 0))
+// View-to-screen geometry is exercised by check-pointer-geometry.py.
 
 // Focus gate: losing focus hides held keys; a key pressed without focus stays
 // hidden until released, even after focus returns.

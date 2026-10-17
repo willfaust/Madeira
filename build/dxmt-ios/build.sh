@@ -99,6 +99,7 @@ compile_cxx() {
 # MADEIRA: the native D3D9 frontend and its substrate (section 8.10 step 1).
 compile_madeira_cxx() {
     local src=$1 name=$2 extra="${3:-}"
+    if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang++ $COMMON_FLAGS $MADEIRA_CXX_FLAGS $MADEIRA_WARNINGS \
         $MADEIRA_INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $MADEIRA_DEFS $extra \
@@ -111,6 +112,7 @@ compile_madeira_cxx() {
 
 compile_madeira_c() {
     local src=$1 name=$2 extra="${3:-}"
+    if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang $COMMON_FLAGS -std=c11 $MADEIRA_WARNINGS \
         $MADEIRA_INCLUDES $INCLUDES_DIRECTX $INCLUDES_SHADERS $MADEIRA_DEFS $extra \
@@ -196,6 +198,19 @@ echo "=== winemetal unix (Objective-C) ==="
 compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
+echo "=== airconv shader headers ==="
+DXMT_METAL_STD="${DXMT_METAL_STD:-metal3.1}"
+mkdir -p "$BUILD_DIR/shader-headers"
+for name in air_msad air_samplepos air_tessellation; do
+    src="$DXMT_SRC/airconv/shaders/$name.metal"
+    dst="$BUILD_DIR/shader-headers/$name.h"
+    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ] || [ "$0" -nt "$dst" ]; then
+        xcrun -sdk macosx metal -std="$DXMT_METAL_STD" --target=air64-apple-macos14.0 \
+            -o "$BUILD_DIR/shader-headers/$name.air" -c "$src"
+        xxd -n "$name" -i "$BUILD_DIR/shader-headers/$name.air" "$dst"
+    fi
+done
+
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
@@ -212,6 +227,7 @@ compile_cxx "$DXMT_SRC/airconv/transforms/lower_16bit_texread.cpp" lower_16bit_t
 echo "=== DXBCParser (uses exceptions — override) ==="
 for cpp in BlobContainer.cpp DXBCUtils.cpp ShaderBinary.cpp; do
     name=dxbc_$(basename "$cpp" .cpp)
+    if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then continue; fi
     # ShaderBinary uses `throw`, so we can't use -fno-exceptions from CXX_FLAGS.
     printf "  %-40s " "$name"
     if xcrun -sdk iphoneos clang++ $COMMON_FLAGS -std=c++20 -fno-rtti \
@@ -343,5 +359,9 @@ if [ -f "$COMBINED" ]; then
     APP_COPY="$REPO_ROOT/app/Madeira/libdxmt_combined.a"
     if [ -f "$APP_COPY" ]; then cp "$COMBINED" "$APP_COPY"; echo "Staged: $APP_COPY"; fi
 else
-    echo "NOTE: $COMBINED absent; the app links that file, so build it before deploying."
+    echo "=== Creating libdxmt_combined.a ==="
+    LLVM_ARCHIVES=("$LLVM_BUILD"/lib/libLLVM*.a)
+    [ -f "${LLVM_ARCHIVES[0]}" ] || { echo "ERROR: build the iOS LLVM libraries first"; exit 1; }
+    xcrun -sdk iphoneos libtool -static -o "$COMBINED" "$OUT_LIB" "${LLVM_ARCHIVES[@]}"
+    cp "$COMBINED" "$REPO_ROOT/app/Madeira/libdxmt_combined.a"
 fi
