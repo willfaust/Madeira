@@ -187,6 +187,18 @@ require(fitted.map { $0.action } == ControlPresetLayout.xbox(for: tablet).map { 
         && fitted.map { $0.scale } == ControlPresetLayout.xbox(for: tablet).map { $0.scale },
         "a built-in is laid out again for the screen it is loaded on")
 
+// --- Gesture zones ride with a layout and survive the file.
+var zs = ControlPresetStore()
+var zone = GestureZone(); zone.kind = .swipe; zone.x = 0.9; zone.w = 0.5
+guard case .created(let zid) = zs.save(name: "Zoned", controls: [], zones: [zone]) else { fatalError() }
+let reread = try! ControlPresetStore.decoded(try! zs.encoded())
+let loadedZones = ControlPresetStore.zones(of: reread.preset(zid)!)
+require(loadedZones.count == 1 && loadedZones[0].kind == .swipe, "a layout's zones survive saving and loading")
+require(loadedZones[0].id != zone.id, "loaded zones get fresh ids")
+require(loadedZones[0].x + loadedZones[0].w <= 1, "a loaded zone stays on screen")
+let old = try! JSONDecoder().decode(ControlPreset.self, from: Data(#"{"id":"a","name":"Old","controls":[]}"#.utf8))
+require(old.zones == nil && ControlPresetStore.zones(of: old).isEmpty, "layouts saved before zones still load")
+
 if failures > 0 { print("\(failures) FAILED"); exit(1) }
 print("PASS: built-in controller layout, layout store, naming and loading")
 '''
@@ -219,10 +231,10 @@ assert '== "1"' in function(gamepad, 'static func optIn('), 'only "1" enables'
 assert 'Self.xboxDefault' in function(presets, 'var defaultPending: Bool {'), 'the automatic built-in needs the opt-in'
 
 model = content[content.index('final class TouchControlsModel'):content.index('/// Click-through EXCEPT')]
-assert 'if oldValue && !editing { ControlPresetsModel.shared.editingEnded(baseline: editBaseline) }' in model
+assert 'ControlPresetsModel.shared.editingEnded(baseline: editBaseline, zoneBaseline: editZoneBaseline)' in model
 assert 'needsDefaultLayout = !FileManager.default.fileExists(atPath: Self.url.path)' in model, 'default only without a file'
 assert 'var layout: String?' in model, 'older controls files still decode'
-ended = function(presets, 'func editingEnded(baseline: [TouchControl]) {')
+ended = function(presets, 'func editingEnded(baseline: [TouchControl], zoneBaseline: [GestureZone]) {')
 assert ended.index('guard Self.enabled else { return }') < ended.index('s.overwrite(id: id'), 'write-back is switchable'
 default = function(presets, 'func applyDefaultIfNeeded(screen: ControlPresetScreen) {')
 assert 'm.controls.isEmpty' in default and 'm.needsDefaultLayout = false' in default, 'applied once, never over controls'

@@ -3882,6 +3882,8 @@ struct TouchControl: Codable, Identifiable, Equatable {
     /// (PadKeyboardMouse): "A", "RT", "D↑", ...; "LS"/"RS" for a key stick.
     /// Optional, so layouts saved before it existed still decode.
     var padBinding: String?
+    /// Locked in place: the editor selects it but will not move or resize it.
+    var locked: Bool?
 }
 
 final class TouchControlsModel: ObservableObject {
@@ -3893,8 +3895,10 @@ final class TouchControlsModel: ObservableObject {
     @Published var editing = false {            // transient, never persisted
         didSet {
             // ml1970: an ended edit is written back to the custom layout it came from.
-            if !oldValue && editing { editBaseline = controls }
-            if oldValue && !editing { ControlPresetsModel.shared.editingEnded(baseline: editBaseline) }
+            if !oldValue && editing { editBaseline = controls; editZoneBaseline = GestureZonesModel.shared.zones }
+            if oldValue && !editing {
+                ControlPresetsModel.shared.editingEnded(baseline: editBaseline, zoneBaseline: editZoneBaseline)
+            }
         }
     }
     @Published var selected: UUID?              // transient
@@ -3905,6 +3909,7 @@ final class TouchControlsModel: ObservableObject {
     /// layout may be applied once (ControlPresetsModel.applyDefaultIfNeeded).
     var needsDefaultLayout = false
     private var editBaseline: [TouchControl] = []
+    private var editZoneBaseline: [GestureZone] = []
 
     /// One size for the whole layout (0.5...2), multiplying each control's own
     /// pinch `scale`. A library entry keeps its own (Control size) and sets it
@@ -3987,7 +3992,7 @@ final class TouchControlsModel: ObservableObject {
             let cy = CGFloat(c.ny) * bounds.height
             if hypot(p.x - cx, p.y - cy) <= r { return true }
         }
-        return false
+        return GestureZonesModel.shared.contains(p, in: bounds)
     }
 }
 
@@ -4060,6 +4065,7 @@ enum TouchControlsHost {
 struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
     @ObservedObject private var library = LibraryModel.shared
+    @ObservedObject private var zones = GestureZonesModel.shared
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4073,11 +4079,16 @@ struct TouchControlsOverlay: View {
             ZStack(alignment: .top) {
                 if landscape {
                     if (m.visible || m.editing) && !library.blocksGameplayTouch {
+                        if GestureZonesModel.enabled {
+                            GestureZonesLayer(screen: geo.size, editing: m.editing)
+                        }
                         controls(geo.size, session: session)
                     }
                     if session && !m.editing { LibraryHUD() } else { topBar }
                     if m.editing, let i = m.index(of: m.selected) {
                         MappingPanel(control: m.controls[i], screen: geo.size)
+                    } else if m.editing, let i = zones.index(of: zones.selected) {
+                        GestureZonePanel(zone: zones.zones[i], screen: geo.size)
                     }
                 }
             }
@@ -4088,6 +4099,8 @@ struct TouchControlsOverlay: View {
             .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
             .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
+            .onChange(of: zones.padZoneIDs) { _, _ in configureGamepad(landscape: landscape) }
+            .onChange(of: m.selected) { _, new in if new != nil { zones.selected = nil } }
             .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
             .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
@@ -4119,7 +4132,8 @@ struct TouchControlsOverlay: View {
 
     private func configureGamepad(landscape: Bool) {
         let ids = landscape && m.visible
-            ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id) : []
+            ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id)
+                + (GestureZonesModel.enabled ? zones.zones.filter(\.feedsPad).map(\.id) : []) : []
         // Menus and the control editor keep the pad connected but take no input (#204);
         // a touch that misses the controls is no mouse only while they do (#150).
         let accepting = !m.editing && !library.blocksGameplayTouch
@@ -4190,6 +4204,14 @@ struct TouchControlsOverlay: View {
                     m.selected = c.id
                 }
                 .transition(.opacity.combined(with: .scale))
+                if GestureZonesModel.enabled {
+                    // A gesture zone (GestureZones.swift).
+                    glassButton("rectangle.dashed") {
+                        m.selected = nil
+                        GestureZonesModel.shared.add()
+                    }
+                    .transition(.opacity.combined(with: .scale))
+                }
             }
         }
         .padding(.top, 10)
@@ -4201,11 +4223,12 @@ struct TouchControlsOverlay: View {
     private var scalePinch: some Gesture {
         MagnificationGesture()
             .onChanged { v in
-                guard m.editing, let i = m.index(of: m.selected) else { return }
+                if m.editing, zones.selected != nil { zones.pinch(Double(v)); return }
+                guard m.editing, let i = m.index(of: m.selected), m.controls[i].locked != true else { return }
                 if pinchBase == nil { pinchBase = m.controls[i].scale }
                 m.controls[i].scale = min(max((pinchBase ?? 1) * Double(v), 0.5), 3.0)
             }
-            .onEnded { _ in pinchBase = nil }
+            .onEnded { _ in pinchBase = nil; zones.pinch(nil) }
     }
 
     private func glassButton(_ system: String, dim: Bool = false,
@@ -4398,7 +4421,7 @@ struct TouchControlButton: View {
         // ml646: the springy knob, same curve as the portrait pad overlay.
         .animation(.spring(response: 0.22, dampingFraction: 0.58), value: stickDir)
         .overlay(alignment: .topTrailing) {
-            if isSelected {
+            if isSelected && control.locked != true {
                 Button {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     m.controls.removeAll { $0.id == control.id }
@@ -4434,7 +4457,7 @@ struct TouchControlButton: View {
                 .onChanged { v in
                     if m.editing {
                         m.selected = control.id
-                        guard let i = m.index(of: control.id) else { return }
+                        guard control.locked != true, let i = m.index(of: control.id) else { return }
                         if dragBase == nil { dragBase = CGPoint(x: control.nx, y: control.ny) }
                         let b = dragBase ?? .zero
                         m.controls[i].nx = min(max(b.x + Double(v.translation.width  / screen.width),  0.03), 0.97)
@@ -4530,7 +4553,20 @@ struct MappingPanel: View {
             HStack(spacing: 0) {
                 tabButton(0, "keyboard")
                 tabButton(1, "gamecontroller")
+                Button {
+                    if let i = m.index(of: control.id) { m.controls[i].locked = control.locked == true ? nil : true }
+                } label: {
+                    Image(systemName: control.locked == true ? "lock.fill" : "lock.open")
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(.white.opacity(control.locked == true ? 1.0 : 0.38))
+                        .frame(width: 44, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(control.locked == true ? "Unlock control" : "Lock control")
             }
+            Rectangle().fill(.white.opacity(0.15)).frame(height: 1)
+            LayerButtons { mv in if let i = m.index(of: control.id) { mv.apply(&m.controls, i) } }
+                .padding(.horizontal, 10)
             Rectangle().fill(.white.opacity(0.15)).frame(height: 1)
             ScrollView {
                 (tab == 0 ? AnyView(keyboardTab) : AnyView(controllerTab))

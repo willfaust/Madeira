@@ -200,6 +200,8 @@ struct LibraryEntry: Codable, Identifiable {
     /// Session menu shows it and an edit is written back to it; nil for controls
     /// no layout holds. Older files have none.
     var controlLayout: String?
+    /// The game's gesture zones (GestureZones.swift), kept with its controls. Older files have none.
+    var zones: [GestureZone]?
     var lastPlayed: Date?
     var graphicsAPI: String?
     var folderBytes: Int64?
@@ -670,6 +672,7 @@ final class LibraryModel: ObservableObject {
     private var steamMetadataInFlight = Set<Int>()
     private var savedControls: [TouchControl] = []
     private var savedLayout: String?
+    private var savedZones: [GestureZone] = []
     private var savedVisible = true
     private var savedSize = 1.0
     /// The session's first frame makes the drawable's shape known (Aspect).
@@ -1028,8 +1031,15 @@ final class LibraryModel: ObservableObject {
         let controls = TouchControlsModel.shared
         savedControls = controls.controls; savedVisible = controls.visible; savedSize = controls.sizeScale
         savedLayout = controls.layoutID
+        let zones = GestureZonesModel.shared
+        savedZones = zones.zones
         if let profile = entry.controls {
             controls.controls = profile
+            // A game saved before zones existed takes its layout's zones, if any.
+            zones.selected = nil
+            zones.zones = entry.zones
+                ?? ControlPresetsModel.shared.store.preset(entry.controlLayout ?? "").map(ControlPresetStore.zones(of:))
+                ?? []
             // The game's controls come with the layout they were loaded from (if that
             // layout still exists), so a later edit is not written to another game's.
             if ControlPresetsModel.enabled {
@@ -1153,6 +1163,7 @@ final class LibraryModel: ObservableObject {
         let controls = TouchControlsModel.shared
         if let id = current, var entry = entries.first(where: { $0.id == id }) {
             entry.controls = controls.controls
+            entry.zones = GestureZonesModel.shared.zones
             if ControlPresetsModel.enabled { entry.controlLayout = controls.layoutID }
             entry.touchControls = controls.visible
             entry.fpsMode = fpsMode; entry.performance = performance
@@ -1177,6 +1188,7 @@ final class LibraryModel: ObservableObject {
         let controls = TouchControlsModel.shared
         controls.editing = false; controls.selected = nil
         controls.controls = savedControls; controls.visible = savedVisible; controls.sizeScale = savedSize
+        GestureZonesModel.shared.selected = nil; GestureZonesModel.shared.zones = savedZones
         if ControlPresetsModel.enabled { controls.layoutID = savedLayout }
         current = nil; activeEntry = nil; menu = false; sessionMessage = ""
         displayMode = .fit

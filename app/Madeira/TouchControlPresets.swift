@@ -35,7 +35,55 @@ struct ControlPreset: Codable, Identifiable, Equatable {
     var id: String
     var name: String
     var controls: [TouchControl]
+    /// Gesture zones (GestureZones.swift). Optional, so layouts saved before
+    /// zones existed still decode; nil reads as none.
+    var zones: [GestureZone]? = nil
 }
+
+enum GestureZoneKind: String, Codable, CaseIterable {
+    case stick, swipe, look
+    var title: String { switch self { case .stick: "Stick"; case .swipe: "Swipe"; case .look: "Look" } }
+}
+
+enum SwipeDirections: String, Codable, CaseIterable {
+    case four, horizontal, vertical
+    var title: String { switch self { case .four: "All"; case .horizontal: "Left/Right"; case .vertical: "Up/Down" } }
+}
+
+struct GestureZone: Codable, Identifiable, Equatable {
+    static let directionNames = ["up", "down", "left", "right"]
+
+    var id = UUID()
+    /// Top-left corner and size, as fractions of the screen.
+    var x = 0.04, y = 0.3, w = 0.36, h = 0.62
+    var kind: GestureZoneKind = .stick
+    /// Stick zones: .pad("LS"), .pad("RS"), .joystickWASD or .joystickArrows.
+    var stick: ControlAction = .pad("LS")
+    /// Swipe zones: what each direction presses.
+    var swipe: [String: ControlAction] = ["up": .pad("D↑"), "down": .pad("D↓"),
+                                          "left": .pad("D←"), "right": .pad("D→")]
+    var directions: SwipeDirections = .four
+    /// Swipe zones: a tap that did not become a swipe.
+    var tap: ControlAction = .none
+    /// Stick: full deflection distance is 70 pt / sensitivity. Swipe: the swipe
+    /// length is 36 pt / sensitivity. Look: mouse counts per point.
+    var sensitivity = 1.0
+    func contains(_ p: CGPoint, in size: CGSize) -> Bool { rect(in: size).contains(p) }
+    /// Locked in place: the editor selects it but will not move or resize it.
+    var locked: Bool?
+
+    func rect(in size: CGSize) -> CGRect {
+        CGRect(x: x * size.width, y: y * size.height, width: w * size.width, height: h * size.height)
+    }
+    var feedsPad: Bool {
+        switch kind {
+        case .stick: return stick.isPad
+        case .swipe: return tap.isPad || swipe.values.contains { $0.isPad }
+        case .look: return false
+        }
+    }
+}
+
 
 /// The screen a built-in layout is placed on, in points, with its safe-area
 /// insets. Built-ins are laid out in points from the edges and then normalised
@@ -231,7 +279,7 @@ struct ControlPresetStore: Equatable {
 
     /// Save a layout under a name. A built-in's name is refused (built-ins are
     /// never overwritten); a user layout's name replaces that layout in place.
-    mutating func save(name: String, controls: [TouchControl],
+    mutating func save(name: String, controls: [TouchControl], zones: [GestureZone] = [],
                        newID: () -> String = { UUID().uuidString }) -> SaveResult {
         let n = Self.clean(name)
         guard !n.isEmpty else { return .refusedEmpty }
@@ -239,17 +287,19 @@ struct ControlPresetStore: Equatable {
             if Self.isBuiltIn(existing.id) { return .refusedBuiltIn }
             guard let i = user.firstIndex(where: { $0.id == existing.id }) else { return .refusedEmpty }
             user[i].controls = controls
+            user[i].zones = zones.isEmpty ? nil : zones
             return .replaced(existing.id)
         }
         let id = newID()
-        user.append(ControlPreset(id: id, name: n, controls: controls))
+        user.append(ControlPreset(id: id, name: n, controls: controls, zones: zones.isEmpty ? nil : zones))
         return .created(id)
     }
 
     /// Overwrite a user layout's controls. false for a built-in or a missing id.
-    mutating func overwrite(id: String, controls: [TouchControl]) -> Bool {
+    mutating func overwrite(id: String, controls: [TouchControl], zones: [GestureZone] = []) -> Bool {
         guard let i = user.firstIndex(where: { $0.id == id }) else { return false }
         user[i].controls = controls
+        user[i].zones = zones.isEmpty ? nil : zones
         return true
     }
 
@@ -295,6 +345,20 @@ struct ControlPresetStore: Equatable {
             c.ny = min(max(c.ny, 0.03), 0.97)
             c.scale = min(max(c.scale, 0.5), 3.0)
             return c
+        }
+    }
+}
+
+extension ControlPresetStore {
+    /// A layout's zones as loaded: fresh ids (an id keys the zone's touch
+    /// state), rectangles kept on screen.
+    static func zones(of p: ControlPreset) -> [GestureZone] {
+        (p.zones ?? []).map { z in
+            var z = z
+            z.id = UUID()
+            z.w = min(max(z.w, 0.06), 1); z.h = min(max(z.h, 0.08), 1)
+            z.x = min(max(z.x, 0), 1 - z.w); z.y = min(max(z.y, 0), 1 - z.h)
+            return z
         }
     }
 }
@@ -347,7 +411,7 @@ final class ControlPresetsModel: ObservableObject {
     /// On-screen controls that no layout holds: switching away would lose them.
     var currentIsUnsaved: Bool {
         let m = TouchControlsModel.shared
-        return m.layoutID == nil && !m.controls.isEmpty
+        return m.layoutID == nil && (!m.controls.isEmpty || !GestureZonesModel.shared.zones.isEmpty)
     }
 
     /// With MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no madeira-controls.json gets the controller layout the
@@ -402,6 +466,8 @@ final class ControlPresetsModel: ObservableObject {
         let controls = ControlPresetStore.layout(of: p, screen: screen)
         m.selected = nil
         m.controls = controls
+        GestureZonesModel.shared.selected = nil
+        GestureZonesModel.shared.zones = ControlPresetStore.zones(of: p)
         m.layoutID = p.id
         log("loaded layout=\(ControlPresetStore.isBuiltIn(p.id) ? "xbox" : "custom") controls=\(controls.count) reason=\(reason)")
     }
@@ -411,7 +477,8 @@ final class ControlPresetsModel: ObservableObject {
         guard !readOnly else { return false }
         let m = TouchControlsModel.shared
         var s = store
-        guard case .created(let id) = s.save(name: s.nextCustomName(), controls: m.controls) else { return false }
+        guard case .created(let id) = s.save(name: s.nextCustomName(), controls: m.controls,
+                                             zones: GestureZonesModel.shared.zones) else { return false }
         store = s
         m.layoutID = id
         persist()
@@ -429,6 +496,8 @@ final class ControlPresetsModel: ObservableObject {
         let m = TouchControlsModel.shared
         m.selected = nil
         m.controls = []
+        GestureZonesModel.shared.selected = nil
+        GestureZonesModel.shared.zones = []
         m.layoutID = id
         m.visible = true
         m.editing = true
@@ -456,19 +525,19 @@ final class ControlPresetsModel: ObservableObject {
     /// An edit session ended. Edits to a custom layout are written back to it;
     /// a built-in stays as shipped, so an edited copy of one becomes unsaved
     /// controls that the menu offers to keep before switching away.
-    func editingEnded(baseline: [TouchControl]) {
+    func editingEnded(baseline: [TouchControl], zoneBaseline: [GestureZone]) {
         guard Self.enabled else { return }
         let m = TouchControlsModel.shared
         guard let id = m.layoutID else { return }
         if ControlPresetStore.isBuiltIn(id) {
-            if baseline != m.controls {
+            if baseline != m.controls || zoneBaseline != GestureZonesModel.shared.zones {
                 m.layoutID = nil
                 log("edited built-in kept as unsaved controls=\(m.controls.count)")
             }
             return
         }
         var s = store
-        guard !readOnly, s.overwrite(id: id, controls: m.controls) else { return }
+        guard !readOnly, s.overwrite(id: id, controls: m.controls, zones: GestureZonesModel.shared.zones) else { return }
         store = s
         persist()
         log("saved custom layout controls=\(m.controls.count)")
