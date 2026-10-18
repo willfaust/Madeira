@@ -17,7 +17,9 @@ B="$R/wine/build-arm64ec"
 if [ ! -f "$B/config.status" ]; then
     mkdir -p "$B" && cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer
 fi
-cd "$B" && make -C dlls/ntdll
+# Only build the PE DLL. The directory's default target also links the host
+# ntdll.so, which is unrelated to Madeira's separately built iOS unix library.
+cd "$B" && make dlls/ntdll/arm64ec-windows/ntdll.dll
 SRC="$B/dlls/ntdll/arm64ec-windows/ntdll.dll"; OUT="$R/app/Madeira/arm64ec-windows/ntdll.dll"
 cp "$SRC" "$OUT.tmp"
 "$TC/arm64ec-w64-mingw32-strip" "$OUT.tmp"

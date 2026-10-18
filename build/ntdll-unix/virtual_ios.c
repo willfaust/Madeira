@@ -16497,9 +16497,40 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
 }
 
 
+/* Pagefile-backed section views in the x64 emulator must retain their shared
+ * backing. Copying an executable view into the JIT pool disconnects it from a
+ * writable sibling view: code emitted through the sibling is then invisible
+ * to FEX. Guest execute permission stays in Wine's page table; the host only
+ * needs to read the x64 bytes. Native EC allocations and images keep the pool
+ * path. File-backed sections are deliberately outside this change. */
+static int ios_guest_section_is_host_data( const void *base, size_t size )
+{
+#ifdef WINE_IOS
+    struct file_view *view;
+
+    if (!arm64ec_view || ios_alloc_ec_code || ios_wow_in_window( base )) return 0;
+    if (!(view = find_view( base, 0 ))) return 0;
+    if (!(view->protect & (SEC_COMMIT | SEC_RESERVE))) return 0;
+    if (view->protect & (SEC_FILE | SEC_IMAGE | VPROT_ARM64EC | VPROT_SYSTEM)) return 0;
+    return ios_x64_image_view_covers( (uintptr_t)view->base, view->size, (uintptr_t)base, size );
+#else
+    return 0;
+#endif
+}
+
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
 #ifdef WINE_IOS
+    if ((unix_prot & PROT_EXEC) && ios_guest_section_is_host_data( base, size ))
+    {
+        static unsigned int section_n;
+        if (section_n++ < 24 && !ios_in_mach_exc)
+            dprintf( 2, "[guest-section] %p+0x%lx: preserving shared backing for translated code\n",
+                     base, (unsigned long)size );
+        unix_prot &= ~PROT_EXEC;
+        if (!unix_prot) unix_prot = PROT_READ;
+    }
+
     /* iOS-Madeira ml1030: A 32-BIT IMAGE PAGE IS DATA TO THE HOST — SO STOP
      * ROUTING ITS WRITE REQUESTS THROUGH THE EXECUTABLE MACHINERY.
      *
