@@ -20,6 +20,18 @@ only when the sample or connection changes. The win32u query copies state or
 capabilities into the Windows caller's buffer. Wine's paired XInput change tries
 this query before its existing HID path.
 
+## Direct-attached USB-C controllers (Backbone One, Kishi)
+
+USB-C direct-attach gamepads (Backbone One, Razer Kishi, GameSir G8) connect
+directly as physical extended gamepad profiles.
+
+- **Audio routing**: Controllers with an integrated 3.5mm headphone jack
+  (such as Backbone One) take over system audio output on iOS. To keep game
+  sound playing through the device speakers while the controller is plugged
+  in, switch the audio output back to iPhone or iPad in iOS Control Centre.
+- **Pass-through charging**: USB-C power delivery pass-through is supported
+  without resetting the active XInput slot or stalling the input sampling queue.
+
 ## Touch controls
 
 In the existing landscape touch editor, assign a control using its Controller
