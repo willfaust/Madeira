@@ -65,8 +65,10 @@ for m in re.finditer(r'static let (\w+) = GameRecommendation\(\n\s*id: "([^"]+)"
     lines = [line[len(indent):] if line.startswith(indent) else line for line in body.split('\n')]
     presets[ident] = dict(name=name, title=title, version=int(version), lines=lines, switches=' '.join((switches or '').split()))
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'ghost-of-tsushima', 'god-of-war',
-                        'horizon-zero-dawn', 'standard'}, sorted(presets)
+                        'horizon-zero-dawn', 'hollow-knight', 'celeste', 'fallout-nv', 'skyrim', 'hades',
+                        'witcher-3', 'portal-2', 'dead-cells', 'standard'}, sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,\n'
+        '                      hollowKnight, celeste, falloutNV, skyrim, hades, witcher3, portal2, deadCells,\n'
         '                      standard]') in lists_src
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
@@ -267,7 +269,7 @@ print('PASS: RDR2 (Steam) is the owner\'s 463 list plus the 466, 467, 470, 472, 
 
 # Recognition: Steam by App ID or steamapps\common folder; everything else by the program's name.
 match = block(lists_src, 'static func match(', '\n    }\n')
-assert 'rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,\n               horizonZeroDawnAppID = 1151640' in lists_src
+assert 'rdr2AppID = 1174180' in lists_src and 'hollowKnightAppID = 367520' in lists_src
 assert 'let installFolder = last == steamFolder ? steamFolder : nil' in match
 assert 'installFolder == "red dead redemption 2"' in match and 'installFolder == "grand theft auto v enhanced"' in match
 assert 'case "ghostoftsushima.exe":' in match and 'case "gow.exe":' in match and 'case "rdr2.exe", "playrdr2.exe":' in match

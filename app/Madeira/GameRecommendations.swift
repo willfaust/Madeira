@@ -529,6 +529,118 @@ enum GameRecommendations {
     /// that reserves, releases and reserves again inside the same range never gets it
     /// back: Madeira Dock spun on "Loading Steam" before Thumper. The game lists that
     /// were tested with those defaults keep them. No switches.
+    static let hollowKnight = GameRecommendation(
+        id: "hollow-knight", title: "Hollow Knight", version: 1,
+        config: """
+        # Madeira's recommended settings for Hollow Knight.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 2048
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let celeste = GameRecommendation(
+        id: "celeste", title: "Celeste", version: 1,
+        config: """
+        # Madeira's recommended settings for Celeste.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 1024
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let falloutNV = GameRecommendation(
+        id: "fallout-nv", title: "Fallout: New Vegas", version: 1,
+        config: """
+        # Madeira's recommended settings for Fallout: New Vegas.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 3072
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let skyrim = GameRecommendation(
+        id: "skyrim", title: "The Elder Scrolls V: Skyrim", version: 1,
+        config: """
+        # Madeira's recommended settings for The Elder Scrolls V: Skyrim.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 4096
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let hades = GameRecommendation(
+        id: "hades", title: "Hades", version: 1,
+        config: """
+        # Madeira's recommended settings for Hades.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 2048
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let witcher3 = GameRecommendation(
+        id: "witcher-3", title: "The Witcher 3: Wild Hunt", version: 1,
+        config: """
+        # Madeira's recommended settings for The Witcher 3: Wild Hunt.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 4096
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 3)
+
+    static let portal2 = GameRecommendation(
+        id: "portal-2", title: "Portal 2", version: 1,
+        config: """
+        # Madeira's recommended settings for Portal 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 2048
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
+    static let deadCells = GameRecommendation(
+        id: "dead-cells", title: "Dead Cells", version: 1,
+        config: """
+        # Madeira's recommended settings for Dead Cells.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        swap-mb = 1024
+        # madeira-bcd's defaults, which this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        fastSync: true, fpsMode: 1)
+
     static let standard = GameRecommendation(
         id: "standard", title: "games without a list of their own", version: 3,
         config: """
@@ -538,13 +650,16 @@ enum GameRecommendations {
         """)
 
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, ghostOfTsushima, godOfWar, horizonZeroDawn,
+                      hollowKnight, celeste, falloutNV, skyrim, hades, witcher3, portal2, deadCells,
                       standard]
 
     // MARK: Recognising a game
 
     /// Steam App IDs.
     static let rdr2AppID = 1174180, gta5EnhancedAppID = 3240220, ghostAppID = 2215430, godOfWarAppID = 1593500,
-               horizonZeroDawnAppID = 1151640
+               horizonZeroDawnAppID = 1151640, hollowKnightAppID = 367520, celesteAppID = 504230,
+               falloutNVAppID = 22380, skyrimAppID = 489830, hadesAppID = 1145360,
+               witcher3AppID = 292030, portal2AppID = 620, deadCellsAppID = 588650
 
     /// The recommendation for a game, or nil.
     /// - windowsPath: a program ("C:\Games\GoW\GoW.exe"), or a library Steam
@@ -566,6 +681,14 @@ enum GameRecommendations {
                 || installFolder == "ghost of tsushima" { return ghostOfTsushima }
             if steamAppID == godOfWarAppID || installFolder == "godofwar" || installFolder == "god of war" { return godOfWar }
             if steamAppID == horizonZeroDawnAppID || installFolder == "horizon zero dawn" { return horizonZeroDawn }
+            if steamAppID == hollowKnightAppID || installFolder == "hollow knight" { return hollowKnight }
+            if steamAppID == celesteAppID || installFolder == "celeste" { return celeste }
+            if steamAppID == falloutNVAppID || installFolder == "fallout new vegas" { return falloutNV }
+            if steamAppID == skyrimAppID || installFolder == "skyrim special edition" { return skyrim }
+            if steamAppID == hadesAppID || installFolder == "hades" { return hades }
+            if steamAppID == witcher3AppID || installFolder == "the witcher 3" || installFolder == "the witcher 3 wild hunt" { return witcher3 }
+            if steamAppID == portal2AppID || installFolder == "portal 2" { return portal2 }
+            if steamAppID == deadCellsAppID || installFolder == "dead cells" { return deadCells }
             return nil
         }
         // A program, wherever it was installed: only the game's own programs, so a
@@ -586,6 +709,22 @@ enum GameRecommendations {
             return godOfWar
         case "horizonzerodawn.exe":
             return horizonZeroDawn
+        case "hollow_knight.exe":
+            return hollowKnight
+        case "celeste.exe":
+            return celeste
+        case "falloutnv.exe":
+            return falloutNV
+        case "skyrimse.exe", "skyrim.exe":
+            return skyrim
+        case "hades.exe":
+            return hades
+        case "witcher3.exe":
+            return witcher3
+        case "portal2.exe":
+            return portal2
+        case "deadcells.exe":
+            return deadCells
         default:
             return nil
         }
