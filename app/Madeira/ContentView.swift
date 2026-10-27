@@ -4138,7 +4138,14 @@ final class ControlsWindow: UIWindow {
         // The library itself, between sessions (a start that did not happen): nothing here.
         if library.enabled && library.current == nil { return nil }
         if library.current != nil {
-            if library.menu || library.launching || library.menuButtonRect.contains(point) ||
+            if library.menu || library.launching { return super.hitTest(point, with: event) }
+            // Folded like a laptop (DeviceFold.swift), the deck holds the HUD and the
+            // controls and has no game under it, so all of it is this window's; the
+            // upright half is the game's.
+            if let deck = DeviceFold.shared.layout?.deck {
+                return deck.contains(point) ? super.hitTest(point, with: event) : nil
+            }
+            if library.menuButtonRect.contains(point) ||
                 (library.performance && library.performanceRect.contains(point)) {
                 return super.hitTest(point, with: event)
             }
@@ -4186,6 +4193,7 @@ struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var zones = GestureZonesModel.shared
+    @ObservedObject private var deviceFold = DeviceFold.shared
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4196,17 +4204,35 @@ struct TouchControlsOverlay: View {
             // bar; the controls hide while its menu or starting screen is up.
             let session = library.current != nil || library.preparing != nil
             let landscape = geo.size.width > geo.size.height || session
+            // Folded like a laptop (DeviceFold.swift), a library session's controls and
+            // HUD live on the deck below the fold.
+            let deck = session ? deviceFold.layout?.deck : nil
+            let area = deck ?? CGRect(origin: .zero, size: geo.size)
             ZStack(alignment: .top) {
                 // The library between sessions (the window came up for a start that did not
                 // happen) draws nothing over the library's own screens.
                 if landscape && !(library.enabled && !session && !m.editing) {
                     if (m.visible || m.editing) && !library.blocksGameplayTouch {
-                        if GestureZonesModel.enabled {
-                            GestureZonesLayer(screen: geo.size, editing: m.editing)
+                        ZStack(alignment: .topLeading) {
+                            if GestureZonesModel.enabled {
+                                GestureZonesLayer(screen: area.size, editing: m.editing)
+                            }
+                            controls(area.size, session: session)
                         }
-                        controls(geo.size, session: session)
+                        .frame(width: area.width, height: area.height, alignment: .topLeading)
+                        .offset(x: area.minX, y: area.minY)
                     }
-                    if session && !m.editing { LibraryHUD() } else { topBar }
+                    if session && !m.editing {
+                        // The starting screen covers the whole window; the menu button and
+                        // the in-game menu stay on the deck.
+                        if let deck, !library.startingScreen {
+                            LibraryHUD()
+                                .frame(width: deck.width, height: deck.height)
+                                .offset(x: deck.minX, y: deck.minY)
+                        } else {
+                            LibraryHUD()
+                        }
+                    } else { topBar }
                     if m.editing, let i = m.index(of: m.selected) {
                         MappingPanel(control: m.controls[i], screen: geo.size)
                     } else if m.editing, let i = zones.index(of: zones.selected) {
@@ -4219,6 +4245,7 @@ struct TouchControlsOverlay: View {
             .gesture(scalePinch, including: m.editing ? .all : .subviews)
             .onAppear { applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
             .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
+            .onChange(of: deviceFold.layout) { _, _ in applyDefaultLayout(geo) }
             .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: zones.padZoneIDs) { _, _ in configureGamepad(landscape: landscape) }
@@ -4268,10 +4295,13 @@ struct TouchControlsOverlay: View {
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
     /// layout on the first landscape overlay, laid out for this screen (never over an existing controls file).
     private func applyDefaultLayout(_ geo: GeometryProxy) {
-        guard m.needsDefaultLayout, geo.size.width > geo.size.height else { return }
-        let i = geo.safeAreaInsets
+        // Folded like a laptop, the controls are laid out for the deck.
+        let deck = library.current != nil ? deviceFold.layout?.deck : nil
+        let size = deck?.size ?? geo.size
+        guard m.needsDefaultLayout, size.width > size.height else { return }
+        let i = deck == nil ? geo.safeAreaInsets : EdgeInsets()
         ControlPresetsModel.shared.applyDefaultIfNeeded(screen: ControlPresetScreen(
-            width: Double(geo.size.width), height: Double(geo.size.height),
+            width: Double(size.width), height: Double(size.height),
             left: Double(i.leading), right: Double(i.trailing),
             top: Double(i.top), bottom: Double(i.bottom)))
     }
