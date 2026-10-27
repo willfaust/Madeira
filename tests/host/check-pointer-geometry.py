@@ -56,6 +56,7 @@ final class MetalBackedView: UIView {
     func guestSize() -> CGSize { size }
     func drawableAspect() -> CGSize { aspect }
     func effectiveDisplayMode() -> DisplayMode { mode }
+    func surfaceBounds() -> CGRect { bounds }   // no portrait pin on the host
     POINTER_RECT
     GAME_RECT
     func convert(_ point: CGPoint, to: Any?) -> CGPoint {
