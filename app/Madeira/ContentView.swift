@@ -4194,6 +4194,7 @@ struct TouchControlsOverlay: View {
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var zones = GestureZonesModel.shared
     @ObservedObject private var deviceFold = DeviceFold.shared
+    @ObservedObject private var pad = PadStickMouse.shared
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4205,14 +4206,20 @@ struct TouchControlsOverlay: View {
             let session = library.current != nil || library.preparing != nil
             let landscape = geo.size.width > geo.size.height || session
             // Folded like a laptop (DeviceFold.swift), a library session's controls and
-            // HUD live on the deck below the fold.
+            // HUD live on the deck below the fold; with a controller, or touch controls
+            // hidden, the deck shows FoldDeck instead of the controls.
             let deck = session ? deviceFold.layout?.deck : nil
             let area = deck ?? CGRect(origin: .zero, size: geo.size)
+            let foldDeck = deck != nil && !m.editing && (!m.visible || pad.controllerConnected)
             ZStack(alignment: .top) {
                 // The library between sessions (the window came up for a start that did not
                 // happen) draws nothing over the library's own screens.
                 if landscape && !(library.enabled && !session && !m.editing) {
-                    if (m.visible || m.editing) && !library.blocksGameplayTouch {
+                    if let deck, foldDeck, !library.blocksGameplayTouch {
+                        FoldDeck()
+                            .frame(width: deck.width, height: deck.height)
+                            .offset(x: deck.minX, y: deck.minY)
+                    } else if (m.visible || m.editing) && !library.blocksGameplayTouch {
                         ZStack(alignment: .topLeading) {
                             if GestureZonesModel.enabled {
                                 GestureZonesLayer(screen: area.size, editing: m.editing)
