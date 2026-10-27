@@ -70,6 +70,16 @@ has no game under it, so no touch there becomes a mouse event. Its contents:
   - Mirror turns the copy off. It's the same setting as the key above the
     touch controls (`madeiraFoldMirror` in the app's preferences).
 
+Folded, the deck lies on the table like a keyboard, so its controls are drawn as
+physical keys rather than glass. That covers the touch controls, `FoldDeck`'s
+buttons and the mirror key:
+- Each key is a raised cap, lit from above, on a darker skirt.
+- The cap sinks onto the skirt while held, and its shadow tightens.
+- Coloured buttons such as A/B/X/Y keep their colour.
+
+`glassFace` (`ContentView.swift`) draws the keycap (`FoldKeyFace`) wherever a view
+is marked `.foldKeys()`. Outside the folded deck nothing changes.
+
 The copy is a portal. UIKit's `_UIPortalView` draws the game's Metal layer a
 second time. The layer itself cannot move: it has one parent, and it must stay a
 window-level view for its presents to reach the screen (`MetalHostView`). The

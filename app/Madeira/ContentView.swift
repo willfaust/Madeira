@@ -4266,6 +4266,7 @@ struct TouchControlsOverlay: View {
                         }
                         .frame(width: area.width, height: area.height, alignment: .topLeading)
                         .offset(x: area.minX, y: area.minY)
+                        .foldKeys(deck != nil)   // keycaps on the folded deck (FoldDeck.swift)
                     }
                     if session && !m.editing {
                         // The starting screen covers the whole window; the menu button and
@@ -4481,15 +4482,26 @@ extension View {
     /// layer over the container's other children, so a label that is merely a
     /// sibling of its glass ends up blurred underneath it; a label that is the
     /// glass view's own content is drawn on top, as the system's buttons are.
-    @ViewBuilder func glassFace(_ g: GlassShape) -> some View {
-        if #available(iOS 26.0, *) {
+    /// On a folded Duo's deck (`.foldKeys()`, FoldDeck.swift) it is a keycap instead.
+    func glassFace(_ g: GlassShape) -> some View { modifier(GlassFace(g: g)) }
+}
+
+private struct GlassFace: ViewModifier {
+    let g: GlassShape
+    @Environment(\.foldKeys) private var foldKeys
+    @Environment(\.foldKeyPressed) private var pressed
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if foldKeys {
+            content.background { FoldKeyFace(shape: g.shape, tint: g.tint, pressed: pressed) }
+        } else if #available(iOS 26.0, *) {
             if let tint = g.tint {
-                self.glassEffect(.regular.tint(tint.opacity(0.55)), in: g.shape)
+                content.glassEffect(.regular.tint(tint.opacity(0.55)), in: g.shape)
             } else {
-                self.glassEffect(.regular, in: g.shape)
+                content.glassEffect(.regular, in: g.shape)
             }
         } else {
-            self.background {
+            content.background {
                 g.shape.fill(.ultraThinMaterial)
                 if let tint = g.tint { g.shape.fill(tint.opacity(0.35)) }
             }
@@ -4616,6 +4628,7 @@ struct TouchControlButton: View {
             }
         }
         .frame(width: size.width, height: size.height)
+        .environment(\.foldKeyPressed, isDown)   // a keycap on a folded Duo sinks (FoldDeck.swift)
         .overlay(outline.stroke(.white.opacity(isSelected ? 0.95
                                                : (isStick ? 0 : 0.28)),
                                 lineWidth: isSelected ? 2 : 1))
