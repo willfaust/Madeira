@@ -6,11 +6,11 @@ import GameController
 import SwiftUI
 import UIKit
 
-// The iPhone Duo's deck while a controller plays (docs/DUO.md): with the Duo folded
-// like a laptop (DeviceFold.swift) and touch controls hidden or a controller
-// connected, the flat half shows a copy of the game, which can be turned off, and
-// the few things a controller has no button for: the game menu, the keyboard and
-// touch controls.
+// The iPhone Duo's deck (docs/DUO.md). With the Duo folded like a laptop
+// (DeviceFold.swift) and touch controls hidden or a controller connected, the flat
+// half shows a copy of the game, which can be turned off, and the few things a
+// controller has no button for: the game menu, the keyboard and touch controls.
+// Folded, the deck's controls are drawn as keycaps (FoldKeyFace).
 
 struct FoldDeck: View {
     @ObservedObject private var pad = PadStickMouse.shared
@@ -33,6 +33,7 @@ struct FoldDeck: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .foldKeys()
     }
 
     private var status: some View {
@@ -72,8 +73,73 @@ struct FoldDeck: View {
             .frame(width: 68, height: 46)
             .background(GlassShape())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FoldKeyButtonStyle())
         .accessibilityLabel(label)
+    }
+}
+
+// MARK: - Keycaps
+
+// Folded like a laptop, the deck lies on the table like a keyboard, so its controls are
+// drawn as physical keys rather than glass: a raised cap lit from above, standing on a
+// darker skirt it sinks into while pressed. Everything drawn with glassFace inside a
+// view marked `.foldKeys()` takes the keycap (ContentView.swift, GlassFace); a control
+// says it is held through `foldKeyPressed`. Nothing changes outside the deck.
+
+private struct FoldKeysKey: EnvironmentKey { static let defaultValue = false }
+private struct FoldKeyPressedKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    /// Glass faces in this view are drawn as keycaps.
+    var foldKeys: Bool {
+        get { self[FoldKeysKey.self] }
+        set { self[FoldKeysKey.self] = newValue }
+    }
+    /// The keycap is held down.
+    var foldKeyPressed: Bool {
+        get { self[FoldKeyPressedKey.self] }
+        set { self[FoldKeyPressedKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Draws this view's glass faces as keycaps while `on`.
+    func foldKeys(_ on: Bool = true) -> some View { environment(\.foldKeys, on) }
+}
+
+/// A keycap in `shape`: the skirt, the cap with its top-lit gradient and edge, and a
+/// tint for coloured buttons (A/B/X/Y). Pressed, the cap sinks onto the skirt and its
+/// shadow tightens.
+struct FoldKeyFace: View {
+    let shape: AnyShape
+    var tint: Color?
+    var pressed = false
+
+    var body: some View {
+        let travel: CGFloat = pressed ? 1 : 3.5
+        ZStack {
+            shape.fill(Color(white: 0.05))
+                .offset(y: travel)
+            ZStack {
+                shape.fill(LinearGradient(colors: pressed ? [Color(white: 0.17), Color(white: 0.23)]
+                                                          : [Color(white: 0.32), Color(white: 0.16)],
+                                          startPoint: .top, endPoint: .bottom))
+                if let tint { shape.fill(tint.opacity(pressed ? 0.45 : 0.6)) }
+                shape.fill(LinearGradient(colors: [.white.opacity(pressed ? 0.04 : 0.16), .clear],
+                                          startPoint: .top, endPoint: .center))
+                shape.stroke(LinearGradient(colors: [.white.opacity(0.42), .white.opacity(0.06)],
+                                            startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            }
+            .offset(y: pressed ? travel - 1 : 0)
+        }
+        .shadow(color: .black.opacity(0.6), radius: pressed ? 1 : 4, y: pressed ? 1 : 4)
+    }
+}
+
+/// A Button whose label's keycap sinks while it is held.
+struct FoldKeyButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.environment(\.foldKeyPressed, configuration.isPressed)
     }
 }
 
@@ -93,7 +159,7 @@ struct FoldMirrorKey: View {
                 .frame(width: 44, height: 28)
                 .background(GlassShape(cornerRadius: 9))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FoldKeyButtonStyle())
         .accessibilityLabel(on ? "Hide the game on this screen" : "Show the game on this screen")
     }
 }
