@@ -6,7 +6,8 @@ becomes a deck for the controls. Held open or closed, and on every other iPhone,
 nothing changes. The fold is read in `app/Madeira/DeviceFold.swift`, and the
 deck's controller view is in `app/Madeira/FoldDeck.swift`. The hooks are in
 `ContentView.swift`: `sessionBody`, `TouchControlsOverlay` and
-`ControlsWindow.hitTest`.
+`ControlsWindow.hitTest`. Two parts at the end apply to every iPhone: moving the
+game in portrait with a controller, and switching games.
 
 ## Reading the fold
 
@@ -94,6 +95,26 @@ window-level view for its presents to reach the screen (`MetalHostView`). The
 copy costs one more composite of the game per frame and nothing in the game. If
 the class is missing on some future system, the deck shows the controller's
 name instead, and the Mirror button is not offered.
+
+## Portrait with a controller
+
+This part applies to every iPhone. Held upright, a library session fits the game
+into a band across the middle of the tall window. With a controller connected, a
+swipe up or down in the empty space above or below the game moves it to the top
+or the bottom of the screen, inside the safe area, and a swipe the other way
+brings it back to the middle. The game slides there at the same size. The choice
+is kept (`madeiraPortraitPin` in the app's preferences).
+
+The code is `app/Madeira/PortraitPin.swift`. `MetalBackedView` lays the game out
+in the band at the pinned edge instead of its whole bounds, so the presented
+layer, the desktop compositor and touch mapping all follow the same rect. A
+touch that starts in the empty space while a pin can apply belongs to the swipe
+and never reaches the game. Without a controller, in landscape, folded, or when
+the game fills the height, nothing changes, and touches in the empty space reach
+the game as before. Connecting or disconnecting a controller lays the game out
+again.
+
+Log tag: `[portrait-pin]`.
 
 ## Switching games
 

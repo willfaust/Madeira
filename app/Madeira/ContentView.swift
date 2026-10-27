@@ -121,6 +121,8 @@ final class MetalHostView: UIView {
 // SwiftUI-hosted placeholder: geometry + touch input only.
 final class MetalBackedView: UIView {
     private static var layerRegistered = false
+    /// Swipes beside the game that move it up or down in portrait (PortraitPin.swift).
+    private let pinSwipe = PortraitPinSwipe()
 
     // Hardware keyboard bridge: the view becomes first responder so the iOS
     // software keyboard appears, and each typed character is forwarded to
@@ -229,8 +231,16 @@ final class MetalBackedView: UIView {
     /// never skew input.
     private func gameRect() -> CGRect {
         let r = GameSurfaceLayout.rect(guest: guestSize(), aspect: drawableAspect(),
-                                       bounds: bounds, mode: effectiveDisplayMode())
+                                       bounds: surfaceBounds(), mode: effectiveDisplayMode())
         return CGRect(x: r.minX, y: r.minY, width: max(r.width, 1), height: max(r.height, 1))
+    }
+
+    /// What the surface is laid out in: `bounds`, or in portrait with a controller
+    /// and a pin (PortraitPin.swift) the band at the top or bottom of it.
+    private func surfaceBounds() -> CGRect {
+        let centred = GameSurfaceLayout.rect(guest: guestSize(), aspect: drawableAspect(),
+                                             bounds: bounds, mode: effectiveDisplayMode())
+        return PortraitPin.bounds(bounds, game: centred, insets: safeAreaInsets)
     }
 
     private static var drawableObservation: NSKeyValueObservation?
@@ -242,7 +252,15 @@ final class MetalBackedView: UIView {
     private func applyDisplayMode(reason: String) {
         guard let w = window else { return }
         let r = gameRect()
-        MetalHostView.shared.frame = convert(r, to: w)
+        let frame = convert(r, to: w)
+        if reason == PortraitPin.reason {
+            // A swipe moved the game; it slides there at the same size.
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+                MetalHostView.shared.frame = frame
+            }
+        } else {
+            MetalHostView.shared.frame = frame
+        }
         // The desktop compositor lays the guest display out in the same rect,
         // so Aspect / Fill / Stretch / Fit apply to desktop sessions as well.
         winios_set_desktop_rect(r.minX - bounds.minX, r.minY - bounds.minY, r.width, r.height, 1)
@@ -278,7 +296,7 @@ final class MetalBackedView: UIView {
             MetalBackedView.refreshDisplayMode(reason: "orientation")
         },
     ]
-    static func observeModeChanges() { _ = observers }
+    static func observeModeChanges() { _ = observers; PortraitPin.observeControllers() }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -624,6 +642,7 @@ final class MetalBackedView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .began) { return }
+        if pinSwipe.intercept(touches, .began, in: self, game: gameRect()) { return }
         guard let touches = tmgFilter(touches, .began) else { return }
         if touchPointerMode { touchModeBegan(touches); return }
         guard desktopMode else {
@@ -671,6 +690,7 @@ final class MetalBackedView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .moved) { return }
+        if pinSwipe.intercept(touches, .moved, in: self, game: gameRect()) { return }
         guard let touches = tmgFilter(touches, .moved) else { return }
         if touchPointerMode { touchModeMoved(touches, event); return }
         guard desktopMode else {
@@ -753,6 +773,7 @@ final class MetalBackedView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .ended) { return }
+        if pinSwipe.intercept(touches, .ended, in: self, game: gameRect()) { return }
         guard let touches = tmgFilter(touches, .ended) else { return }
         if touchPointerMode { touchModeEnded(touches, event); return }
         guard desktopMode else {
@@ -797,6 +818,7 @@ final class MetalBackedView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         if HardwareInput.shared.interceptTouches(touches, event, .cancelled) { return }
+        if pinSwipe.intercept(touches, .cancelled, in: self, game: gameRect()) { return }
         guard let touches = tmgFilter(touches, .cancelled) else { return }
         if touchPointerMode { touchModeCancelled(touches); return }
         guard desktopMode else {
