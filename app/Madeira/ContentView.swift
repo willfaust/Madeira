@@ -1282,6 +1282,8 @@ struct ContentView: View {
     @State private var jitStatus: JITStatus = .unknown
     /// Play without JIT: the start that waits for Enable JIT (jitReadyForLaunch).
     @State private var launchAfterJIT: (() -> Void)?
+    /// The entry SessionSwitch noted before Madeira closed, until the library can start it.
+    @State private var pendingSwitch: UUID?
     @State private var entitlements: EntitlementStatus?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
@@ -1334,12 +1336,16 @@ struct ContentView: View {
             .toolbarBackground(library.enabled && !Self.systemScrollEdge ? .visible : .automatic, for: .navigationBar)
             // A second session cannot start in this process; offer to close Madeira.
             .alert("Restart Madeira", isPresented: Binding(get: { library.restartNotice != nil },
-                                                            set: { if !$0 { library.restartNotice = nil } })) {
+                                                            set: { if !$0 { library.restartNotice = nil; SessionSwitch.held = nil } })) {
+                // The game whose Play was held starts again once Madeira reopens (SessionSwitch.swift).
+                if let entry = SessionSwitch.held {
+                    Button("Close and Start \(entry.title)") { SessionSwitch.restart(into: entry) }
+                }
                 Button("Close Madeira") {
                     LogStore.shared.log("[session-once] closed by the user for a restart")
                     exit(0)
                 }
-                Button("Later", role: .cancel) { library.restartNotice = nil }
+                Button("Later", role: .cancel) { library.restartNotice = nil; SessionSwitch.held = nil }
             } message: { Text(library.restartNotice ?? "") }
             // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
             .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
@@ -1387,6 +1393,9 @@ struct ContentView: View {
                 // madeira-bcd: the Dock's Reset sets the VC++ markers back to a new prefix's
                 // values, read from the bundled prefix template (DockReset.swift).
                 DockReset.baselineProvider = { DockReset.templateRegistry { madeira_extract_prefix_tgz($0, $1) } }
+                // A game noted before Madeira closed to switch to it (SessionSwitch.swift).
+                pendingSwitch = SessionSwitch.take()
+                launchPendingSwitch()
             }
             .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in
                 if !SteamSignIn.isSignedIn { MadeiraDock.cleanup() }
@@ -1394,7 +1403,8 @@ struct ContentView: View {
             // A Home Screen shortcut (madeira://play?exe=...) starts its library entry,
             // now or, from a cold start, once the library is up.
             .onReceive(ShortcutRouter.shared.$pendingExe) { _ in launchPendingShortcut() }
-            .onChange(of: library.enabled) { _, _ in launchPendingShortcut() }
+            .onChange(of: library.enabled) { _, _ in launchPendingShortcut(); launchPendingSwitch() }
+            .onChange(of: library.entries.count) { _, _ in launchPendingSwitch() }
         }
     }
 
@@ -2549,6 +2559,18 @@ struct ContentView: View {
         launchLibraryEntry(entry)
     }
 
+    /// The game Close and Start noted (SessionSwitch.swift) starts once the library
+    /// is up and has its entries.
+    private func launchPendingSwitch() {
+        guard library.enabled, library.current == nil, !library.entries.isEmpty, let id = pendingSwitch else { return }
+        pendingSwitch = nil
+        guard let entry = library.entries.first(where: { $0.id == id }) else {
+            logStore.log("[session-switch] the noted game is no longer in the library", level: .error); return
+        }
+        logStore.log("[session-switch] starting \(entry.title)")
+        launchLibraryEntry(entry)
+    }
+
     /// A Home Screen shortcut starts a game that is in the library, by its Windows
     /// path. A link names any path, so one for a program not in the library starts
     /// nothing: add it to the library first.
@@ -2598,6 +2620,7 @@ struct ContentView: View {
         // One Wine session per app run (see LibraryModel.sessionsThisRun).
         if LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
             LogStore.shared.log("[session-once] launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
+            SessionSwitch.held = entry
             library.restartNotice = LibraryModel.restartMessage; return
         }
         // The same precondition runWineFullSequence checks: the JIT pool is
@@ -3456,6 +3479,7 @@ struct ContentView: View {
         }
         if inLibrary, LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
             LogStore.shared.log("[session-once] Dock launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
+            SessionSwitch.held = profile
             library.restartNotice = LibraryModel.restartMessage
             return
         }
