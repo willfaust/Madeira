@@ -1292,6 +1292,7 @@ struct ContentView: View {
     /// replaces both bodies below, and a running library session gets the
     /// full-screen `sessionBody`.
     @ObservedObject private var library = LibraryModel.shared
+    @ObservedObject private var deviceFold = DeviceFold.shared
     /// "Use New Interface" (actionButtons) applies at the next start.
     @State private var showFrontendRestart = false
 
@@ -1433,9 +1434,17 @@ struct ContentView: View {
     /// library's menu button, starting screen and in-game menu drawn above it by
     /// TouchControlsOverlay (LibraryHUD), in the window above the game surface.
     private var sessionBody: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             Color.black
+            // Folded like a laptop (DeviceFold.swift): the game keeps the upright
+            // half and the flat half is the deck the controls window draws on.
+            if let fold = deviceFold.layout {
+                FoldDeckBackground()
+                    .frame(width: fold.deck.width, height: fold.deck.height)
+                    .offset(x: fold.deck.minX, y: fold.deck.minY)
+            }
             MadeiraMetalView()
+                .frame(width: deviceFold.layout?.top.width, height: deviceFold.layout?.top.height)
                 .onAppear { TouchControlsHost.attach() }
                 .onReceive(NotificationCenter.default.publisher(
                     for: UIDevice.orientationDidChangeNotification)) { _ in
