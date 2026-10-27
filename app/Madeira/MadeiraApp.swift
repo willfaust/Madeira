@@ -31,6 +31,7 @@ struct MadeiraApp: App {
             ContentView()
                 .background(InteractionFrameRateInstaller())   // touch frame-rate request (New library grid)
                 .modifier(ClaimGamepadEvents())
+                .deviceFoldReader()   // the iPhone Duo's laptop posture (DeviceFold.swift)
                 .onAppear {
                     ExternalDrives.shared.mountAll()
                     GamepadInput.shared.start()
