@@ -54,6 +54,9 @@ has no game under it, so no touch there becomes a mouse event. Its contents:
 - **Touch controls.** The entry's layout is drawn in the deck at the same
   relative positions it has in landscape. A user with no layout yet gets the
   built-in one laid out for the deck. Gesture zones scale to the deck too.
+  Under them the deck shows the game as well, dimmed so the controls stay
+  readable, the way a video app does on a folded Duo. A small key at the top
+  of the deck turns that copy off and on.
 - **The menu button and the in-game menu** (`LibraryHUD`) stay on the deck, so
   Done, Keyboard, Edit controls and Quit game are within reach without leaning
   over the fold. The starting screen still covers the whole window.
@@ -64,7 +67,8 @@ has no game under it, so no touch there becomes a mouse event. Its contents:
   - Keyboard shows the keyboard;
   - Touch brings the touch controls back (offered while no controller is
     connected);
-  - Mirror turns the copy off (`madeiraFoldMirror` in the app's preferences).
+  - Mirror turns the copy off. It's the same setting as the key above the
+    touch controls (`madeiraFoldMirror` in the app's preferences).
 
 The copy is a portal. UIKit's `_UIPortalView` draws the game's Metal layer a
 second time. The layer itself cannot move: it has one parent, and it must stay a
