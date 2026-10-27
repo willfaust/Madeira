@@ -9,23 +9,28 @@ import UIKit
 // The iPhone Duo's deck (docs/DUO.md). With the Duo folded like a laptop
 // (DeviceFold.swift) and touch controls hidden or a controller connected, the flat
 // half shows a copy of the game, which can be turned off, and the few things a
-// controller has no button for: the game menu, the keyboard and touch controls.
+// controller has no button for: going home, the keyboard and touch controls (the
+// menu button of LibraryHUD, on the deck as well, opens the game menu). Home asks
+// on the deck itself before quitting: a system alert would sit across the fold.
 // Folded, the deck's controls are drawn as keycaps (FoldKeyFace).
 
 struct FoldDeck: View {
     @ObservedObject private var pad = PadStickMouse.shared
     @ObservedObject private var controls = TouchControlsModel.shared
     @AppStorage("madeiraFoldMirror") private var mirror = true
+    /// Home was pressed: the deck asks before quitting the game.
+    @State private var confirmingHome = false
 
     var body: some View {
         VStack(spacing: 10) {
             if mirror && GameMirror.available {
                 GameMirror()
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay { if confirmingHome { homeQuestion.background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10)) } }
                     .allowsHitTesting(false)
             } else {
                 Spacer(minLength: 0)
-                status
+                if confirmingHome { homeQuestion } else { status }
                 Spacer(minLength: 0)
             }
             buttons
@@ -48,20 +53,40 @@ struct FoldDeck: View {
         }
     }
 
+    private var homeQuestion: some View {
+        VStack(spacing: 4) {
+            Text("Quit \(LibraryModel.shared.activeEntry?.title ?? "the game") and go back to the library?")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            Text("Unsaved progress will be lost.").font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private var buttons: some View {
         HStack(spacing: 10) {
-            button("line.3.horizontal", "Menu") { LibraryModel.shared.showMenu() }
-            button("keyboard", "Keyboard") { LibraryKeyboard.show() }
-            if !pad.controllerConnected {
-                button("hand.tap", "Touch") { controls.visible = true }
-            }
-            if GameMirror.available {
-                button(mirror ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle", "Mirror") { mirror.toggle() }
+            if confirmingHome {
+                button("play.fill", "Keep playing", width: 132) { confirmingHome = false }
+                button("house.fill", "Quit game", width: 132, tint: .red) {
+                    confirmingHome = false
+                    LibraryModel.shared.requestQuit()
+                }
+            } else {
+                button("house", "Home") { confirmingHome = true }
+                button("keyboard", "Keyboard") { LibraryKeyboard.show() }
+                if !pad.controllerConnected {
+                    button("hand.tap", "Touch") { controls.visible = true }
+                }
+                if GameMirror.available {
+                    button(mirror ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle", "Mirror") { mirror.toggle() }
+                }
             }
         }
     }
 
-    private func button(_ symbol: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+    private func button(_ symbol: String, _ label: String, width: CGFloat = 68, tint: Color? = nil,
+                        _ action: @escaping () -> Void) -> some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             action()
@@ -70,7 +95,8 @@ struct FoldDeck: View {
                 Image(systemName: symbol).font(.system(size: 16))
                 Text(label).font(.caption2)
             }
-            .frame(width: 68, height: 46)
+            .foregroundStyle(tint ?? .white)
+            .frame(width: width, height: 46)
             .background(GlassShape())
         }
         .buttonStyle(FoldKeyButtonStyle())
