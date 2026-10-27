@@ -4219,6 +4219,8 @@ struct TouchControlsOverlay: View {
     @ObservedObject private var zones = GestureZonesModel.shared
     @ObservedObject private var deviceFold = DeviceFold.shared
     @ObservedObject private var pad = PadStickMouse.shared
+    /// The copy of the game on the deck (FoldDeck.swift), under the touch controls too.
+    @AppStorage("madeiraFoldMirror") private var foldMirror = true
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4245,10 +4247,22 @@ struct TouchControlsOverlay: View {
                             .offset(x: deck.minX, y: deck.minY)
                     } else if (m.visible || m.editing) && !library.blocksGameplayTouch {
                         ZStack(alignment: .topLeading) {
+                            // Folded, the deck shows the game as well, under its controls, the
+                            // way a video app does on a folded Duo; dimmed so the keys read.
+                            if deck != nil, foldMirror, GameMirror.available, !m.editing {
+                                GameMirror()
+                                    .overlay(Color.black.opacity(0.35))
+                                    .frame(width: area.width, height: area.height)
+                                    .allowsHitTesting(false)
+                            }
                             if GestureZonesModel.enabled {
                                 GestureZonesLayer(screen: area.size, editing: m.editing)
                             }
                             controls(area.size, session: session)
+                            if deck != nil, GameMirror.available, !m.editing {
+                                FoldMirrorKey(on: $foldMirror)
+                                    .position(x: area.width / 2, y: 24)
+                            }
                         }
                         .frame(width: area.width, height: area.height, alignment: .topLeading)
                         .offset(x: area.minX, y: area.minY)

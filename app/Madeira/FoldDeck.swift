@@ -77,6 +77,27 @@ struct FoldDeck: View {
     }
 }
 
+/// The small key at the top of the deck that shows or hides the copy of the game under
+/// the touch controls (the same setting as FoldDeck's Mirror button).
+struct FoldMirrorKey: View {
+    @Binding var on: Bool
+
+    var body: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            on.toggle()
+        } label: {
+            Image(systemName: on ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 44, height: 28)
+                .background(GlassShape(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "Hide the game on this screen" : "Show the game on this screen")
+    }
+}
+
 /// A live copy of the game. The game's Metal layer can have only one parent, and it
 /// must stay a window-level view for its presents to reach the screen
 /// (MetalHostView), so the copy is a portal: UIKit's _UIPortalView draws the same
