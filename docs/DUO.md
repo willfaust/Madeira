@@ -34,10 +34,14 @@ older SDKs and systems build and run without it.
 The `-fold` launch argument stands a 24-point fold across the middle of the
 window. That way the layout can be seen in the simulator, whose hinge cannot bend.
 
-Log tag: `[fold]`. The layout is logged when it changes (`[fold] laptop top=…
-deck=…` or `[fold] off`), and so is each new hinge reading (`[fold] hinge open,
-150° (24° from flat)`), which gives real numbers when a fold is caught too early
-or too late.
+Log tag: `[fold]`. These are logged when they change:
+- the layout (`[fold] laptop top=… deck=…` or `[fold] off`);
+- each new hinge reading (`[fold] hinge open, 150° (24° from flat)`), which gives
+  real numbers when a fold is caught too early or too late;
+- the window and every division the reader sees (`[fold] window 669x951
+  divisions=[0,455 669x40 active]`). This shows why a fold didn't become a layout:
+  no division, or one running down a landscape window, with the Duo held on its
+  side, where the laptop layout needs a portrait window with the fold across it.
 
 ## The upper half: the game
 
