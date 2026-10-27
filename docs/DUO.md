@@ -67,7 +67,11 @@ has no game under it, so no touch there becomes a mouse event. Its contents:
 - **With a controller** (or with touch controls hidden), the deck shows
   `FoldDeck` instead of the controls. It has a live copy of the game, scaled to
   fit, above four buttons:
-  - Menu opens the in-game menu;
+  - Home quits the game and goes back to the library, the in-game menu's Quit
+    game. It asks first, on the deck itself: the copy of the game dims under the
+    question and the buttons become Keep playing and Quit game. A system alert
+    would sit across the fold, half out of reach. The in-game menu is the menu
+    button's, already on the deck;
   - Keyboard shows the keyboard;
   - Touch brings the touch controls back (offered while no controller is
     connected);
