@@ -48,7 +48,7 @@ final class DeviceFold: ObservableObject {
     fileprivate func update(_ new: Layout?) {
         guard new != layout else { return }
         layout = new
-        fputs("[fold] \(new.map { "laptop top=\($0.top) deck=\($0.deck)" } ?? "off")\n", stderr)
+        LogStore.shared.log("[fold] \(new.map { "laptop top=\($0.top) deck=\($0.deck)" } ?? "off")")
         // The controls window and the game surface both follow the fold.
         TouchControlsHost.attach()
         MetalBackedView.refreshDisplayMode(reason: "fold")
@@ -57,7 +57,18 @@ final class DeviceFold: ObservableObject {
     fileprivate func note(hinge reading: String) {
         guard reading != hinge else { return }
         hinge = reading
-        fputs("[fold] hinge \(reading)\n", stderr)
+        LogStore.shared.log("[fold] hinge \(reading)")
+    }
+
+    /// The window and the fold regions last seen, logged when they change, so a fold
+    /// that never becomes a layout says why: no division, or one running across a
+    /// landscape window (the Duo held on its side) rather than a portrait one.
+    private(set) var regions = ""
+
+    fileprivate func note(regions reading: String) {
+        guard reading != regions else { return }
+        regions = reading
+        LogStore.shared.log("[fold] window \(reading)")
     }
 }
 
@@ -126,9 +137,11 @@ private struct DeviceFoldReader: ViewModifier {
                 .background(
                     GeometryReader { proxy in
                         let layout = proxy.foldLayout(folded: folded, generation: generation)
+                        let regions = proxy.foldRegions(generation: generation)
                         Color.clear
-                            .onAppear { DeviceFold.shared.update(layout) }
+                            .onAppear { DeviceFold.shared.update(layout); DeviceFold.shared.note(regions: regions) }
                             .onChange(of: layout) { _, new in DeviceFold.shared.update(new) }
+                            .onChange(of: regions) { _, new in DeviceFold.shared.note(regions: new) }
                     }
                     .ignoresSafeArea()
                 )
@@ -199,6 +212,16 @@ private extension GeometryProxy {
         // A sliver either side is a fold near an edge, not a laptop.
         guard top.height >= 120, deck.height >= 120 else { return nil }
         return DeviceFold.Layout(top: top, fold: fold, deck: deck)
+    }
+
+    /// "951x669 divisions=[476,0 19x669 inactive]": the window and every division,
+    /// for the log (DeviceFold.note(regions:)).
+    func foldRegions(generation _: Int) -> String {
+        let divisions = reservedRegions(kind: .division, options: .includeInactive).map { region in
+            let f = region.frame
+            return "\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) \(region.isActive ? "active" : "inactive")"
+        }
+        return "\(Int(size.width))x\(Int(size.height)) divisions=[\(divisions.joined(separator: "; "))]"
     }
 }
 #endif
