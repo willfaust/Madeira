@@ -5913,6 +5913,13 @@ void server_init_process_done(void)
      * left behind. This process owns no handles yet. A no-op while fastsync is off. */
     madeira_fast_flush_pid();
 
+    /* The client half of the directory cache is kept per process id for the same reason
+     * (wine/dlls/ntdll/unix/file.c): drop a dead process's listings. */
+    {
+        extern void madeira_dir_cache_flush_pid(void);
+        madeira_dir_cache_flush_pid();
+    }
+
     if (!get_device_info( initial_cwd, &info ) && (info.Characteristics & FILE_REMOVABLE_MEDIA))
         chdir( "/" );
     close( initial_cwd );

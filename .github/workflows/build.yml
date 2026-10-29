@@ -35,6 +35,9 @@ jobs:
           python3 tests/host/check-clean-bootstrap.py
           python3 tests/host/check-app-link-inputs.py
           python3 tests/host/check-runtime-components.py
+      - name: Check Steam connection recovery
+        if: hashFiles('tests/host/check-steam-cm-transport.py') != ''
+        run: python3 tests/host/check-steam-cm-transport.py
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key
