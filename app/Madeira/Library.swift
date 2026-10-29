@@ -3355,6 +3355,7 @@ struct ExecutableBrowser: View {
     @State private var error: String?
     var body: some View {
         List {
+            NavigationLink("Import game folder or ZIP") { GameImportsView() }
             if let error { Text(error).foregroundStyle(.red) }
             ForEach(files, id: \.path) { file in
                 if file.hasDirectoryPath {
