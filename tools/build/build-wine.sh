@@ -16,7 +16,8 @@ if [[ ! -f "$WINE/build-macos/Makefile" ]]; then
   mkdir -p "$WINE/build-macos"
   (
     cd "$WINE/build-macos"
-    ../configure --enable-archs=aarch64 --disable-tests
+    ../configure --enable-archs=aarch64 --disable-tests --without-x \
+      --without-freetype --without-gnutls --enable-winegstreamer
   )
 fi
 
@@ -26,14 +27,15 @@ make -C "$WINE/build-macos" -j"$JOBS" tools/all tools/widl/all tools/winebuild/a
 
 # Madeira's ntdll iOS build currently includes generated dwrite headers from a
 # directory named build-arm64ec. Configure that tree reproducibly and build only
-# the generated headers required by the iOS static libraries; PE binaries are
-# already versioned by Madeira and are not rebuilt during onboarding.
+# the generated headers required by the iOS static libraries. The shared
+# windows-runtime stage rebuilds the PE half before packaging.
 if [[ ! -f "$WINE/build-arm64ec/Makefile" ]]; then
   echo "Configuring Wine (ARM64EC headers)..."
   mkdir -p "$WINE/build-arm64ec"
   (
     cd "$WINE/build-arm64ec"
-    ../configure --enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer
+    ../configure --enable-archs=arm64ec --without-x --disable-tests \
+      --without-freetype --without-gnutls --enable-winegstreamer
   )
 fi
 

@@ -174,3 +174,6 @@ for f in "$DEST"/*; do
     done < <("$OBJDUMP" -p "$f" 2>/dev/null | sed -n 's/^ *DLL Name: //p')
 done
 echo "== $(ls "$DEST" | wc -l | tr -d ' ') files in app/Madeira/i386-windows, $missing missing imports =="
+if [ $# -eq 0 ] && [ -z "${SKIP_DXMT:-}" ]; then
+    [ "$missing" -eq 0 ]
+fi

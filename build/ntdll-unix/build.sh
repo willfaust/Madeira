@@ -107,12 +107,21 @@ echo "=== Building crypto/network unixlibs ==="
 compile_one "$CRYPTO_DIR/gnutls_symtab_ios.c" "gnutls_symtab_ios"
 compile_unixlib "$WINE_SRC/dlls/ws2_32/unixlib.c" "ws2_32_unixlib" "ws2_32" \
     -I"$WINE_SRC/dlls/ws2_32"
+# Host configure cannot detect the statically linked iOS GnuTLS backend.
+GNUTLS_DEFS=()
+if [ -f "$GNUTLS_PREFIX/lib/libgnutls.a" ]; then
+    GNUTLS_DEFS=(-DHAVE_GNUTLS_CIPHER_INIT '-DSONAME_LIBGNUTLS="libgnutls.so.30"')
+else
+    echo "WARNING: build/gnutls-ios/build.sh must run before the TLS backends can build." >&2
+fi
 compile_unixlib "$WINE_SRC/dlls/bcrypt/gnutls.c" "bcrypt_unixlib" "bcrypt" \
     -I"$WINE_SRC/dlls/bcrypt" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
 compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "secur32" \
     -I"$WINE_SRC/dlls/secur32" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
 # iOS-Madeira ml494 (#61 text wall): dwrite had NO unixlib, so every
 # __wine_unix_call from dwrite.dll failed and get_glyph_bbox never ran —
 # every glyph run reported an EMPTY bbox and Chromium drew no text at all.
@@ -124,7 +133,18 @@ compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
     -I"$REPO_ROOT/wine/build-arm64ec/include"
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
-    -include "$CRYPTO_DIR/ios_gnutls_shim.h"
+    -include "$CRYPTO_DIR/ios_gnutls_shim.h" \
+    "${GNUTLS_DEFS[@]}"
+if [ ${#GNUTLS_DEFS[@]} -gt 0 ]; then
+    for module in bcrypt secur32 crypt32; do
+        for table in unix_call_funcs unix_call_wow64_funcs; do
+            xcrun nm -gU "$OBJ_DIR/${module}_unixlib.o" | grep -Eq "[[:space:]]_${module}_${table}$" || {
+                echo "ERROR: $module did not build its $table table" >&2
+                exit 1
+            }
+        done
+    done
+fi
 # iOS-Madeira 2026-08-03 (#79 transport): in-process NSI TCP connection
 # tables (nsiproxy.sys is not shipped; PE nsi.dll falls back to this).
 compile_one "$BUILD_DIR/nsi_unixlib_ios.c" "nsi_unixlib_ios"

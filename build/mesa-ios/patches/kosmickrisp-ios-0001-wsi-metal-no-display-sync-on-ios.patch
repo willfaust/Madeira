@@ -1,0 +1,35 @@
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -8,6 +8,7 @@
+ 
+ #import <QuartzCore/CAMetalLayer.h>
+ #import <Metal/Metal.h>
++#include <TargetConditionals.h>
+ 
+ void
+ wsi_metal_layer_size(const CAMetalLayer *metal_layer,
+@@ -137,7 +138,14 @@
+ wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
+                               bool enable_immediate)
+ {
++#if TARGET_OS_OSX
+    metal_layer.displaySyncEnabled = !enable_immediate;
++#else
++   /* iOS CAMetalLayer has no displaySyncEnabled: presentation always waits
++    * for the display, so immediate mode is not available there. */
++   (void)metal_layer;
++   (void)enable_immediate;
++#endif
+ }
+ 
+ VkResult
+@@ -169,7 +177,9 @@
+       metal_layer.maximumDrawableCount = image_count;
+       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
+       metal_layer.opaque = enable_opaque;
++#if TARGET_OS_OSX
+       metal_layer.displaySyncEnabled = !enable_immediate;
++#endif
+       metal_layer.pixelFormat = metal_format;
+ 
+       metal_layer.colorspace = cg_color_space;

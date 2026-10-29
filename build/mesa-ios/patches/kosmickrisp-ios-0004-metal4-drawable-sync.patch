@@ -1,0 +1,163 @@
+--- a/src/kosmickrisp/bridge/mtl_command_queue.h
++++ b/src/kosmickrisp/bridge/mtl_command_queue.h
+@@ -41,4 +41,12 @@
+ 
+ void mtl_drawable_present(void *drawable);
+ 
++/* Madeira: Metal 4 drawable synchronisation. waitForDrawable must precede the
++ * commit of any command buffer that writes the drawable, and the layer's
++ * residency set must be on the queue so the drawable texture is resident. */
++void mtl_command_queue_wait_for_drawable(mtl_command_queue *queue,
++                                         void *drawable);
++
++mtl_residency_set *mtl_drawable_get_layer_residency_set(void *drawable);
++
+ #endif /* MTL_COMMAND_QUEUE_H */
+\ No newline at end of file
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -8,6 +8,7 @@
+ 
+ #include <Metal/MTLDevice.h>
+ #include <Metal/MTLCommandQueue.h>
++#import <QuartzCore/CAMetalLayer.h>
+ 
+ /* MTL4CommitOptions */
+ mtl_commit_options *
+@@ -127,3 +128,29 @@
+       [d present];
+    }
+ }
++
++void
++mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
++{
++   @autoreleasepool {
++      id<MTL4CommandQueue> q = (id<MTL4CommandQueue>)queue;
++      id<MTLDrawable> d = (id<MTLDrawable>)drawable;
++      [q waitForDrawable:d];
++   }
++}
++
++/* Returns the presenting layer's residency set (not retained), or NULL when
++ * the drawable has no CAMetalLayer or the OS has no layer residency sets. */
++mtl_residency_set *
++mtl_drawable_get_layer_residency_set(void *drawable)
++{
++   @autoreleasepool {
++      id d = (id)drawable;
++      if (![d respondsToSelector:@selector(layer)])
++         return NULL;
++      CAMetalLayer *layer = [(id<CAMetalDrawable>)d layer];
++      if (!layer || ![layer respondsToSelector:@selector(residencySet)])
++         return NULL;
++      return (mtl_residency_set *)layer.residencySet;
++   }
++}
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+@@ -65,3 +65,14 @@
+ mtl_drawable_present(void *drawable)
+ {
+ }
++
++void
++mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
++{
++}
++
++mtl_residency_set *
++mtl_drawable_get_layer_residency_set(void *drawable)
++{
++   return NULL;
++}
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -17,6 +17,40 @@
+ 
+ #include "vk_cmd_queue.h"
+ 
++#include "util/macros.h"
++#include "util/u_debug.h"
++
++#include <string.h>
++
++/* Madeira: Metal 4 does not synchronise or page in CAMetalLayer drawables on
++ * its own. Before a command buffer that writes a drawable is committed, the
++ * queue must wait for the display to release it, and the layer's residency
++ * set must be on the queue. Without this the copy into the drawable can be
++ * lost and the window stays black. MADEIRA_KK_DRAWABLE_SYNC=0 turns it off. */
++static void
++kk_queue_prepare_drawable(struct kk_queue *queue, void *drawable)
++{
++   mtl_residency_set *set = mtl_drawable_get_layer_residency_set(drawable);
++   if (set) {
++      bool known = false;
++      for (uint32_t i = 0; i < queue->layer_set_count; i++)
++         known |= queue->layer_sets[i] == set;
++      if (!known) {
++         if (queue->layer_set_count == ARRAY_SIZE(queue->layer_sets)) {
++            mtl_command_queue_remove_residency_set(queue->mtl_handle,
++                                                   queue->layer_sets[0]);
++            mtl_release(queue->layer_sets[0]);
++            memmove(&queue->layer_sets[0], &queue->layer_sets[1],
++                    sizeof(queue->layer_sets[0]) * (queue->layer_set_count - 1));
++            queue->layer_set_count--;
++         }
++         mtl_command_queue_add_residency_set(queue->mtl_handle, set);
++         queue->layer_sets[queue->layer_set_count++] = mtl_retain(set);
++      }
++   }
++   mtl_command_queue_wait_for_drawable(queue->mtl_handle, drawable);
++}
++
+ static void
+ commit_callback(struct mtl_feedback_data *data)
+ {
+@@ -81,6 +115,9 @@
+       uint32_t count = util_dynarray_num_elements(&cmd_buffer->submit_cmd_bufs,
+                                                   mtl_command_buffer *);
+ 
++      if (cmd_buffer->drawable && queue->drawable_sync)
++         kk_queue_prepare_drawable(queue, cmd_buffer->drawable);
++
+       /* Metal complains with empty submissions. */
+       if (count > 0u) {
+          mtl_commit_options_add_feedback_handler(queue->commit_options,
+@@ -145,6 +182,9 @@
+    mtl_command_queue_add_residency_set(queue->mtl_handle,
+                                        dev->residency_set.handle);
+    queue->commit_options = mtl_new_commit_options();
++   queue->layer_set_count = 0;
++   queue->drawable_sync =
++      debug_get_bool_option("MADEIRA_KK_DRAWABLE_SYNC", true);
+ 
+    queue->vk.driver_submit = kk_queue_submit;
+ 
+@@ -156,6 +196,12 @@
+ {
+    mtl_command_queue_remove_residency_set(queue->mtl_handle,
+                                           dev->residency_set.handle);
++   for (uint32_t i = 0; i < queue->layer_set_count; i++) {
++      mtl_command_queue_remove_residency_set(queue->mtl_handle,
++                                             queue->layer_sets[i]);
++      mtl_release(queue->layer_sets[i]);
++   }
++   queue->layer_set_count = 0;
+    mtl_release(queue->commit_options);
+    mtl_release(queue->mtl_handle);
+    vk_queue_finish(&queue->vk);
+--- a/src/kosmickrisp/vulkan/kk_queue.h
++++ b/src/kosmickrisp/vulkan/kk_queue.h
+@@ -18,6 +18,11 @@
+    struct vk_queue vk;
+    struct mtl_command_queue *mtl_handle;
+    mtl_commit_options *commit_options;
++
++   /* Madeira: CAMetalLayer residency sets added to mtl_handle (retained). */
++   mtl_residency_set *layer_sets[8];
++   uint32_t layer_set_count;
++   bool drawable_sync;
+ };
+ 
+ static inline struct kk_device *

@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 # A complete IPA cache is scoped by the checked-out tree and build environment.
-# Otherwise, three parallel jobs provide the expensive native dependencies.
+# Native libraries and runtime components have separate source/SDK caches.
 # xcode-27: the ntdll unix side uses iOS 27 SDK fields (rusage_info_v6.ri_page_wait_time_mach).
 
 jobs:
@@ -34,6 +34,10 @@ jobs:
           python3 tests/host/check-ci-llvm-cache.py
           python3 tests/host/check-clean-bootstrap.py
           python3 tests/host/check-app-link-inputs.py
+          python3 tests/host/check-runtime-components.py
+      - name: Check Steam connection recovery
+        if: hashFiles('tests/host/check-steam-cm-transport.py') != ''
+        run: python3 tests/host/check-steam-cm-transport.py
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key
@@ -49,7 +53,13 @@ jobs:
     needs: plan
     if: needs.plan.outputs.reuse == 'true'
     runs-on: xcode-27
+    env:
+      MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
+      MADEIRA_RUNTIME_SDK: ${{ needs.plan.outputs.sdk }}
     steps:
+      - uses: actions/checkout@v4
+      - id: sdk
+        run: bash tools/build/ci-input-key.sh
       - uses: actions/cache/restore@v4
         with:
           key: ${{ needs.plan.outputs.ipa }}
@@ -59,7 +69,7 @@ jobs:
         run: |
           test -s dist/Madeira.ipa
           unzip -tq dist/Madeira.ipa
-          unzip -Z1 dist/Madeira.ipa | grep -x 'Payload/Madeira.app/Madeira'
+          python3 tools/build/runtime-components.py ipa dist/Madeira.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: Madeira-ipa
@@ -198,13 +208,60 @@ jobs:
           overwrite: true
           retention-days: 1
 
+  runtime:
+    needs: [plan, llvm]
+    if: needs.plan.outputs.reuse != 'true'
+    runs-on: xcode-27
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [dock, windows, moltenvk, zink, mesa-d3d12, vulkan-pe, kosmickrisp]
+    env:
+      MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
+      MADEIRA_RUNTIME_SDK: ${{ needs.plan.outputs.sdk }}
+      MADEIRA_RUNTIME_REUSE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - id: sdk
+        run: bash tools/build/ci-input-key.sh
+      - id: key
+        run: python3 tools/build/runtime-components.py key '${{ matrix.component }}' >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: .runtime-cache/${{ matrix.component }}
+      - if: contains(fromJSON('["dock","windows","mesa-d3d12","vulkan-pe"]'), matrix.component)
+        uses: actions/cache@v4
+        with:
+          key: mingw-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/build/setup-llvm-mingw.sh') }}
+          path: toolchains/llvm-mingw-*
+      - if: matrix.component == 'windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: native-llvm-${{ needs.plan.outputs.sdk }}
+          path: toolchains
+      - name: Build or verify runtime component
+        run: python3 tools/build/runtime-components.py build '${{ matrix.component }}'
+      # Each completed component survives a failure in another component or app.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.component }}
+          path: .runtime-cache
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
   app:
-    needs: [plan, llvm, fex, i386]
+    needs: [plan, llvm, fex, i386, runtime]
     if: needs.plan.outputs.reuse != 'true'
     runs-on: xcode-27
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
       MADEIRA_PLANNED_IPA: ${{ needs.plan.outputs.ipaenv }}
+      MADEIRA_RUNTIME_SDK: ${{ needs.plan.outputs.sdk }}
+      MADEIRA_RUNTIME_REUSE: '1'
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -327,6 +384,13 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           tools/build/build-shader-headers.sh
           build/wine-i386/build.sh
+      - name: Recover runtime components from this run
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: .runtime-cache
+          merge-multiple: true
       - name: Build IPA
         run: tools/build-ipa.sh
       - uses: actions/cache/save@v4

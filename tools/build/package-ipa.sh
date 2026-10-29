@@ -23,6 +23,8 @@ for path in "${required[@]}"; do
   [[ -f "$path" ]] || { echo "ERROR: required build artifact missing: $path" >&2; exit 1; }
 done
 
+python3 "$ROOT/tools/build/runtime-components.py" verify all
+
 rm -rf "$DERIVED" "$DIST/Payload"
 mkdir -p "$DIST"
 
@@ -40,6 +42,8 @@ xcodebuild \
   build
 
 [[ -d "$APP" ]] || { echo "ERROR: xcodebuild succeeded but Madeira.app is missing" >&2; exit 1; }
+
+python3 "$ROOT/tools/build/runtime-components.py" bundle "$APP"
 
 # Preserve Madeira's requested JIT/debug entitlements in the IPA. SideStore will
 # replace this ad-hoc signature with the user's development signature while
@@ -72,3 +76,4 @@ rm -f "$DIST/Madeira.ipa"
 rm -rf "$DIST/Payload"
 [[ -s "$DIST/Madeira.ipa" ]] || { echo "ERROR: failed to create IPA" >&2; exit 1; }
 unzip -tq "$DIST/Madeira.ipa" >/dev/null
+python3 "$ROOT/tools/build/runtime-components.py" ipa "$DIST/Madeira.ipa"

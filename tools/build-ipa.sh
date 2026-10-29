@@ -51,6 +51,13 @@ xcodebuild -downloadComponent MetalToolchain >/dev/null 2>&1 || true
 "$ROOT/tools/build/build-dxmt-ios.sh"
 "$ROOT/tools/build/prepare-vcruntime.sh"
 "$ROOT/build/stage-licenses.sh"
+
+log "Building and verifying the bundled runtime components"
+# Local builds rebuild from source. CI may reuse only fully verified inputs.
+python3 "$ROOT/tools/build/runtime-components.py" build all
+if [[ "${GITHUB_ACTIONS:-}" != true ]]; then
+  "$ROOT/build/wine-i386/build.sh"
+fi
 "$ROOT/tools/build/package-ipa.sh"
 
 printf '\n\033[1;32mDone: %s/dist/Madeira.ipa\033[0m\n' "$ROOT"

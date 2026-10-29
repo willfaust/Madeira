@@ -1,0 +1,212 @@
+--- a/src/gallium/drivers/zink/zink_compiler.c
++++ b/src/gallium/drivers/zink/zink_compiler.c
+@@ -2871,6 +2871,200 @@
+    return false;
+ }
+ 
++/* Madeira: Metal links a fragment input to a vertex output by location AND
++ * component, and the types must match. MoltenVK fails the whole pipeline when
++ * a fragment input has no such output ("Fragment input(s) `user(locn1)`
++ * mismatching vertex shader output type(s) or not written by vertex shader").
++ * GL and Vulkan allow this; the input is just undefined. Zink builds each
++ * stage's i/o variables from that stage's own loads and stores
++ * (rework_io_vars), so a fragment input often has no exact twin: the vertex
++ * shader writes fewer components, writes them through separate variables, or
++ * loses a store when the stage is optimised again for a pipeline variant
++ * (undefined values, inlined uniforms), and prune_io then drops the output.
++ *
++ * At link time, for every user slot (generic and legacy) that both stages
++ * access directly, the producer first stores zero into each component the
++ * fragment shader reads. The store goes at the start of the shader, so the
++ * shader's own stores still win; colours default to 0,0,0,1, as in
++ * rewrite_read_as_0. Both stages then get one variable for the slot with the
++ * same width and base type. rewrite_read_as_0 already turns a fragment read
++ * of a slot with no producer output into a constant (texcoords at compile
++ * time).
++ *
++ * MADEIRA_ZINK_LINK_FS_INPUTS=0 turns this off; =1 also turns it on for
++ * drivers other than MoltenVK.
++ */
++#define FS_LINK_SLOTS (BITFIELD64_BIT(VARYING_SLOT_COL0) | BITFIELD64_BIT(VARYING_SLOT_COL1) | \
++                       BITFIELD64_BIT(VARYING_SLOT_FOGC) | BITFIELD64_RANGE(VARYING_SLOT_TEX0, 8) | \
++                       BITFIELD64_BIT(VARYING_SLOT_BFC0) | BITFIELD64_BIT(VARYING_SLOT_BFC1) | \
++                       BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32))
++static_assert(VARYING_SLOT_VAR0 + 32 == 64, "user varying slots must fit a 64-bit mask");
++
++struct fs_link_scan {
++   uint64_t skip;               /* slots with access this pass leaves alone */
++   uint64_t stored;             /* producer: slots with a direct 32-bit store */
++   uint64_t flat;               /* consumer: slots read with load_input */
++   uint64_t interp;             /* consumer: slots read with load_interpolated_input */
++   uint8_t read_mask[64];       /* consumer: components read */
++   uint8_t interp_mode[64];     /* consumer: interpolation of those reads */
++   unsigned base[64];           /* producer: indices of one store, for the zero store */
++   nir_alu_type src_type[64];
++   nir_io_semantics sem[64];
++};
++
++static void
++fs_link_skip(struct fs_link_scan *s, unsigned location, unsigned num_slots)
++{
++   for (unsigned i = location; i < location + MAX2(num_slots, 1) && i < 64; i++)
++      s->skip |= BITFIELD64_BIT(i);
++}
++
++static bool
++fs_link_scan_instr(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   struct fs_link_scan *s = data;
++   bool is_load = false;
++   bool is_input = false;
++   bool is_interp = false;
++   if (!filter_io_instr(intr, &is_load, &is_input, &is_interp))
++      return false;
++   const bool producer = b->shader->info.stage != MESA_SHADER_FRAGMENT;
++   /* the producer's output stores and the consumer's input loads */
++   if (producer ? is_load : !is_input)
++      return false;
++   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
++   if (sem.location >= 64)
++      return false;
++   const unsigned bit_size = is_load ? intr->def.bit_size : nir_src_bit_size(intr->src[0]);
++   nir_src *offset = nir_get_io_offset_src(intr);
++   if (sem.num_slots != 1 || io_instr_is_arrayed(intr) || bit_size != 32 ||
++       !offset || !nir_src_is_const(*offset) || nir_src_as_uint(*offset)) {
++      fs_link_skip(s, sem.location, sem.num_slots);
++      return false;
++   }
++   const unsigned slot = sem.location;
++   const uint64_t bit = BITFIELD64_BIT(slot);
++   if (producer) {
++      if (!(s->stored & bit) && !sem.no_varying) {
++         s->stored |= bit;
++         s->base[slot] = nir_intrinsic_base(intr);
++         s->src_type[slot] = nir_intrinsic_src_type(intr);
++         s->sem[slot] = sem;
++      }
++      return false;
++   }
++   s->read_mask[slot] |= BITFIELD_RANGE(nir_intrinsic_component(intr), intr->num_components);
++   if (is_interp) {
++      nir_intrinsic_instr *bary = nir_src_as_intrinsic(intr->src[0]);
++      if (!bary || !nir_intrinsic_has_interp_mode(bary)) {
++         fs_link_skip(s, slot, 1);
++         return false;
++      }
++      const unsigned mode = nir_intrinsic_interp_mode(bary);
++      if ((s->interp & bit) && s->interp_mode[slot] != mode)
++         fs_link_skip(s, slot, 1);
++      s->interp |= bit;
++      s->interp_mode[slot] = mode;
++   } else {
++      s->flat |= bit;
++   }
++   return false;
++}
++
++/* collect the variables at 'slot'; false if one is not a plain 32-bit vector
++ * of the same base type as the others, or an array reaches into the slot
++ */
++static bool
++fs_link_slot_vars(nir_shader *nir, nir_variable_mode mode, unsigned slot,
++                  nir_variable **vars, unsigned *count, uint32_t *mask)
++{
++   *count = 0;
++   *mask = 0;
++   nir_foreach_variable_with_modes(var, nir, mode) {
++      const struct glsl_type *type = var->type;
++      const unsigned num_slots = glsl_type_is_array(type) ? glsl_count_attribute_slots(type, false) : 1;
++      if (var->data.location > slot || var->data.location + num_slots <= slot)
++         continue;
++      if (var->data.location != slot || !glsl_type_is_vector_or_scalar(type) ||
++          glsl_get_bit_size(type) != 32 || var->data.compact || var->data.patch ||
++          var->data.fb_fetch_output || var->data.per_primitive || *count == 4)
++         return false;
++      if (*count && (glsl_get_base_type(type) != glsl_get_base_type(vars[0]->type) ||
++                     var->data.driver_location != vars[0]->data.driver_location))
++         return false;
++      *mask |= BITFIELD_RANGE(var->data.location_frac, glsl_get_vector_elements(type));
++      vars[(*count)++] = var;
++   }
++   return true;
++}
++
++static void
++fs_link_set_vars(nir_variable **vars, unsigned count, const struct glsl_type *type)
++{
++   vars[0]->type = type;
++   vars[0]->data.location_frac = 0;
++   for (unsigned i = 1; i < count; i++)
++      vars[i]->data.mode = nir_var_shader_temp;
++}
++
++static bool
++link_fs_inputs_to_outputs(struct zink_screen *screen, nir_shader *producer, nir_shader *consumer)
++{
++   const char *env = getenv("MADEIRA_ZINK_LINK_FS_INPUTS");
++   if (env && *env ? !strcmp(env, "0") : screen->info.driver_props.driverID != VK_DRIVER_ID_MOLTENVK)
++      return false;
++   if (consumer->info.stage != MESA_SHADER_FRAGMENT ||
++       (producer->info.stage != MESA_SHADER_VERTEX && producer->info.stage != MESA_SHADER_TESS_EVAL) ||
++       !producer->info.io_lowered || !consumer->info.io_lowered ||
++       producer->xfb_info || producer->info.has_transform_feedback_varyings)
++      return false;
++
++   struct fs_link_scan *ps = CALLOC(2, sizeof(struct fs_link_scan));
++   if (!ps)
++      return false;
++   struct fs_link_scan *cs = ps + 1;
++   nir_shader_intrinsics_pass(producer, fs_link_scan_instr, nir_metadata_all, ps);
++   nir_shader_intrinsics_pass(consumer, fs_link_scan_instr, nir_metadata_all, cs);
++   const uint64_t slots = ps->stored & FS_LINK_SLOTS & ~ps->skip & ~cs->skip & ~(cs->flat & cs->interp);
++
++   nir_function_impl *impl = nir_shader_get_entrypoint(producer);
++   nir_builder b = nir_builder_at(nir_before_impl(impl));
++   bool progress = false;
++   u_foreach_bit64(slot, slots) {
++      const uint32_t read = cs->read_mask[slot];
++      nir_variable *pvars[4], *cvars[4];
++      unsigned pcount, ccount;
++      uint32_t pmask, cmask;
++      if (!read ||
++          !fs_link_slot_vars(producer, nir_var_shader_out, slot, pvars, &pcount, &pmask) || !pcount ||
++          !fs_link_slot_vars(consumer, nir_var_shader_in, slot, cvars, &ccount, &cmask) || !ccount ||
++          pvars[0]->data.driver_location != cvars[0]->data.driver_location)
++         continue;
++
++      const unsigned n = util_last_bit(read);
++      nir_def *zero = nir_imm_zero(&b, n, 32);
++      if (n == 4 && (slot == VARYING_SLOT_COL0 || slot == VARYING_SLOT_COL1 ||
++                     slot == VARYING_SLOT_BFC0 || slot == VARYING_SLOT_BFC1))
++         zero = nir_vector_insert_imm(&b, zero, nir_imm_float(&b, 1.0), 3);
++      nir_store_output(&b, zero, nir_imm_int(&b, 0), .base = ps->base[slot], .component = 0,
++                       .src_type = ps->src_type[slot], .write_mask = read, .io_semantics = ps->sem[slot]);
++
++      /* the producer's base type wins, as in later Mesa's fix_var_int_floatness */
++      const struct glsl_type *type = glsl_vector_type(glsl_get_base_type(pvars[0]->type),
++                                                      util_last_bit(read | pmask | cmask));
++      fs_link_set_vars(pvars, pcount, type);
++      fs_link_set_vars(cvars, ccount, type);
++      progress = true;
++   }
++   FREE(ps);
++   if (!progress)
++      return false;
++   nir_metadata_preserve(impl, nir_metadata_control_flow);
++   nir_fixup_deref_modes(producer);
++   NIR_PASS_V(producer, nir_remove_dead_variables, nir_var_shader_temp, NULL);
++   return true;
++}
++
+ void
+ zink_compiler_assign_io(struct zink_screen *screen, nir_shader *producer, nir_shader *consumer)
+ {
+@@ -2953,6 +3147,8 @@
+             do_fixup |= nir_shader_intrinsics_pass(consumer, fill_zero_reads, nir_metadata_dominance, &wc);
+       }
+    }
++   /* Madeira: no fragment input without a vertex output of the same shape (Metal) */
++   do_fixup |= link_fs_inputs_to_outputs(screen, producer, consumer);
+    if (!do_fixup)
+       return;
+    nir_fixup_deref_modes(nir);

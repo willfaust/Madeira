@@ -1,0 +1,315 @@
+--- a/src/kosmickrisp/bridge/mtl_command_queue.h
++++ b/src/kosmickrisp/bridge/mtl_command_queue.h
+@@ -49,4 +49,9 @@
+ 
+ mtl_residency_set *mtl_drawable_get_layer_residency_set(void *drawable);
+ 
++/* Madeira: reads back the copy source and the drawable after the queue's work
++ * so far and logs pixel statistics ([kk-present]). Blocks up to 2 s. */
++void mtl_present_probe(mtl_command_queue *queue, void *drawable,
++                       mtl_texture *src, unsigned frame);
++
+ #endif /* MTL_COMMAND_QUEUE_H */
+\ No newline at end of file
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -10,6 +10,10 @@
+ #include <Metal/MTLCommandQueue.h>
+ #import <QuartzCore/CAMetalLayer.h>
+ 
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
++
+ /* MTL4CommitOptions */
+ mtl_commit_options *
+ mtl_new_commit_options(void)
+@@ -154,3 +158,179 @@
+       return (mtl_residency_set *)layer.residencySet;
+    }
+ }
++
++/* Madeira present probe. Bytes per pixel of the formats it can read, else 0. */
++static unsigned
++madeira_probe_bpp(MTLPixelFormat f)
++{
++   switch (f) {
++   case MTLPixelFormatBGRA8Unorm:
++   case MTLPixelFormatBGRA8Unorm_sRGB:
++   case MTLPixelFormatRGBA8Unorm:
++   case MTLPixelFormatRGBA8Unorm_sRGB:
++   case MTLPixelFormatRGB10A2Unorm:
++   case MTLPixelFormatBGR10A2Unorm:
++      return 4;
++   case MTLPixelFormatRGBA16Float:
++      return 8;
++   default:
++      return 0;
++   }
++}
++
++static void
++madeira_probe_report(const char *what, unsigned frame, id<MTLTexture> t,
++                     id<MTLBuffer> buf, NSUInteger bpr, unsigned bpp)
++{
++   const uint8_t *p = (const uint8_t *)buf.contents;
++   NSUInteger w = t.width, h = t.height;
++   bool ten = t.pixelFormat == MTLPixelFormatRGB10A2Unorm ||
++              t.pixelFormat == MTLPixelFormatBGR10A2Unorm;
++   unsigned samples = 0, rgb_nonzero = 0, alpha0 = 0, bright = 0;
++   for (unsigned gy = 0; gy < 31; gy++) {
++      for (unsigned gx = 0; gx < 32; gx++) {
++         NSUInteger x = (w * (2 * gx + 1)) / 64, y = (h * (2 * gy + 1)) / 62;
++         const uint8_t *px = p + y * bpr + x * bpp;
++         samples++;
++         if (bpp == 4) {
++            uint32_t v;
++            memcpy(&v, px, 4);
++            uint32_t rgb = ten ? (v & 0x3fffffffu) : (v & 0x00ffffffu);
++            uint32_t a = ten ? (v >> 30) : (v >> 24);
++            rgb_nonzero += rgb != 0;
++            alpha0 += a == 0;
++            if (!ten)
++               bright += (unsigned)px[0] + px[1] + px[2] > 3 * 64;
++         } else {
++            uint16_t c[4];
++            memcpy(c, px, 8);
++            rgb_nonzero += ((c[0] | c[1] | c[2]) & 0x7fff) ? 1 : 0;
++            alpha0 += (c[3] & 0x7fff) == 0;
++         }
++      }
++   }
++   uint32_t first = 0, center = 0;
++   memcpy(&first, p, 4);
++   memcpy(&center, p + (h / 2) * bpr + (w / 2) * bpp, 4);
++   fprintf(stderr, "[kk-present] frame %u %s %lux%lu fmt=%lu: %u samples, rgb-nonzero=%u bright=%u "
++                   "alpha0=%u first=%08x center=%08x\n",
++           frame, what, (unsigned long)w, (unsigned long)h,
++           (unsigned long)t.pixelFormat, samples, rgb_nonzero, bright, alpha0,
++           first, center);
++}
++
++void
++mtl_present_probe(mtl_command_queue *queue, void *drawable, mtl_texture *src,
++                  unsigned frame)
++{
++   @autoreleasepool {
++      id<MTL4CommandQueue> q = (id<MTL4CommandQueue>)queue;
++      id<CAMetalDrawable> d = (id<CAMetalDrawable>)drawable;
++      id<MTLTexture> dst = d.texture;
++      id<MTLTexture> s = (id<MTLTexture>)src;
++      id<MTLDevice> dev = dst.device;
++      static id<MTLCommandQueue> legacy;
++      static id<MTLSharedEvent> event;
++      static uint64_t value;
++      static CAMetalLayer *said_layer;
++
++      CAMetalLayer *layer = [d respondsToSelector:@selector(layer)] ? d.layer : nil;
++      if (layer && layer != said_layer) {
++         said_layer = layer;
++         CALayer *up = layer.superlayer;
++         bool chain_hidden = false;
++         float chain_opacity = 1.0f;
++         for (CALayer *l = up; l; l = l.superlayer) {
++            chain_hidden |= l.hidden;
++            chain_opacity *= l.opacity;
++         }
++         id rs = [layer respondsToSelector:@selector(residencySet)] ? layer.residencySet : nil;
++         fprintf(stderr, "[kk-present] layer %p: device %s, residencySet %p, pixelFormat %lu, drawableSize %.0fx%.0f, "
++                         "bounds %.0fx%.0f at (%.0f,%.0f), contentsScale %.1f, hidden=%d opacity=%.2f opaque=%d "
++                         "framebufferOnly=%d maxDrawables=%lu; superlayer %p, ancestors hidden=%d opacity=%.2f; "
++                         "drawable texture %lux%lu fmt=%lu usage=0x%lx storage=%lu\n",
++                 (void *)layer, layer.device == dev ? "same" : "DIFFERENT", (void *)rs,
++                 (unsigned long)layer.pixelFormat, layer.drawableSize.width, layer.drawableSize.height,
++                 layer.bounds.size.width, layer.bounds.size.height, layer.frame.origin.x, layer.frame.origin.y,
++                 (double)layer.contentsScale, (int)layer.hidden, (double)layer.opacity, (int)layer.opaque,
++                 (int)layer.framebufferOnly, (unsigned long)layer.maximumDrawableCount, (void *)up,
++                 (int)chain_hidden, (double)chain_opacity, (unsigned long)dst.width, (unsigned long)dst.height,
++                 (unsigned long)dst.pixelFormat, (unsigned long)dst.usage, (unsigned long)dst.storageMode);
++      }
++
++      if (!legacy) {
++         legacy = [dev newCommandQueue];
++         event = [dev newSharedEvent];
++      }
++      if (!legacy || !event) {
++         fprintf(stderr, "[kk-present] frame %u: no Metal 3 queue for the readback\n", frame);
++         fflush(stderr);
++         return;
++      }
++      uint64_t v = ++value;
++      [q signalEvent:event value:v];
++
++      id<MTLTexture> tex[2] = {s, dst};
++      const char *names[2] = {"copy source", "drawable"};
++      id<MTLBuffer> bufs[2] = {nil, nil};
++      NSUInteger bprs[2] = {0, 0};
++      unsigned bpps[2] = {0, 0};
++
++      id<MTLCommandBuffer> cb = [legacy commandBuffer];
++      [cb encodeWaitForEvent:event value:v];
++      id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
++      for (int i = 0; i < 2; i++) {
++         id<MTLTexture> t = tex[i];
++         if (!t) {
++            fprintf(stderr, "[kk-present] frame %u %s: none recorded\n", frame, names[i]);
++            continue;
++         }
++         unsigned bpp = madeira_probe_bpp(t.pixelFormat);
++         if (!bpp || t.sampleCount != 1 || t.width == 0 || t.height == 0 ||
++             (t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) ||
++             (i == 1 && layer && layer.framebufferOnly)) {
++            fprintf(stderr, "[kk-present] frame %u %s %lux%lu fmt=%lu type=%lu samples=%lu: not readable\n",
++                    frame, names[i], (unsigned long)t.width, (unsigned long)t.height,
++                    (unsigned long)t.pixelFormat, (unsigned long)t.textureType,
++                    (unsigned long)t.sampleCount);
++            continue;
++         }
++         bprs[i] = t.width * bpp;
++         bpps[i] = bpp;
++         bufs[i] = [dev newBufferWithLength:bprs[i] * t.height options:MTLResourceStorageModeShared];
++         if (!bufs[i])
++            continue;
++         [be copyFromTexture:t
++                 sourceSlice:0
++                 sourceLevel:0
++                sourceOrigin:MTLOriginMake(0, 0, 0)
++                  sourceSize:MTLSizeMake(t.width, t.height, 1)
++                    toBuffer:bufs[i]
++           destinationOffset:0
++      destinationBytesPerRow:bprs[i]
++    destinationBytesPerImage:bprs[i] * t.height];
++      }
++      [be endEncoding];
++
++      dispatch_semaphore_t done = dispatch_semaphore_create(0);
++      [cb addCompletedHandler:^(id<MTLCommandBuffer> unused) {
++         dispatch_semaphore_signal(done);
++      }];
++      [cb commit];
++      if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) {
++         fprintf(stderr, "[kk-present] frame %u: readback did not finish in 2 s (queue work or the drawable wait is stuck)\n",
++                 frame);
++      } else if (cb.status == MTLCommandBufferStatusError) {
++         fprintf(stderr, "[kk-present] frame %u: readback failed: %s\n", frame,
++                 cb.error ? cb.error.localizedDescription.UTF8String : "?");
++      } else {
++         for (int i = 0; i < 2; i++)
++            if (bufs[i])
++               madeira_probe_report(names[i], frame, tex[i], bufs[i], bprs[i], bpps[i]);
++      }
++      dispatch_release(done);
++      for (int i = 0; i < 2; i++)
++         [bufs[i] release];
++      fflush(stderr);
++   }
++}
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+@@ -76,3 +76,9 @@
+ {
+    return NULL;
+ }
++
++void
++mtl_present_probe(mtl_command_queue *queue, void *drawable, mtl_texture *src,
++                  unsigned frame)
++{
++}
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -198,6 +198,7 @@
+ 
+    memset(&cmd->state, 0, sizeof(cmd->state));
+    cmd->uses_heap = false;
++   cmd->madeira_copy_src = NULL;
+ }
+ 
+ static void
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -224,6 +224,9 @@
+    struct kk_encoder_state *post_gfx;
+ 
+    void *drawable;
++   /* Madeira: source texture of the last image copy (the present probe reads
++    * it back next to the drawable). Not retained. */
++   void *madeira_copy_src;
+    mtl_argument_table *argument_table;
+ 
+    struct {
+--- a/src/kosmickrisp/vulkan/kk_cmd_copy.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_copy.c
+@@ -302,6 +302,7 @@
+    mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
+    struct kk_image_plane *src_plane = &src->planes[src_index];
+    struct kk_image_plane *dst_plane = &dst->planes[dst_index];
++   cmd->madeira_copy_src = src_plane->mtl_handle;
+ 
+    /* From the Vulkan 1.3.217 spec:
+     *
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -131,6 +131,14 @@
+       }
+ 
+       if (cmd_buffer->drawable) {
++         /* Madeira: [kk-present] pixel statistics for a few presents.
++          * MADEIRA_KK_PRESENT_PROBE=0 turns them off. */
++         uint32_t n = ++queue->present_count;
++         if (queue->present_probe &&
++             (n <= 3 || n == 10 || n == 30 || n == 120 || n == 600 ||
++              n == 3000))
++            mtl_present_probe(queue->mtl_handle, cmd_buffer->drawable,
++                              cmd_buffer->madeira_copy_src, n);
+          mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                            cmd_buffer->drawable);
+          mtl_drawable_present(cmd_buffer->drawable);
+@@ -197,6 +205,9 @@
+    if (queue->feedback_once)
+       mtl_commit_options_add_feedback_handler(queue->commit_options,
+                                               commit_callback, dev);
++   queue->present_probe =
++      debug_get_bool_option("MADEIRA_KK_PRESENT_PROBE", true);
++   queue->present_count = 0;
+    queue->layer_set_count = 0;
+    queue->drawable_sync =
+       debug_get_bool_option("MADEIRA_KK_DRAWABLE_SYNC", true);
+--- a/src/kosmickrisp/vulkan/kk_queue.h
++++ b/src/kosmickrisp/vulkan/kk_queue.h
+@@ -24,6 +24,8 @@
+    uint32_t layer_set_count;
+    bool drawable_sync;
+    bool feedback_once;
++   bool present_probe;
++   uint32_t present_count;
+ };
+ 
+ static inline struct kk_device *
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -18,6 +18,7 @@
+ #include "vulkan/vulkan_core.h"
+ 
+ #include <assert.h>
++#include <stdio.h>
+ 
+ struct wsi_metal {
+    struct wsi_interface base;
+@@ -510,6 +511,16 @@
+          return VK_SUCCESS;
+       }
+ 
++      /* Madeira: nextDrawable gave up (about 1 s): every drawable of the
++       * layer is still in use. */
++      static unsigned no_drawable;
++      unsigned n = ++no_drawable;
++      if (n <= 8 || (n % 64) == 0) {
++         fprintf(stderr, "[kk-wsi] layer %p: nextDrawable returned no drawable (#%u)\n",
++                 (void *)chain->surface->pLayer, n);
++         fflush(stderr);
++      }
++
+       /* Check for timeout. */
+       struct timespec current_time;
+       clock_gettime(CLOCK_MONOTONIC, &current_time);

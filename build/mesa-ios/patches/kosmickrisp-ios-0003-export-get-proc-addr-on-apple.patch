@@ -1,0 +1,40 @@
+--- a/src/kosmickrisp/vulkan/kk_instance.c
++++ b/src/kosmickrisp/vulkan/kk_instance.c
+@@ -12,6 +12,7 @@
+ #include "kk_physical_device.h"
+ 
+ #include "kk_dispatch_trampolines.h"
++#include "vk_device.h"
+ 
+ #include "vulkan/wsi/wsi_common.h"
+ 
+@@ -242,3 +243,29 @@
+ {
+    return kk_GetInstanceProcAddr(instance, pName);
+ }
++
++#ifdef __APPLE__
++/* Apple platforms have no system Vulkan loader, and an iOS app usually
++ * bundles its driver and loads it directly. Export the two core lookup
++ * functions so an application can dlopen this library and use it as its
++ * libvulkan, the way MoltenVK is used. A Vulkan loader still finds the driver
++ * through the vk_icd* entry points above; with two-level namespaces these
++ * extra exports do not clash with the loader's own. */
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetDeviceProcAddr(VkDevice device, const char *pName);
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName)
++{
++   return kk_GetInstanceProcAddr(instance, pName);
++}
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetDeviceProcAddr(VkDevice _device, const char *pName)
++{
++   VK_FROM_HANDLE(vk_device, device, _device);
++   return vk_device_get_proc_addr(device, pName);
++}
++#endif

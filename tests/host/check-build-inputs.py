@@ -17,8 +17,8 @@ assert workflow.count('key: ${{ steps.key.outputs.key }}\n    steps:') == 2
 assert workflow.count('key: plan19-${{ steps.sdk.outputs.key }}-${{ steps.key.outputs.key }}') == 2
 assert workflow.count('key: plan19-${{ steps.sdk.outputs.key }}-${{ needs.') == 2
 script = (root / 'tools/build/ci-input-key.sh').read_text()
-assert workflow.count('run: bash tools/build/ci-input-key.sh') == 5
-assert workflow.count('MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}') == 4
+assert workflow.count('run: bash tools/build/ci-input-key.sh') == 7
+assert workflow.count('MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}') == 6
 assert "'.github/workflows/build.yml')" not in workflow, 'workflow-only edits must not rebuild LLVM/FEX'
 assert 'toolchains/llvm-ios-build/.madeira-cache.sha256' in workflow
 assert 'toolchains/gnutls-ios' in workflow and 'build/gnutls-ios/obj/*.done' in workflow
@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-build-inputs-') as folder:
                SDK_INPUT=str(sdk), CLANG_INPUT=str(clang), RUST_INPUT=str(rust), GITHUB_OUTPUT=str(output),
                REPO_INPUT=str(root), GIT_INPUT=shutil.which('git'))
     native_flags = ('CC', 'CXX', 'AR', 'RANLIB', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS',
-                    'SDKROOT', 'MACOSX_DEPLOYMENT_TARGET', 'IPHONEOS_DEPLOYMENT_TARGET', 'ImageOS', 'ImageVersion')
+                    'SDKROOT', 'MACOSX_DEPLOYMENT_TARGET', 'IPHONEOS_DEPLOYMENT_TARGET', 'ImageOS')
     rust_flags = ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTUP_TOOLCHAIN')
     graphics_flags = ('DXMT_METAL_STD', 'MADEIRA_ONLY', 'MADEIRA_MSC_ROOT')
     app_flags = ('CONFIGURATION', 'MADEIRA_MOLTENVK')
@@ -57,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-build-inputs-') as folder:
     first = fingerprint()
     assert first == fingerprint()
     assert first == fingerprint({'JOBS': '3'})
+    assert first == fingerprint({'ImageVersion': 'different fleet image'}), 'runner rollout metadata is not an SDK change'
     sdk.write_text('27.2\n')
     assert first != fingerprint()
     sdk.write_text('27.1\n')
@@ -129,7 +130,8 @@ with tempfile.TemporaryDirectory(prefix='madeira-build-inputs-') as folder:
                               capture_output=True).returncode == 0
     with zipfile.ZipFile(ipa, 'w') as archive:
         archive.writestr('Payload/Madeira.app/Madeira', b'fixture')
-    assert valid_ipa()
+    assert not valid_ipa(), 'an executable alone is not a complete IPA'
+    assert 'runtime-components.py ipa dist/Madeira.ipa' in validation
     with zipfile.ZipFile(ipa, 'w') as archive:
         archive.writestr('wrong-layout/Madeira', b'fixture')
     assert not valid_ipa(), 'a ZIP with the wrong bundle layout must not be reused'

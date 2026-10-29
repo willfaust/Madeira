@@ -1,0 +1,160 @@
+--- a/src/gallium/drivers/zink/zink_compiler.c
++++ b/src/gallium/drivers/zink/zink_compiler.c
+@@ -2938,7 +2938,14 @@
+    }
+    nir_shader_gather_info(producer, nir_shader_get_entrypoint(producer));
+    if (producer->info.io_lowered && consumer->info.io_lowered) {
+-      u_foreach_bit64(slot, producer->info.outputs_written & BITFIELD64_RANGE(VARYING_SLOT_VAR0, 31)) {
++      /* Madeira: the legacy fixed-function slots too. MoltenVK (Metal) rejects a
++       * pipeline whose fragment shader reads a component the vertex shader never
++       * writes ("Fragment input(s) user(locn0_3) mismatching ... or not written"),
++       * which Vulkan allows; zero those reads here as for the generic slots. */
++      const uint64_t legacy = BITFIELD64_BIT(VARYING_SLOT_COL0) | BITFIELD64_BIT(VARYING_SLOT_COL1) |
++                              BITFIELD64_BIT(VARYING_SLOT_FOGC) | BITFIELD64_RANGE(VARYING_SLOT_TEX0, 8) |
++                              BITFIELD64_BIT(VARYING_SLOT_BFC0) | BITFIELD64_BIT(VARYING_SLOT_BFC1);
++      u_foreach_bit64(slot, producer->info.outputs_written & (BITFIELD64_RANGE(VARYING_SLOT_VAR0, 31) | legacy)) {
+          struct write_components wc = {slot, 0};
+          nir_shader_intrinsics_pass(producer, find_max_write_components, nir_metadata_all, &wc);
+          assert(wc.component_mask);
+@@ -5449,6 +5456,90 @@
+          remaining = ris.ignored_component_mask;
+       } while (remaining);
+    }
++}
++
++/* Madeira: Metal links a fragment input to a vertex output by location AND
++ * component, and a fragment shader that reads TEX0.xy and TEX0.w (projective
++ * texturing) gets two inputs, "locn0" vec2 and "locn0_3" float, which a vec4
++ * vertex output matches neither of: MoltenVK fails the pipeline ("Fragment
++ * input(s) user(locn0_3) mismatching vertex shader output"). Widen every read
++ * of such a slot to start at component 0 so rework_io_vars makes one variable
++ * covering components [0, highest read]. Slots already read only from
++ * component 0 are left alone. */
++struct fs_input_widen {
++   uint8_t end[VARYING_SLOT_MAX];     /* highest component read + 1 */
++   uint64_t offset_reads;             /* slots with a read at component != 0 */
++};
++
++static bool
++fs_input_widen_slot(gl_varying_slot slot)
++{
++   return slot == VARYING_SLOT_COL0 || slot == VARYING_SLOT_COL1 ||
++          slot == VARYING_SLOT_BFC0 || slot == VARYING_SLOT_BFC1 ||
++          (slot >= VARYING_SLOT_TEX0 && slot <= VARYING_SLOT_TEX7) ||
++          (slot >= VARYING_SLOT_VAR0 && slot < VARYING_SLOT_VAR0 + 32);
++}
++
++static nir_io_semantics *
++fs_input_widen_filter(nir_intrinsic_instr *intr, nir_io_semantics *sem)
++{
++   if (intr->intrinsic != nir_intrinsic_load_input &&
++       intr->intrinsic != nir_intrinsic_load_interpolated_input)
++      return NULL;
++   if (intr->def.bit_size != 32 || !nir_src_is_const(*nir_get_io_offset_src(intr)))
++      return NULL;
++   *sem = nir_intrinsic_io_semantics(intr);
++   if (sem->num_slots != 1 || nir_src_as_uint(*nir_get_io_offset_src(intr)) ||
++       !fs_input_widen_slot(sem->location))
++      return NULL;
++   return sem;
++}
++
++static bool
++fs_input_widen_scan(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   struct fs_input_widen *w = data;
++   nir_io_semantics sem;
++   if (!fs_input_widen_filter(intr, &sem))
++      return false;
++   unsigned c = nir_intrinsic_component(intr);
++   w->end[sem.location] = MAX2(w->end[sem.location], c + intr->num_components);
++   if (c)
++      w->offset_reads |= BITFIELD64_BIT(sem.location);
++   return false;
++}
++
++static bool
++fs_input_widen_rewrite(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   struct fs_input_widen *w = data;
++   nir_io_semantics sem;
++   if (!fs_input_widen_filter(intr, &sem) || !(w->offset_reads & BITFIELD64_BIT(sem.location)))
++      return false;
++   unsigned c = nir_intrinsic_component(intr);
++   unsigned n = intr->num_components;
++   unsigned end = w->end[sem.location];
++   if (!c && n == end)
++      return false;
++   intr->num_components = end;
++   intr->def.num_components = end;
++   nir_intrinsic_set_component(intr, 0);
++   b->cursor = nir_after_instr(&intr->instr);
++   nir_def *part = nir_channels(b, &intr->def, BITFIELD_RANGE(c, n));
++   nir_def_rewrite_uses_after(&intr->def, part, part->parent_instr);
++   return true;
++}
++
++static bool
++widen_fs_inputs(nir_shader *nir)
++{
++   struct fs_input_widen w = {0};
++   if (nir->info.stage != MESA_SHADER_FRAGMENT)
++      return false;
++   nir_shader_intrinsics_pass(nir, fs_input_widen_scan, nir_metadata_all, &w);
++   if (!w.offset_reads)
++      return false;
++   return nir_shader_intrinsics_pass(nir, fs_input_widen_rewrite, nir_metadata_control_flow, &w);
+ }
+ 
+ /* for a given mode, generate variables */
+@@ -6207,6 +6298,7 @@
+    NIR_PASS_V(nir, nir_opt_vectorize, NULL, NULL);
+    NIR_PASS_V(nir, trivial_revectorize);
+    if (nir->info.io_lowered) {
++      NIR_PASS_V(nir, widen_fs_inputs);
+       rework_io_vars(nir, nir_var_shader_in, zs);
+       rework_io_vars(nir, nir_var_shader_out, zs);
+       nir_sort_variables_by_location(nir, nir_var_shader_in);
+--- a/src/gallium/drivers/zink/zink_draw.cpp
++++ b/src/gallium/drivers/zink/zink_draw.cpp
+@@ -259,7 +259,7 @@
+ 
+ template <zink_dynamic_state DYNAMIC_STATE, bool BATCH_CHANGED>
+ static bool
+-update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode)
++update_gfx_pipeline(struct zink_context *ctx, struct zink_batch_state *bs, enum mesa_prim mode, bool *no_pipeline)
+ {
+    VkPipeline prev_pipeline = ctx->gfx_pipeline_state.pipeline;
+    const struct zink_screen *screen = zink_screen(ctx->base.screen);
+@@ -275,6 +275,19 @@
+          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, true>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
+       else
+          pipeline = zink_get_gfx_pipeline<DYNAMIC_STATE, false>(ctx, ctx->curr_program, &ctx->gfx_pipeline_state, mode);
++   }
++   *no_pipeline = false;
++   if (!pipeline && !screen->info.have_EXT_shader_object) {
++      /* Madeira: the pipeline failed to compile (MoltenVK rejects some shader
++       * interfaces) and there are no shader objects to fall back to --
++       * vkCmdBindShadersEXT is NULL. Drop the draw instead of calling it. */
++      static bool warned;
++      if (!warned) {
++         warned = true;
++         mesa_loge("ZINK: no pipeline for a draw and no VK_EXT_shader_object; skipping such draws");
++      }
++      *no_pipeline = true;
++      return false;
+    }
+    if (pipeline) {
+       pipeline_changed = prev_pipeline != pipeline;
+@@ -525,7 +538,10 @@
+    if (have_streamout && ctx->dirty_so_targets)
+       zink_emit_stream_output_targets(pctx);
+ 
+-   bool pipeline_changed = update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode);
++   bool no_pipeline;
++   bool pipeline_changed = update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode, &no_pipeline);
++   if (unlikely(no_pipeline))
++      return;
+ 
+    if (BATCH_CHANGED || ctx->vp_state_changed || (DYNAMIC_STATE == ZINK_NO_DYNAMIC_STATE && pipeline_changed)) {
+       VkViewport viewports[PIPE_MAX_VIEWPORTS];

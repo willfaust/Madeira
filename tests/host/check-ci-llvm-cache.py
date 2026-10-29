@@ -111,15 +111,21 @@ with tempfile.TemporaryDirectory(prefix='madeira-ci-llvm-') as tmp:
     objdump.write_text('#!/bin/sh\nprintf "  DLL Name: %s\\n" "$TEST_IMPORT"\n')
     objdump.chmod(0o755)
     closure = (root / 'build/wine-i386/build.sh').read_text().split('missing=0\n', 1)[1]
-    closure_env = dict(env, DEST=str(installed), OBJDUMP=str(objdump))
+    closure_env = dict(env, DEST=str(installed), OBJDUMP=str(objdump), SKIP_DXMT='')
     for imported, expected in [('A-TARGET.DLL', 0), ('absent.dll', 2)]:
         result = subprocess.run(['bash'], input='set -euo pipefail\nmissing=0\n' + closure,
                                 env=dict(closure_env, TEST_IMPORT=imported),
                                 capture_output=True, text=True)
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == (1 if expected else 0), (result.stdout, result.stderr)
         assert f', {expected} missing imports ==' in result.stdout, result.stdout
         assert not result.stderr, result.stderr
+    for arguments, mode in [('set -- a-target\n', ''), ('', '1')]:
+        result = subprocess.run(['bash'], input='set -euo pipefail\n' + arguments + 'missing=0\n' + closure,
+                                env=dict(closure_env, TEST_IMPORT='absent.dll', SKIP_DXMT=mode),
+                                capture_output=True, text=True)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert ', 2 missing imports ==' in result.stdout, result.stdout
 print('PASS: complete LLVM cache skips clone/build; damaged or missing archives are refused')
 print('PASS: complete FEX/DXMT CI caches skip rebuilds; missing outputs and local builds do not')
 print('PASS: GnuTLS output and stage-marker caches skip completed stages together')
-print('PASS: large DLL sets resolve present imports and report absent imports without broken pipes')
+print('PASS: large DLL sets reject absent imports; partial builds still report them without broken pipes')

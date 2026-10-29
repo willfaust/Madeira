@@ -1,0 +1,78 @@
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -76,6 +76,10 @@
+    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
+ 
+    mtl_release(cmd->argument_table);
++   /* Madeira: a drawable that was never presented. */
++   if (cmd->drawable)
++      mtl_release(cmd->drawable);
++   cmd->drawable = NULL;
+    kk_destroy_encoder_state(&cmd->cmp[0]);
+    kk_destroy_encoder_state(&cmd->cmp[1]);
+    kk_destroy_encoder_state(&cmd->gfx);
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -120,8 +120,12 @@
+ 
+       /* Metal complains with empty submissions. */
+       if (count > 0u) {
+-         mtl_commit_options_add_feedback_handler(queue->commit_options,
+-                                                 commit_callback, dev);
++         /* Madeira: the feedback handler is added once, in kk_queue_init.
++          * Adding it here appended one more handler to the same options on
++          * every submit, and every later commit ran all of them. */
++         if (!queue->feedback_once)
++            mtl_commit_options_add_feedback_handler(queue->commit_options,
++                                                    commit_callback, dev);
+          mtl_command_queue_commit(queue->mtl_handle, cmds, count,
+                                   queue->commit_options);
+       }
+@@ -130,6 +134,11 @@
+          mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                            cmd_buffer->drawable);
+          mtl_drawable_present(cmd_buffer->drawable);
++         /* Madeira: drop the reference kk_encode_drawable_present took. A
++          * CAMetalLayer reuses a drawable only after every reference to it
++          * is gone; with this one leaked, the layer ran out of drawables
++          * after a few frames and nextDrawable blocked. */
++         mtl_release(cmd_buffer->drawable);
+          cmd_buffer->drawable = NULL;
+       }
+    }
+@@ -182,6 +191,12 @@
+    mtl_command_queue_add_residency_set(queue->mtl_handle,
+                                        dev->residency_set.handle);
+    queue->commit_options = mtl_new_commit_options();
++   /* MADEIRA_KK_FEEDBACK_ONCE=0: add the handler on every submit again. */
++   queue->feedback_once =
++      debug_get_bool_option("MADEIRA_KK_FEEDBACK_ONCE", true);
++   if (queue->feedback_once)
++      mtl_commit_options_add_feedback_handler(queue->commit_options,
++                                              commit_callback, dev);
+    queue->layer_set_count = 0;
+    queue->drawable_sync =
+       debug_get_bool_option("MADEIRA_KK_DRAWABLE_SYNC", true);
+--- a/src/kosmickrisp/vulkan/kk_queue.h
++++ b/src/kosmickrisp/vulkan/kk_queue.h
+@@ -23,6 +23,7 @@
+    mtl_residency_set *layer_sets[8];
+    uint32_t layer_set_count;
+    bool drawable_sync;
++   bool feedback_once;
+ };
+ 
+ static inline struct kk_device *
+--- a/src/kosmickrisp/vulkan/kk_wsi.c
++++ b/src/kosmickrisp/vulkan/kk_wsi.c
+@@ -72,6 +72,10 @@
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, vk_cmd);
+    mtl_retain(drawable);
++   /* Madeira: a command buffer re-recorded before it was submitted still
++    * holds the previous drawable. */
++   if (cmd->drawable)
++      mtl_release(cmd->drawable);
+    cmd->drawable = drawable;
+ }
+ 

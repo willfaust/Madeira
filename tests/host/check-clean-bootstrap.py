@@ -85,6 +85,7 @@ ar() { touch "$2"; }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('#!/bin/bash\nexit 0\n')
         path.chmod(0o755)
+    (pipeline / 'tools/build/runtime-components.py').write_text('import sys\nassert sys.argv[1:] == ["build", "all"]\n')
     pairing = pipeline / 'build/rppairing-ios'
     (pairing / 'build.sh').write_text((root / 'build/rppairing-ios/build.sh').read_text())
     (pairing / 'notices.py').write_text('from pathlib import Path\nimport sys\nPath(sys.argv[1]).write_text("notices")\n')

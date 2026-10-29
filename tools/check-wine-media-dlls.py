@@ -10,8 +10,8 @@ import sys
 
 
 class PE:
-    def __init__(self, path):
-        self.data = Path(path).read_bytes()
+    def __init__(self, path, *, machines=(0x8664, 0xa641, 0xa64e), require_dll=True):
+        self.data = path if isinstance(path, bytes) else Path(path).read_bytes()
         if self.data[:2] != b'MZ':
             raise ValueError('missing DOS header')
         pe = self.unpack('<I', 0x3c)[0]
@@ -20,7 +20,7 @@ class PE:
         machine, sections = self.unpack('<HH', pe + 4)
         optional_size, flags = self.unpack('<HH', pe + 20)
         optional = pe + 24
-        if machine not in (0x8664, 0xa641, 0xa64e) or not flags & 0x2000:
+        if machine not in machines or (require_dll and not flags & 0x2000):
             raise ValueError('expected a 64-bit x64/ARM64EC/ARM64X DLL')
         if optional_size < 224 or self.unpack('<H', optional)[0] != 0x20b:
             raise ValueError('missing PE32+ optional header')

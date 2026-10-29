@@ -1,0 +1,42 @@
+vkd3d-proton: transform feedback and single-texel alignment are not required
+
+From NutsEmu 0.0.1 build 1382, patches/vkd3d-proton/0001-transform-feedback-and-texel-
+alignment-optional.patch (NutsEmu, Evan Bolton; first added 2026-10-05; LGPL-2.1-or-later
+like vkd3d-proton). Madeira copy: code unchanged, one comment reworded (2026-10-12).
+
+Vulkan on Metal has neither transform feedback nor single-texel alignment for texel buffer
+views. Without transform feedback only stream output is unavailable (its pipelines fail to
+create, as command.c and state.c already handle); a typed buffer view at an offset that is
+not 16-byte aligned reads from the wrong place. Both were hard failures at device creation.
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index bfabbe0f..9e2eb476 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -2501,8 +2501,11 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+ 
+     if (!physical_device_info->xfb_properties.transformFeedbackQueries)
+     {
+-        ERR("Lacking support for transform feedback.\n");
+-        return E_INVALIDARG;
++        /* NutsEmu: Vulkan on Metal (KosmicKrisp, MoltenVK) has no transform feedback.
++         * Only stream output needs it (its pipelines then fail to create, command.c and
++         * state.c check the extension). */
++        WARN("Lacking support for transform feedback; stream output is unavailable.\n");
++        vulkan_info->EXT_transform_feedback = false;
+     }
+ 
+     single_storage_texel =
+@@ -2516,8 +2519,10 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
+ 
+     if (!single_storage_texel || !single_uniform_texel)
+     {
+-        ERR("Lacking support for single texel alignment.\n");
+-        return E_INVALIDARG;
++        /* NutsEmu: KosmicKrisp places a texel buffer view's Metal texture at a 16-byte aligned
++         * offset; views at other offsets aren't right yet (to do in KosmicKrisp: an element
++         * offset applied in the shader). Most views start at aligned offsets. */
++        WARN("Lacking support for single texel alignment; unaligned typed buffer views are wrong.\n");
+     }
+ 
+     /* Disable unused Vulkan features. The following features need to remain enabled

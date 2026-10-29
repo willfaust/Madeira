@@ -1,0 +1,67 @@
+vkd3d-proton: KosmicKrisp is not held below shader model 6.5 by denormal control or compute derivatives
+
+From NutsEmu 0.0.1 build 1382, patches/vkd3d-proton/0003-kosmickrisp-shader-model-gates.patch
+(NutsEmu, Evan Bolton; first added 2026-10-06; LGPL-2.1-or-later like vkd3d-proton).
+Madeira copy: code unchanged, comments reworded to leave out application names (2026-10-12).
+
+KosmicKrisp (Mesa's Vulkan on Metal) has no per-shader float32 denormal control, so the
+shader model stopped at 6.0; like NVIDIA's driver, which vkd3d-proton already lets through,
+it now goes on to 6.5. For 6.6 it gets the same fallback NVIDIA gets for compute shader
+derivatives; 6.6 still needs 64-bit buffer atomics. Feature level 12_0 without tiled
+resources on KosmicKrisp (no sparse residency), and an INFO line with the inputs of
+feature level 12_0 and the shader model. Every change is gated on
+VK_DRIVER_ID_MESA_KOSMICKRISP except the INFO line; MoltenVK is not affected.
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index ea415bf7..9f695d09 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -9665,11 +9665,24 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_11_1;
+ 
+     if (caps->max_feature_level >= D3D_FEATURE_LEVEL_11_1 &&
+-            caps->options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2 &&
++            (caps->options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2 ||
++                    /* NutsEmu: KosmicKrisp (Metal) has no sparse residency, so no tiled
++                     * resources, and stopped at 11_1; engines that need 12_0 do not use
++                     * tiled resources unless the tier says so. */
++                    device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_KOSMICKRISP) &&
+             caps->options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2 &&
+             caps->options.TypedUAVLoadAdditionalFormats)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_12_0;
+ 
++    /* NutsEmu: what feature level 12_0 and shader model 6 checks look at, in the log */
++    INFO("Feature level %#x: tiled tier %u, binding tier %u, typed UAV loads %u, logic op %u, "
++            "shader model %#x, wave ops %u, 64-bit atomics on typed resources %u, on heap resources %u.\n",
++            caps->max_feature_level, caps->options.TiledResourcesTier, caps->options.ResourceBindingTier,
++            caps->options.TypedUAVLoadAdditionalFormats, caps->options.OutputMergerLogicOp,
++            caps->max_shader_model, caps->options1.WaveOps,
++            caps->options9.AtomicInt64OnTypedResourceSupported,
++            caps->options11.AtomicInt64OnDescriptorHeapResourceSupported);
++
+     if (caps->max_feature_level >= D3D_FEATURE_LEVEL_12_0 && caps->options.ROVsSupported &&
+             caps->options.ConservativeRasterizationTier >= D3D12_CONSERVATIVE_RASTERIZATION_TIER_1)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_12_1;
+@@ -9807,6 +9820,11 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
+                         device->device_info.vulkan_1_2_properties.shaderDenormPreserveFloat32;
+             }
+         }
++        /* NutsEmu: KosmicKrisp (Metal) has no per-shader float32 denormal control, which held
++         * the shader model at 6.0; as on NVIDIA, applications hardly depend on it, so it
++         * doesn't hold SM 6.2+ back. */
++        if (device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_KOSMICKRISP)
++            denorm_behavior = true;
+ 
+         if (denorm_behavior)
+         {
+@@ -9863,7 +9881,9 @@ static void d3d12_device_caps_init_shader_model(struct d3d12_device *device)
+          */
+         if (device->d3d12_caps.max_shader_model == D3D_SHADER_MODEL_6_5 &&
+                 (device->device_info.compute_shader_derivatives_features_khr.computeDerivativeGroupLinear ||
+-                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY) &&
++                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
++                        /* NutsEmu: the same fallback for compute derivatives on KosmicKrisp */
++                        device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_KOSMICKRISP) &&
+                 device->device_info.vulkan_1_2_features.shaderBufferInt64Atomics &&
+                 device->device_info.vulkan_1_2_features.shaderInt8 &&
+                 d3d12_device_supports_required_subgroup_size_for_stage(device, VK_SHADER_STAGE_COMPUTE_BIT))

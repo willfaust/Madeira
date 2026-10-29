@@ -9,7 +9,7 @@ private func _SecTaskCopyValueForEntitlement(
     _ task: SecTaskRef,
     _ entitlement: NSString,
     _ error: NSErrorPointer
-) -> CFTypeRef?
+) -> Unmanaged<CFTypeRef>?
 
 @_silgen_name("SecTaskCreateFromSelf")
 private func _SecTaskCreateFromSelf(
@@ -18,8 +18,10 @@ private func _SecTaskCreateFromSelf(
 
 func checkAppEntitlement(_ ent: String) -> Bool {
     guard let task = _SecTaskCreateFromSelf(nil) else { return false }
+    // The manually declared Create/Copy APIs return caller-owned CF objects.
+    defer { Unmanaged<CFTypeRef>.fromOpaque(UnsafeRawPointer(task)).release() }
 
-    guard let value = _SecTaskCopyValueForEntitlement(task, ent as NSString, nil) else {
+    guard let value = _SecTaskCopyValueForEntitlement(task, ent as NSString, nil)?.takeRetainedValue() else {
         return false
     }
 

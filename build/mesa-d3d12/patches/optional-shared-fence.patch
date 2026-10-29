@@ -1,0 +1,71 @@
+--- a/src/gallium/drivers/d3d12/d3d12_screen.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_screen.cpp
+@@ -383,8 +383,8 @@
+    caps->device_reset_status_query = true;
+    caps->robust_buffer_access_behavior = true;
+    caps->memobj = true;
+-   caps->fence_signal = true;
+-   caps->timeline_semaphore_import = true;
++   caps->fence_signal = screen->shared_fences_supported;
++   caps->timeline_semaphore_import = screen->shared_fences_supported;
+    caps->clip_halfz = true;
+    caps->vs_layer_viewport = true;
+    caps->copy_between_compressed_and_plain_formats = true;
+@@ -1582,6 +1582,29 @@
+          return false;
+    }
+    return true;
++}
++
++/* Rendering itself only needs a local timeline. Translation backends may
++ * implement ordinary fences without the cross-process sharing interfaces.
++ * Preserve real allocation/device failures; only lack of sharing permits a
++ * fallback. The caller disables external semaphore/handle support below.
++ */
++static bool
++d3d12_init_screen_fence(struct d3d12_screen *screen)
++{
++   screen->shared_fences_supported = false;
++   HRESULT hr = screen->dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
++                                       IID_PPV_ARGS(&screen->fence));
++   if (SUCCEEDED(hr)) {
++      screen->shared_fences_supported = true;
++      return true;
++   }
++   if (hr != E_NOTIMPL && hr != DXGI_ERROR_UNSUPPORTED)
++      return false;
++
++   debug_printf("D3D12: shared fences unsupported; using a local rendering fence\n");
++   return SUCCEEDED(screen->dev->CreateFence(0, D3D12_FENCE_FLAG_NONE,
++                                            IID_PPV_ARGS(&screen->fence)));
+ }
+ 
+ bool
+@@ -1747,9 +1770,16 @@
+       }
+    }
+ 
+-   if (FAILED(screen->dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&screen->fence))))
++   if (!d3d12_init_screen_fence(screen))
+       return false;
+ 
++   if (!screen->shared_fences_supported) {
++      screen->base.create_fence_win32 = nullptr;
++#ifdef _WIN32
++      screen->base.fence_get_win32_handle = nullptr;
++#endif
++   }
++
+    screen->dev->QueryInterface(&screen->dev15);
+ 
+    // Uses screen->dev15 so QI must be before this
+--- a/src/gallium/drivers/d3d12/d3d12_screen.h
++++ b/src/gallium/drivers/d3d12/d3d12_screen.h
+@@ -85,6 +85,7 @@
+ 
+    mtx_t submit_mutex;
+    ID3D12Fence *fence;
++   bool shared_fences_supported;
+    uint64_t fence_value;
+ 
+    mtx_t pending_free_lock;
