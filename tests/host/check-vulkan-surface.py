@@ -29,9 +29,9 @@ void *madeira_vulkan_layer_acquire(void *hwnd) {
     retain_count++;return layer;
 }
 void madeira_vulkan_layer_release(void *p) { assert(p==layer);released++; }
-void *client_surface_create(UINT size,const struct client_surface_funcs *funcs,HWND hwnd) {
+void *client_surface_create(const struct client_surface_funcs *funcs,HWND hwnd,int format,BOOL raw) {
     if(allocation_fails)return NULL;
-    struct client_surface *s=calloc(1,size);s->funcs=funcs;s->hwnd=hwnd;return s;
+    struct client_surface *s=calloc(1,funcs->size);s->funcs=funcs;s->hwnd=hwnd;return s;
 }
 void client_surface_release(struct client_surface *s) { s->funcs->destroy(s);free(s); }
 static VkResult VKAPI_CALL metal(VkInstance i,const VkMetalSurfaceCreateInfoEXT *c,const VkAllocationCallbacks *a,VkSurfaceKHR *out) {
@@ -62,16 +62,17 @@ int main(void) {
  struct vulkan_instance instance={0};instance.host.instance=(VkInstance)0x11;
  instance.p_vkCreateMetalSurfaceEXT=metal;instance.p_vkDestroySurfaceKHR=destroy;
  instance.p_vkGetPhysicalDeviceSurfaceSupportKHR=support;
- struct client_surface *client=(void *)1;VkSurfaceKHR s=(VkSurfaceKHR)1;
- missing_layer=1;assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_ERROR_SURFACE_LOST_KHR && !client && !s);
- client=(void *)1;s=(VkSurfaceKHR)1;
- missing_layer=0;allocation_fails=1;assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_ERROR_OUT_OF_HOST_MEMORY && !client && !s);
- allocation_fails=0;surface_result=VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
- client=(void *)1;s=(VkSurfaceKHR)1;
- assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_ERROR_NATIVE_WINDOW_IN_USE_KHR && !client && !s);
+ allocation_fails=1;assert(!winios_vulkan_client_surface_create((HWND)0x42,0,FALSE));
+ allocation_fails=0;
+ struct client_surface *client=winios_vulkan_client_surface_create((HWND)0x42,0,FALSE);
+ assert(client);VkSurfaceKHR s=(VkSurfaceKHR)1;
+ missing_layer=1;assert(f->p_vulkan_surface_create(client,&instance,&s)==VK_ERROR_SURFACE_LOST_KHR && !s);
+ assert(!retain_count && !released);
+ missing_layer=0;surface_result=VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;s=(VkSurfaceKHR)1;
+ assert(f->p_vulkan_surface_create(client,&instance,&s)==VK_ERROR_NATIVE_WINDOW_IN_USE_KHR && !s);
  assert(retain_count==released);
  surface_result=VK_SUCCESS;
- assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_SUCCESS && s==(VkSurfaceKHR)0x99 && client);
+ assert(f->p_vulkan_surface_create(client,&instance,&s)==VK_SUCCESS && s==(VkSurfaceKHR)0x99);
  assert(retain_count==released+1);client->funcs->detach(client);client->funcs->detach(client);
  client->funcs->update(client);client->funcs->present(client,NULL);
  assert(retain_count==released+1);
@@ -81,13 +82,15 @@ int main(void) {
  host_support=VK_TRUE;assert(f->p_get_physical_device_presentation_support(&physical,3));
  support_result=VK_ERROR_SURFACE_LOST_KHR;assert(!f->p_get_physical_device_presentation_support(&physical,3));
  assert(destroyed==3 && retain_count==released);
- instance.p_vkCreateMetalSurfaceEXT=NULL;client=(void *)1;s=(VkSurfaceKHR)1;
- assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_ERROR_EXTENSION_NOT_PRESENT && !client && !s);
+ client=winios_vulkan_client_surface_create((HWND)0x42,0,FALSE);
+ instance.p_vkCreateMetalSurfaceEXT=NULL;s=(VkSurfaceKHR)1;
+ assert(f->p_vulkan_surface_create(client,&instance,&s)==VK_ERROR_EXTENSION_NOT_PRESENT && !s);
  instance.p_vkCreateMetalSurfaceEXT=metal;instance.host.instance=VK_NULL_HANDLE;
- client=(void *)1;s=(VkSurfaceKHR)1;
- assert(f->p_vulkan_surface_create((HWND)0x42,&instance,&s,&client)==VK_ERROR_EXTENSION_NOT_PRESENT && !client && !s);
+ s=(VkSurfaceKHR)1;
+ assert(f->p_vulkan_surface_create(client,&instance,&s)==VK_ERROR_EXTENSION_NOT_PRESENT && !s);
  instance.p_vkCreateMetalSurfaceEXT=NULL;
  assert(!f->p_get_physical_device_presentation_support(&physical,3));
+ client_surface_release(client);assert(retain_count==released);
  puts("PASS: real surface adapter maps Metal extensions, propagates failures, balances retains and queries native presentation support (not GPU proof)");
 }
 '''

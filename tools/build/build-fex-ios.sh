@@ -6,6 +6,24 @@ SRC="$ROOT/FEX"
 BUILD="$SRC/build-ios"
 OUT="$BUILD/FEXCore/Source/libFEXCore.a"
 
+required=(
+  "$OUT"
+  "$BUILD/FEXCore/Source/libFEXCore_Base.a"
+  "$BUILD/FEXCore/Source/libJemallocLibs.a"
+  "$BUILD/External/fmt/libfmt.a"
+  "$BUILD/External/cephes/libcephes_128bit.a"
+  "$BUILD/External/SoftFloat-3e/libsoftfloat_3e.a"
+  "$BUILD/External/xxhash/cmake_unofficial/libxxhash.a"
+)
+# The workflow validates the SDK, source pin and build recipe before restoring.
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  complete=true
+  for lib in "${required[@]}"; do [[ -s "$lib" ]] || complete=false; done
+  if "$complete"; then
+    echo "Using the input-matched FEX iOS cache"
+    exit 0
+  fi
+fi
 
 # Options mirror build/fex-ios/build.sh. Do not define FEX_IOS_HOST here: in
 # this FEX fork it selects the code for FEX running as a Windows PE under Wine
@@ -33,6 +51,6 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
 
 # The Xcode project links these archives from FEX/build-ios.
 cmake --build "$BUILD" --target FEXCore FEXCore_Base JemallocLibs fmt cephes_128bit softfloat_3e xxhash --parallel "$JOBS"
-for lib in "$OUT" "$BUILD/FEXCore/Source/libJemallocLibs.a"; do
+for lib in "${required[@]}"; do
   [[ -f "$lib" ]] || { echo "ERROR: FEX build did not produce $lib" >&2; exit 1; }
 done

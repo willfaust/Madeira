@@ -45,7 +45,7 @@ other_process:
 """
 getter = getter.replace("BOOL get_window_rects(", "static BOOL wine_get_window_rects(", 1)
 mirror = function(wine, "static void mirror_rect(")
-mapping = function(dpi, "RECT map_dpi_rect(")
+mapping = function(dpi, "static BOOL needs_dpi_mapping(") + "\n" + function(dpi, "RECT map_dpi_rect(")
 bridge = function(app, "void winios_window_geometry(")
 assert "if (!l) return;" in bridge
 assert "winios_layer_for" not in bridge and "l.hidden" not in bridge
@@ -63,6 +63,7 @@ harness = r'''
 typedef uintptr_t HWND;
 typedef int BOOL, NTSTATUS;
 typedef unsigned int UINT, DWORD, ULONG;
+struct ratio { unsigned short num, den; };
 typedef struct { int left, top, right, bottom; } RECT;
 struct window_rects { RECT window, client, visible; };
 struct window_surface { int unused; };
@@ -104,8 +105,8 @@ static int muldiv(int a, UINT b, UINT c) {
     int64_t n = (int64_t)a * b;
     return (int)((n + (n >= 0 ? (int64_t)c/2 : -(int64_t)c/2)) / c);
 }
-static UINT get_dpi_for_window(HWND w) { return window_dpi[w] ? window_dpi[w] : 96; }
-static RECT get_primary_monitor_rect(UINT dpi) { (void)dpi; return (RECT){0,0,1920,1080}; }
+static struct ratio get_dpi_for_window(HWND w) { return (struct ratio){window_dpi[w] ? window_dpi[w] : 96,96}; }
+static RECT get_primary_monitor_rect(struct ratio dpi) { (void)dpi; return (RECT){0,0,1920,1080}; }
 static HWND get_hwnd_message_parent(void) { return MESSAGE_PARENT; }
 static HWND get_desktop_window(void) { return DESKTOP; }
 static WND *get_win_ptr(HWND w) {
@@ -117,8 +118,8 @@ static WND *get_win_ptr(HWND w) {
 }
 static void release_win_ptr(WND *w) { assert(w && w != WND_DESKTOP && w != WND_OTHER_PROCESS); }
 static void RtlSetLastWin32Error(UINT error) { assert(error == ERROR_INVALID_WINDOW_HANDLE); }
-static UINT get_win_monitor_dpi(HWND hwnd, UINT *raw) {
-    (void)hwnd; if (dpi_fail) return 0; *raw = raw_dpi; return 96;
+static struct ratio get_win_monitor_dpi(HWND hwnd, struct ratio *raw) {
+    (void)hwnd; if (dpi_fail) return (struct ratio){0}; *raw = (struct ratio){raw_dpi,96}; return (struct ratio){96,96};
 }
 static DWORD get_window_long(HWND w, int index) { assert(index == GWL_STYLE); return styles[w]; }
 static HWND NtUserGetAncestor(HWND w, UINT kind) { assert(kind == GA_PARENT); return parents[w]; }
@@ -143,8 +144,8 @@ static NTSTATUS NtUserBuildHwndList(uintptr_t desk, HWND hwnd, BOOL children,
     memcpy(out, found, n * sizeof(*out)); out[n] = DESKTOP;
     return 0;
 }
-static BOOL server_rects(HWND w, enum coords_relative relative, struct window_rects *out, UINT dpi) {
-    assert(dpi == raw_dpi);
+static BOOL server_rects(HWND w, enum coords_relative relative, struct window_rects *out, struct ratio dpi) {
+    assert(dpi.num == raw_dpi && dpi.den == 96);
     server_calls++;
     if (relative == COORDS_SCREEN) *out = server_screen;
     else { assert(relative == COORDS_PARENT); *out = nodes[w].rects; }
@@ -152,8 +153,8 @@ static BOOL server_rects(HWND w, enum coords_relative relative, struct window_re
     return TRUE;
 }
 /* WINE RECTANGLES */
-static BOOL get_window_rects(HWND hwnd, enum coords_relative relative, struct window_rects *out, UINT dpi) {
-    query_calls++; assert(dpi == raw_dpi);
+static BOOL get_window_rects(HWND hwnd, enum coords_relative relative, struct window_rects *out, struct ratio dpi) {
+    query_calls++; assert(dpi.num == raw_dpi && dpi.den == 96);
     if (hwnd == fail_hwnd && (int)relative == fail_relative) return FALSE;
     return wine_get_window_rects(hwnd, relative, out, dpi);
 }
@@ -245,15 +246,15 @@ int main(void) {
     nodes[2].dwExStyle=0;
     set_node(3,2,(RECT){0,0,700,800},(RECT){0,0,700,800},(RECT){0,0,700,800});
     raw_dpi=192;
-    struct window_rects scaled={map_dpi_rect(nodes[3].rects.window,96,192),
-                               map_dpi_rect(nodes[3].rects.client,96,192),
-                               map_dpi_rect(nodes[3].rects.visible,96,192)};
+    struct window_rects scaled={map_dpi_rect(nodes[3].rects.window,(struct ratio){96,96},(struct ratio){192,96}),
+                               map_dpi_rect(nodes[3].rects.client,(struct ratio){96,96},(struct ratio){192,96}),
+                               map_dpi_rect(nodes[3].rects.visible,(struct ratio){96,96},(struct ratio){192,96})};
     changed(3,still,&scaled);
     expect_frame(1220,280,1400,1600,1220,280,1400,1600);
     raw_dpi=144;
-    scaled=(struct window_rects){map_dpi_rect(nodes[3].rects.window,96,144),
-                                map_dpi_rect(nodes[3].rects.client,96,144),
-                                map_dpi_rect(nodes[3].rects.visible,96,144)};
+    scaled=(struct window_rects){map_dpi_rect(nodes[3].rects.window,(struct ratio){96,96},(struct ratio){144,96}),
+                                map_dpi_rect(nodes[3].rects.client,(struct ratio){96,96},(struct ratio){144,96}),
+                                map_dpi_rect(nodes[3].rects.visible,(struct ratio){96,96},(struct ratio){144,96})};
     changed(3,still,&scaled);
     expect_frame(915,210,1050,1200,915,210,1050,1200);
     raw_dpi=96;

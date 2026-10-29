@@ -106,28 +106,26 @@ PATCHED_FILES=(
     "storage_device_ios:storage_device_ios.c:storage_device_ios.o"
 )
 
-# A clean checkout has no base archive. Compile the unchanged server sources
-# with the same iOS flags; the replacements below supply the patched sources.
-if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
-    if [ -f "$APP_LIB" ]; then
-        cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
-    else
-        [ "${1:-all}" = all ] || { echo "ERROR: build all sources first (run without arguments)"; exit 1; }
-        echo "=== Building wineserver base from source ==="
-        BASE_OBJECTS=()
-        while read -r file; do
-            name="${file%.c}"
-            replaced=0
-            for entry in "${PATCHED_FILES[@]}"; do
-                [ "${entry##*:}" != "$name.o" ] || replaced=1
-            done
-            [ "$replaced" = 0 ] || continue
-            compile_one "$WINE_SRC/server/$file" "$name"
-            BASE_OBJECTS+=("$OBJ_DIR/$name.o")
-        done < <(sed -nE 's/^[[:space:]]+([[:alnum:]_]+\.c)[[:space:]\\]*$/\1/p' "$WINE_SRC/server/Makefile.in")
-        [ "${#BASE_OBJECTS[@]}" -gt 0 ] || { echo "ERROR: no Wine server sources found"; exit 1; }
-        ar rcs "$OBJ_DIR/libwineserver.a" "${BASE_OBJECTS[@]}"
-    fi
+# Full builds must not reuse objects from a different Wine protocol revision.
+if [ "${1:-all}" = all ]; then
+    echo "=== Building wineserver base from source ==="
+    BASE_OBJECTS=()
+    while read -r file; do
+        name="${file%.c}"
+        replaced=0
+        for entry in "${PATCHED_FILES[@]}"; do
+            [ "${entry##*:}" != "$name.o" ] || replaced=1
+        done
+        [ "$replaced" = 0 ] || continue
+        compile_one "$WINE_SRC/server/$file" "$name"
+        BASE_OBJECTS+=("$OBJ_DIR/$name.o")
+    done < <(sed -nE 's/^[[:space:]]+([[:alnum:]_]+\.c)[[:space:]\\]*$/\1/p' "$WINE_SRC/server/Makefile.in")
+    [ "${#BASE_OBJECTS[@]}" -gt 0 ] || { echo "ERROR: no Wine server sources found"; exit 1; }
+    rm -f "$OBJ_DIR/libwineserver-base.a"
+    ar rcs "$OBJ_DIR/libwineserver-base.a" "${BASE_OBJECTS[@]}"
+    mv "$OBJ_DIR/libwineserver-base.a" "$OBJ_DIR/libwineserver.a"
+elif [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
+    echo "ERROR: build all sources first (run without arguments)"; exit 1
 fi
 
 echo "=== Building kill wrapper (without kill macro) ==="

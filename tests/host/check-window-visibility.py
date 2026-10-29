@@ -51,6 +51,7 @@ harness = r'''
 typedef uintptr_t HWND;
 typedef int BOOL;
 typedef unsigned int UINT, DWORD, ULONG;
+struct ratio { unsigned short num, den; };
 typedef int NTSTATUS;
 typedef struct { int left, top, right, bottom; } RECT;
 struct window_rects { RECT window, client, visible; };
@@ -77,9 +78,9 @@ static struct { HWND hwnd; int x,y,w,h,visible,cx,cy,cw,ch; } last;
 static struct window_rects queried_rects;
 static BOOL IsRectEmpty(const RECT *r) { return r->left >= r->right || r->top >= r->bottom; }
 static void OffsetRect(RECT *r, int x, int y) { r->left += x; r->right += x; r->top += y; r->bottom += y; }
-static UINT get_win_monitor_dpi(HWND hwnd, UINT *raw_dpi) { (void)hwnd; *raw_dpi = 96; return 96; }
-static BOOL get_window_rects(HWND hwnd, enum coords_relative relative, struct window_rects *rects, UINT dpi) {
-    (void)hwnd; (void)relative; assert(dpi == 96); *rects = queried_rects; return TRUE;
+static struct ratio get_win_monitor_dpi(HWND hwnd, struct ratio *raw_dpi) { (void)hwnd; *raw_dpi = (struct ratio){1,1}; return *raw_dpi; }
+static BOOL get_window_rects(HWND hwnd, enum coords_relative relative, struct window_rects *rects, struct ratio dpi) {
+    (void)hwnd; (void)relative; assert(dpi.num == 1 && dpi.den == 1); *rects = queried_rects; return TRUE;
 }
 static DWORD get_window_long(HWND w, int index) { assert(index == GWL_STYLE && w < 512); return styles[w]; }
 static HWND get_desktop_window(void) { return DESKTOP; }

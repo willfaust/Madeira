@@ -63,6 +63,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 /* WiniosGL.m */
 extern void *madeira_gl_context_create( void *share, int *major );
 extern void madeira_gl_context_release( void *context );
+extern void madeira_gl_context_retain( void *context );
+extern void *madeira_gl_context_current( void );
 extern int madeira_gl_make_current( void *context );
 extern int madeira_gl_present( void **state, void *hwnd, unsigned int fbo, int width, int height );
 extern void madeira_gl_present_release( void *state );
@@ -160,11 +162,10 @@ static BOOL ios_describe_pixel_format( int format, struct wgl_pixel_format *fmt 
     return TRUE;
 }
 
-static const char *ios_init_wgl_extensions( struct opengl_funcs *funcs )
+static void ios_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )
 {
-    /* SDL only creates an OpenGL ES context through WGL when these are listed
-     * (otherwise it goes looking for ANGLE's libEGL.dll). */
-    return "WGL_EXT_create_context_es2_profile WGL_EXT_create_context_es_profile";
+    extensions[WGL_EXT_create_context_es2_profile] = TRUE;
+    extensions[WGL_EXT_create_context_es_profile] = TRUE;
 }
 
 /* ---- entry points ----------------------------------------------------- */
@@ -251,7 +252,7 @@ static void *ios_get_proc_address( const char *name )
 
 /* ---- contexts --------------------------------------------------------- */
 
-static BOOL ios_context_create( int format, void *share, const int *attribs, void **context )
+static BOOL ios_host_context_create( int format, void *share, const int *attribs, void **context )
 {
     int major = 0, minor = 0, profile = 0, got = 0;
 
@@ -278,9 +279,10 @@ static BOOL ios_context_create( int format, void *share, const int *attribs, voi
     return TRUE;
 }
 
-static BOOL ios_context_destroy( void *context )
+static BOOL ios_host_context_destroy( void *context )
 {
     TRACE( "context %p\n", context );
+    if (madeira_gl_context_current() == context) madeira_gl_make_current( NULL );
     madeira_gl_context_release( context );
     return TRUE;
 }
@@ -348,15 +350,28 @@ static void surface_storage( struct ios_surface *surface, int width, int height 
 
 static void surface_delete_objects( struct ios_surface *surface )
 {
-    if (surface->base.draw_fbo) p_glDeleteFramebuffers( 1, &surface->base.draw_fbo );
-    if (surface->color) p_glDeleteRenderbuffers( 1, &surface->color );
-    if (surface->depth) p_glDeleteRenderbuffers( 1, &surface->depth );
+    void *previous = madeira_gl_context_current();
+    void *owner = surface->fbo_context;
+
+    if (owner && (owner == previous || madeira_gl_make_current( owner )))
+    {
+        if (surface->base.draw_fbo) p_glDeleteFramebuffers( 1, &surface->base.draw_fbo );
+        if (surface->color) p_glDeleteRenderbuffers( 1, &surface->color );
+        if (surface->depth) p_glDeleteRenderbuffers( 1, &surface->depth );
+        if (owner != previous) madeira_gl_make_current( previous );
+    }
+    else if (owner)
+    {
+        /* shortcut: busy owners keep objects until teardown; queue owner-thread cleanup before supporting concurrent surface moves. */
+        WARN( "Cannot activate framebuffer owner %p for cleanup\n", owner );
+    }
     surface->base.draw_fbo = surface->base.read_fbo = 0;
     surface->color = surface->depth = 0;
     surface->fbo_context = NULL;
+    if (owner) madeira_gl_context_release( owner );
 }
 
-/* Called with `context` current (or NULL while the old one is still current). */
+/* Called after the new context becomes current. */
 static void ios_surface_set_context( struct opengl_drawable *base, void *context )
 {
     struct ios_surface *surface = impl_from_drawable( base );
@@ -374,15 +389,7 @@ static void ios_surface_set_context( struct opengl_drawable *base, void *context
         return;
     }
     if (surface->fbo_context == context && base->draw_fbo) return;
-    if (surface->fbo_context)
-    {
-        /* Still owned by another context (another thread): deleting these names
-         * here would hit whatever the current context calls them. Leak them. */
-        WARN( "[winios-gl] %s moves from context %p to %p, dropping its framebuffer\n",
-              debugstr_opengl_drawable( base ), surface->fbo_context, context );
-        base->draw_fbo = base->read_fbo = 0;
-        surface->color = surface->depth = 0;
-    }
+    if (surface->fbo_context) surface_delete_objects( surface );
 
     p_glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &prev_draw );
     p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &prev_read );
@@ -410,6 +417,7 @@ static void ios_surface_set_context( struct opengl_drawable *base, void *context
     p_glBindFramebuffer( GL_DRAW_FRAMEBUFFER, prev_draw );
     p_glBindFramebuffer( GL_READ_FRAMEBUFFER, prev_read );
 
+    madeira_gl_context_retain( context );
     surface->fbo_context = context;
     ERR( "[winios-gl] %s: framebuffer %u %dx%d depth %u stencil %u in context %p\n",
          debugstr_opengl_drawable( base ), base->draw_fbo, width, height, f->depth, f->stencil, context );
@@ -417,6 +425,7 @@ static void ios_surface_set_context( struct opengl_drawable *base, void *context
 
 static BOOL surface_present( struct ios_surface *surface )
 {
+    if (!surface->base.client) return TRUE;
     HWND hwnd = surface->base.client ? surface->base.client->hwnd : 0;
 
     if (!hwnd || !surface->base.draw_fbo) return FALSE;
@@ -451,29 +460,28 @@ static void ios_surface_destroy( struct opengl_drawable *base )
 {
     struct ios_surface *surface = impl_from_drawable( base );
     TRACE( "%s\n", debugstr_opengl_drawable( base ) );
-    /* The GL objects went with set_context( NULL ); only the presenter is left. */
+    surface_delete_objects( surface );
     if (surface->present_state) madeira_gl_present_release( surface->present_state );
 }
 
 static const struct opengl_drawable_funcs ios_surface_funcs =
 {
+    .size = sizeof(struct ios_surface),
     .destroy = ios_surface_destroy,
     .flush = ios_surface_flush,
     .swap = ios_surface_swap,
-    .set_context = ios_surface_set_context,
 };
 
-static BOOL ios_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+static BOOL ios_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
-    struct client_surface *client;
+    HWND hwnd = client ? client->hwnd : 0;
+    SIZE size = {1, 1};
     struct ios_surface *surface;
 
     TRACE( "hwnd %p, format %d\n", hwnd, format );
 
     if (!format_from_index( format )) return FALSE;
-    if (!(client = nulldrv_client_surface_create( hwnd ))) return FALSE;
-    surface = opengl_drawable_create( sizeof(*surface), &ios_surface_funcs, format, client );
-    client_surface_release( client );
+    surface = opengl_drawable_create( &ios_surface_funcs, format, client, client ? NULL : &size );
     if (!surface) return FALSE;
 
     /* One colour attachment backs every buffer name; see the file comment. */
@@ -493,10 +501,10 @@ static BOOL ios_surface_create( HWND hwnd, int format, struct opengl_drawable **
 
 /* ---- pbuffers (not supported) ------------------------------------------ */
 
-static BOOL ios_pbuffer_create( HDC hdc, int format, BOOL largest, GLenum texture_format, GLenum texture_target,
-                                GLint max_level, GLsizei *width, GLsizei *height, struct opengl_drawable **drawable )
+static BOOL ios_pbuffer_create( HDC hdc, int format, SIZE size, BOOL largest, GLenum texture_format, GLenum texture_target,
+                                GLint max_level, struct opengl_drawable **drawable )
 {
-    FIXME( "[winios-gl] pbuffers are not supported (hdc %p, format %d, %dx%d)\n", hdc, format, *width, *height );
+    FIXME( "[winios-gl] pbuffers are not supported (hdc %p, format %d, %dx%d)\n", hdc, format, size.cx, size.cy );
     return FALSE;
 }
 
@@ -510,19 +518,57 @@ static UINT ios_pbuffer_bind( HDC hdc, struct opengl_drawable *drawable, GLenum 
     return -1; /* default implementation */
 }
 
+static struct opengl_context *ios_context_create( const struct opengl_context_attrs *attrs,
+                                                       struct opengl_context *share )
+{
+    struct opengl_context *context = calloc( 1, sizeof(*context) );
+    const int legacy_attrs[] = { WGL_CONTEXT_MAJOR_VERSION_ARB, attrs->major,
+        WGL_CONTEXT_MINOR_VERSION_ARB, attrs->minor, WGL_CONTEXT_PROFILE_MASK_ARB, attrs->profile, 0 };
+    if (!context) return NULL;
+    if (!ios_host_context_create( attrs->format, share ? share->host_context : NULL,
+                                      legacy_attrs, &context->host_context ))
+    {
+        free( context );
+        return NULL;
+    }
+    context->attrs = *attrs;
+    return context;
+}
+
+static BOOL ios_context_destroy( struct opengl_context *context )
+{
+    BOOL ret = ios_host_context_destroy( context->host_context );
+    if (ret) free( context );
+    return ret;
+}
+
+static BOOL ios_context_activate( struct opengl_context *context,
+                                      struct opengl_drawable *draw, struct opengl_drawable *read )
+{
+    void *host = context ? context->host_context : NULL;
+    if (!ios_make_current( draw, read, host )) return FALSE;
+    if (draw) ios_surface_set_context( draw, host );
+    if (read && read != draw) ios_surface_set_context( read, host );
+    return TRUE;
+}
+
+static BOOL ios_null_surface_create( int format, struct opengl_drawable **drawable )
+{
+    return ios_surface_create( NULL, format, drawable );
+}
+
 static const struct opengl_driver_funcs ios_driver_funcs =
 {
     .p_get_proc_address = ios_get_proc_address,
     .p_init_pixel_formats = ios_init_pixel_formats,
     .p_describe_pixel_format = ios_describe_pixel_format,
-    .p_init_wgl_extensions = ios_init_wgl_extensions,
+    .p_init_extensions = ios_init_extensions,
     .p_surface_create = ios_surface_create,
+    .p_null_surface_create = ios_null_surface_create,
     .p_context_create = ios_context_create,
     .p_context_destroy = ios_context_destroy,
-    .p_make_current = ios_make_current,
+    .p_context_activate = ios_context_activate,
     .p_pbuffer_create = ios_pbuffer_create,
-    .p_pbuffer_updated = ios_pbuffer_updated,
-    .p_pbuffer_bind = ios_pbuffer_bind,
 };
 
 /* ======================================================================
@@ -842,6 +888,7 @@ struct zink_surface
 {
     struct opengl_drawable base;
     void *target;        /* WiniosGL.m IOSurface ring + presenter */
+    unsigned int null_pixel;
     int   width;
     int   height;
 };
@@ -859,9 +906,8 @@ static HWND drawable_hwnd( struct opengl_drawable *drawable )
     return drawable->client ? drawable->client->hwnd : 0;
 }
 
-static const char *zink_init_wgl_extensions( struct opengl_funcs *funcs )
+static void zink_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )
 {
-    return "";   /* desktop OpenGL only: no ES profiles */
 }
 
 static void *zink_get_proc_address( const char *name )
@@ -869,7 +915,7 @@ static void *zink_get_proc_address( const char *name )
     return pOSMesaGetProcAddress( name );
 }
 
-static BOOL zink_context_create( int format, void *share, const int *attribs, void **context )
+static BOOL zink_host_context_create( int format, void *share, const int *attribs, void **context )
 {
     const struct ios_format *f = format_from_index( format );
     int major = 0, minor = 0, profile = 0, a[20], n = 0;
@@ -914,7 +960,7 @@ static BOOL zink_context_create( int format, void *share, const int *attribs, vo
     return TRUE;
 }
 
-static BOOL zink_context_destroy( void *context )
+static BOOL zink_host_context_destroy( void *context )
 {
     perf_count( &perf_wgl_calls );
     pOSMesaDestroyContext( context );
@@ -955,6 +1001,11 @@ static BOOL zink_make_current( struct opengl_drawable *draw, struct opengl_drawa
         return pOSMesaMakeCurrent( NULL, NULL, 0, 0, 0 );
     }
     if (!draw) return FALSE;
+    if (!draw->client)
+    {
+        zink_current = NULL;
+        return pOSMesaMakeCurrent( context, &zink_from_drawable( draw )->null_pixel, GL_UNSIGNED_BYTE, 1, 1 );
+    }
     perf_maybe_log( drawable_hwnd( draw ) );
     /* OSMesa has no separate read surface; reads come from the draw buffer. */
     return zink_bind( zink_from_drawable( draw ), context );
@@ -962,6 +1013,7 @@ static BOOL zink_make_current( struct opengl_drawable *draw, struct opengl_drawa
 
 static BOOL zink_present( struct zink_surface *surface )
 {
+    if (!surface->base.client) return TRUE;
     void *context = pOSMesaGetCurrentContext(), *next;
     uint64_t start;
     BOOL ret;
@@ -1019,21 +1071,21 @@ static void zink_surface_destroy( struct opengl_drawable *base )
 
 static const struct opengl_drawable_funcs zink_surface_funcs =
 {
+    .size = sizeof(struct zink_surface),
     .destroy = zink_surface_destroy,
     .flush = zink_surface_flush,
     .swap = zink_surface_swap,
 };
 
-static BOOL zink_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+static BOOL zink_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
-    struct client_surface *client;
+    HWND hwnd = client ? client->hwnd : 0;
+    SIZE size = {1, 1};
     struct zink_surface *surface;
 
     perf_count( &perf_wgl_calls );
     if (!format_from_index( format )) return FALSE;
-    if (!(client = nulldrv_client_surface_create( hwnd ))) return FALSE;
-    surface = opengl_drawable_create( sizeof(*surface), &zink_surface_funcs, format, client );
-    client_surface_release( client );
+    surface = opengl_drawable_create( &zink_surface_funcs, format, client, client ? NULL : &size );
     if (!surface) return FALSE;
 
     /* Single-buffered OSMesa visual: back buffers are the front buffer. */
@@ -1049,19 +1101,55 @@ static BOOL zink_surface_create( HWND hwnd, int format, struct opengl_drawable *
     return TRUE;
 }
 
+static struct opengl_context *zink_context_create( const struct opengl_context_attrs *attrs,
+                                                       struct opengl_context *share )
+{
+    struct opengl_context *context = calloc( 1, sizeof(*context) );
+    const int legacy_attrs[] = { WGL_CONTEXT_MAJOR_VERSION_ARB, attrs->major,
+        WGL_CONTEXT_MINOR_VERSION_ARB, attrs->minor, WGL_CONTEXT_PROFILE_MASK_ARB, attrs->profile, 0 };
+    if (!context) return NULL;
+    if (!zink_host_context_create( attrs->format, share ? share->host_context : NULL,
+                                      legacy_attrs, &context->host_context ))
+    {
+        free( context );
+        return NULL;
+    }
+    context->attrs = *attrs;
+    return context;
+}
+
+static BOOL zink_context_destroy( struct opengl_context *context )
+{
+    BOOL ret = zink_host_context_destroy( context->host_context );
+    if (ret) free( context );
+    return ret;
+}
+
+static BOOL zink_context_activate( struct opengl_context *context,
+                                      struct opengl_drawable *draw, struct opengl_drawable *read )
+{
+    void *host = context ? context->host_context : NULL;
+    if (!zink_make_current( draw, read, host )) return FALSE;
+    return TRUE;
+}
+
+static BOOL zink_null_surface_create( int format, struct opengl_drawable **drawable )
+{
+    return zink_surface_create( NULL, format, drawable );
+}
+
 static const struct opengl_driver_funcs zink_driver_funcs =
 {
     .p_get_proc_address = zink_get_proc_address,
     .p_init_pixel_formats = ios_init_pixel_formats,
     .p_describe_pixel_format = ios_describe_pixel_format,
-    .p_init_wgl_extensions = zink_init_wgl_extensions,
+    .p_init_extensions = zink_init_extensions,
     .p_surface_create = zink_surface_create,
+    .p_null_surface_create = zink_null_surface_create,
     .p_context_create = zink_context_create,
     .p_context_destroy = zink_context_destroy,
-    .p_make_current = zink_make_current,
+    .p_context_activate = zink_context_activate,
     .p_pbuffer_create = ios_pbuffer_create,
-    .p_pbuffer_updated = ios_pbuffer_updated,
-    .p_pbuffer_bind = ios_pbuffer_bind,
 };
 
 /* ---- shader disk cache (zink backend), ml1342 ---------------------------

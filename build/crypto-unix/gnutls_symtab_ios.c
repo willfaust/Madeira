@@ -46,68 +46,74 @@ extern char ios_gts_40 __asm__("_gnutls_pkcs12_bag_get_count");
 extern char ios_gts_41 __asm__("_gnutls_pkcs12_bag_get_data");
 extern char ios_gts_42 __asm__("_gnutls_pkcs12_bag_get_type");
 extern char ios_gts_43 __asm__("_gnutls_pkcs12_bag_init");
-extern char ios_gts_44 __asm__("_gnutls_pkcs12_deinit");
-extern char ios_gts_45 __asm__("_gnutls_pkcs12_get_bag");
-extern char ios_gts_46 __asm__("_gnutls_pkcs12_import");
-extern char ios_gts_47 __asm__("_gnutls_pkcs12_init");
-extern char ios_gts_48 __asm__("_gnutls_pkcs12_verify_mac");
-extern char ios_gts_49 __asm__("_gnutls_priority_set_direct");
-extern char ios_gts_50 __asm__("_gnutls_privkey_decrypt_data");
-extern char ios_gts_51 __asm__("_gnutls_privkey_deinit");
-extern char ios_gts_52 __asm__("_gnutls_privkey_derive_secret");
-extern char ios_gts_53 __asm__("_gnutls_privkey_export_dh_raw");
-extern char ios_gts_54 __asm__("_gnutls_privkey_export_dsa_raw");
-extern char ios_gts_55 __asm__("_gnutls_privkey_export_ecc_raw");
-extern char ios_gts_56 __asm__("_gnutls_privkey_export_rsa_raw");
-extern char ios_gts_57 __asm__("_gnutls_privkey_export_x509");
-extern char ios_gts_58 __asm__("_gnutls_privkey_generate2");
-extern char ios_gts_59 __asm__("_gnutls_privkey_import_dh_raw");
-extern char ios_gts_60 __asm__("_gnutls_privkey_import_dsa_raw");
-extern char ios_gts_61 __asm__("_gnutls_privkey_import_ecc_raw");
-extern char ios_gts_62 __asm__("_gnutls_privkey_import_rsa_raw");
-extern char ios_gts_63 __asm__("_gnutls_privkey_init");
-extern char ios_gts_64 __asm__("_gnutls_privkey_set_spki");
-extern char ios_gts_65 __asm__("_gnutls_privkey_sign_hash");
-extern char ios_gts_66 __asm__("_gnutls_protocol_get_version");
-extern char ios_gts_67 __asm__("_gnutls_pubkey_deinit");
-extern char ios_gts_68 __asm__("_gnutls_pubkey_encrypt_data");
-extern char ios_gts_69 __asm__("_gnutls_pubkey_export_dh_raw");
-extern char ios_gts_70 __asm__("_gnutls_pubkey_export_dsa_raw");
-extern char ios_gts_71 __asm__("_gnutls_pubkey_export_ecc_raw");
-extern char ios_gts_72 __asm__("_gnutls_pubkey_export_rsa_raw");
-extern char ios_gts_73 __asm__("_gnutls_pubkey_import_dh_raw");
-extern char ios_gts_74 __asm__("_gnutls_pubkey_import_dsa_raw");
-extern char ios_gts_75 __asm__("_gnutls_pubkey_import_ecc_raw");
-extern char ios_gts_76 __asm__("_gnutls_pubkey_import_privkey");
-extern char ios_gts_77 __asm__("_gnutls_pubkey_import_rsa_raw");
-extern char ios_gts_78 __asm__("_gnutls_pubkey_init");
-extern char ios_gts_79 __asm__("_gnutls_pubkey_set_spki");
-extern char ios_gts_80 __asm__("_gnutls_pubkey_verify_hash2");
-extern char ios_gts_81 __asm__("_gnutls_record_get_max_size");
-extern char ios_gts_82 __asm__("_gnutls_record_recv");
-extern char ios_gts_83 __asm__("_gnutls_record_send");
-extern char ios_gts_84 __asm__("_gnutls_server_name_set");
-extern char ios_gts_85 __asm__("_gnutls_session_channel_binding");
-extern char ios_gts_86 __asm__("_gnutls_set_default_priority");
-extern char ios_gts_87 __asm__("_gnutls_transport_get_ptr");
-extern char ios_gts_88 __asm__("_gnutls_transport_set_errno");
-extern char ios_gts_89 __asm__("_gnutls_transport_set_ptr");
-extern char ios_gts_90 __asm__("_gnutls_transport_set_pull_function");
-extern char ios_gts_91 __asm__("_gnutls_transport_set_pull_timeout_function");
-extern char ios_gts_92 __asm__("_gnutls_transport_set_push_function");
-extern char ios_gts_93 __asm__("_gnutls_x509_crt_deinit");
-extern char ios_gts_94 __asm__("_gnutls_x509_crt_export");
-extern char ios_gts_95 __asm__("_gnutls_x509_crt_import");
-extern char ios_gts_96 __asm__("_gnutls_x509_crt_init");
-extern char ios_gts_97 __asm__("_gnutls_x509_privkey_deinit");
-extern char ios_gts_98 __asm__("_gnutls_x509_privkey_export_rsa_raw2");
-extern char ios_gts_99 __asm__("_gnutls_x509_privkey_get_pk_algorithm2");
-extern char ios_gts_100 __asm__("_gnutls_x509_privkey_import_pkcs8");
-extern char ios_gts_101 __asm__("_gnutls_x509_privkey_init");
-extern char ios_gts_102 __asm__("_gnutls_x509_spki_deinit");
-extern char ios_gts_103 __asm__("_gnutls_x509_spki_init");
-extern char ios_gts_104 __asm__("_gnutls_x509_spki_set_rsa_oaep_params");
-extern char ios_gts_105 __asm__("_gnutls_x509_spki_set_rsa_pss_params");
+extern char ios_gts_44 __asm__("_gnutls_pkcs12_bag_set_crt");
+extern char ios_gts_45 __asm__("_gnutls_pkcs12_bag_set_privkey");
+extern char ios_gts_46 __asm__("_gnutls_pkcs12_deinit");
+extern char ios_gts_47 __asm__("_gnutls_pkcs12_export2");
+extern char ios_gts_48 __asm__("_gnutls_pkcs12_generate_mac2");
+extern char ios_gts_49 __asm__("_gnutls_pkcs12_get_bag");
+extern char ios_gts_50 __asm__("_gnutls_pkcs12_import");
+extern char ios_gts_51 __asm__("_gnutls_pkcs12_init");
+extern char ios_gts_52 __asm__("_gnutls_pkcs12_set_bag");
+extern char ios_gts_53 __asm__("_gnutls_pkcs12_verify_mac");
+extern char ios_gts_54 __asm__("_gnutls_priority_set_direct");
+extern char ios_gts_55 __asm__("_gnutls_privkey_decrypt_data");
+extern char ios_gts_56 __asm__("_gnutls_privkey_deinit");
+extern char ios_gts_57 __asm__("_gnutls_privkey_derive_secret");
+extern char ios_gts_58 __asm__("_gnutls_privkey_export_dh_raw");
+extern char ios_gts_59 __asm__("_gnutls_privkey_export_dsa_raw");
+extern char ios_gts_60 __asm__("_gnutls_privkey_export_ecc_raw");
+extern char ios_gts_61 __asm__("_gnutls_privkey_export_rsa_raw");
+extern char ios_gts_62 __asm__("_gnutls_privkey_export_x509");
+extern char ios_gts_63 __asm__("_gnutls_privkey_generate2");
+extern char ios_gts_64 __asm__("_gnutls_privkey_import_dh_raw");
+extern char ios_gts_65 __asm__("_gnutls_privkey_import_dsa_raw");
+extern char ios_gts_66 __asm__("_gnutls_privkey_import_ecc_raw");
+extern char ios_gts_67 __asm__("_gnutls_privkey_import_rsa_raw");
+extern char ios_gts_68 __asm__("_gnutls_privkey_init");
+extern char ios_gts_69 __asm__("_gnutls_privkey_set_spki");
+extern char ios_gts_70 __asm__("_gnutls_privkey_sign_hash");
+extern char ios_gts_71 __asm__("_gnutls_protocol_get_version");
+extern char ios_gts_72 __asm__("_gnutls_pubkey_deinit");
+extern char ios_gts_73 __asm__("_gnutls_pubkey_encrypt_data");
+extern char ios_gts_74 __asm__("_gnutls_pubkey_export_dh_raw");
+extern char ios_gts_75 __asm__("_gnutls_pubkey_export_dsa_raw");
+extern char ios_gts_76 __asm__("_gnutls_pubkey_export_ecc_raw");
+extern char ios_gts_77 __asm__("_gnutls_pubkey_export_rsa_raw");
+extern char ios_gts_78 __asm__("_gnutls_pubkey_import_dh_raw");
+extern char ios_gts_79 __asm__("_gnutls_pubkey_import_dsa_raw");
+extern char ios_gts_80 __asm__("_gnutls_pubkey_import_ecc_raw");
+extern char ios_gts_81 __asm__("_gnutls_pubkey_import_privkey");
+extern char ios_gts_82 __asm__("_gnutls_pubkey_import_rsa_raw");
+extern char ios_gts_83 __asm__("_gnutls_pubkey_init");
+extern char ios_gts_84 __asm__("_gnutls_pubkey_set_spki");
+extern char ios_gts_85 __asm__("_gnutls_pubkey_verify_hash2");
+extern char ios_gts_86 __asm__("_gnutls_record_get_max_size");
+extern char ios_gts_87 __asm__("_gnutls_record_recv");
+extern char ios_gts_88 __asm__("_gnutls_record_send");
+extern char ios_gts_89 __asm__("_gnutls_server_name_set");
+extern char ios_gts_90 __asm__("_gnutls_session_channel_binding");
+extern char ios_gts_91 __asm__("_gnutls_set_default_priority");
+extern char ios_gts_92 __asm__("_gnutls_transport_get_ptr");
+extern char ios_gts_93 __asm__("_gnutls_transport_set_errno");
+extern char ios_gts_94 __asm__("_gnutls_transport_set_ptr");
+extern char ios_gts_95 __asm__("_gnutls_transport_set_pull_function");
+extern char ios_gts_96 __asm__("_gnutls_transport_set_pull_timeout_function");
+extern char ios_gts_97 __asm__("_gnutls_transport_set_push_function");
+extern char ios_gts_98 __asm__("_gnutls_x509_crt_deinit");
+extern char ios_gts_99 __asm__("_gnutls_x509_crt_export");
+extern char ios_gts_100 __asm__("_gnutls_x509_crt_import");
+extern char ios_gts_101 __asm__("_gnutls_x509_crt_init");
+extern char ios_gts_102 __asm__("_gnutls_x509_privkey_deinit");
+extern char ios_gts_103 __asm__("_gnutls_x509_privkey_export_rsa_raw2");
+extern char ios_gts_104 __asm__("_gnutls_x509_privkey_get_pk_algorithm2");
+extern char ios_gts_105 __asm__("_gnutls_x509_privkey_import_pkcs8");
+extern char ios_gts_106 __asm__("_gnutls_x509_privkey_import_rsa_raw");
+extern char ios_gts_107 __asm__("_gnutls_x509_privkey_init");
+extern char ios_gts_108 __asm__("_gnutls_x509_spki_deinit");
+extern char ios_gts_109 __asm__("_gnutls_x509_spki_init");
+extern char ios_gts_110 __asm__("_gnutls_x509_spki_set_rsa_oaep_params");
+extern char ios_gts_111 __asm__("_gnutls_x509_spki_set_rsa_pss_params");
 
 static const struct { const char *name; void *addr; } ios_gnutls_symtab[] = {
     { "gnutls_alert_get", &ios_gts_0 },
@@ -154,68 +160,74 @@ static const struct { const char *name; void *addr; } ios_gnutls_symtab[] = {
     { "gnutls_pkcs12_bag_get_data", &ios_gts_41 },
     { "gnutls_pkcs12_bag_get_type", &ios_gts_42 },
     { "gnutls_pkcs12_bag_init", &ios_gts_43 },
-    { "gnutls_pkcs12_deinit", &ios_gts_44 },
-    { "gnutls_pkcs12_get_bag", &ios_gts_45 },
-    { "gnutls_pkcs12_import", &ios_gts_46 },
-    { "gnutls_pkcs12_init", &ios_gts_47 },
-    { "gnutls_pkcs12_verify_mac", &ios_gts_48 },
-    { "gnutls_priority_set_direct", &ios_gts_49 },
-    { "gnutls_privkey_decrypt_data", &ios_gts_50 },
-    { "gnutls_privkey_deinit", &ios_gts_51 },
-    { "gnutls_privkey_derive_secret", &ios_gts_52 },
-    { "gnutls_privkey_export_dh_raw", &ios_gts_53 },
-    { "gnutls_privkey_export_dsa_raw", &ios_gts_54 },
-    { "gnutls_privkey_export_ecc_raw", &ios_gts_55 },
-    { "gnutls_privkey_export_rsa_raw", &ios_gts_56 },
-    { "gnutls_privkey_export_x509", &ios_gts_57 },
-    { "gnutls_privkey_generate2", &ios_gts_58 },
-    { "gnutls_privkey_import_dh_raw", &ios_gts_59 },
-    { "gnutls_privkey_import_dsa_raw", &ios_gts_60 },
-    { "gnutls_privkey_import_ecc_raw", &ios_gts_61 },
-    { "gnutls_privkey_import_rsa_raw", &ios_gts_62 },
-    { "gnutls_privkey_init", &ios_gts_63 },
-    { "gnutls_privkey_set_spki", &ios_gts_64 },
-    { "gnutls_privkey_sign_hash", &ios_gts_65 },
-    { "gnutls_protocol_get_version", &ios_gts_66 },
-    { "gnutls_pubkey_deinit", &ios_gts_67 },
-    { "gnutls_pubkey_encrypt_data", &ios_gts_68 },
-    { "gnutls_pubkey_export_dh_raw", &ios_gts_69 },
-    { "gnutls_pubkey_export_dsa_raw", &ios_gts_70 },
-    { "gnutls_pubkey_export_ecc_raw", &ios_gts_71 },
-    { "gnutls_pubkey_export_rsa_raw", &ios_gts_72 },
-    { "gnutls_pubkey_import_dh_raw", &ios_gts_73 },
-    { "gnutls_pubkey_import_dsa_raw", &ios_gts_74 },
-    { "gnutls_pubkey_import_ecc_raw", &ios_gts_75 },
-    { "gnutls_pubkey_import_privkey", &ios_gts_76 },
-    { "gnutls_pubkey_import_rsa_raw", &ios_gts_77 },
-    { "gnutls_pubkey_init", &ios_gts_78 },
-    { "gnutls_pubkey_set_spki", &ios_gts_79 },
-    { "gnutls_pubkey_verify_hash2", &ios_gts_80 },
-    { "gnutls_record_get_max_size", &ios_gts_81 },
-    { "gnutls_record_recv", &ios_gts_82 },
-    { "gnutls_record_send", &ios_gts_83 },
-    { "gnutls_server_name_set", &ios_gts_84 },
-    { "gnutls_session_channel_binding", &ios_gts_85 },
-    { "gnutls_set_default_priority", &ios_gts_86 },
-    { "gnutls_transport_get_ptr", &ios_gts_87 },
-    { "gnutls_transport_set_errno", &ios_gts_88 },
-    { "gnutls_transport_set_ptr", &ios_gts_89 },
-    { "gnutls_transport_set_pull_function", &ios_gts_90 },
-    { "gnutls_transport_set_pull_timeout_function", &ios_gts_91 },
-    { "gnutls_transport_set_push_function", &ios_gts_92 },
-    { "gnutls_x509_crt_deinit", &ios_gts_93 },
-    { "gnutls_x509_crt_export", &ios_gts_94 },
-    { "gnutls_x509_crt_import", &ios_gts_95 },
-    { "gnutls_x509_crt_init", &ios_gts_96 },
-    { "gnutls_x509_privkey_deinit", &ios_gts_97 },
-    { "gnutls_x509_privkey_export_rsa_raw2", &ios_gts_98 },
-    { "gnutls_x509_privkey_get_pk_algorithm2", &ios_gts_99 },
-    { "gnutls_x509_privkey_import_pkcs8", &ios_gts_100 },
-    { "gnutls_x509_privkey_init", &ios_gts_101 },
-    { "gnutls_x509_spki_deinit", &ios_gts_102 },
-    { "gnutls_x509_spki_init", &ios_gts_103 },
-    { "gnutls_x509_spki_set_rsa_oaep_params", &ios_gts_104 },
-    { "gnutls_x509_spki_set_rsa_pss_params", &ios_gts_105 },
+    { "gnutls_pkcs12_bag_set_crt", &ios_gts_44 },
+    { "gnutls_pkcs12_bag_set_privkey", &ios_gts_45 },
+    { "gnutls_pkcs12_deinit", &ios_gts_46 },
+    { "gnutls_pkcs12_export2", &ios_gts_47 },
+    { "gnutls_pkcs12_generate_mac2", &ios_gts_48 },
+    { "gnutls_pkcs12_get_bag", &ios_gts_49 },
+    { "gnutls_pkcs12_import", &ios_gts_50 },
+    { "gnutls_pkcs12_init", &ios_gts_51 },
+    { "gnutls_pkcs12_set_bag", &ios_gts_52 },
+    { "gnutls_pkcs12_verify_mac", &ios_gts_53 },
+    { "gnutls_priority_set_direct", &ios_gts_54 },
+    { "gnutls_privkey_decrypt_data", &ios_gts_55 },
+    { "gnutls_privkey_deinit", &ios_gts_56 },
+    { "gnutls_privkey_derive_secret", &ios_gts_57 },
+    { "gnutls_privkey_export_dh_raw", &ios_gts_58 },
+    { "gnutls_privkey_export_dsa_raw", &ios_gts_59 },
+    { "gnutls_privkey_export_ecc_raw", &ios_gts_60 },
+    { "gnutls_privkey_export_rsa_raw", &ios_gts_61 },
+    { "gnutls_privkey_export_x509", &ios_gts_62 },
+    { "gnutls_privkey_generate2", &ios_gts_63 },
+    { "gnutls_privkey_import_dh_raw", &ios_gts_64 },
+    { "gnutls_privkey_import_dsa_raw", &ios_gts_65 },
+    { "gnutls_privkey_import_ecc_raw", &ios_gts_66 },
+    { "gnutls_privkey_import_rsa_raw", &ios_gts_67 },
+    { "gnutls_privkey_init", &ios_gts_68 },
+    { "gnutls_privkey_set_spki", &ios_gts_69 },
+    { "gnutls_privkey_sign_hash", &ios_gts_70 },
+    { "gnutls_protocol_get_version", &ios_gts_71 },
+    { "gnutls_pubkey_deinit", &ios_gts_72 },
+    { "gnutls_pubkey_encrypt_data", &ios_gts_73 },
+    { "gnutls_pubkey_export_dh_raw", &ios_gts_74 },
+    { "gnutls_pubkey_export_dsa_raw", &ios_gts_75 },
+    { "gnutls_pubkey_export_ecc_raw", &ios_gts_76 },
+    { "gnutls_pubkey_export_rsa_raw", &ios_gts_77 },
+    { "gnutls_pubkey_import_dh_raw", &ios_gts_78 },
+    { "gnutls_pubkey_import_dsa_raw", &ios_gts_79 },
+    { "gnutls_pubkey_import_ecc_raw", &ios_gts_80 },
+    { "gnutls_pubkey_import_privkey", &ios_gts_81 },
+    { "gnutls_pubkey_import_rsa_raw", &ios_gts_82 },
+    { "gnutls_pubkey_init", &ios_gts_83 },
+    { "gnutls_pubkey_set_spki", &ios_gts_84 },
+    { "gnutls_pubkey_verify_hash2", &ios_gts_85 },
+    { "gnutls_record_get_max_size", &ios_gts_86 },
+    { "gnutls_record_recv", &ios_gts_87 },
+    { "gnutls_record_send", &ios_gts_88 },
+    { "gnutls_server_name_set", &ios_gts_89 },
+    { "gnutls_session_channel_binding", &ios_gts_90 },
+    { "gnutls_set_default_priority", &ios_gts_91 },
+    { "gnutls_transport_get_ptr", &ios_gts_92 },
+    { "gnutls_transport_set_errno", &ios_gts_93 },
+    { "gnutls_transport_set_ptr", &ios_gts_94 },
+    { "gnutls_transport_set_pull_function", &ios_gts_95 },
+    { "gnutls_transport_set_pull_timeout_function", &ios_gts_96 },
+    { "gnutls_transport_set_push_function", &ios_gts_97 },
+    { "gnutls_x509_crt_deinit", &ios_gts_98 },
+    { "gnutls_x509_crt_export", &ios_gts_99 },
+    { "gnutls_x509_crt_import", &ios_gts_100 },
+    { "gnutls_x509_crt_init", &ios_gts_101 },
+    { "gnutls_x509_privkey_deinit", &ios_gts_102 },
+    { "gnutls_x509_privkey_export_rsa_raw2", &ios_gts_103 },
+    { "gnutls_x509_privkey_get_pk_algorithm2", &ios_gts_104 },
+    { "gnutls_x509_privkey_import_pkcs8", &ios_gts_105 },
+    { "gnutls_x509_privkey_import_rsa_raw", &ios_gts_106 },
+    { "gnutls_x509_privkey_init", &ios_gts_107 },
+    { "gnutls_x509_spki_deinit", &ios_gts_108 },
+    { "gnutls_x509_spki_init", &ios_gts_109 },
+    { "gnutls_x509_spki_set_rsa_oaep_params", &ios_gts_110 },
+    { "gnutls_x509_spki_set_rsa_pss_params", &ios_gts_111 },
 };
 
 #define IOS_GNUTLS_MAGIC ((void *)&ios_gnutls_symtab)

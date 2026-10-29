@@ -141,3 +141,6 @@ got=$(shasum -a 256 "$OUT/dxil.dll" | cut -d' ' -f1)
 [ "$got" = "$DXIL_SHA256" ] || die "dxil.dll: SHA-256 $got, expected $DXIL_SHA256"
 
 (cd "$OUT" && shasum -a 256 opengl32.dll libgallium_wgl.dll dxil.dll)
+
+cp "$SRC/docs/license.rst" "$OUT/LICENSE-Mesa.rst"
+cp "$DXH/LICENSE" "$OUT/LICENSE-DirectX-Headers.txt"

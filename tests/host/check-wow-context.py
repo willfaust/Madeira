@@ -56,7 +56,9 @@ assert apply_.index("if (!ios_process_is_wow64( thread->process )) return 0;") <
 g = apply_.index("thread_get_state(")
 chk = apply_.index("ios_wow_frame_seq( frame ) != thread->ios_ctx_seq")
 assert apply_.index("thread_suspend( port )") < g < chk < apply_.index("mach_vm_write(")
-assert "if (i != 18) *(uint64_t *)(f + i * 8)" in apply_
+assert "for (i = 0; i < 18; i++)" in apply_
+assert "for (i = 19; i < 29; i++)" in apply_
+assert "arm64_regs.x0[i]" in apply_ and "arm64_regs.x19[i - 19]" in apply_
 assert "thread_resume( port );" in apply_[apply_.index("done:"):]
 assert "fprintf" not in apply_ and "malloc" not in apply_, "nothing that locks stdio or allocates while the target is halted"
 print("PASS: i386-only capture and apply; frame and fingerprint re-checked while halted; x18 kept; no stdio while halted")

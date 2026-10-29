@@ -27,14 +27,22 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#ifdef MADEIRA_MOLTENVK
+#if MADEIRA_MOLTENVK
 extern void *madeira_vulkan_symbol(const char *name);
 #endif
+int madeira_vulkan_static_available(void)
+{
+#if MADEIRA_MOLTENVK
+    return 1;
+#else
+    return 0;
+#endif
+}
 static char ios_vulkan_token;
 static void *ios_vulkan_open(const char *name, int flags)
 {
     if (strcmp(name, "madeira-static-moltenvk")) return dlopen(name, flags);
-#ifndef MADEIRA_MOLTENVK
+#if !MADEIRA_MOLTENVK
     return NULL;
 #else
     fprintf(stderr, "[vk-win32u] binding statically linked MoltenVK backend\n");
@@ -44,7 +52,7 @@ static void *ios_vulkan_open(const char *name, int flags)
 static void *ios_vulkan_sym(void *handle, const char *name)
 {
     if (handle != &ios_vulkan_token) return dlsym(handle, name);
-#ifdef MADEIRA_MOLTENVK
+#if MADEIRA_MOLTENVK
     return madeira_vulkan_symbol(name);
 #else
     return NULL;

@@ -1,0 +1,215 @@
+{
+  "dock": {
+    "pins": [
+      "madeira-dock"
+    ],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/madeira-dock/**",
+      "tools/build/setup-llvm-mingw.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "arm64ec-windows/dockhost.exe",
+      "arm64ec-windows/dock-notices.txt"
+    ],
+    "required": [
+      "arm64ec-windows/dockhost.exe",
+      "arm64ec-windows/dock-notices.txt"
+    ]
+  },
+  "windows": {
+    "pins": [
+      "wine",
+      "FEX",
+      "dxmt"
+    ],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/windows-runtime/**",
+      "build/wine-pe/**",
+      "build/fex-arm64ec/**",
+      "build/fex-wow64/**",
+      "build/faultrep/**",
+      "build/luajit-x64/**",
+      "build/madeira-d3d12/build-pe.sh",
+      "madeira-d3d12/src/**",
+      "madeira-d3d12/tests/windows/**",
+      "tools/build/build-wine.sh",
+      "tools/build/setup-llvm-mingw.sh",
+      "tools/build/build-shader-headers.sh",
+      "tools/build/build-llvm-ios.sh",
+      "build/dxmt-ios/build.sh",
+      "madeira-d3d12/third_party/**",
+      "app/Madeira/d3d12/**",
+      "tools/build/build-runtime-component.sh",
+      "tools/check-wine-media-dlls.py",
+      "build/wineios-drv/**",
+      "build/tftrace/*.c"
+    ],
+    "outputs": [
+      "arm64ec-windows/*",
+      "aarch64-windows/*",
+      "vulkan/arm64ec-windows/winevulkan.dll",
+      "vulkan/arm64ec-windows/vulkan-1.dll",
+      "compat/love/*",
+      "licenses/LuaJIT-MIT.txt"
+    ],
+    "required": [
+      "arm64ec-windows/ntdll.dll",
+      "arm64ec-windows/kernelbase.dll",
+      "arm64ec-windows/explorerframe.dll",
+      "arm64ec-windows/xtajit64.dll",
+      "arm64ec-windows/d3d11.dll",
+      "arm64ec-windows/winemetal.dll",
+      "arm64ec-windows/d3d12.dll",
+      "aarch64-windows/ntdll.dll",
+      "aarch64-windows/wow64.dll",
+      "aarch64-windows/wow64win.dll",
+      "aarch64-windows/xtajit.dll",
+      "vulkan/arm64ec-windows/winevulkan.dll",
+      "vulkan/arm64ec-windows/vulkan-1.dll",
+      "compat/love/lua51.dll",
+      "licenses/LuaJIT-MIT.txt",
+      "arm64ec-windows/wineios.drv",
+      "arm64ec-windows/tftrace-x64.dll"
+    ],
+    "prebuilt": [
+      "aarch64-windows/child-test.exe",
+      "aarch64-windows/cube.exe",
+      "aarch64-windows/proc-test.exe",
+      "aarch64-windows/texquad.exe",
+      "aarch64-windows/triangle.exe",
+      "aarch64-windows/winhttp-test.exe",
+      "arm64ec-windows/calltest-x64.exe",
+      "arm64ec-windows/child-test-x64.exe",
+      "arm64ec-windows/clocktest-x64.exe",
+      "arm64ec-windows/cube-x64.exe",
+      "arm64ec-windows/d3d12-cube-x64.exe",
+      "arm64ec-windows/d3d12-m2-x64.exe",
+      "arm64ec-windows/d3d12-vfetch-x64.exe",
+      "arm64ec-windows/dxchkmsaa-x64.exe",
+      "arm64ec-windows/fib-x64.exe",
+      "arm64ec-windows/fib2-x64.exe",
+      "arm64ec-windows/fib3-x64.exe",
+      "arm64ec-windows/fileio-x64.exe",
+      "arm64ec-windows/fpconf-x64.exe",
+      "arm64ec-windows/heap-x64.exe",
+      "arm64ec-windows/hello-x64.exe",
+      "arm64ec-windows/proc-test-x64.exe"
+    ]
+  },
+  "moltenvk": {
+    "pins": [],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/moltenvk-ios/**",
+      "tools/build/prepare-graphics.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "gl/libMoltenVK.*",
+      "licenses/MoltenVK-Apache-2.0.txt",
+      "licenses/SPIRV-Cross-Apache-2.0.txt",
+      "licenses/SPIRV-Tools-Apache-2.0.txt",
+      "licenses/cereal-BSD-3-Clause.txt"
+    ],
+    "required": [
+      "gl/libMoltenVK.dylib",
+      "licenses/MoltenVK-Apache-2.0.txt",
+      "licenses/SPIRV-Cross-Apache-2.0.txt",
+      "licenses/SPIRV-Tools-Apache-2.0.txt",
+      "licenses/cereal-BSD-3-Clause.txt"
+    ]
+  },
+  "zink": {
+    "pins": [],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/mesa-ios/build.sh",
+      "build/mesa-ios/ios-arm64.cross",
+      "build/mesa-ios/patches/0*.patch",
+      "build/moltenvk-ios/build.sh",
+      "tools/build/prepare-graphics.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "gl/libOSMesa.*",
+      "licenses/Mesa-license.rst"
+    ],
+    "required": [
+      "gl/libOSMesa.dylib",
+      "licenses/Mesa-license.rst"
+    ]
+  },
+  "mesa-d3d12": {
+    "pins": [],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/mesa-d3d12/**",
+      "tools/build/setup-llvm-mingw.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "x86_64-opengl/*"
+    ],
+    "required": [
+      "x86_64-opengl/opengl32.dll",
+      "x86_64-opengl/libgallium_wgl.dll",
+      "x86_64-opengl/dxil.dll",
+      "x86_64-opengl/LICENSE-dxil.txt",
+      "x86_64-opengl/LICENSE-Mesa.rst",
+      "x86_64-opengl/LICENSE-DirectX-Headers.txt"
+    ]
+  },
+  "vulkan-pe": {
+    "pins": [],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/dxvk/**",
+      "build/vkd3d-proton/**",
+      "tools/build/setup-llvm-mingw.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "vulkan/arm64ec-windows/dxvk-*.dll",
+      "vulkan/arm64ec-windows/d3d12*.dll",
+      "licenses/DXVK-zlib.txt",
+      "licenses/libdisplay-info-MIT.txt",
+      "licenses/vkd3d-proton-LGPL-2.1.txt",
+      "licenses/dxil-spirv-MIT.txt",
+      "licenses/dxbc-spirv-MIT.txt"
+    ],
+    "required": [
+      "vulkan/arm64ec-windows/dxvk-d3d11.dll",
+      "vulkan/arm64ec-windows/dxvk-d3d10core.dll",
+      "vulkan/arm64ec-windows/dxvk-dxgi.dll",
+      "vulkan/arm64ec-windows/d3d12.dll",
+      "vulkan/arm64ec-windows/d3d12core.dll",
+      "licenses/DXVK-zlib.txt",
+      "licenses/libdisplay-info-MIT.txt",
+      "licenses/vkd3d-proton-LGPL-2.1.txt",
+      "licenses/dxil-spirv-MIT.txt",
+      "licenses/dxbc-spirv-MIT.txt"
+    ]
+  },
+  "kosmickrisp": {
+    "pins": [],
+    "inputs": [
+      "tools/build/runtime-components.json",
+      "build/mesa-ios/build-kosmickrisp.sh",
+      "build/mesa-ios/kosmickrisp-ios-arm64.cross",
+      "build/mesa-ios/patches/kosmickrisp-*.patch",
+      "tools/build/prepare-graphics.sh",
+      "tools/build/build-runtime-component.sh"
+    ],
+    "outputs": [
+      "gl/libvulkan_kosmickrisp.*",
+      "licenses/KosmicKrisp-Mesa-license.rst"
+    ],
+    "required": [
+      "gl/libvulkan_kosmickrisp.dylib",
+      "licenses/KosmicKrisp-Mesa-license.rst"
+    ]
+  }
+}

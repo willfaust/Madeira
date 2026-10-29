@@ -2341,7 +2341,7 @@ static NTSTATUS wgp_create( void *args )
     pthread_once( &wma_av_log_once, wma_install_av_log );
     pthread_once( &wgp_config_once, wgp_configure );
     if (!(parser = calloc( 1, sizeof(*parser) ))) return E_OUTOFMEMORY;
-    if (!(parser->core = mav_create( params->output_compressed )))
+    if (!(parser->core = mav_create( params->flags & WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED )))
     {
         free( parser );
         return E_OUTOFMEMORY;
@@ -2980,7 +2980,7 @@ struct wg_parser_stream_get_tag_params32
     PTR32 size;
 };
 
-C_ASSERT( sizeof(struct wg_format) == 120 );
+C_ASSERT( sizeof(struct wg_format) == 196 );
 C_ASSERT( sizeof(struct wg_parser_buffer) == 32 );
 C_ASSERT( offsetof(struct wg_parser_stream_seek_params, stop_flags) == 36 );
 C_ASSERT( offsetof(struct wg_parser_stream_notify_qos_params, timestamp) == 32 );

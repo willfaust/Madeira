@@ -23,7 +23,7 @@ HERE="$R/build/mesa-ios"
 SRC="${MESA_SRC:-$R/research/mesa-25.0.7}"
 MVK="${MOLTENVK_SRC:-$R/research/MoltenVK}"
 VENV="${MESA_VENV:-$R/research/mesa-venv}"
-B="$HERE/obj"
+B="${MESA_BUILD:-$HERE/obj}"
 OUT="$R/app/Madeira/gl"
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 

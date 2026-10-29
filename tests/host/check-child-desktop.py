@@ -60,22 +60,23 @@ typedef int BOOL; typedef unsigned int UINT, DWORD; typedef void *HDESK, *HWND;
 #define FALSE 0
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define UlongToHandle(x) ((void *)(unsigned long)(x))
+#define wine_server_ptr_handle(h) ((HWND)(unsigned long)(h))
 #define HandleToULong(h) ((DWORD)(unsigned long)(h))
 #define ERR_(ch) err_print
 static void err_print( const char *fmt, ... )
 { va_list ap; va_start( ap, fmt ); vfprintf( stderr, fmt, ap ); va_end( ap ); }
-struct ntuser_thread_info { UINT top_window, msg_window; };
+struct user_thread_info { HWND top_window, msg_window; };
 struct teb { struct { void *UniqueProcess; } ClientId; void *Peb; };
 
 /* ---- the world: two "processes" sharing one desktop object ---- */
 static struct teb cur_teb; static DWORD cur_tid;
-static struct ntuser_thread_info thread_infos[8]; static int cur_thread;
+static struct user_thread_info thread_infos[8]; static int cur_thread;
 static int thread_desktop[8];            /* desktop object id of each thread (0 = none) */
 static int class_registered[0x100];      /* desktop class per pid */
 static int desktop_top[4], desktop_msg[4];
 static int requests, registrations, winstation_inits, set_desktop_calls, server_refuses;
 static struct teb *NtCurrentTeb(void) { return &cur_teb; }
-static struct ntuser_thread_info *NtUserGetThreadInfo(void) { return &thread_infos[cur_thread]; }
+static struct user_thread_info *get_user_thread_info(void) { return &thread_infos[cur_thread]; }
 static DWORD GetCurrentThreadId(void) { return cur_tid; }
 static BOOL is_service_process(void) { return TRUE; }
 static HDESK NtUserGetThreadDesktop( DWORD tid ) { (void)tid; return (HDESK)(long)thread_desktop[cur_thread]; }
@@ -138,7 +139,7 @@ int main( int argc, char **argv )
         puts( "PASS (MADEIRA_CHILD_DESKTOP=0): the child keeps no desktop window, as before" );
         return 0;
     }
-    assert( h == (HWND)0x10020 && thread_infos[1].msg_window == 0x10022 );
+    assert( h == (HWND)0x10020 && thread_infos[1].msg_window == (HWND)0x10022 );
     assert( requests == 2 && registrations == 1 && !winstation_inits && set_desktop_calls == 1 );
 
     /* A second thread of the same child: the window exists now, no more work. */

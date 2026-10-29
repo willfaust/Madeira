@@ -108,13 +108,16 @@ void *madeira_gl_context_create(void *share, int *major) {
     }
 }
 
+void madeira_gl_context_retain(void *context) {
+    if (context) CFRetain(context);
+}
+
 void madeira_gl_context_release(void *context) {
-    @autoreleasepool {
-        EAGLContext *c = (__bridge EAGLContext *)context;
-        if (!c) return;
-        if ([EAGLContext currentContext] == c) [EAGLContext setCurrentContext:nil];
-        CFBridgingRelease(context);
-    }
+    if (context) CFRelease(context);
+}
+
+void *madeira_gl_context_current(void) {
+    return (__bridge void *)[EAGLContext currentContext];
 }
 
 int madeira_gl_make_current(void *context) {

@@ -837,7 +837,7 @@ static BOOL madeira_d3d12_vkd3d_wanted(void)
 }
 
 /* The Vulkan library for this session, or nil when Vulkan stays off. */
-extern void *madeira_vulkan_symbol(const char *name) __attribute__((weak_import));
+extern int madeira_vulkan_static_available(void);
 
 static NSString *madeira_vulkan_library(NSString *bundle)
 {
@@ -847,7 +847,7 @@ static NSString *madeira_vulkan_library(NSString *bundle)
     if (set && (!strcasecmp(v, "off") || !strcmp(v, "0"))) return nil;
     if (!set && !madeira_d3d12_vkd3d_wanted() && !madeira_d3d11_dxvk_wanted()) return nil;
     if (set && (!strcasecmp(v, "static") || !strcmp(v, "1")))
-        return madeira_vulkan_symbol ? @"madeira-static-moltenvk" : nil;
+        return madeira_vulkan_static_available() ? @"madeira-static-moltenvk" : nil;
     if (!set || !strcasecmp(v, "moltenvk"))
         return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
     if (!strcasecmp(v, "kosmickrisp"))

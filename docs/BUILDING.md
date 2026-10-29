@@ -195,3 +195,21 @@ default. `env.MADEIRA_OPENGL = 1` selects the separate Mesa-on-D3D12 Windows
 overlay when its DLLs are built. `vulkan = static` selects the optional static
 MoltenVK backend; the app requires that backend to be linked. The dynamic
 MoltenVK and KosmicKrisp choices share the same retained-layer surface adapter.
+
+### Complete IPA runtime checks
+
+`tools/build-ipa.sh` builds Dock, the 64-bit Windows runtime, and the optional
+OpenGL/Vulkan backends before packaging. Wine Mono still downloads on first use.
+The default graphics settings remain unchanged.
+
+CI keeps seven separate runtime caches. Each cache uses its own source recipes,
+submodule pins, and the actual SDK/compiler identity. An app-only or validation-only
+change reuses those binaries. A failed or missing transfer rebuilds the affected
+component. Successful components remain cached if another component fails.
+
+`tools/build/runtime-components.py verify all` checks the staged files before
+Xcode builds the app. Packaging then writes `runtime-build.json` with the source
+keys and final bundle hashes. `tools/build/runtime-components.py ipa dist/Madeira.ipa`
+checks a completed IPA, including Dock, the graphics drivers, and their notices.
+Run this command from the matching checkout and build environment. CI calls the
+same check before it uploads a fresh or cached IPA.

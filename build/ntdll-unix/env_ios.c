@@ -2888,3 +2888,19 @@ void WINAPI RtlSetLastWin32Error( DWORD err )
 #endif
     teb->LastErrorValue = err;
 }
+
+/* Wine 11 exports these helpers; Madeira keeps each guest's state in its TEB. */
+PEB * WINAPI RtlGetCurrentPeb(void)
+{
+    return NtCurrentTeb()->Peb;
+}
+
+HANDLE WINAPI PsGetCurrentProcessId(void)
+{
+    return NtCurrentTeb()->ClientId.UniqueProcess;
+}
+
+HANDLE WINAPI PsGetCurrentThreadId(void)
+{
+    return NtCurrentTeb()->ClientId.UniqueThread;
+}

@@ -4672,7 +4672,7 @@ NTSTATUS unixcall_wine_server_handle_to_fd( void *args )
 int server_pipe( int fd[2] )
 {
     int ret;
-#ifdef HAVE_PIPE2
+#if defined(HAVE_PIPE2) && !defined(WINE_IOS)
     static BOOL have_pipe2 = TRUE;
 
     if (have_pipe2)
@@ -6379,7 +6379,7 @@ NTSTATUS WINAPI NtAllocateReserveObject( HANDLE *handle, const OBJECT_ATTRIBUTES
     TRACE("(%p, %p, %d)\n", handle, attr, type);
 
     *handle = 0;
-    if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
 
     SERVER_START_REQ( allocate_reserve_object )
     {

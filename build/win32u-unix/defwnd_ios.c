@@ -37,6 +37,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(win);
 #define KEYDATA_ALT             0x2000
 #define KEYDATA_PREVSTATE       0x4000
 
+static const struct ratio no_dpi;
 static short f10_key = 0;
 static short menu_sys_key = 0;
 
@@ -695,7 +696,7 @@ static BOOL on_bottom_border( int hit )
  */
 static void sys_command_size_move( HWND hwnd, WPARAM wparam )
 {
-    DWORD msg_pos = NtUserGetThreadInfo()->message_pos;
+    DWORD msg_pos = NtUserGetMessagePos();
     BOOL thickframe, drag_full_windows = TRUE, moved = FALSE;
     RECT sizing_rect, mouse_rect, orig_rect;
     UINT hittest = wparam & 0x0f;
@@ -703,8 +704,8 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
     UINT style = get_window_long( hwnd, GWL_STYLE );
     POINT capture_point, pt;
     MINMAXINFO minmax;
+    struct ratio dpi;
     HWND parent;
-    UINT dpi;
     HDC hdc;
     MSG msg;
 
@@ -830,7 +831,7 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
              * WM_LBUTTONUP. Detect that and terminate the loop as if we'd gotten it. */
             if (!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000))
             {
-                DWORD last_pos = NtUserGetThreadInfo()->message_pos;
+                DWORD last_pos = NtUserGetMessagePos();
                 pt.x = ((int)(short)LOWORD( last_pos ));
                 pt.y = ((int)(short)HIWORD( last_pos ));
                 break;
@@ -991,6 +992,7 @@ static void track_nc_scroll_bar( HWND hwnd, WPARAM wparam, POINT pt )
 
 static LRESULT handle_sys_command( HWND hwnd, WPARAM wparam, LPARAM lparam )
 {
+    DWORD msgpos;
     POINT pos;
     RECT rect;
 
@@ -1001,11 +1003,12 @@ static LRESULT handle_sys_command( HWND hwnd, WPARAM wparam, LPARAM lparam )
     if (call_hooks( WH_CBT, HCBT_SYSCOMMAND, wparam, lparam, 0 ))
         return 0;
 
-    pos.x = (short)LOWORD( NtUserGetThreadInfo()->message_pos );
-    pos.y = (short)HIWORD( NtUserGetThreadInfo()->message_pos );
+    msgpos = NtUserGetMessagePos();
+    pos.x = (short)LOWORD( msgpos );
+    pos.y = (short)HIWORD( msgpos );
     NtUserLogicalToPerMonitorDPIPhysicalPoint( hwnd, &pos );
     SetRect( &rect, pos.x, pos.y, pos.x, pos.y );
-    rect = map_rect_virt_to_raw( rect, 0 );
+    rect = map_rect_virt_to_raw( rect, no_dpi );
     pos.x = rect.left;
     pos.y = rect.top;
 
@@ -1507,7 +1510,7 @@ static void draw_close_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
     {
         /* Windows does not use SM_CXSMSIZE and SM_CYSMSIZE
          * it uses 11x11 for  the close button in tool window */
-        int bmp_height = muldiv( 11, get_dpi_for_window( hwnd ), 96 );
+        int bmp_height = map_user_dpi( 11, get_dpi_for_window( hwnd ) );
         int bmp_width = bmp_height;
         int caption_height = get_system_metrics( SM_CYSMCAPTION );
 
@@ -2885,25 +2888,39 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
 
             if (lparam & PRF_CHILDREN)
             {
+                HDC hdc = (HDC)wparam;
                 HWND *list, *child;
+                HRGN clip_rgn;
+                int old_clip;
                 POINT org;
                 RECT rect;
                 UINT dpi;
 
                 if ((list = list_window_children( hwnd )))
                 {
+                    clip_rgn = NtGdiCreateRectRgn( 0, 0, 0, 0 );
+
                     for (child = list; *child; child++)
                     {
                         if (!(get_window_long( *child, GWL_STYLE ) & WS_VISIBLE))
                             continue;
 
                         dpi = NtUserGetDpiForWindow( *child );
-                        NtUserGetClientRect( *child, &rect, dpi );
-                        NtUserMapWindowPoints( *child, hwnd, (POINT *)&rect, 2, dpi );
-                        offset_viewport_org( (HDC)wparam, rect.left, rect.top, &org );
+                        NtUserGetWindowRect( *child, &rect, dpi );
+                        NtUserMapWindowPoints( NULL, hwnd, (POINT *)&rect, 2, dpi );
+
+                        old_clip = NtGdiGetRandomRgn( hdc, clip_rgn, NTGDI_RGN_MIRROR_RTL | 1 );
+                        NtGdiIntersectClipRect( hdc, rect.left, rect.top, rect.right, rect.bottom );
+                        offset_viewport_org( hdc, rect.left, rect.top, &org );
                         send_message( *child, WM_PRINT, wparam, PRF_NONCLIENT | PRF_CLIENT | PRF_ERASEBKGND | PRF_CHILDREN );
-                        set_viewport_org( (HDC)wparam, org.x, org.y, NULL );
+                        set_viewport_org( hdc, org.x, org.y, NULL );
+                        if (old_clip == 0)
+                            NtGdiExtSelectClipRgn( hdc, NULL, RGN_COPY );
+                        else if (old_clip == 1)
+                            NtGdiExtSelectClipRgn( hdc, clip_rgn, RGN_COPY );
                     }
+
+                    NtGdiDeleteObjectApp( clip_rgn );
                     free( list );
                 }
             }
@@ -3068,7 +3085,7 @@ LRESULT desktop_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
     {
         static RECT virtual_rect = {INT_MIN,INT_MIN,INT_MAX,INT_MAX};
 
-        RECT new_rect = get_virtual_screen_rect( 0, MDT_DEFAULT ), old_rect = virtual_rect;
+        RECT new_rect = get_virtual_screen_rect( no_dpi, MDT_DEFAULT ), old_rect = virtual_rect;
         UINT context, flags = 0;
 
         if (EqualRect( &new_rect, &old_rect )) return TRUE;

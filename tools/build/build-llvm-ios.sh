@@ -7,9 +7,21 @@ HOST="$ROOT/toolchains/llvm-host-build"
 IOS="$ROOT/toolchains/llvm-ios-build"
 TAG=llvmorg-15.0.7
 
+# CI restores archives and headers, not the LLVM Git checkout.
+if [[ "${GITHUB_ACTIONS:-}" == true && -s "$IOS/.madeira-cache.sha256" &&
+      -s "$IOS/lib/libLLVMCore.a" && -s "$IOS/lib/libLLVMSupport.a" &&
+      -f "$IOS/include/llvm/Config/llvm-config.h" && -f "$SRC/llvm/include/llvm/IR/Module.h" ]] &&
+   (cd "$IOS" && shasum -a 256 -c .madeira-cache.sha256 >/dev/null 2>&1); then
+  echo "Using the input-matched LLVM iOS cache"
+  exit 0
+fi
 
 mkdir -p "$ROOT/toolchains"
-if [[ ! -d "$SRC/.git" ]]; then
+if [[ ! -e "$SRC/.git" ]]; then
+  [[ ! -e "$SRC" ]] || {
+    echo "ERROR: incomplete LLVM cache or non-Git source directory: $SRC" >&2
+    exit 1
+  }
   git clone --depth 1 --branch "$TAG" https://github.com/llvm/llvm-project.git "$SRC"
 fi
 
@@ -60,3 +72,4 @@ compgen -G "$IOS/lib/libLLVM*.a" >/dev/null || {
   echo "ERROR: LLVM iOS build produced no static LLVM libraries" >&2
   exit 1
 }
+(cd "$IOS" && shasum -a 256 lib/libLLVM*.a) > "$IOS/.madeira-cache.sha256"

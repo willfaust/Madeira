@@ -42,37 +42,42 @@ static void ios_vulkan_surface_present(struct client_surface *client, HDC hdc)
 
 static const struct client_surface_funcs ios_vulkan_client_funcs =
 {
+    .size = sizeof(struct ios_vulkan_client_surface),
     .destroy = ios_vulkan_surface_destroy,
     .detach = ios_vulkan_surface_detach,
     .update = ios_vulkan_surface_update,
     .present = ios_vulkan_surface_present,
 };
 
-static VkResult ios_vulkan_surface_create(HWND hwnd, const struct vulkan_instance *instance,
-        VkSurfaceKHR *handle, struct client_surface **client)
+struct client_surface *winios_vulkan_client_surface_create( HWND hwnd, int format, BOOL raw )
+{
+    return client_surface_create( &ios_vulkan_client_funcs, hwnd, format, raw );
+}
+
+static VkResult ios_vulkan_surface_create( struct client_surface *client,
+        const struct vulkan_instance *instance, VkSurfaceKHR *handle )
 {
     struct ios_vulkan_client_surface *surface;
     VkResult result;
-    *client = NULL;
+    VkMetalSurfaceCreateInfoEXT info = {.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+
     *handle = VK_NULL_HANDLE;
+    if (client->funcs != &ios_vulkan_client_funcs) return VK_ERROR_SURFACE_LOST_KHR;
     if (!instance->host.instance || !instance->p_vkCreateMetalSurfaceEXT) return VK_ERROR_EXTENSION_NOT_PRESENT;
-    surface = client_surface_create(sizeof(*surface), &ios_vulkan_client_funcs, hwnd);
-    if (!surface) return VK_ERROR_OUT_OF_HOST_MEMORY;
-    surface->layer = madeira_vulkan_layer_acquire(hwnd);
-    if (!surface->layer) { client_surface_release(&surface->client); return VK_ERROR_SURFACE_LOST_KHR; }
-    VkMetalSurfaceCreateInfoEXT info = {.sType=VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
-        .pLayer=surface->layer};
-    result = instance->p_vkCreateMetalSurfaceEXT(instance->host.instance, &info, NULL, handle);
-    fprintf(stderr, "[vk-surface] HWND=%p layer=%p -> vkCreateMetalSurfaceEXT result=%d\n",
-            hwnd, surface->layer, result);
+    surface = CONTAINING_RECORD( client, struct ios_vulkan_client_surface, client );
+    if (!surface->layer) surface->layer = madeira_vulkan_layer_acquire( client->hwnd );
+    if (!surface->layer) return VK_ERROR_SURFACE_LOST_KHR;
+    info.pLayer = surface->layer;
+    result = instance->p_vkCreateMetalSurfaceEXT( instance->host.instance, &info, NULL, handle );
+    fprintf( stderr, "[vk-surface] HWND=%p layer=%p -> vkCreateMetalSurfaceEXT result=%d\n",
+             client->hwnd, surface->layer, result );
     if (result != VK_SUCCESS)
     {
         *handle = VK_NULL_HANDLE;
-        client_surface_release(&surface->client);
-        return result;
+        madeira_vulkan_layer_release( surface->layer );
+        surface->layer = NULL;
     }
-    *client = &surface->client;
-    return VK_SUCCESS;
+    return result;
 }
 
 static VkBool32 ios_vulkan_presentation_support(struct vulkan_physical_device *physical, uint32_t queue)

@@ -787,10 +787,12 @@ int ios_apply_resume_context( struct thread *thread, const struct context_data *
         if (!ios_safe_read( frame, f, sizeof(f) )) goto done;
         if (native->flags & SERVER_CTX_INTEGER)
         {
-            for (i = 0; i < 29; i++)
-                if (i != 18) *(uint64_t *)(f + i * 8) = native->integer.arm64_regs.x[i];
-            *(uint64_t *)(f + IOS_SCF_FP) = native->integer.arm64_regs.x[29];
-            *(uint64_t *)(f + IOS_SCF_LR) = native->integer.arm64_regs.x[30];
+            for (i = 0; i < 18; i++)
+                *(uint64_t *)(f + i * 8) = native->integer.arm64_regs.x0[i];
+            for (i = 19; i < 29; i++)
+                *(uint64_t *)(f + i * 8) = native->integer.arm64_regs.x19[i - 19];
+            *(uint64_t *)(f + IOS_SCF_FP) = native->integer.arm64_regs.x19[10];
+            *(uint64_t *)(f + IOS_SCF_LR) = native->integer.arm64_regs.x19[11];
         }
         *(uint64_t *)(f + IOS_SCF_SP)   = native->ctl.arm64_regs.sp;
         *(uint64_t *)(f + IOS_SCF_PC)   = native->ctl.arm64_regs.pc;
@@ -900,9 +902,10 @@ int ios_fill_thread_context( struct thread *thread,
         native->ctl.arm64_regs.sp     = arm.__sp;
         native->ctl.arm64_regs.pc     = arm.__pc;
         native->ctl.arm64_regs.pstate = arm.__cpsr;
-        for (i = 0; i < 29; i++) native->integer.arm64_regs.x[i] = arm.__x[i];
-        native->integer.arm64_regs.x[29] = arm.__fp;
-        native->integer.arm64_regs.x[30] = arm.__lr;
+        for (i = 0; i < 18; i++) native->integer.arm64_regs.x0[i] = arm.__x[i];
+        for (i = 19; i < 29; i++) native->integer.arm64_regs.x19[i - 19] = arm.__x[i];
+        native->integer.arm64_regs.x19[10] = arm.__fp;
+        native->integer.arm64_regs.x19[11] = arm.__lr;
         have_native = 1;
     }
 
@@ -957,10 +960,12 @@ int ios_fill_thread_context( struct thread *thread,
                     {
                         unsigned int i;
                         static int n_sub;
-                        for (i = 0; i < 29; i++)
-                            native->integer.arm64_regs.x[i] = *(uint64_t *)(f + i * 8);
-                        native->integer.arm64_regs.x[29] = *(uint64_t *)(f + IOS_SCF_FP);
-                        native->integer.arm64_regs.x[30] = *(uint64_t *)(f + IOS_SCF_LR);
+                        for (i = 0; i < 18; i++)
+                            native->integer.arm64_regs.x0[i] = *(uint64_t *)(f + i * 8);
+                        for (i = 19; i < 29; i++)
+                            native->integer.arm64_regs.x19[i - 19] = *(uint64_t *)(f + i * 8);
+                        native->integer.arm64_regs.x19[10] = *(uint64_t *)(f + IOS_SCF_FP);
+                        native->integer.arm64_regs.x19[11] = *(uint64_t *)(f + IOS_SCF_LR);
                         native->ctl.arm64_regs.sp     = fsp;
                         native->ctl.arm64_regs.pc     = fpc;
                         native->ctl.arm64_regs.pstate = *(uint32_t *)(f + IOS_SCF_CPSR);
