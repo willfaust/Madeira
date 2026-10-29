@@ -177,6 +177,7 @@
 		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
 		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
 		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
+		A1000F51 /* PadAssist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000F51 /* PadAssist.swift */; };
 		A1000244 /* Winios/WiniosGamepad.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000244 /* Winios/WiniosGamepad.c */; };
 		A1000203 /* HardwareInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000203 /* HardwareInput.swift */; };
 		A1000281 /* Winios/WiniosCursor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000281 /* Winios/WiniosCursor.c */; };
@@ -406,6 +407,7 @@
 		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestDisplay.swift; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
 		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
+		A2000F51 /* PadAssist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadAssist.swift"; sourceTree = "<group>"; };
 		A2000244 /* Winios/WiniosGamepad.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosGamepad.c"; sourceTree = "<group>"; };
 		A2000203 /* HardwareInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardwareInput.swift; sourceTree = "<group>"; };
 		A2000281 /* Winios/WiniosCursor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosCursor.c"; sourceTree = "<group>"; };
@@ -553,6 +555,7 @@
 				A2000281 /* Winios/WiniosCursor.c */,
 				A2000243 /* GamepadInput.swift */,
 				A2000260 /* PadKeyboardMouse.swift */,
+				A2000F51 /* PadAssist.swift */,
 				A2000002 /* ContentView.swift */,
 				A2000003 /* LogStore.swift */,
 				A2000077 /* MadeiraConfig.swift */,
@@ -927,6 +930,7 @@
 				A1000281 /* Winios/WiniosCursor.c in Sources */,
 				A1000243 /* GamepadInput.swift in Sources */,
 				A1000260 /* PadKeyboardMouse.swift in Sources */,
+				A1000F51 /* PadAssist.swift in Sources */,
 				A1000002 /* ContentView.swift in Sources */,
 				A1000003 /* LogStore.swift in Sources */,
 				A1000077 /* MadeiraConfig.swift in Sources */,
