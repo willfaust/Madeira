@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sun, 4 Oct 2026 19:55:00 +0200
+Subject: [PATCH] kk: a device pipeline cache and the Mesa disk cache
+
+KosmicKrisp had neither. A pipeline created with no VkPipelineCache, as
+DXVK creates all of its pipelines, was looked up in no cache at all: a
+shader that several pipelines share was translated to MSL for each, and
+every launch translated every shader again.
+
+- kk_CreateDevice makes the implicit device cache (vk.mem_cache), weakly
+  referenced as hk and nvk do, so a shader object lives only as long as a
+  pipeline uses it.
+- kk_physical_device_init_pipeline_cache creates the physical device's
+  disk cache. Its driver ID, also the pipeline-cache and shader-binary
+  UUIDs, hashes the driver build ID, the GPU family, the MSL version, the
+  disabled workarounds and forced robustness. The existing teardown
+  destroys it; the creation's failure path now does too.
+
+The directory and the size limit are the embedding app's, through Mesa's
+MESA_SHADER_CACHE_DIR and MESA_SHADER_CACHE_MAX_SIZE; MESA_SHADER_CACHE_DISABLE
+still turns it off. A disk-cache hit saves the NIR to MSL translation only:
+kk_deserialize_shader still builds the Metal library and pipeline.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-04-portal2-shader-cache.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_device.c          | 15 +++++++++++++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 20 ++++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index c4e0312..96bbcac 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -314,6 +314,18 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       dev->has_queue = true;
+    }
+ 
++   /* The cache for pipelines created without one (DXVK passes none). Without
++    * it the disk cache is never consulted, and a shader that several
++    * pipelines share is compiled for each. */
++   struct vk_pipeline_cache_create_info cache_info = {
++      .weak_ref = true,
++   };
++   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
++   if (dev->vk.mem_cache == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_queue;
++   }
++
+    result = kk_alloc_bo(dev, &dev->vk.base, 2u * KK_SINK_PAGE_SIZE, 0,
+                         &dev->sink_bo);
+    if (result != VK_SUCCESS)
+@@ -358,6 +370,8 @@ fail_meta:
+ fail_sink:
+    kk_destroy_bo(dev, dev->sink_bo);
+ fail_mem_cache:
++   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
++fail_queue:
+    if (dev->has_queue) {
+       kk_queue_finish(dev, &dev->queue);
+       dev->has_queue = false;
+@@ -394,6 +408,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    kk_device_finish_lib(dev);
+    kk_query_table_finish(dev, &dev->occlusion_queries);
+    kk_destroy_sampler_heap(dev, &dev->samplers);
++   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+ 
+    /* Geometry heap */
+    if (dev->heap)
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index c4fdbc0..5515c1f 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -982,12 +982,31 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
+                        sizeof(instance->driver_build_sha));
+ 
++   /* The MSL also depends on the GPU, the language version, the workarounds
++    * and forced robustness. */
++   _mesa_blake3_update(&blake3_ctx, &pdev->info.gpu_apple_family,
++                       sizeof(pdev->info.gpu_apple_family));
++   _mesa_blake3_update(&blake3_ctx, &pdev->info.msl_version,
++                       sizeof(pdev->info.msl_version));
++   _mesa_blake3_update(&blake3_ctx, &pdev->settings.disabled_workarounds,
++                       sizeof(pdev->settings.disabled_workarounds));
++   const uint64_t compiler_flags =
++      kk_mesa_debug_flags & KK_DEBUG_FORCE_ROBUSTNESS;
++   _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
++
+    unsigned char blake3[BLAKE3_KEY_LEN];
+    _mesa_blake3_final(&blake3_ctx, blake3);
+ 
+    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
++
++#ifdef ENABLE_SHADER_CACHE
++   /* The directory, size limit and eviction are Mesa's (MESA_SHADER_CACHE_*). */
++   char driver_id[BLAKE3_HEX_LEN];
++   _mesa_blake3_format(driver_id, blake3);
++   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", driver_id, 0);
++#endif
+ }
+ 
+ static void
+@@ -1232,6 +1251,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
+    return VK_SUCCESS;
+ 
+ fail_disk_cache:
++   kk_physical_device_free_disk_cache(pdev);
+    vk_physical_device_finish(&pdev->vk);
+ fail_mtl_dev:
+    mtl_release(pdev->mtl_dev_handle);

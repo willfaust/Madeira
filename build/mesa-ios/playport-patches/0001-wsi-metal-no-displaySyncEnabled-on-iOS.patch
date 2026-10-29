@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 14:47:14 +0200
+Subject: [PATCH 1/4] wsi/metal: no displaySyncEnabled on iOS
+
+CAMetalLayer.displaySyncEnabled is macOS only: the iOS SDK marks it
+unavailable, so wsi_common_metal_layer.m does not compile for iOS. An
+iOS layer always presents at the display's refresh, so there is no
+immediate mode to offer: leave the property alone there and advertise
+only VK_PRESENT_MODE_FIFO_KHR.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-kosmickrisp-ios-build.md
+Offered-upstream: no
+---
+ src/vulkan/wsi/wsi_common_metal.c       | 8 ++++++++
+ src/vulkan/wsi/wsi_common_metal_layer.m | 4 ++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 54542c6..5f6e7e4 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -20,6 +20,10 @@
+ 
+ #include <assert.h>
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
+ struct wsi_metal {
+    struct wsi_interface base;
+ 
+@@ -40,7 +44,11 @@ wsi_metal_surface_get_support(VkIcdSurfaceBase *surface,
+ }
+ 
+ static const VkPresentModeKHR present_modes[] = {
++#if !TARGET_OS_IPHONE
++   /* CAMetalLayer.displaySyncEnabled, which turns vsync off, is macOS only:
++    * an iOS layer always presents at the display's refresh. */
+    VK_PRESENT_MODE_IMMEDIATE_KHR,
++#endif
+    VK_PRESENT_MODE_FIFO_KHR,
+ };
+ 
+diff --git a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
+index 6308d70..3b103b7 100644
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -139,7 +139,9 @@ void
+ wsi_metal_layer_set_immediate(const CAMetalLayer *metal_layer,
+                               bool enable_immediate)
+ {
++#if !TARGET_OS_IPHONE
+    metal_layer.displaySyncEnabled = !enable_immediate;
++#endif
+ }
+ 
+ VkResult
+@@ -170,7 +172,9 @@ wsi_metal_layer_configure(const CAMetalLayer *metal_layer,
+       metal_layer.maximumDrawableCount = image_count;
+       metal_layer.drawableSize = (CGSize){.width = width, .height = height};
+       metal_layer.opaque = enable_opaque;
++#if !TARGET_OS_IPHONE
+       metal_layer.displaySyncEnabled = !enable_immediate;
++#endif
+       metal_layer.pixelFormat = metal_format;
+ 
+       metal_layer.colorspace = cg_color_space;

@@ -2680,6 +2680,14 @@ struct ContentView: View {
     /// to prepare code pages. Detach happens after Wine finishes + recovery.
     /// `profile` is a library entry whose launch profile applies to this run.
     private func runWineFullSequence(profile: LibraryEntry? = nil) {
+        if getenv("MESA_SHADER_CACHE_DIR") == nil,
+           let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("KosmicKrisp", isDirectory: true) {
+            do {
+                try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+                setenv("MESA_SHADER_CACHE_DIR", cache.path, 0)
+                setenv("MESA_SHADER_CACHE_MAX_SIZE", "512M", 0)
+            } catch { logStore.log("KosmicKrisp cache is unavailable.", level: .error) }
+        }
         guard jit_check_debugged() else {
             logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
             if profile != nil { LibraryModel.shared.launchFailed() }

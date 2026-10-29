@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 23:54:44 +0200
+Subject: [PATCH] wsi/metal: an opaque swap chain's layer is opaque on iOS
+
+For a hardware device the Metal WSI sets the layer's opaque to NO even
+when the swap chain asks for opaque composition, to work around a
+Metal 4 presentation bug. On iOS a layer that is not opaque is always
+composited (the Metal HUD reads Composited, not Direct): Hollow Knight
+under DXVK ran at 80 fps on a 120 Hz panel with 6.7 ms of GPU time.
+With the layer opaque it presents correctly, the HUD reads Direct and
+the game runs at 119 fps. Keep the workaround off iOS.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-vulkan-d3d11-d3d12.md
+Offered-upstream: no
+---
+ src/vulkan/wsi/wsi_common_metal.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 50bac21..049cde2 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -954,7 +954,15 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+     * be blitting to the drawable, which means rendering, we can
+     * set the framebuffer only usage.
+     */
++#if TARGET_OS_IPHONE
++   /* On iOS an opaque layer presents fine through Metal 4, and a layer that
++    * is not opaque is always composited: the display cannot scan it out
++    * directly (Metal HUD: "Composited" rather than "Direct"), which costs a
++    * compositor pass and a frame of latency on every present. */
++   const bool layer_opaque = opaque_composition;
++#else
+    const bool layer_opaque = opaque_composition && wsi_device->sw;
++#endif
+    const bool framebuffer_only = !wsi_device->sw;
+ 
+    VkResult result = wsi_metal_layer_configure(metal_surface->pLayer,

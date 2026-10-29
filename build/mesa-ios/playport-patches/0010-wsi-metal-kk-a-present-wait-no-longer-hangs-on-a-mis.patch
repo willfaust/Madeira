@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 20:47:47 +0200
+Subject: [PATCH] wsi/metal, kk: a present wait no longer hangs on a missed
+ presented handler; trace presents
+
+vkWaitForPresentKHR waited for the drawable's presented handler with the
+caller's timeout, which DXVK gives as infinite. On an iPhone, a DXVK game
+presented its first frame and then hung for good: its frame thread
+waited for that present, and the swapchain recreation after a
+VK_SUBOPTIMAL_KHR waited for the frame thread. Once the GPU work of the
+present is done (the present semaphore), wait for the handler at most
+100 ms, then treat the image as presented; a caller with a shorter
+timeout keeps its own.
+
+Trace the first 40 presents, presented handlers, present waits and queue
+commit completions (with any Metal error) to stderr, so a device log
+shows where presentation stops.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-vulkan-backend-build.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_queue.c | 10 ++++++++
+ src/vulkan/wsi/wsi_common_metal.c | 38 ++++++++++++++++++++++++++++++-
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index 5509318..4262593 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -6,6 +6,8 @@
+  */
+ 
+ #include "kk_queue.h"
++
++#include <stdio.h>
+ #include "kk_buffer.h"
+ #include "kk_cmd_buffer.h"
+ #include "kk_device.h"
+@@ -43,6 +45,14 @@ kk_queue_release_cmd_buffer_locked(struct kk_queue *queue,
+ static void
+ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
+ {
++   static unsigned traced;
++   if (traced < 40 || data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
++      traced++;
++      fprintf(stderr, "[kk-queue] commit done error=%d gpu=%.3f ms %s\n", (int)data->error,
++              (data->gpu_end - data->gpu_start) * 1000.0,
++              data->error_message ? data->error_message : "");
++      fflush(stderr);
++   }
+    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+       vk_device_set_lost(
+          &dev->vk, "Command queue error: %s, with message \"%s\"",
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 5f6e7e4..08f4cee 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -19,6 +19,20 @@
+ #include "vulkan/vulkan_core.h"
+ 
+ #include <assert.h>
++#include <stdio.h>
++#include <stdatomic.h>
++
++/* Bounded tracing of presents: what reaches the screen and what waits for
++ * it. The first KK_WSI_TRACE events of each kind go to stderr. */
++#define KK_WSI_TRACE 40
++static atomic_uint kk_wsi_trace_n[4];
++#define kk_wsi_trace(kind, ...)                                               \
++   do {                                                                       \
++      if (atomic_fetch_add(&kk_wsi_trace_n[kind], 1) < KK_WSI_TRACE) {        \
++         fprintf(stderr, "[kk-wsi] " __VA_ARGS__);                            \
++         fflush(stderr);                                                      \
++      }                                                                       \
++   } while (0)
+ 
+ #if defined(__APPLE__)
+ #include <TargetConditionals.h>
+@@ -683,6 +697,7 @@ wsi_metal_present_complete(void *present_info_ptr, uint64_t present_id)
+ {
+    struct wsi_metal_present_info *present_info = present_info_ptr;
+ 
++   kk_wsi_trace(0, "presented id=%llu\n", (unsigned long long)present_id);
+    mtx_lock(&present_info->mutex);
+    if (present_id > present_info->present_id) {
+       present_info->present_id = present_id;
+@@ -727,6 +742,9 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
+    uint32_t width = 0u, height = 0u;
+    wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
+    bool is_optimal = (width == chain->extent.width && height == chain->extent.height);
++   kk_wsi_trace(1, "present image=%u id=%llu wait=%d layer=%ux%u chain=%ux%u\n", image_index,
++                (unsigned long long)present_id, present_id && wsi_chain->present_wait_enabled,
++                width, height, chain->extent.width, chain->extent.height);
+    return is_optimal ? VK_SUCCESS : VK_SUBOPTIMAL_KHR;
+ }
+ 
+@@ -746,11 +764,25 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
+ 
+    /* Need to observe that the swapchain semaphore has been unsignalled,
+     * as this is guaranteed when a present is complete. */
++   kk_wsi_trace(2, "wait_for_present id=%llu timeout=%llu\n", (unsigned long long)waitValue,
++                (unsigned long long)timeout);
+    VkResult result = wsi_swapchain_wait_for_present_semaphore(
+       &chain->base, waitValue, timeout);
++   kk_wsi_trace(2, "wait_for_present id=%llu semaphore -> %d\n", (unsigned long long)waitValue, result);
+    if (result != VK_SUCCESS)
+       return result;
+ 
++   /* The presented handler is the only sign a drawable reached the display,
++    * and Core Animation does not call it for every drawable (one it drops,
++    * or one presented to a layer that is not composited). Once the GPU work
++    * is done (the semaphore above), wait for it at most a few frames, so a
++    * missed handler cannot hold a caller that waits with no timeout (DXVK's
++    * frame thread, and a swapchain recreation behind it) for good. */
++   const uint64_t handler_grace_ns = 100000000ull;
++   bool grace = timeout > handler_grace_ns;
++   if (grace)
++      abs_timeout = os_time_get_absolute_timeout(handler_grace_ns);
++
+    timespec_from_nsec(&abs_timespec, abs_timeout);
+ 
+    mtx_lock(&present_info->mutex);
+@@ -759,7 +791,10 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
+                                           &present_info->mutex,
+                                           &abs_timespec);
+       if (ret == thrd_timedout) {
+-         result = VK_TIMEOUT;
++         if (grace)
++            kk_wsi_trace(3, "no presented handler for id=%llu after the GPU finished; "
++                            "treating it as presented\n", (unsigned long long)waitValue);
++         result = grace ? VK_SUCCESS : VK_TIMEOUT;
+          break;
+       }
+       if (ret != thrd_success) {
+@@ -769,6 +804,7 @@ wsi_metal_swapchain_wait_for_present(struct wsi_swapchain *wsi_chain,
+    }
+ 
+    mtx_unlock(&present_info->mutex);
++   kk_wsi_trace(2, "wait_for_present id=%llu -> %d\n", (unsigned long long)waitValue, result);
+    return result;
+ }
+ 

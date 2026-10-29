@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 14:47:14 +0200
+Subject: [PATCH 2/4] vulkan: link CoreGraphics for the Metal WSI
+
+wsi_common_metal_layer.m calls CGColorSpaceCreateWithName and
+CGColorSpaceRelease and reads the kCGColorSpace* names. On macOS a
+framework KosmicKrisp links already brings CoreGraphics in; on iOS
+nothing does, and because libvulkan_kosmickrisp links with
+-undefined dynamic_lookup the missing symbols would surface only when
+dyld loads the driver. Name the framework.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-kosmickrisp-ios-build.md
+Offered-upstream: no
+---
+ src/vulkan/meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/vulkan/meson.build b/src/vulkan/meson.build
+index 614a33a..261babc 100644
+--- a/src/vulkan/meson.build
++++ b/src/vulkan/meson.build
+@@ -73,7 +73,7 @@ if with_platform_macos
+   vulkan_wsi_list += '-DVK_USE_PLATFORM_METAL_EXT'
+   vulkan_wsi_deps += dependency(
+     'appleframeworks',
+-    modules : ['QuartzCore', 'Metal']
++    modules : ['QuartzCore', 'Metal', 'CoreGraphics']
+   )
+ endif
+ 

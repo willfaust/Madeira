@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 14:47:14 +0200
+Subject: [PATCH 4/4] util: available memory on iOS is the process's limit
+
+os_get_available_system_memory() reports free plus inactive pages on
+Apple systems. An iOS app is killed at its own memory limit long before
+the system runs out of pages, so the Vulkan memory budget built from it
+(vk_physical_device_heap_budget_from_system) would promise memory the
+app cannot have. On iOS, report os_proc_available_memory(): what this
+process may still allocate before it reaches its limit.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-kosmickrisp-ios-build.md
+Offered-upstream: no
+---
+ src/util/os_misc.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index ea73839..5ed2201 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -73,6 +73,10 @@
+ #    include <mach/mach_init.h>
+ #    include <mach/vm_param.h>
+ #    include <mach/vm_statistics.h>
++#    include <TargetConditionals.h>
++#    if TARGET_OS_IPHONE
++#      include <os/proc.h>
++#    endif
+ #   endif
+ #elif DETECT_OS_HAIKU
+ #  include <kernel/OS.h>
+@@ -464,6 +468,11 @@ os_get_available_system_memory(uint64_t *size)
+    ret = GlobalMemoryStatusEx(&status);
+    *size = status.ullAvailPhys;
+    return (ret == true);
++#elif DETECT_OS_APPLE && TARGET_OS_IPHONE
++   /* An iOS app is limited by its own memory limit, not by the free pages of
++    * the system: report what the process may still allocate. */
++   *size = os_proc_available_memory();
++   return *size != 0;
+ #elif DETECT_OS_APPLE
+    vm_statistics64_data_t vm_stats;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
