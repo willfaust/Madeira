@@ -6,6 +6,7 @@
 // author's permission (see docs/STEAM_SIGNIN.md, "Provenance"). The sign-in
 // errors are the ones sign-in raises; the connection, library and download
 // errors belong to the owned library and downloads (docs/STEAM_LIBRARY.md).
+// Transport error policy adapted from kuscholar/iDeck; see docs/STEAM_LIBRARY.md.
 
 import Foundation
 
@@ -29,6 +30,8 @@ enum SteamError: LocalizedError, Equatable {
     // Connection
     case noServersAvailable
     case connectionFailed(String)
+    /// Safe transport identity only; no URL, headers or credential-bearing error payload.
+    case transportFailed(domain: String, code: Int)
     case connectionTimeout
     case disconnected
     /// The CM refused the logon with this EResult. Lets callers tell a revoked
@@ -74,6 +77,19 @@ enum SteamError: LocalizedError, Equatable {
             return "No Steam servers are available."
         case .connectionFailed(let reason):
             return "Connection failed: \(reason)"
+        case .transportFailed(let domain, let code):
+            if domain == NSURLErrorDomain {
+                switch URLError.Code(rawValue: code) {
+                case .secureConnectionFailed:
+                    return "Steam could not make a secure connection (\(code)). Check your network or VPN and try again."
+                case .serverCertificateHasBadDate, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+                    return "Steam could not verify the server certificate (\(code)). Check your device's date and network settings."
+                case .clientCertificateRejected, .clientCertificateRequired:
+                    return "Steam requested or rejected a client certificate (\(code)). Check your network or VPN settings."
+                default: break
+                }
+            }
+            return "Steam connection failed (\(domain), \(code))."
         case .connectionTimeout:
             return "Steam did not respond in time. Check your internet connection and try again."
         case .disconnected:
@@ -113,4 +129,23 @@ enum SteamError: LocalizedError, Equatable {
 enum SteamGuardType: String, Codable {
     case email = "email"
     case device = "device"          // Steam Mobile Authenticator
+}
+
+/// An endpoint/route negotiation failure can be isolated by trying another CM.
+/// Explicit trust failures and cancellation must not be hidden by retries.
+enum SteamCMTransportPolicy {
+    static func canTryAnotherServer(_ error: Error) -> Bool {
+        let failure = error as NSError
+        guard failure.domain == NSURLErrorDomain else { return false }
+        switch URLError.Code(rawValue: failure.code) {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .secureConnectionFailed: return true
+        default: return false
+        }
+    }
+    static func sanitized(_ error: Error) -> SteamError {
+        let failure = error as NSError
+        let domain = [NSURLErrorDomain, NSPOSIXErrorDomain].contains(failure.domain) ? failure.domain : "other"
+        return .transportFailed(domain: domain, code: failure.code)
+    }
 }

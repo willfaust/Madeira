@@ -434,6 +434,34 @@ devices; see the pull request for what was and was not device-tested), the Swift
 views, iOS background-task behaviour, and running a downloaded game (through
 Madeira Dock or as The game).
 
+## Steam connection recovery
+
+An initial WebSocket failure releases its task and session before another
+connection is tried. A connection request tries at most three distinct CM
+endpoints from Valve's directory. Timeouts, DNS and connection failures, and
+generic TLS negotiation failures can try another endpoint. Explicit server or
+client certificate failures, cancellation and offline errors stop immediately.
+Certificate and hostname verification remain URLSession's defaults. If the
+directory has no unused endpoint, the last transport error is retained.
+
+Transport errors retain only a known error domain and numeric code, without
+the failing URL, headers or error payload. Replaced connections cannot deliver
+messages or close a newer connection. Cancelling a pending handshake cancels
+its WebSocket, and a late success cannot publish a cancelled connection.
+
+The retry, endpoint-exclusion and cleanup code and host fixture are adapted
+from [kuscholar/iDeck at e3d845e](https://github.com/kuscholar/iDeck/tree/e3d845edd4cf46a247baea6d2cc398d7ba71812d)
+(`SteamConnection.swift`, `CMServerList.swift`, `SteamError.swift` and
+`tests/host/check-steam-cm-transport.py`). Madeira also guards successful receive
+callbacks and tests cancellation after a delayed success. Existing source
+copyright and licence notices are retained.
+
+Run `python3 tests/host/check-steam-cm-transport.py`. It compiles the production
+connection-loop and receive methods with scripted transports and the real
+endpoint-selection code. It checks retry bounds, cleanup, certificate failures,
+error redaction, cancellation and replacement connections. It does not establish
+live Steam, VPN, TLS-handshake or device behaviour.
+
 ## Not included, and limits
 
 - No Steam Cloud, no achievements, no workshop content, no DLC installation,
