@@ -2685,6 +2685,7 @@ struct ContentView: View {
             if profile != nil { LibraryModel.shared.launchFailed() }
             return
         }
+        GameBrowser.shared.start()
         // Steam downloads wait for the session, and the app's own Steam connection closes
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)

@@ -7,69 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A1000E07 /* EpicCloudSaves.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E07 /* EpicCloudSaves.swift */; };
-		A1000E06 /* EpicCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E06 /* EpicCloud.swift */; };
-		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
-		A1000521 /* MadeiraDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000521 /* MadeiraDockView.swift */; };
-		A1000650 /* DockStartScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000650 /* DockStartScreen.swift */; };
-		A1000978 /* LogSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000978 /* LogSummary.swift */; };
-		A1000530 /* Onboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000530 /* Onboarding.swift */; };
-		A1000540 /* ConfigCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000540 /* ConfigCatalog.swift */; };
-		A1000541 /* ConfigCatalog.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000541 /* ConfigCatalog.generated.swift */; };
-		A1000531 /* SteamGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000531 /* SteamGames.swift */; };
-		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
-		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
-		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
-		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
-		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
-		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
-		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
-		A1000920 /* ExternalDrives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* ExternalDrives.swift */; };
-		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
-		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
-		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
-		A1000E01 /* EpicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E01 /* EpicLibrary.swift */; };
-		A1000E02 /* EpicGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E02 /* EpicGames.swift */; };
-		A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E03 /* EpicAPI.swift */; };
-		A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E04 /* EpicFormats.swift */; };
-		A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E05 /* EpicDownloader.swift */; };
-		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
-		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
-		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
-		A100060A /* SwiftSteam/Content/DepotDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060A /* DepotDownloader.swift */; };
-		A100060B /* SwiftSteam/Content/DepotManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060B /* DepotManifest.swift */; };
-		A100060E /* SwiftSteam/Install/AppManifestWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060E /* AppManifestWriter.swift */; };
-		A100060F /* SwiftSteam/chunk_zip.c in Sources */ = {isa = PBXBuildFile; fileRef = A200060F /* chunk_zip.c */; };
-		A1000610 /* SwiftSteam/lzma_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000610 /* lzma_shim.c */; };
-		A1000611 /* SwiftSteam/zstd_edu.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000611 /* zstd_edu.c */; };
-		A1000603 /* SwiftSteam/Core/CMServerList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000603 /* CMServerList.swift */; };
-		A1000604 /* SwiftSteam/Core/LicenseListBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000604 /* LicenseListBox.swift */; };
-		A1000605 /* SwiftSteam/Core/SteamConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000605 /* SteamConnection.swift */; };
-		A1000606 /* SwiftSteam/Core/SteamMessageCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000606 /* SteamMessageCodec.swift */; };
-		A1000607 /* SwiftSteam/Core/SteamProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000607 /* SteamProtocol.swift */; };
-		A1000608 /* SwiftSteam/Core/SteamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000608 /* SteamSession.swift */; };
-		A1000616 /* SwiftSteam/Core/SteamCMSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000616 /* SteamCMSession.swift */; };
-		A100060C /* SwiftSteam/Library/SteamAppInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060C /* SteamAppInfo.swift */; };
-		A100060D /* SwiftSteam/Library/SteamLibraryFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060D /* SteamLibraryFetcher.swift */; };
-		A1000522 /* SteamKeyValues.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000522 /* SteamKeyValues.swift */; };
-		A1000523 /* SteamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000523 /* SteamRuntime.swift */; };
-		A1000524 /* DockInstallers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000524 /* DockInstallers.swift */; };
-		A1000542 /* DockStartProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000542 /* DockStartProgram.swift */; };
-		A1000913 /* DockReset.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000913 /* DockReset.swift */; };
-		A1000510 /* SwiftSteam/SteamSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000510 /* SteamSignIn.swift */; };
-		A1000511 /* SwiftSteam/SteamSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000511 /* SteamSignInView.swift */; };
-		A1000512 /* SwiftSteam/Auth/SteamAuthAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000512 /* SteamAuthAPI.swift */; };
-		A1000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000513 /* SteamCredentialAuth.swift */; };
-		A1000514 /* SwiftSteam/Auth/SteamQRAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000514 /* SteamQRAuth.swift */; };
-		A1000515 /* SwiftSteam/Auth/SteamTokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000515 /* SteamTokenStore.swift */; };
-		A1000516 /* SwiftSteam/Core/SteamError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000516 /* SteamError.swift */; };
-		A1000517 /* SwiftSteam/Proto/SteamProtoMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000517 /* SteamProtoMessages.swift */; };
-		A1000518 /* SwiftSteam/Helpers/SteamDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000518 /* SteamDevice.swift */; };
-		A1000519 /* SwiftSteam/Helpers/SteamLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000519 /* SteamLog.swift */; };
+		2CA2E0ECAB17387183994F18 /* GameBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */; };
+		79CAD4FC8F9DC4CA65DD6A24 /* GameBrowserKit in Frameworks */ = {isa = PBXBuildFile; productRef = F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */; };
 		A1000001 /* MadeiraApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* MadeiraApp.swift */; };
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
 		A1000003 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* LogStore.swift */; };
-		A1000077 /* MadeiraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000077 /* MadeiraConfig.swift */; };
 		A1000004 /* JITAllocator.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* JITAllocator.c */; };
 		A1000005 /* EntitlementChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000A /* EntitlementChecker.swift */; };
 		A1000006 /* FEXBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = A200000B /* FEXBridge.mm */; };
@@ -90,22 +32,6 @@
 		A1000033 /* wine_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000034 /* wine_stubs.c */; };
 		A1000034 /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000035 /* IOKit.framework */; };
 		A1000035 /* StikJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* StikJITHelper.swift */; };
-		A1000980 /* JITPoolMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000980 /* JITPoolMeter.swift */; };
-		B1000001 /* JITSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* JITSetup.swift */; };
-		B1000050 /* JITNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000050 /* JITNetwork.swift */; };
-		B1000002 /* JITBuiltInHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* JITBuiltInHost.swift */; };
-		B1000003 /* JITBuiltInMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
-		B1000040 /* JITPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000040 /* JITPairing.swift */; };
-		B1000060 /* SigningRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000060 /* SigningRefresh.swift */; };
-		B1000061 /* AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000061 /* AppleSignIn.swift */; };
-		B1000041 /* libmadeira_rppairing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000041 /* libmadeira_rppairing.a */; };
-		B1000004 /* madeira-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B2000004 /* madeira-jit.js */; };
-		B1000051 /* Madeira JIT.shortcut in Resources */ = {isa = PBXBuildFile; fileRef = B2000051 /* Madeira JIT.shortcut */; };
-		B1000005 /* ExtensionFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
-		B1000010 /* MadeiraJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000020 /* MadeiraJITHelper.swift */; };
-		B1000011 /* JITBuiltInMessages.swift in Helper Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
-		B1000014 /* ExtensionFoundation.framework in Helper Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; };
-		B1000016 /* MadeiraJITHelper.appex in Embed JIT Helper */ = {isa = PBXBuildFile; fileRef = B2000022 /* MadeiraJITHelper.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A1000040 /* prefix-template.tar.gz in Resources */ = {isa = PBXBuildFile; fileRef = A2000040 /* prefix-template.tar.gz */; };
 		A1000041 /* PrefixExtractor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000041 /* PrefixExtractor.c */; };
 		A1000042 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000042 /* libz.tbd */; };
@@ -115,25 +41,34 @@
 		A1000053 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000053 /* QuartzCore.framework */; };
 		A1000054 /* MetalFX.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000054 /* MetalFX.framework */; };
 		A1000055 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000055 /* libsqlite3.tbd */; };
-		A1000615 /* liblzma.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000615 /* liblzma.tbd */; };
-		A1000701 /* Winios/WiniosGL.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000701 /* Winios/WiniosGL.m */; };
-		A1000702 /* OpenGLES.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000702 /* OpenGLES.framework */; };
-		A1000703 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000703 /* IOSurface.framework */; };
-		A1000704 /* compat in Resources */ = {isa = PBXBuildFile; fileRef = A2000704 /* compat */; };
-		A1000705 /* gl in Resources */ = {isa = PBXBuildFile; fileRef = A2000705 /* gl */; };
-		A1000707 /* vulkan in Resources */ = {isa = PBXBuildFile; fileRef = A2000707 /* vulkan */; };
 		A1000060 /* libwin32u_unix.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000060 /* libwin32u_unix.a */; };
 		A1000070 /* Winios/Winios.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000070 /* Winios/Winios.m */; };
-		A1000247 /* PadOutput.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000247 /* PadOutput.m */; };
-		C1000F01 /* PhonePointer.m in Sources */ = {isa = PBXBuildFile; fileRef = C2000F01 /* PhonePointer.m */; };
+		A1000077 /* MadeiraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000077 /* MadeiraConfig.swift */; };
 		A1000080 /* arm64ec-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000080 /* arm64ec-windows */; };
-		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
 		A1000081 /* x86_64-vcruntime in Resources */ = {isa = PBXBuildFile; fileRef = A2000081 /* x86_64-vcruntime */; };
 		A1000082 /* x86_64-opengl in Resources */ = {isa = PBXBuildFile; fileRef = A2000082 /* x86_64-opengl */; };
 		A1000090 /* libgnutls.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000090 /* libgnutls.a */; };
 		A1000091 /* libhogweed.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000091 /* libhogweed.a */; };
 		A1000092 /* libnettle.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000092 /* libnettle.a */; };
 		A1000093 /* libgmp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000093 /* libgmp.a */; };
+		A1000094 /* cacert.pem in Resources */ = {isa = PBXBuildFile; fileRef = A2000094 /* cacert.pem */; };
+		A10000D1 /* d3d12 in Resources */ = {isa = PBXBuildFile; fileRef = A20000D1 /* d3d12 */; };
+		A10000D2 /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = A20000D2 /* licenses */; };
+		A10000F1 /* legal in Resources */ = {isa = PBXBuildFile; fileRef = A20000F1 /* legal */; };
+		A1000200 /* LogPattern.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000200 /* LogPattern.swift */; };
+		A1000201 /* LogTail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000201 /* LogTail.swift */; };
+		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
+		A1000203 /* HardwareInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000203 /* HardwareInput.swift */; };
+		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
+		A1000210 /* i386-windows in Resources */ = {isa = PBXBuildFile; fileRef = A2000210 /* i386-windows */; };
+		A1000213 /* LibraryBCD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000213 /* LibraryBCD.swift */; };
+		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
+		A1000244 /* Winios/WiniosGamepad.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000244 /* Winios/WiniosGamepad.c */; };
+		A1000245 /* TouchGamepad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000245 /* TouchGamepad.swift */; };
+		A1000246 /* TouchControlPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000246 /* TouchControlPresets.swift */; };
+		A1000247 /* PadOutput.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000247 /* PadOutput.m */; };
+		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
+		A1000281 /* Winios/WiniosCursor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000281 /* Winios/WiniosCursor.c */; };
 		A1000300 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000300 /* VideoToolbox.framework */; };
 		A1000301 /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000301 /* CoreMedia.framework */; };
 		A1000302 /* CoreVideo.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000302 /* CoreVideo.framework */; };
@@ -143,46 +78,113 @@
 		A1000306 /* libavcodec.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000306 /* libavcodec.a */; };
 		A1000307 /* libswresample.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000307 /* libswresample.a */; };
 		A1000308 /* libavutil.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000308 /* libavutil.a */; };
-		A1000094 /* cacert.pem in Resources */ = {isa = PBXBuildFile; fileRef = A2000094 /* cacert.pem */; };
-		A10000D1 /* d3d12 in Resources */ = {isa = PBXBuildFile; fileRef = A20000D1 /* d3d12 */; };
-		A10000D2 /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = A20000D2 /* licenses */; };
-		A10000F1 /* legal in Resources */ = {isa = PBXBuildFile; fileRef = A20000F1 /* legal */; };
-		A1000200 /* LogPattern.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000200 /* LogPattern.swift */; };
-		A1000201 /* LogTail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000201 /* LogTail.swift */; };
-		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
-		A1000213 /* LibraryBCD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000213 /* LibraryBCD.swift */; };
-		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
-		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
-		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
+		A1000400 /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000400 /* Library.swift */; };
+		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
+		A1000510 /* SwiftSteam/SteamSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000510 /* SwiftSteam/SteamSignIn.swift */; };
+		A1000511 /* SwiftSteam/SteamSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000511 /* SwiftSteam/SteamSignInView.swift */; };
+		A1000512 /* SwiftSteam/Auth/SteamAuthAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000512 /* SwiftSteam/Auth/SteamAuthAPI.swift */; };
+		A1000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift */; };
+		A1000514 /* SwiftSteam/Auth/SteamQRAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000514 /* SwiftSteam/Auth/SteamQRAuth.swift */; };
+		A1000515 /* SwiftSteam/Auth/SteamTokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000515 /* SwiftSteam/Auth/SteamTokenStore.swift */; };
+		A1000516 /* SwiftSteam/Core/SteamError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000516 /* SwiftSteam/Core/SteamError.swift */; };
+		A1000517 /* SwiftSteam/Proto/SteamProtoMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000517 /* SwiftSteam/Proto/SteamProtoMessages.swift */; };
+		A1000518 /* SwiftSteam/Helpers/SteamDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000518 /* SwiftSteam/Helpers/SteamDevice.swift */; };
+		A1000519 /* SwiftSteam/Helpers/SteamLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000519 /* SwiftSteam/Helpers/SteamLog.swift */; };
+		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
+		A1000521 /* MadeiraDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000521 /* MadeiraDockView.swift */; };
+		A1000522 /* SteamKeyValues.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000522 /* SteamKeyValues.swift */; };
+		A1000523 /* SteamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000523 /* SteamRuntime.swift */; };
+		A1000524 /* DockInstallers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000524 /* DockInstallers.swift */; };
+		A1000530 /* Onboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000530 /* Onboarding.swift */; };
+		A1000531 /* SteamGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000531 /* SteamGames.swift */; };
+		A1000540 /* ConfigCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000540 /* ConfigCatalog.swift */; };
+		A1000541 /* ConfigCatalog.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000541 /* ConfigCatalog.generated.swift */; };
+		A1000542 /* DockStartProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000542 /* DockStartProgram.swift */; };
+		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
+		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
+		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
+		A1000603 /* SwiftSteam/Core/CMServerList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000603 /* SwiftSteam/Core/CMServerList.swift */; };
+		A1000604 /* SwiftSteam/Core/LicenseListBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000604 /* SwiftSteam/Core/LicenseListBox.swift */; };
+		A1000605 /* SwiftSteam/Core/SteamConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000605 /* SwiftSteam/Core/SteamConnection.swift */; };
+		A1000606 /* SwiftSteam/Core/SteamMessageCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000606 /* SwiftSteam/Core/SteamMessageCodec.swift */; };
+		A1000607 /* SwiftSteam/Core/SteamProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000607 /* SwiftSteam/Core/SteamProtocol.swift */; };
+		A1000608 /* SwiftSteam/Core/SteamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000608 /* SwiftSteam/Core/SteamSession.swift */; };
+		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* SwiftSteam/Content/ContentDecryptor.swift */; };
+		A100060A /* SwiftSteam/Content/DepotDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060A /* SwiftSteam/Content/DepotDownloader.swift */; };
+		A100060B /* SwiftSteam/Content/DepotManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060B /* SwiftSteam/Content/DepotManifest.swift */; };
+		A100060C /* SwiftSteam/Library/SteamAppInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060C /* SwiftSteam/Library/SteamAppInfo.swift */; };
+		A100060D /* SwiftSteam/Library/SteamLibraryFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060D /* SwiftSteam/Library/SteamLibraryFetcher.swift */; };
+		A100060E /* SwiftSteam/Install/AppManifestWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060E /* SwiftSteam/Install/AppManifestWriter.swift */; };
+		A100060F /* SwiftSteam/chunk_zip.c in Sources */ = {isa = PBXBuildFile; fileRef = A200060F /* SwiftSteam/chunk_zip.c */; };
+		A1000610 /* SwiftSteam/lzma_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000610 /* SwiftSteam/lzma_shim.c */; };
+		A1000611 /* SwiftSteam/zstd_edu.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000611 /* SwiftSteam/zstd_edu.c */; };
+		A1000615 /* liblzma.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000615 /* liblzma.tbd */; };
+		A1000616 /* SwiftSteam/Core/SteamCMSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000616 /* SwiftSteam/Core/SteamCMSession.swift */; };
+		A1000650 /* DockStartScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000650 /* DockStartScreen.swift */; };
+		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
+		A1000701 /* Winios/WiniosGL.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000701 /* Winios/WiniosGL.m */; };
+		A1000702 /* OpenGLES.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000702 /* OpenGLES.framework */; };
+		A1000703 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000703 /* IOSurface.framework */; };
+		A1000704 /* compat in Resources */ = {isa = PBXBuildFile; fileRef = A2000704 /* compat */; };
+		A1000705 /* gl in Resources */ = {isa = PBXBuildFile; fileRef = A2000705 /* gl */; };
+		A1000707 /* vulkan in Resources */ = {isa = PBXBuildFile; fileRef = A2000707 /* vulkan */; };
+		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
+		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
+		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
+		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
+		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
+		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
+		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
-		A1000400 /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000400 /* Library.swift */; };
-		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
-		A1000976 /* LibraryGridZoomStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000976 /* LibraryGridZoomStart.swift */; };
-		A1000975 /* LibraryGridZoomIdle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000975 /* LibraryGridZoomIdle.swift */; };
-		A1000974 /* LibraryGridZoomHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000974 /* LibraryGridZoomHaptics.swift */; };
-		A1000973 /* DeferredMainWork.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000973 /* DeferredMainWork.swift */; };
-		A1000972 /* InteractionFrameRate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000972 /* InteractionFrameRate.swift */; };
-		A1000970 /* LibraryGridZoomBlend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000970 /* LibraryGridZoomBlend.swift */; };
-		A1000969 /* LibraryGridGlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000969 /* LibraryGridGlow.swift */; };
-		A1000968 /* LibraryGridCardCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000968 /* LibraryGridCardCell.swift */; };
-		A1000967 /* LibraryGridZoomStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000967 /* LibraryGridZoomStage.swift */; };
-		A1000966 /* LibraryGridZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000966 /* LibraryGridZoom.swift */; };
-		A1000965 /* LibraryGridPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000965 /* LibraryGridPage.swift */; };
-		A1000964 /* LibraryGridHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000964 /* LibraryGridHost.swift */; };
-		A1000963 /* LibraryCoverCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000963 /* LibraryCoverCache.swift */; };
-		A1000962 /* LibraryGridZoomScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000962 /* LibraryGridZoomScene.swift */; };
-		A1000961 /* LibraryGridZoomModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000961 /* LibraryGridZoomModel.swift */; };
+		A1000913 /* DockReset.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000913 /* DockReset.swift */; };
+		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
+		A1000920 /* ExternalDrives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* ExternalDrives.swift */; };
+		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
 		A1000960 /* LibraryGridLevels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000960 /* LibraryGridLevels.swift */; };
-		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
-		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
-		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
-		A1000244 /* Winios/WiniosGamepad.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000244 /* Winios/WiniosGamepad.c */; };
-		A1000203 /* HardwareInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000203 /* HardwareInput.swift */; };
-		A1000281 /* Winios/WiniosCursor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000281 /* Winios/WiniosCursor.c */; };
-		A1000245 /* TouchGamepad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000245 /* TouchGamepad.swift */; };
+		A1000961 /* LibraryGridZoomModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000961 /* LibraryGridZoomModel.swift */; };
+		A1000962 /* LibraryGridZoomScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000962 /* LibraryGridZoomScene.swift */; };
+		A1000963 /* LibraryCoverCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000963 /* LibraryCoverCache.swift */; };
+		A1000964 /* LibraryGridHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000964 /* LibraryGridHost.swift */; };
+		A1000965 /* LibraryGridPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000965 /* LibraryGridPage.swift */; };
+		A1000966 /* LibraryGridZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000966 /* LibraryGridZoom.swift */; };
+		A1000967 /* LibraryGridZoomStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000967 /* LibraryGridZoomStage.swift */; };
+		A1000968 /* LibraryGridCardCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000968 /* LibraryGridCardCell.swift */; };
+		A1000969 /* LibraryGridGlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000969 /* LibraryGridGlow.swift */; };
+		A1000970 /* LibraryGridZoomBlend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000970 /* LibraryGridZoomBlend.swift */; };
+		A1000972 /* InteractionFrameRate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000972 /* InteractionFrameRate.swift */; };
+		A1000973 /* DeferredMainWork.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000973 /* DeferredMainWork.swift */; };
+		A1000974 /* LibraryGridZoomHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000974 /* LibraryGridZoomHaptics.swift */; };
+		A1000975 /* LibraryGridZoomIdle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000975 /* LibraryGridZoomIdle.swift */; };
+		A1000976 /* LibraryGridZoomStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000976 /* LibraryGridZoomStart.swift */; };
+		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
+		A1000978 /* LogSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000978 /* LogSummary.swift */; };
+		A1000980 /* JITPoolMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000980 /* JITPoolMeter.swift */; };
+		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
+		A1000E01 /* EpicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E01 /* EpicLibrary.swift */; };
+		A1000E02 /* EpicGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E02 /* EpicGames.swift */; };
+		A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E03 /* SwiftEpic/EpicAPI.swift */; };
+		A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E04 /* SwiftEpic/EpicFormats.swift */; };
+		A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E05 /* SwiftEpic/EpicDownloader.swift */; };
+		A1000E06 /* EpicCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E06 /* EpicCloud.swift */; };
+		A1000E07 /* SwiftEpic/EpicCloudSaves.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E07 /* SwiftEpic/EpicCloudSaves.swift */; };
 		A1000F01 /* GestureZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000F01 /* GestureZones.swift */; };
-		A1000246 /* TouchControlPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000246 /* TouchControlPresets.swift */; };
+		B1000001 /* JITSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* JITSetup.swift */; };
+		B1000002 /* JITBuiltInHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* JITBuiltInHost.swift */; };
+		B1000003 /* JITBuiltInMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
+		B1000004 /* madeira-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B2000004 /* madeira-jit.js */; };
+		B1000005 /* ExtensionFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+		B1000010 /* MadeiraJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000020 /* MadeiraJITHelper.swift */; };
+		B1000011 /* JITBuiltInMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* JITBuiltInMessages.swift */; };
+		B1000014 /* ExtensionFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; };
+		B1000016 /* MadeiraJITHelper.appex in Embed JIT Helper */ = {isa = PBXBuildFile; fileRef = B2000022 /* MadeiraJITHelper.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B1000040 /* JITPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000040 /* JITPairing.swift */; };
+		B1000041 /* libmadeira_rppairing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000041 /* libmadeira_rppairing.a */; };
+		B1000050 /* JITNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000050 /* JITNetwork.swift */; };
+		B1000051 /* Madeira JIT.shortcut in Resources */ = {isa = PBXBuildFile; fileRef = B2000051 /* Madeira JIT.shortcut */; };
+		B1000060 /* SigningRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000060 /* SigningRefresh.swift */; };
+		B1000061 /* AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000061 /* AppleSignIn.swift */; };
+		C1000F01 /* PhonePointer.m in Sources */ = {isa = PBXBuildFile; fileRef = C2000F01 /* PhonePointer.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -220,81 +222,19 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		A2000E07 /* EpicCloudSaves.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicCloudSaves.swift"; sourceTree = "<group>"; };
-		A2000E06 /* EpicCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicCloud.swift"; sourceTree = "<group>"; };
-		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
-		A2000521 /* MadeiraDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDockView.swift"; sourceTree = "<group>"; };
-		A2000650 /* DockStartScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartScreen.swift"; sourceTree = "<group>"; };
-		A2000978 /* LogSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogSummary.swift"; sourceTree = "<group>"; };
-		A2000530 /* Onboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Onboarding.swift"; sourceTree = "<group>"; };
-		A2000540 /* ConfigCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConfigCatalog.swift"; sourceTree = "<group>"; };
-		A2000541 /* ConfigCatalog.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConfigCatalog.generated.swift"; sourceTree = "<group>"; };
-		A2000531 /* SteamGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamGames.swift"; sourceTree = "<group>"; };
-		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
-		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
-		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
-		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
-		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
-		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
-		A2000920 /* ExternalDrives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalDrives.swift"; sourceTree = "<group>"; };
-		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
-		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
-		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
-		A2000E01 /* EpicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicLibrary.swift"; sourceTree = "<group>"; };
-		A2000E02 /* EpicGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicGames.swift"; sourceTree = "<group>"; };
-		A2000E03 /* EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicAPI.swift"; sourceTree = "<group>"; };
-		A2000E04 /* EpicFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicFormats.swift"; sourceTree = "<group>"; };
-		A2000E05 /* EpicDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicDownloader.swift"; sourceTree = "<group>"; };
-		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
-		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
-		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
-		A200060A /* DepotDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/DepotDownloader.swift"; sourceTree = "<group>"; };
-		A200060B /* DepotManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/DepotManifest.swift"; sourceTree = "<group>"; };
-		A200060E /* AppManifestWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Install/AppManifestWriter.swift"; sourceTree = "<group>"; };
-		A200060F /* chunk_zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/chunk_zip.c"; sourceTree = "<group>"; };
-		A2000610 /* lzma_shim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/lzma_shim.c"; sourceTree = "<group>"; };
-		A2000611 /* zstd_edu.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/zstd_edu.c"; sourceTree = "<group>"; };
-		A2000612 /* chunk_zip.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/chunk_zip.h"; sourceTree = "<group>"; };
-		A2000613 /* lzma_shim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/lzma_shim.h"; sourceTree = "<group>"; };
-		A2000614 /* zstd_edu.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/zstd_edu.h"; sourceTree = "<group>"; };
-		A2000603 /* CMServerList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/CMServerList.swift"; sourceTree = "<group>"; };
-		A2000604 /* LicenseListBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/LicenseListBox.swift"; sourceTree = "<group>"; };
-		A2000605 /* SteamConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamConnection.swift"; sourceTree = "<group>"; };
-		A2000606 /* SteamMessageCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamMessageCodec.swift"; sourceTree = "<group>"; };
-		A2000607 /* SteamProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamProtocol.swift"; sourceTree = "<group>"; };
-		A2000608 /* SteamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamSession.swift"; sourceTree = "<group>"; };
-		A2000616 /* SteamCMSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamCMSession.swift"; sourceTree = "<group>"; };
-		A200060C /* SteamAppInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamAppInfo.swift"; sourceTree = "<group>"; };
-		A200060D /* SteamLibraryFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamLibraryFetcher.swift"; sourceTree = "<group>"; };
-		A2000522 /* SteamKeyValues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamKeyValues.swift"; sourceTree = "<group>"; };
-		A2000523 /* SteamRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamRuntime.swift"; sourceTree = "<group>"; };
-		A2000524 /* DockInstallers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockInstallers.swift"; sourceTree = "<group>"; };
-		A2000542 /* DockStartProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartProgram.swift"; sourceTree = "<group>"; };
-		A2000913 /* DockReset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockReset.swift; sourceTree = "<group>"; };
-		A2000510 /* SteamSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/SteamSignIn.swift"; sourceTree = "<group>"; };
-		A2000511 /* SteamSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/SteamSignInView.swift"; sourceTree = "<group>"; };
-		A2000512 /* SteamAuthAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamAuthAPI.swift"; sourceTree = "<group>"; };
-		A2000513 /* SteamCredentialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamCredentialAuth.swift"; sourceTree = "<group>"; };
-		A2000514 /* SteamQRAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamQRAuth.swift"; sourceTree = "<group>"; };
-		A2000515 /* SteamTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamTokenStore.swift"; sourceTree = "<group>"; };
-		A2000516 /* SteamError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamError.swift"; sourceTree = "<group>"; };
-		A2000517 /* SteamProtoMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Proto/SteamProtoMessages.swift"; sourceTree = "<group>"; };
-		A2000518 /* SteamDevice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamDevice.swift"; sourceTree = "<group>"; };
-		A2000519 /* SteamLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamLog.swift"; sourceTree = "<group>"; };
-		A2000001 /* MadeiraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraApp.swift; sourceTree = "<group>"; };
-		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		A2000003 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
-		A2000077 /* MadeiraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraConfig.swift; sourceTree = "<group>"; };
-		A2000004 /* JITAllocator.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = JITAllocator.c; sourceTree = "<group>"; };
-		A2000005 /* JITAllocator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = JITAllocator.h; sourceTree = "<group>"; };
+		8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */ = {isa = PBXFileReference; explicitFileType = sourcecode.swift; lastKnownFileType = sourcecode.swift; name = GameBrowser.swift; path = "GameBrowser.swift"; sourceTree = "<group>"; };
+		A2000001 /* MadeiraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraApp.swift"; sourceTree = "<group>"; };
+		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ContentView.swift"; sourceTree = "<group>"; };
+		A2000003 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogStore.swift"; sourceTree = "<group>"; };
+		A2000004 /* JITAllocator.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "JITAllocator.c"; sourceTree = "<group>"; };
+		A2000005 /* JITAllocator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "JITAllocator.h"; sourceTree = "<group>"; };
 		A2000006 /* Madeira-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Madeira-Bridging-Header.h"; sourceTree = "<group>"; };
-		A2000007 /* Madeira.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Madeira.entitlements; sourceTree = "<group>"; };
-		A2000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		A2000009 /* Madeira.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Madeira.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A200000A /* EntitlementChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntitlementChecker.swift; sourceTree = "<group>"; };
-		A200000B /* FEXBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FEXBridge.mm; sourceTree = "<group>"; };
-		A200000C /* FEXBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FEXBridge.h; sourceTree = "<group>"; };
+		A2000007 /* Madeira.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Madeira.entitlements"; sourceTree = "<group>"; };
+		A2000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info.plist"; sourceTree = "<group>"; };
+		A2000009 /* Madeira.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Madeira.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A200000A /* EntitlementChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EntitlementChecker.swift"; sourceTree = "<group>"; };
+		A200000B /* FEXBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "FEXBridge.mm"; sourceTree = "<group>"; };
+		A200000C /* FEXBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "FEXBridge.h"; sourceTree = "<group>"; };
 		A2000010 /* libFEXCore.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libFEXCore.a; path = "../../FEX/build-ios/FEXCore/Source/libFEXCore.a"; sourceTree = "<group>"; };
 		A2000011 /* libFEXCore_Base.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libFEXCore_Base.a; path = "../../FEX/build-ios/FEXCore/Source/libFEXCore_Base.a"; sourceTree = "<group>"; };
 		A2000012 /* libfmt.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libfmt.a; path = "../../FEX/build-ios/External/fmt/libfmt.a"; sourceTree = "<group>"; };
@@ -303,115 +243,178 @@
 		A2000015 /* libsoftfloat_3e.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libsoftfloat_3e.a; path = "../../FEX/build-ios/External/SoftFloat-3e/libsoftfloat_3e.a"; sourceTree = "<group>"; };
 		A2000016 /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
 		A2000017 /* libJemallocLibs.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libJemallocLibs.a; path = "../../FEX/build-ios/FEXCore/Source/libJemallocLibs.a"; sourceTree = "<group>"; };
-		A200001E /* WineServerBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WineServerBridge.m; sourceTree = "<group>"; };
-		A200001F /* WineServerBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WineServerBridge.h; sourceTree = "<group>"; };
-		A2000020 /* libwineserver.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwineserver.a; sourceTree = "<group>"; };
-		A2000021 /* nls */ = {isa = PBXFileReference; lastKnownFileType = folder; path = nls; sourceTree = "<group>"; };
-		A2000030 /* WineProcessBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WineProcessBridge.m; sourceTree = "<group>"; };
-		A2000031 /* WineProcessBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WineProcessBridge.h; sourceTree = "<group>"; };
-		A2000032 /* libntdll_unix.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libntdll_unix.a; sourceTree = "<group>"; };
+		A200001E /* WineServerBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "WineServerBridge.m"; sourceTree = "<group>"; };
+		A200001F /* WineServerBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WineServerBridge.h"; sourceTree = "<group>"; };
+		A2000020 /* libwineserver.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libwineserver.a"; sourceTree = "<group>"; };
+		A2000021 /* nls */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "nls"; sourceTree = "<group>"; };
+		A2000030 /* WineProcessBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "WineProcessBridge.m"; sourceTree = "<group>"; };
+		A2000031 /* WineProcessBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WineProcessBridge.h"; sourceTree = "<group>"; };
+		A2000032 /* libntdll_unix.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libntdll_unix.a"; sourceTree = "<group>"; };
 		A2000033 /* aarch64-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "aarch64-windows"; sourceTree = "<group>"; };
-		A2000034 /* wine_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = wine_stubs.c; sourceTree = "<group>"; };
-		A2000035 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = System/Library/Frameworks/IOKit.framework; sourceTree = SDKROOT; };
-		A2000036 /* StikJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StikJITHelper.swift; sourceTree = "<group>"; };
-		A2000980 /* JITPoolMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPoolMeter.swift; sourceTree = "<group>"; };
-		B2000001 /* JITSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITSetup.swift; sourceTree = "<group>"; };
-		B2000050 /* JITNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITNetwork.swift; sourceTree = "<group>"; };
-		B2000002 /* JITBuiltInHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInHost.swift; sourceTree = "<group>"; };
-		B2000003 /* JITBuiltInMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITBuiltInMessages.swift; sourceTree = "<group>"; };
-		B2000040 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JITPairing.swift; sourceTree = "<group>"; };
-		B2000060 /* SigningRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SigningRefresh.swift; sourceTree = "<group>"; };
-		B2000061 /* AppleSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSignIn.swift; sourceTree = "<group>"; };
-		B2000041 /* libmadeira_rppairing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libmadeira_rppairing.a; sourceTree = "<group>"; };
-		B2000042 /* MadeiraRPPairing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MadeiraRPPairing.h; sourceTree = "<group>"; };
-		B2000004 /* madeira-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "madeira-jit.js"; sourceTree = "<group>"; };
-		B2000051 /* Madeira JIT.shortcut */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Madeira JIT.shortcut"; sourceTree = "<group>"; };
-		B2000010 /* ExtensionFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ExtensionFoundation.framework; path = System/Library/Frameworks/ExtensionFoundation.framework; sourceTree = SDKROOT; };
-		B2000020 /* MadeiraJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraJITHelper.swift; sourceTree = "<group>"; };
-		B2000021 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		B2000022 /* MadeiraJITHelper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MadeiraJITHelper.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		B2000030 /* StikJIT.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Frameworks/StikJIT.xcframework; sourceTree = SOURCE_ROOT; };
+		A2000034 /* wine_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "wine_stubs.c"; sourceTree = "<group>"; };
+		A2000035 /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = "System/Library/Frameworks/IOKit.framework"; sourceTree = SDKROOT; };
+		A2000036 /* StikJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "StikJITHelper.swift"; sourceTree = "<group>"; };
 		A2000040 /* prefix-template.tar.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "prefix-template.tar.gz"; sourceTree = "<group>"; };
-		A2000041 /* PrefixExtractor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = PrefixExtractor.c; sourceTree = "<group>"; };
-		A2000042 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
-		A2000043 /* PrefixExtractor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrefixExtractor.h; sourceTree = "<group>"; };
-		A2000050 /* IOSDisplayShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = IOSDisplayShim.m; sourceTree = "<group>"; };
-		A2000051 /* libdxmt_combined.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libdxmt_combined.a; sourceTree = "<group>"; };
-		A2000052 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
-		A2000053 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
-		A2000054 /* MetalFX.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalFX.framework; path = System/Library/Frameworks/MetalFX.framework; sourceTree = SDKROOT; };
-		A2000055 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
-		A2000615 /* liblzma.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = liblzma.tbd; path = usr/lib/liblzma.tbd; sourceTree = SDKROOT; };
-		A2000701 /* Winios/WiniosGL.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/WiniosGL.m; sourceTree = "<group>"; };
-		A2000702 /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = System/Library/Frameworks/OpenGLES.framework; sourceTree = SDKROOT; };
-		A2000703 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
-		A2000704 /* compat */ = {isa = PBXFileReference; lastKnownFileType = folder; path = compat; sourceTree = "<group>"; };
-		A2000705 /* gl */ = {isa = PBXFileReference; lastKnownFileType = folder; path = gl; sourceTree = "<group>"; };
-		A2000707 /* vulkan */ = {isa = PBXFileReference; lastKnownFileType = folder; path = vulkan; sourceTree = "<group>"; };
-		A2000056 /* IOSDisplayShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = IOSDisplayShim.h; sourceTree = "<group>"; };
-		A2000060 /* libwin32u_unix.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libwin32u_unix.a; sourceTree = "<group>"; };
-		A2000070 /* Winios/Winios.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Winios/Winios.m; sourceTree = "<group>"; };
-		A2000071 /* Winios/Winios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Winios/Winios.h; sourceTree = "<group>"; };
-		A2000247 /* PadOutput.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PadOutput.m; sourceTree = "<group>"; };
-		C2000F01 /* PhonePointer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PhonePointer.m; sourceTree = "<group>"; };
-		A2000248 /* PadOutput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PadOutput.h; sourceTree = "<group>"; };
+		A2000041 /* PrefixExtractor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "PrefixExtractor.c"; sourceTree = "<group>"; };
+		A2000042 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = "usr/lib/libz.tbd"; sourceTree = SDKROOT; };
+		A2000043 /* PrefixExtractor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "PrefixExtractor.h"; sourceTree = "<group>"; };
+		A2000050 /* IOSDisplayShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "IOSDisplayShim.m"; sourceTree = "<group>"; };
+		A2000051 /* libdxmt_combined.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libdxmt_combined.a"; sourceTree = "<group>"; };
+		A2000052 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = "System/Library/Frameworks/Metal.framework"; sourceTree = SDKROOT; };
+		A2000053 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = "System/Library/Frameworks/QuartzCore.framework"; sourceTree = SDKROOT; };
+		A2000054 /* MetalFX.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalFX.framework; path = "System/Library/Frameworks/MetalFX.framework"; sourceTree = SDKROOT; };
+		A2000055 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = "usr/lib/libsqlite3.tbd"; sourceTree = SDKROOT; };
+		A2000056 /* IOSDisplayShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "IOSDisplayShim.h"; sourceTree = "<group>"; };
+		A2000060 /* libwin32u_unix.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libwin32u_unix.a"; sourceTree = "<group>"; };
+		A2000070 /* Winios/Winios.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "Winios/Winios.m"; sourceTree = "<group>"; };
+		A2000071 /* Winios/Winios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Winios/Winios.h"; sourceTree = "<group>"; };
+		A2000077 /* MadeiraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraConfig.swift"; sourceTree = "<group>"; };
 		A2000080 /* arm64ec-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "arm64ec-windows"; sourceTree = "<group>"; };
-		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
 		A2000081 /* x86_64-vcruntime */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "x86_64-vcruntime"; sourceTree = "<group>"; };
 		A2000082 /* x86_64-opengl */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "x86_64-opengl"; sourceTree = "<group>"; };
-		A2000090 /* libgnutls.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libgnutls.a; sourceTree = "<group>"; };
-		A2000091 /* libhogweed.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libhogweed.a; sourceTree = "<group>"; };
-		A2000092 /* libnettle.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libnettle.a; sourceTree = "<group>"; };
-		A2000093 /* libgmp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libgmp.a; sourceTree = "<group>"; };
-		A2000300 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
-		A2000301 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
-		A2000302 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = System/Library/Frameworks/CoreVideo.framework; sourceTree = SDKROOT; };
-		A2000303 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
-		A2000304 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
-		A2000305 /* libavformat.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavformat.a; sourceTree = "<group>"; };
-		A2000306 /* libavcodec.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavcodec.a; sourceTree = "<group>"; };
-		A2000307 /* libswresample.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libswresample.a; sourceTree = "<group>"; };
-		A2000308 /* libavutil.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libavutil.a; sourceTree = "<group>"; };
-		A2000094 /* cacert.pem */ = {isa = PBXFileReference; lastKnownFileType = text; path = cacert.pem; sourceTree = "<group>"; };
-		A20000D1 /* d3d12 */ = {isa = PBXFileReference; lastKnownFileType = folder; path = d3d12; sourceTree = "<group>"; };
-		A20000D2 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; path = licenses; sourceTree = "<group>"; };
-		A20000F1 /* legal */ = {isa = PBXFileReference; lastKnownFileType = folder; path = legal; sourceTree = "<group>"; };
-		A2000200 /* LogPattern.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogPattern.swift; sourceTree = "<group>"; };
-		A2000201 /* LogTail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTail.swift; sourceTree = "<group>"; };
-		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
-		A2000213 /* LibraryBCD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBCD.swift; sourceTree = "<group>"; };
-		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
-		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
-		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
-		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
-		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
-		A2000400 /* Library.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Library.swift; sourceTree = "<group>"; };
-		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
-		A2000976 /* LibraryGridZoomStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStart.swift"; sourceTree = "<group>"; };
-		A2000975 /* LibraryGridZoomIdle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomIdle.swift"; sourceTree = "<group>"; };
-		A2000974 /* LibraryGridZoomHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomHaptics.swift"; sourceTree = "<group>"; };
-		A2000973 /* DeferredMainWork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DeferredMainWork.swift"; sourceTree = "<group>"; };
-		A2000972 /* InteractionFrameRate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "InteractionFrameRate.swift"; sourceTree = "<group>"; };
-		A2000970 /* LibraryGridZoomBlend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomBlend.swift"; sourceTree = "<group>"; };
-		A2000969 /* LibraryGridGlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridGlow.swift"; sourceTree = "<group>"; };
-		A2000968 /* LibraryGridCardCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridCardCell.swift"; sourceTree = "<group>"; };
-		A2000967 /* LibraryGridZoomStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStage.swift"; sourceTree = "<group>"; };
-		A2000966 /* LibraryGridZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoom.swift"; sourceTree = "<group>"; };
-		A2000965 /* LibraryGridPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridPage.swift"; sourceTree = "<group>"; };
-		A2000964 /* LibraryGridHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridHost.swift"; sourceTree = "<group>"; };
-		A2000963 /* LibraryCoverCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverCache.swift"; sourceTree = "<group>"; };
-		A2000962 /* LibraryGridZoomScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomScene.swift"; sourceTree = "<group>"; };
-		A2000961 /* LibraryGridZoomModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomModel.swift"; sourceTree = "<group>"; };
-		A2000960 /* LibraryGridLevels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridLevels.swift"; sourceTree = "<group>"; };
-		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestDisplay.swift; sourceTree = "<group>"; };
+		A2000090 /* libgnutls.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libgnutls.a"; sourceTree = "<group>"; };
+		A2000091 /* libhogweed.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libhogweed.a"; sourceTree = "<group>"; };
+		A2000092 /* libnettle.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libnettle.a"; sourceTree = "<group>"; };
+		A2000093 /* libgmp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libgmp.a"; sourceTree = "<group>"; };
+		A2000094 /* cacert.pem */ = {isa = PBXFileReference; lastKnownFileType = text; path = "cacert.pem"; sourceTree = "<group>"; };
+		A20000D1 /* d3d12 */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "d3d12"; sourceTree = "<group>"; };
+		A20000D2 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "licenses"; sourceTree = "<group>"; };
+		A20000F1 /* legal */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "legal"; sourceTree = "<group>"; };
+		A2000200 /* LogPattern.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogPattern.swift"; sourceTree = "<group>"; };
+		A2000201 /* LogTail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogTail.swift"; sourceTree = "<group>"; };
+		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FPSOverlay.swift"; sourceTree = "<group>"; };
+		A2000203 /* HardwareInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HardwareInput.swift"; sourceTree = "<group>"; };
+		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GameProfiles.swift"; sourceTree = "<group>"; };
+		A2000210 /* i386-windows */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "i386-windows"; sourceTree = "<group>"; };
+		A2000213 /* LibraryBCD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryBCD.swift"; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
-		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
 		A2000244 /* Winios/WiniosGamepad.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosGamepad.c"; sourceTree = "<group>"; };
-		A2000203 /* HardwareInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardwareInput.swift; sourceTree = "<group>"; };
+		A2000245 /* TouchGamepad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TouchGamepad.swift"; sourceTree = "<group>"; };
+		A2000246 /* TouchControlPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TouchControlPresets.swift"; sourceTree = "<group>"; };
+		A2000247 /* PadOutput.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "PadOutput.m"; sourceTree = "<group>"; };
+		A2000248 /* PadOutput.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "PadOutput.h"; sourceTree = "<group>"; };
+		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
 		A2000281 /* Winios/WiniosCursor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosCursor.c"; sourceTree = "<group>"; };
-		A2000245 /* TouchGamepad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchGamepad.swift; sourceTree = "<group>"; };
-		A2000F01 /* GestureZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureZones.swift; sourceTree = "<group>"; };
-		A2000246 /* TouchControlPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchControlPresets.swift; sourceTree = "<group>"; };
+		A2000300 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = "System/Library/Frameworks/VideoToolbox.framework"; sourceTree = SDKROOT; };
+		A2000301 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = "System/Library/Frameworks/CoreMedia.framework"; sourceTree = SDKROOT; };
+		A2000302 /* CoreVideo.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreVideo.framework; path = "System/Library/Frameworks/CoreVideo.framework"; sourceTree = SDKROOT; };
+		A2000303 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = "System/Library/Frameworks/AudioToolbox.framework"; sourceTree = SDKROOT; };
+		A2000304 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = "System/Library/Frameworks/CoreFoundation.framework"; sourceTree = SDKROOT; };
+		A2000305 /* libavformat.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libavformat.a"; sourceTree = "<group>"; };
+		A2000306 /* libavcodec.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libavcodec.a"; sourceTree = "<group>"; };
+		A2000307 /* libswresample.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libswresample.a"; sourceTree = "<group>"; };
+		A2000308 /* libavutil.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libavutil.a"; sourceTree = "<group>"; };
+		A2000400 /* Library.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Library.swift"; sourceTree = "<group>"; };
+		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GuestDisplay.swift"; sourceTree = "<group>"; };
+		A2000510 /* SwiftSteam/SteamSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/SteamSignIn.swift"; sourceTree = "<group>"; };
+		A2000511 /* SwiftSteam/SteamSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/SteamSignInView.swift"; sourceTree = "<group>"; };
+		A2000512 /* SwiftSteam/Auth/SteamAuthAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamAuthAPI.swift"; sourceTree = "<group>"; };
+		A2000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamCredentialAuth.swift"; sourceTree = "<group>"; };
+		A2000514 /* SwiftSteam/Auth/SteamQRAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamQRAuth.swift"; sourceTree = "<group>"; };
+		A2000515 /* SwiftSteam/Auth/SteamTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Auth/SteamTokenStore.swift"; sourceTree = "<group>"; };
+		A2000516 /* SwiftSteam/Core/SteamError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamError.swift"; sourceTree = "<group>"; };
+		A2000517 /* SwiftSteam/Proto/SteamProtoMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Proto/SteamProtoMessages.swift"; sourceTree = "<group>"; };
+		A2000518 /* SwiftSteam/Helpers/SteamDevice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamDevice.swift"; sourceTree = "<group>"; };
+		A2000519 /* SwiftSteam/Helpers/SteamLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamLog.swift"; sourceTree = "<group>"; };
+		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
+		A2000521 /* MadeiraDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDockView.swift"; sourceTree = "<group>"; };
+		A2000522 /* SteamKeyValues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamKeyValues.swift"; sourceTree = "<group>"; };
+		A2000523 /* SteamRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamRuntime.swift"; sourceTree = "<group>"; };
+		A2000524 /* DockInstallers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockInstallers.swift"; sourceTree = "<group>"; };
+		A2000530 /* Onboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Onboarding.swift"; sourceTree = "<group>"; };
+		A2000531 /* SteamGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamGames.swift"; sourceTree = "<group>"; };
+		A2000540 /* ConfigCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConfigCatalog.swift"; sourceTree = "<group>"; };
+		A2000541 /* ConfigCatalog.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConfigCatalog.generated.swift"; sourceTree = "<group>"; };
+		A2000542 /* DockStartProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartProgram.swift"; sourceTree = "<group>"; };
+		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
+		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
+		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
+		A2000603 /* SwiftSteam/Core/CMServerList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/CMServerList.swift"; sourceTree = "<group>"; };
+		A2000604 /* SwiftSteam/Core/LicenseListBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/LicenseListBox.swift"; sourceTree = "<group>"; };
+		A2000605 /* SwiftSteam/Core/SteamConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamConnection.swift"; sourceTree = "<group>"; };
+		A2000606 /* SwiftSteam/Core/SteamMessageCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamMessageCodec.swift"; sourceTree = "<group>"; };
+		A2000607 /* SwiftSteam/Core/SteamProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamProtocol.swift"; sourceTree = "<group>"; };
+		A2000608 /* SwiftSteam/Core/SteamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamSession.swift"; sourceTree = "<group>"; };
+		A2000609 /* SwiftSteam/Content/ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
+		A200060A /* SwiftSteam/Content/DepotDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/DepotDownloader.swift"; sourceTree = "<group>"; };
+		A200060B /* SwiftSteam/Content/DepotManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/DepotManifest.swift"; sourceTree = "<group>"; };
+		A200060C /* SwiftSteam/Library/SteamAppInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamAppInfo.swift"; sourceTree = "<group>"; };
+		A200060D /* SwiftSteam/Library/SteamLibraryFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamLibraryFetcher.swift"; sourceTree = "<group>"; };
+		A200060E /* SwiftSteam/Install/AppManifestWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Install/AppManifestWriter.swift"; sourceTree = "<group>"; };
+		A200060F /* SwiftSteam/chunk_zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/chunk_zip.c"; sourceTree = "<group>"; };
+		A2000610 /* SwiftSteam/lzma_shim.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/lzma_shim.c"; sourceTree = "<group>"; };
+		A2000611 /* SwiftSteam/zstd_edu.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftSteam/zstd_edu.c"; sourceTree = "<group>"; };
+		A2000612 /* SwiftSteam/chunk_zip.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/chunk_zip.h"; sourceTree = "<group>"; };
+		A2000613 /* SwiftSteam/lzma_shim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/lzma_shim.h"; sourceTree = "<group>"; };
+		A2000614 /* SwiftSteam/zstd_edu.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftSteam/zstd_edu.h"; sourceTree = "<group>"; };
+		A2000615 /* liblzma.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = liblzma.tbd; path = "usr/lib/liblzma.tbd"; sourceTree = SDKROOT; };
+		A2000616 /* SwiftSteam/Core/SteamCMSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Core/SteamCMSession.swift"; sourceTree = "<group>"; };
+		A2000650 /* DockStartScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartScreen.swift"; sourceTree = "<group>"; };
+		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
+		A2000701 /* Winios/WiniosGL.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "Winios/WiniosGL.m"; sourceTree = "<group>"; };
+		A2000702 /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = "System/Library/Frameworks/OpenGLES.framework"; sourceTree = SDKROOT; };
+		A2000703 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = "System/Library/Frameworks/IOSurface.framework"; sourceTree = SDKROOT; };
+		A2000704 /* compat */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "compat"; sourceTree = "<group>"; };
+		A2000705 /* gl */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "gl"; sourceTree = "<group>"; };
+		A2000707 /* vulkan */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "vulkan"; sourceTree = "<group>"; };
+		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
+		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
+		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
+		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
+		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
+		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
+		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets.xcassets"; sourceTree = "<group>"; };
+		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GameRecommendations.swift"; sourceTree = "<group>"; };
+		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GameRecommendationsApply.swift"; sourceTree = "<group>"; };
+		A2000913 /* DockReset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockReset.swift"; sourceTree = "<group>"; };
+		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryPrefs.swift"; sourceTree = "<group>"; };
+		A2000920 /* ExternalDrives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalDrives.swift"; sourceTree = "<group>"; };
+		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
+		A2000960 /* LibraryGridLevels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridLevels.swift"; sourceTree = "<group>"; };
+		A2000961 /* LibraryGridZoomModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomModel.swift"; sourceTree = "<group>"; };
+		A2000962 /* LibraryGridZoomScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomScene.swift"; sourceTree = "<group>"; };
+		A2000963 /* LibraryCoverCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverCache.swift"; sourceTree = "<group>"; };
+		A2000964 /* LibraryGridHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridHost.swift"; sourceTree = "<group>"; };
+		A2000965 /* LibraryGridPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridPage.swift"; sourceTree = "<group>"; };
+		A2000966 /* LibraryGridZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoom.swift"; sourceTree = "<group>"; };
+		A2000967 /* LibraryGridZoomStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStage.swift"; sourceTree = "<group>"; };
+		A2000968 /* LibraryGridCardCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridCardCell.swift"; sourceTree = "<group>"; };
+		A2000969 /* LibraryGridGlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridGlow.swift"; sourceTree = "<group>"; };
+		A2000970 /* LibraryGridZoomBlend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomBlend.swift"; sourceTree = "<group>"; };
+		A2000972 /* InteractionFrameRate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "InteractionFrameRate.swift"; sourceTree = "<group>"; };
+		A2000973 /* DeferredMainWork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DeferredMainWork.swift"; sourceTree = "<group>"; };
+		A2000974 /* LibraryGridZoomHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomHaptics.swift"; sourceTree = "<group>"; };
+		A2000975 /* LibraryGridZoomIdle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomIdle.swift"; sourceTree = "<group>"; };
+		A2000976 /* LibraryGridZoomStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStart.swift"; sourceTree = "<group>"; };
+		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
+		A2000978 /* LogSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogSummary.swift"; sourceTree = "<group>"; };
+		A2000980 /* JITPoolMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITPoolMeter.swift"; sourceTree = "<group>"; };
+		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GameIniFiles.swift"; sourceTree = "<group>"; };
+		A2000E01 /* EpicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicLibrary.swift"; sourceTree = "<group>"; };
+		A2000E02 /* EpicGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicGames.swift"; sourceTree = "<group>"; };
+		A2000E03 /* SwiftEpic/EpicAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicAPI.swift"; sourceTree = "<group>"; };
+		A2000E04 /* SwiftEpic/EpicFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicFormats.swift"; sourceTree = "<group>"; };
+		A2000E05 /* SwiftEpic/EpicDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicDownloader.swift"; sourceTree = "<group>"; };
+		A2000E06 /* EpicCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicCloud.swift"; sourceTree = "<group>"; };
+		A2000E07 /* SwiftEpic/EpicCloudSaves.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicCloudSaves.swift"; sourceTree = "<group>"; };
+		A2000F01 /* GestureZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GestureZones.swift"; sourceTree = "<group>"; };
+		B2000001 /* JITSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITSetup.swift"; sourceTree = "<group>"; };
+		B2000002 /* JITBuiltInHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITBuiltInHost.swift"; sourceTree = "<group>"; };
+		B2000003 /* JITBuiltInMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITBuiltInMessages.swift"; sourceTree = "<group>"; };
+		B2000004 /* madeira-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "madeira-jit.js"; sourceTree = "<group>"; };
+		B2000010 /* ExtensionFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ExtensionFoundation.framework; path = "System/Library/Frameworks/ExtensionFoundation.framework"; sourceTree = SDKROOT; };
+		B2000020 /* MadeiraJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraJITHelper.swift"; sourceTree = "<group>"; };
+		B2000021 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info.plist"; sourceTree = "<group>"; };
+		B2000022 /* MadeiraJITHelper.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "MadeiraJITHelper.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2000030 /* Frameworks/StikJIT.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = "Frameworks/StikJIT.xcframework"; sourceTree = SOURCE_ROOT; };
+		B2000040 /* JITPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITPairing.swift"; sourceTree = "<group>"; };
+		B2000041 /* libmadeira_rppairing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = "libmadeira_rppairing.a"; sourceTree = "<group>"; };
+		B2000042 /* MadeiraRPPairing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "MadeiraRPPairing.h"; sourceTree = "<group>"; };
+		B2000050 /* JITNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "JITNetwork.swift"; sourceTree = "<group>"; };
+		B2000051 /* Madeira JIT.shortcut */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Madeira JIT.shortcut"; sourceTree = "<group>"; };
+		B2000060 /* SigningRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SigningRefresh.swift"; sourceTree = "<group>"; };
+		B2000061 /* AppleSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppleSignIn.swift"; sourceTree = "<group>"; };
+		C2000F01 /* PhonePointer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "PhonePointer.m"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -455,6 +458,7 @@
 				A1000307 /* libswresample.a in Frameworks */,
 				A1000308 /* libavutil.a in Frameworks */,
 				B1000005 /* ExtensionFoundation.framework in Frameworks */,
+				79CAD4FC8F9DC4CA65DD6A24 /* GameBrowserKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -462,7 +466,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B1000014 /* ExtensionFoundation.framework in Helper Frameworks */,
+				B1000014 /* ExtensionFoundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -503,47 +507,47 @@
 				A2000711 /* WineMono.swift */,
 				A2000E01 /* EpicLibrary.swift */,
 				A2000E02 /* EpicGames.swift */,
-				A2000E03 /* EpicAPI.swift */,
-				A2000E04 /* EpicFormats.swift */,
-				A2000E05 /* EpicDownloader.swift */,
-				A2000E07 /* EpicCloudSaves.swift */,
+				A2000E03 /* SwiftEpic/EpicAPI.swift */,
+				A2000E04 /* SwiftEpic/EpicFormats.swift */,
+				A2000E05 /* SwiftEpic/EpicDownloader.swift */,
+				A2000E07 /* SwiftEpic/EpicCloudSaves.swift */,
 				A2000E06 /* EpicCloud.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
 				A2000600 /* SteamInstall.swift */,
-				A2000609 /* ContentDecryptor.swift */,
-				A200060A /* DepotDownloader.swift */,
-				A200060B /* DepotManifest.swift */,
-				A200060E /* AppManifestWriter.swift */,
-				A200060F /* chunk_zip.c */,
-				A2000610 /* lzma_shim.c */,
-				A2000611 /* zstd_edu.c */,
-				A2000612 /* chunk_zip.h */,
-				A2000613 /* lzma_shim.h */,
-				A2000614 /* zstd_edu.h */,
-				A2000603 /* CMServerList.swift */,
-				A2000604 /* LicenseListBox.swift */,
-				A2000605 /* SteamConnection.swift */,
-				A2000606 /* SteamMessageCodec.swift */,
-				A2000607 /* SteamProtocol.swift */,
-				A2000608 /* SteamSession.swift */,
-				A2000616 /* SteamCMSession.swift */,
-				A200060C /* SteamAppInfo.swift */,
-				A200060D /* SteamLibraryFetcher.swift */,
+				A2000609 /* SwiftSteam/Content/ContentDecryptor.swift */,
+				A200060A /* SwiftSteam/Content/DepotDownloader.swift */,
+				A200060B /* SwiftSteam/Content/DepotManifest.swift */,
+				A200060E /* SwiftSteam/Install/AppManifestWriter.swift */,
+				A200060F /* SwiftSteam/chunk_zip.c */,
+				A2000610 /* SwiftSteam/lzma_shim.c */,
+				A2000611 /* SwiftSteam/zstd_edu.c */,
+				A2000612 /* SwiftSteam/chunk_zip.h */,
+				A2000613 /* SwiftSteam/lzma_shim.h */,
+				A2000614 /* SwiftSteam/zstd_edu.h */,
+				A2000603 /* SwiftSteam/Core/CMServerList.swift */,
+				A2000604 /* SwiftSteam/Core/LicenseListBox.swift */,
+				A2000605 /* SwiftSteam/Core/SteamConnection.swift */,
+				A2000606 /* SwiftSteam/Core/SteamMessageCodec.swift */,
+				A2000607 /* SwiftSteam/Core/SteamProtocol.swift */,
+				A2000608 /* SwiftSteam/Core/SteamSession.swift */,
+				A2000616 /* SwiftSteam/Core/SteamCMSession.swift */,
+				A200060C /* SwiftSteam/Library/SteamAppInfo.swift */,
+				A200060D /* SwiftSteam/Library/SteamLibraryFetcher.swift */,
 				A2000522 /* SteamKeyValues.swift */,
 				A2000523 /* SteamRuntime.swift */,
 				A2000524 /* DockInstallers.swift */,
 				A2000542 /* DockStartProgram.swift */,
 				A2000913 /* DockReset.swift */,
-				A2000510 /* SteamSignIn.swift */,
-				A2000511 /* SteamSignInView.swift */,
-				A2000512 /* SteamAuthAPI.swift */,
-				A2000513 /* SteamCredentialAuth.swift */,
-				A2000514 /* SteamQRAuth.swift */,
-				A2000515 /* SteamTokenStore.swift */,
-				A2000516 /* SteamError.swift */,
-				A2000517 /* SteamProtoMessages.swift */,
-				A2000518 /* SteamDevice.swift */,
-				A2000519 /* SteamLog.swift */,
+				A2000510 /* SwiftSteam/SteamSignIn.swift */,
+				A2000511 /* SwiftSteam/SteamSignInView.swift */,
+				A2000512 /* SwiftSteam/Auth/SteamAuthAPI.swift */,
+				A2000513 /* SwiftSteam/Auth/SteamCredentialAuth.swift */,
+				A2000514 /* SwiftSteam/Auth/SteamQRAuth.swift */,
+				A2000515 /* SwiftSteam/Auth/SteamTokenStore.swift */,
+				A2000516 /* SwiftSteam/Core/SteamError.swift */,
+				A2000517 /* SwiftSteam/Proto/SteamProtoMessages.swift */,
+				A2000518 /* SwiftSteam/Helpers/SteamDevice.swift */,
+				A2000519 /* SwiftSteam/Helpers/SteamLog.swift */,
 				A2000001 /* MadeiraApp.swift */,
 				A2000245 /* TouchGamepad.swift */,
 				A2000F01 /* GestureZones.swift */,
@@ -633,8 +637,9 @@
 				A2000006 /* Madeira-Bridging-Header.h */,
 				A2000007 /* Madeira.entitlements */,
 				A2000008 /* Info.plist */,
+				8AF67B4DB3D08939EEF829A4 /* GameBrowser.swift */,
 			);
-			path = Madeira;
+			path = "Madeira";
 			sourceTree = "<group>";
 		};
 		A4000003 /* Products */ = {
@@ -685,7 +690,7 @@
 				A2000307 /* libswresample.a */,
 				A2000308 /* libavutil.a */,
 				B2000010 /* ExtensionFoundation.framework */,
-				B2000030 /* StikJIT.xcframework */,
+				B2000030 /* Frameworks/StikJIT.xcframework */,
 			);
 			name = Libraries;
 			sourceTree = "<group>";
@@ -696,7 +701,7 @@
 				B2000020 /* MadeiraJITHelper.swift */,
 				B2000021 /* Info.plist */,
 			);
-			path = MadeiraJITHelper;
+			path = "MadeiraJITHelper";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -720,6 +725,9 @@
 				B3000006 /* PBXTargetDependency */,
 			);
 			name = Madeira;
+			packageProductDependencies = (
+				F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */,
+			);
 			productName = Madeira;
 			productReference = A2000009 /* Madeira.app */;
 			productType = "com.apple.product-type.application";
@@ -770,6 +778,9 @@
 				Base,
 			);
 			mainGroup = A4000001;
+			packageReferences = (
+				08E6E0F94AD8B4432844AA3F /* XCLocalSwiftPackageReference "Packages/GameBrowserKit" */,
+			);
 			productRefGroup = A4000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -883,7 +894,7 @@
 				A1000E03 /* SwiftEpic/EpicAPI.swift in Sources */,
 				A1000E04 /* SwiftEpic/EpicFormats.swift in Sources */,
 				A1000E05 /* SwiftEpic/EpicDownloader.swift in Sources */,
-				A1000E07 /* EpicCloudSaves.swift in Sources */,
+				A1000E07 /* SwiftEpic/EpicCloudSaves.swift in Sources */,
 				A1000E06 /* EpicCloud.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
@@ -979,6 +990,7 @@
 				B1000040 /* JITPairing.swift in Sources */,
 				B1000060 /* SigningRefresh.swift in Sources */,
 				B1000061 /* AppleSignIn.swift in Sources */,
+				2CA2E0ECAB17387183994F18 /* GameBrowser.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -987,7 +999,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B1000010 /* MadeiraJITHelper.swift in Sources */,
-				B1000011 /* JITBuiltInMessages.swift in Helper Sources */,
+				B1000011 /* JITBuiltInMessages.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1069,7 +1081,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = ("$(inherited)", "$(MADEIRA_VULKAN_LDFLAGS)");
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
@@ -1106,6 +1117,10 @@
 					"$(SRCROOT)/Madeira",
 				);
 				MARKETING_VERSION = 0.1.3;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(MADEIRA_VULKAN_LDFLAGS)",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1122,7 +1137,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = ("$(inherited)", "$(MADEIRA_VULKAN_LDFLAGS)");
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
@@ -1158,6 +1172,10 @@
 					"$(SRCROOT)/Madeira",
 				);
 				MARKETING_VERSION = 0.1.3;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"$(MADEIRA_VULKAN_LDFLAGS)",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1263,6 +1281,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		08E6E0F94AD8B4432844AA3F /* XCLocalSwiftPackageReference "Packages/GameBrowserKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GameBrowserKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F20BF4ABD273978AC3D64CF7 /* GameBrowserKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GameBrowserKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A6000001 /* Project object */;
 }

@@ -569,6 +569,8 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
         /* ml666: repair the usersmadeira escaping damage BEFORE anything reads
          * the registry, then the (now scoped) ml581 legacy cleanup. */
         madeira_repair_profile( prefix );
+        extern void madeira_browser_register(const char *prefix);
+        madeira_browser_register(prefix.UTF8String);
         /* ml581: see madeira_undo_appdata_skeleton() above. */
         madeira_undo_appdata_skeleton( prefix );
         madeira_ensure_locallow( prefix );

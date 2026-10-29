@@ -4,6 +4,7 @@
 
 import CryptoKit
 import Foundation
+import GameBrowserKit
 import UIKit
 
 // The Epic Games account's games and their downloads (docs/EPIC.md).
@@ -479,6 +480,13 @@ struct EpicInstalledGame: Codable, Sendable {
         let apps = resumeAfterBackground.sorted()
         resumeAfterBackground.removeAll()
         for app in apps { enqueue(app, kind: downloads[app]?.kind ?? .install) }
+    }
+
+    func browserActivationURL(_ request: UrlOpenRequest) async -> URL {
+        guard request.kind == .epicActivation, signedIn,
+              LibraryModel.shared.activeEntry?.epicAppName != nil,
+              let code = try? await api.exchangeCode(), let url = request.epicSignInURL(exchangeCode: code) else { return request.url }
+        return url
     }
 
     // MARK: Launch

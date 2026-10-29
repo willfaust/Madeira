@@ -56,6 +56,11 @@
 	<true/>
 	<key>MadeiraSigningAccountVersion</key>
 	<integer>1</integer>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_remotepairing-pairable-host._tcp</string>
