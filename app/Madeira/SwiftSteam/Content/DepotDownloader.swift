@@ -500,15 +500,13 @@ final class DepotDownloader {
             let order = plan.health.order(plan.hosts, seed: seed)
             let host = order[attempt % order.count]
             let url = "\(host)/depot/\(plan.depotID)/chunk/\(chunk.shaHex)\(plan.auth[host] ?? "")"
+            let data: Data
             do {
                 let encrypted = try await download(url)
-                let data = try ContentDecryptor.processChunk(encryptedData: encrypted, depotKey: plan.key,
+                data = try ContentDecryptor.processChunk(encryptedData: encrypted, depotKey: plan.key,
                                                              expectedCRC: chunk.crc,
                                                              expectedSize: Int(chunk.uncompressedSize))
                 guard data.count == Int(chunk.uncompressedSize) else { throw SteamError.checksumMismatch }
-                try write(data, to: path, offset: chunk.offset)
-                plan.health.recordSuccess(host)
-                return
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -517,7 +515,13 @@ final class DepotDownloader {
                 plan.health.recordFailure(host, reason: failureReason(error))
                 SteamLog.trace("chunk attempt \(attempt + 1) failed: \(failureReason(error))")
                 if attempt + 1 < attempts { try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 400_000_000) }
+                continue
             }
+            // A verified chunk proves the CDN worked. Local I/O failures must
+            // propagate without re-downloading it or penalizing the server.
+            plan.health.recordSuccess(host)
+            try write(data, to: path, offset: chunk.offset)
+            return
         }
         throw lastError
     }
