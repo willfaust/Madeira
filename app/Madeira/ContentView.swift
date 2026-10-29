@@ -2641,6 +2641,8 @@ struct ContentView: View {
         let program = entry.desktop == true ? "explorer.exe"
             : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
         LogStore.shared.startSessionLog(program: program)
+        do { try GOGGames.shared.prepareLaunch(entry) }
+        catch { library.error = "GOG could not start its game service: \(error.localizedDescription)"; return }
         library.begin(entry)
         runWineFullSequence(profile: entry)
     }

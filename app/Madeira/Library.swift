@@ -169,6 +169,7 @@ enum FrontendChoice {
 struct LibraryEntry: Codable, Identifiable {
     var id = UUID()
     var title: String
+    var gogProductID: String? = nil
     /// The executable, relative to drive_c ("Games/Foo/foo.exe").
     var relativePath: String
     /// 32 or 64 from the PE header, 0 when unknown.
@@ -3045,6 +3046,9 @@ struct LibraryView: View {
             }
             if SteamSettingsSection.shown, settingsShow("Steam", "Dock", "sign in", "account", "setup") {
                 SteamSettingsSection(open: { settingsSheet = $0 })
+            }
+            if settingsShow("GOG", "Galaxy", "sign in", "account", "downloads") {
+                Section("GOG") { NavigationLink("GOG games and account") { GOGGamesView(play: play) } }
             }
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })

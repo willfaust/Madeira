@@ -1,0 +1,88 @@
+{
+ "count": 5,
+ "has_private_branches": true,
+ "items": [
+  {
+   "branch": null,
+   "build_id": "59059134842096269",
+   "date_published": "2025-10-10T12:30:48+0000",
+   "generation": 2,
+   "link": "https://gog-cdn-fastly.gog.com/content-system/v2/meta/8f/0c/8f0c5a7c37d4c2619ae4b0a1161ac607",
+   "os": "windows",
+   "product_id": "1104084973",
+   "public": true,
+   "tags": [
+    "receiver_v2",
+    "csb_11_0_0_w_20",
+    "11_0_0_20"
+   ],
+   "version_name": "1.0.2.1a"
+  },
+  {
+   "branch": null,
+   "build_id": "57951992347350006",
+   "date_published": "2024-09-23T15:06:04+0000",
+   "generation": 2,
+   "link": "https://gog-cdn-fastly.gog.com/content-system/v2/meta/32/81/3281d96b02a90be398c574eecd7d1899",
+   "os": "windows",
+   "product_id": "1104084973",
+   "public": true,
+   "tags": [
+    "receiver_v2",
+    "11_0_0_13",
+    "csb_11_0_0_13",
+    "csb_win"
+   ],
+   "version_name": "1.0.2.1"
+  },
+  {
+   "branch": null,
+   "build_id": "57881852637775289",
+   "date_published": "2024-08-30T10:28:23+0000",
+   "generation": 2,
+   "link": "https://gog-cdn-fastly.gog.com/content-system/v2/meta/72/98/7298609eea83d334a4dfb56628e6e26c",
+   "os": "windows",
+   "product_id": "1104084973",
+   "public": true,
+   "tags": [
+    "receiver_v2",
+    "editor_v_1_5_0",
+    "csb_10_6_7_w_3"
+   ],
+   "version_name": "1.0.1.0"
+  },
+  {
+   "branch": null,
+   "build_id": "57612135427707851",
+   "date_published": "2024-05-29T09:37:27+0000",
+   "generation": 2,
+   "link": "https://gog-cdn-fastly.gog.com/content-system/v2/meta/e2/03/e20350ac11ba1435c2a52ae5be2f3b4a",
+   "os": "windows",
+   "product_id": "1104084973",
+   "public": true,
+   "tags": [
+    "receiver_v2",
+    "editor_v_1_5_0",
+    "csb_10_6_7_w_3"
+   ],
+   "version_name": "0.9.1.5"
+  },
+  {
+   "branch": null,
+   "build_id": "57566417425379184",
+   "date_published": "2024-05-13T15:09:21+0000",
+   "generation": 2,
+   "link": "https://gog-cdn-fastly.gog.com/content-system/v2/meta/74/a5/74a50df11f6855388ab4f6552206086a",
+   "os": "windows",
+   "product_id": "1104084973",
+   "public": true,
+   "tags": [
+    "receiver_v2",
+    "editor_v_1_5_0",
+    "csb_10_6_7_w_3"
+   ],
+   "version_name": "0.9.1.3"
+  }
+ ],
+ "total_count": 37
+}
