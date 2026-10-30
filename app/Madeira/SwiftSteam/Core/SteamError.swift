@@ -51,6 +51,9 @@ enum SteamError: LocalizedError, Equatable {
     case checksumMismatch
     case depotKeyNotFound(UInt32)
     case insufficientDiskSpace(needed: UInt64, available: UInt64)
+    /// The chosen branch is password-protected and Steam did not accept the
+    /// kept beta code for it (or none is kept).
+    case betaCodeNeeded(String)
 
     var errorDescription: String? {
         switch self {
@@ -105,6 +108,8 @@ enum SteamError: LocalizedError, Equatable {
         case .insufficientDiskSpace(let needed, let available):
             return String(format: "Not enough free space: the download needs %.1f GB and %.1f GB is available.",
                           Double(needed) / 1_000_000_000, Double(available) / 1_000_000_000)
+        case .betaCodeNeeded(let branch):
+            return "The \(branch) version needs a beta code Steam accepts. Enter it under Game details › Steam › Version, or pick another version."
         }
     }
 }

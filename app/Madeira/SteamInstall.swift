@@ -47,12 +47,35 @@ enum SteamInstallFiles {
         return language.lowercased()
     }
 
+    /// The beta branch the install record names (`UserConfig.BetaKey`, as
+    /// Madeira's downloads and Valve's client write it), or nil for public.
+    static func betaKey(appID: Int, steamApps: URL) -> String? {
+        guard let state = record(appID: appID, steamApps: steamApps),
+              let key = (state["MountedConfig"]?["BetaKey"] ?? state["UserConfig"]?["BetaKey"])?.string,
+              !key.isEmpty, key.lowercased() != "public", key.utf8.count <= 64 else { return nil }
+        return key
+    }
+
     /// The depots the install record holds: its own (`InstalledDepots`) and
     /// those shared from other apps (`SharedDepots`).
     static func depots(appID: Int, steamApps: URL) -> Set<Int> {
         guard let state = record(appID: appID, steamApps: steamApps) else { return [] }
         let keys = Array((state["InstalledDepots"]?.fields ?? [:]).keys) + Array((state["SharedDepots"]?.fields ?? [:]).keys)
         return Set(keys.prefix(512).compactMap { Int($0) })
+    }
+
+    /// The DLC the install record holds: each `InstalledDepots` entry with a
+    /// `dlcappid` (written by Madeira's downloads and by Valve's client), by DLC
+    /// app, with the bytes its depots take when the record states them.
+    static func installedDLC(appID: Int, steamApps: URL) -> [Int: Int64] {
+        guard let state = record(appID: appID, steamApps: steamApps) else { return [:] }
+        var found: [Int: Int64] = [:]
+        for (_, depot) in (state["InstalledDepots"]?.fields ?? [:]).prefix(512) {
+            guard let dlc = depot["dlcappid"]?.string.flatMap({ Int($0) }), dlc > 0 else { continue }
+            let size = depot["size"]?.string.flatMap { Int64($0) } ?? 0
+            found[dlc, default: 0] += max(size, 0)
+        }
+        return found
     }
 
     /// The install size the record states (`SizeOnDisk`, bytes), or nil.

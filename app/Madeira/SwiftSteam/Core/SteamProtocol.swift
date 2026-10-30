@@ -40,6 +40,10 @@ enum EMsg: UInt32 {
     case clientPICSAccessTokenResponse = 8906
     case clientGetDepotDecryptionKey = 5438
     case clientGetDepotDecryptionKeyResponse = 5439
+    case clientCheckAppBetaPassword = 5450
+    case clientCheckAppBetaPasswordResponse = 5451
+    case clientPICSPrivateBetaRequest = 8907
+    case clientPICSPrivateBetaResponse = 8908
     case serviceMethod = 146
     case serviceMethodResponse = 147
     case serviceMethodCallFromClient = 151

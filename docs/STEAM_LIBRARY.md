@@ -135,7 +135,8 @@ opens again when needed.
 account that owns the depot, so ownership is Steam's decision, not Madeira's.
 
 1. Product info of the app (and of the apps whose depots it shares) selects the
-   Windows, 64-bit (else 32-bit) depots of the game language, without DLC,
+   Windows, 64-bit (else 32-bit) depots of the game language, with the depots
+   of the owned DLC left on (below, "DLC") and without other DLC,
    redistributables or regional alternates. The game language is
    **Settings › Steam › Game language**, kept in madeira.cfg as
    `env.MADEIRA_STEAM_LANGUAGE` (a Steam API language name such as
@@ -208,6 +209,92 @@ Any other session also pauses downloads and closes the connection
 (`runWineFullSequence`). Madeira does not start more than one session per app
 run (`docs/LIBRARY.md`).
 
+## DLC
+
+A game's owned DLC downloads with it, as in Valve's client.
+
+**What you see.** The download sheet of a game that is not installed has a
+**DLC** section: every DLC the account owns for the game, with a switch (on
+by default) and about how much it downloads. A DLC with no files of its own
+(it only unlocks content the game already has) is listed as **No download**,
+without a switch. An installed game's Game details page has **Owned DLC (n)** in its
+Steam section, with the same switches and, per DLC, **Installed** or
+**not installed**. When a DLC that is on is missing from the install,
+**Download DLC: <name>** (or **Download n DLC**) runs Repair with it: the DLC's
+files are fetched, and the game's own files are checked and kept. A DLC turned
+off is left out of the next update or repair and its install record entry;
+its files stay until the game is uninstalled, as an earlier language's do.
+
+**How it works.** The library refresh already reads product info for every
+app in the account's licenses; the DLC among them (`common.type` DLC) are kept
+for their game: an owned DLC belongs to a game when its `common.parent` is the
+game, or the game lists it (`extended.listofdlc`) or one of its depots names it
+(`dlcappid`). A DLC's files are the game's depots with its `dlcappid`, chosen
+by the same OS, architecture and language rules as the game's own
+(`SteamAppInfo.dlcDepots`). The cached library keeps, per game, each owned
+DLC's name, depots and sizes (`SteamOwnedGame.dlc`; an older cache has none
+until the next refresh, and downloads then take no DLC).
+
+A download takes every DLC depot the account's licenses include
+(`installDepots(ownedDLC:)`, the licensed depot IDs) except those of the DLC
+the player turned off (`SteamAppInfo.dlcOff`, from `SteamDLC.offApps`). Steam
+still decides ownership: it gives a depot key only for content the account
+owns, and a DLC depot it refuses a key for is left out; the game installs
+without it. The install record lists DLC depots under
+`InstalledDepots` with their `dlcappid`, as Valve's client writes them. The
+switches are kept per game in the app's defaults (`steam-dlc-off`: the DLC
+turned off, by App ID).
+
+`env.MADEIRA_STEAM_DLC = 0` turns it off: no DLC is listed or downloaded, and
+downloads take the game's depots only, as before.
+
+Log: `[steam-dlc] install app=<id> off=<n> dlc-depots=<n>`, `[steam-dlc]
+app=<id> dlc=<id> on=<0|1>` and the `dlc=<n>` count on `[steam-library] owned`.
+
+Not checked on a device yet: whether Valve's client, started through Madeira
+Dock, takes the recorded DLC as installed without downloading it again, and DLC
+whose files live in the DLC's own product info rather than the game's (listed
+as **No download** for now).
+
+## Version (beta branches)
+
+A game's **Version** picker, on its download sheet and in the Steam section of
+its Game details page, works like the Betas tab of Valve's client. It lists
+**Public (default)** and the game's beta branches (`depots.branches`, with
+their descriptions). A password-protected beta (`pwdrequired`) shows up once
+its code was entered with **Enter beta code**: Steam checks the code
+(`ClientCheckAppBetaPassword`) and names the private branches it opens. The
+code and those names are kept per game in the app's defaults
+(`steam-beta-codes`, `steam-beta-unlocked`; **Remove beta code** forgets them
+and puts a chosen private branch back to public). The choice is kept in
+`steam-branches` (`SteamBranch`) and applies to the game's next download,
+update or repair. On an installed game whose record names another branch,
+**Download <branch>** (or **Download the public build**) switches it: files that
+match are kept and only what differs is fetched.
+
+A download asks for the chosen branch (`SteamLibraryFetcher.applyBranch`). A
+beta takes each depot's manifest for the branch (`manifests.<branch>`), and the
+public one for a depot the beta does not change, as Valve's client does; the
+manifest request code names the branch for a depot with its own beta manifest
+(`app_branch`). For a password-protected beta, the code is checked again and
+Steam's private depot section (`ClientPICSPrivateBeta`, binary KeyValues) gives
+the branch's manifests; without a code Steam accepts, the download stops with
+"needs a beta code" instead of taking the public build. A branch Steam no
+longer lists falls back to public. The install record states the branch's
+build and names the branch as `BetaKey` in `UserConfig` and `MountedConfig`,
+as Valve's client writes it, so the client keeps the game on that branch; the
+update badge compares against the recorded branch's build.
+
+Log: `[steam-branch] app=<id> choice=<branch>`, `code=kept|removed private=<n>`,
+`code-check ... eresult=<n> private=<n>`, `private-depots ... eresult=<n>
+bytes=<n>`, `private-manifests=<n>`, `branch-gone=1 using=public`, and
+`branch=<name>` on `[steam-depot] selection`. The code itself is never logged.
+
+Not checked on a device yet: whether Valve's client, started through Madeira
+Dock, starts a password-protected beta install without asking for the code
+itself. "The game" (SteamDirectStart) still picks among the launch entries
+without a beta key.
+
 ## Downloads in the background
 
 On iOS 26 and later, a download submits a `BGContinuedProcessingTask` when it
@@ -240,13 +327,15 @@ In `Documents/madeira.cfg`, all on by default:
   grace period and the clean pause remain.
 - `env.MADEIRA_DOWNLOAD_NOTIFICATIONS = 0`: no notifications and no
   permission request.
+- `env.MADEIRA_STEAM_DLC = 0`: no owned DLC is listed or downloaded (above,
+  "DLC").
 
 `env.MADEIRA_STEAM_TRACE = 1` adds protocol trace lines (message names and
 result codes, never payloads or credentials).
 
 ## Logs
 
-`[steam-library]`, `[steam-depot]`, `[steam-repair]`, `[steam-cdn]`,
+`[steam-library]`, `[steam-depot]`, `[steam-dlc]`, `[steam-branch]`, `[steam-repair]`, `[steam-cdn]`,
 `[steam-shared]`, `[steam-shared-record]`, `[steam-record]`, `[steam-playtime]`,
 `[steam-account]`, `[steam-games]`, `[steam-start]` (Start with: the mode,
 where the program came from, how many launch entries and programs) and
@@ -436,8 +525,8 @@ Madeira Dock or as The game).
 
 ## Not included, and limits
 
-- No Steam Cloud, no achievements, no workshop content, no DLC installation,
-  no branch (beta) selection: the public branch.
+- No Steam Cloud, no achievements, no workshop content. Beta branches: see
+  "Version (beta branches)" above. DLC: see "DLC" above.
 - A file that a newer build no longer contains is not deleted by an update
   (the install keeps it); **Uninstall** removes the whole folder.
 - Only the account's licenses are read; family sharing and free-on-demand

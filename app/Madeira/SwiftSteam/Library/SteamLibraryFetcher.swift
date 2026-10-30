@@ -45,10 +45,15 @@ class SteamLibraryFetcher {
 
         // Playable types only: games, demos and applications. This leaves out
         // DLC, soundtracks and tools (redistributables, runtimes, SDKs, servers).
+        // The owned DLC are kept aside for their games' downloads (SteamDLC).
         let games = appInfos.filter { $0.type.isPlayable }
-        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application)")
+        ownedDLC = appInfos.filter { $0.type == .dlc }
+        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application), \(ownedDLC.count) DLC")
         return games
     }
+
+    /// The DLC apps of the account's licenses, from the last fetchOwnedApps.
+    private(set) var ownedDLC: [SteamAppInfo] = []
 
     /// Depot IDs included in the account's licenses, from the same package
     /// info the library uses (`depotids`). The installer consults it only when
@@ -86,6 +91,15 @@ class SteamLibraryFetcher {
         return try await fetchAppInfo(appIDs: [appID], tokens: tokens).first
     }
 
+    /// Fetches PICS info for several apps in one token and one product-info
+    /// round trip (DLC names for Game details).
+    func fetchAppInfos(appIDs: [UInt32]) async throws -> [SteamAppInfo] {
+        guard !appIDs.isEmpty else { return [] }
+        try await session.ensureConnected()
+        let tokens = try await fetchPICSAccessTokens(appIDs: appIDs)
+        return try await fetchAppInfo(appIDs: appIDs, tokens: tokens)
+    }
+
     // MARK: - Install metadata
 
     /// The app's metadata for an install, with the content metadata of the
@@ -103,6 +117,9 @@ class SteamLibraryFetcher {
         }
         var pending = app.depots.filter { eligible($0) && $0.publicManifestID == nil && $0.fromApp != nil }
             .map { ($0.fromApp!, $0.depotID) }
+        // Redistributables (sharedinstall) resolve the same way, but a missing one
+        // never fails the install: the game's own content does not depend on it.
+        pending += app.redistDepots().filter { $0.publicManifestID == nil }.map { ($0.fromApp!, $0.depotID) }
         while let (id, depotID) = pending.popLast() {
             try Task.checkCancellation()
             if !references.insert("\(id):\(depotID)").inserted { continue }
@@ -133,7 +150,11 @@ class SteamLibraryFetcher {
         guard missing.isEmpty else { throw SteamFileError.invalid("Steam did not provide required shared content metadata. Refresh and retry the download.") }
         // The direct owner of each selected shared depot, for its install
         // record. Metadata only; Valve still decides access and launch readiness.
-        for id in Set(app.installDepots().compactMap(\.fromApp)).subtracting([appID]).sorted() {
+        let redist = app.redistDepots().filter { $0.publicManifestID != nil }
+        if !redist.isEmpty {
+            SteamLog.event("[steam-redist] app=\(appID) depots=\(redist.map { "\($0.depotID)<\($0.fromApp!)" }.joined(separator: ","))")
+        }
+        for id in Set(app.installDepots().compactMap(\.fromApp) + redist.compactMap(\.fromApp)).subtracting([appID]).sorted() {
             try Task.checkCancellation()
             if owners[id] == nil {
                 guard owners.count <= 64 else { break }
@@ -144,6 +165,102 @@ class SteamLibraryFetcher {
             }
         }
         return app
+    }
+
+    // MARK: - Beta branches
+
+    /// The private branches a beta code opens for an app (CheckAppBetaPassword),
+    /// by name, with the key Steam takes for each one's depot section. Empty
+    /// when Steam does not accept the code. The code is sent only to Steam.
+    func checkBetaCode(appID: UInt32, code: String) async throws -> [String: Data] {
+        try await session.ensureConnected()
+        var request = ProtobufEncoder()
+        request.writeUInt32(fieldNumber: 1, value: appID)
+        request.writeString(fieldNumber: 2, value: code)
+        let response = try await session.sendAndWait(eMsg: .clientCheckAppBetaPassword, body: request.data,
+                                                     responseEMsg: .clientCheckAppBetaPasswordResponse, timeout: 15)
+        var decoder = ProtobufDecoder(response.body)
+        var result: UInt64 = 0
+        var keys: [String: Data] = [:]
+        while let tag = try decoder.readTag() {
+            switch (tag.fieldNumber, tag.wireType) {
+            case (1, .varint): result = try decoder.readVarint()
+            case (4, .lengthDelimited):
+                var entry = ProtobufDecoder(try decoder.readBytes())
+                var name = "", hex = ""
+                while let field = try entry.readTag() {
+                    switch (field.fieldNumber, field.wireType) {
+                    case (1, .lengthDelimited): name = try entry.readString()
+                    case (2, .lengthDelimited): hex = try entry.readString()
+                    default: try entry.skip(wireType: field.wireType)
+                    }
+                }
+                if SteamAppInfo.validBranchName(name), keys.count < 64, let key = Self.hexBytes(hex) { keys[name] = key }
+            default: try decoder.skip(wireType: tag.wireType)
+            }
+        }
+        SteamLog.event("[steam-branch] code-check app=\(appID) eresult=\(result) private=\(keys.count)")
+        return result == 1 ? keys : [:]
+    }
+
+    /// The depot section of a private branch (PICSPrivateBeta), parsed; `key`
+    /// is the branch's entry from checkBetaCode.
+    func privateBranchDepots(appID: UInt32, branch: String, key: Data) async throws -> [String: Any] {
+        try await session.ensureConnected()
+        let tokens = try await fetchPICSAccessTokens(appIDs: [appID])
+        var request = ProtobufEncoder()
+        request.writeUInt32(fieldNumber: 1, value: appID)
+        request.writeUInt64(fieldNumber: 2, value: tokens[appID] ?? 0)
+        request.writeString(fieldNumber: 3, value: branch)
+        request.writeBytes(fieldNumber: 4, value: key)
+        let response = try await session.sendAndWait(eMsg: .clientPICSPrivateBetaRequest, body: request.data,
+                                                     responseEMsg: .clientPICSPrivateBetaResponse, timeout: 30)
+        var decoder = ProtobufDecoder(response.body)
+        var result: UInt64 = 0
+        var section = Data()
+        while let tag = try decoder.readTag() {
+            switch (tag.fieldNumber, tag.wireType) {
+            case (1, .varint): result = try decoder.readVarint()
+            case (2, .lengthDelimited): section = try decoder.readBytes()
+            default: try decoder.skip(wireType: tag.wireType)
+            }
+        }
+        SteamLog.event("[steam-branch] private-depots app=\(appID) eresult=\(result) bytes=\(section.count)")
+        guard result == 1, section.count <= 4 << 20 else { return [:] }
+        return VDFParser.parseBinaryVDF(from: section)
+    }
+
+    /// Points install info at a branch: `branch` when PICS lists it, else public.
+    /// A password-protected branch first takes its manifests from Steam with the
+    /// beta code (`code`); without a code Steam accepts, the install stops
+    /// instead of quietly taking the public build.
+    func applyBranch(_ app: inout SteamAppInfo, branch: String, code: String?) async throws {
+        guard branch != SteamAppInfo.publicBranch, let entry = app.branches.first(where: { $0.name == branch }) else {
+            if branch != SteamAppInfo.publicBranch { SteamLog.event("[steam-branch] app=\(app.appID) branch-gone=1 using=public") }
+            app.branch = SteamAppInfo.publicBranch
+            return
+        }
+        if entry.passwordRequired {
+            guard let code, let key = try await checkBetaCode(appID: app.appID, code: code)[branch] else {
+                throw SteamError.betaCodeNeeded(branch)
+            }
+            let section = try await privateBranchDepots(appID: app.appID, branch: branch, key: key)
+            let added = app.addPrivateBranch(branch, depots: section)
+            SteamLog.event("[steam-branch] app=\(app.appID) private-manifests=\(added)")
+            guard added > 0 else { throw SteamError.betaCodeNeeded(branch) }
+        }
+        app.branch = branch
+    }
+
+    nonisolated static func hexBytes(_ hex: String) -> Data? {
+        let digits = Array(hex.utf8)
+        guard !digits.isEmpty, digits.count % 2 == 0, digits.count <= 256 else { return nil }
+        var bytes = Data(capacity: digits.count / 2)
+        for index in stride(from: 0, to: digits.count, by: 2) {
+            guard let byte = UInt8(String(decoding: digits[index...index + 1], as: UTF8.self), radix: 16) else { return nil }
+            bytes.append(byte)
+        }
+        return bytes
     }
 
     // MARK: - License List
@@ -263,6 +380,58 @@ enum VDFParser {
     private static let typeString: UInt8 = 0x01
     private static let typeInt32: UInt8 = 0x02
     private static let typeEnd: UInt8 = 0x08
+
+    /// Parse a binary KeyValues blob (a private branch's depot section) into
+    /// the nested dictionary `parseTextVDF` returns: numbers become their
+    /// decimal text, so the same app-info code reads both. Bounded: 16 levels,
+    /// 65536 entries; a malformed blob yields what was read before it.
+    static func parseBinaryVDF(from data: Data) -> [String: Any] {
+        let bytes = [UInt8](data)
+        var i = 0, entries = 0
+        func string() -> String? {
+            guard let end = bytes[i...].firstIndex(of: 0) else { return nil }
+            defer { i = end + 1 }
+            return String(decoding: bytes[i..<end], as: UTF8.self)
+        }
+        func integer(_ size: Int) -> UInt64? {
+            guard i + size <= bytes.count else { return nil }
+            defer { i += size }
+            return bytes[i..<i + size].reversed().reduce(0) { $0 << 8 | UInt64($1) }
+        }
+        func section(_ depth: Int) -> [String: Any] {
+            var result: [String: Any] = [:]
+            while i < bytes.count, entries < 65_536 {
+                let type = bytes[i]; i += 1
+                if type == typeEnd || type == 0x0B { break }
+                guard let key = string() else { break }
+                entries += 1
+                switch type {
+                case typeNone:
+                    guard depth < 16 else { return result }
+                    result[key] = section(depth + 1)
+                case typeString:
+                    guard let value = string() else { return result }
+                    result[key] = value
+                case typeInt32:
+                    guard let value = integer(4) else { return result }
+                    result[key] = String(Int32(truncatingIfNeeded: value))
+                case 0x03, 0x04, 0x06:  // float, pointer, color: 4 bytes
+                    guard let value = integer(4) else { return result }
+                    result[key] = String(value)
+                case 0x07:  // uint64
+                    guard let value = integer(8) else { return result }
+                    result[key] = String(value)
+                case 0x0A:  // int64
+                    guard let value = integer(8) else { return result }
+                    result[key] = String(Int64(bitPattern: value))
+                default:
+                    return result  // wide strings and unknown types: stop
+                }
+            }
+            return result
+        }
+        return section(0)
+    }
 
     /// Parse a text-format VDF / KeyValues blob into a nested dictionary.
     /// Steam PICS sends *app* product info in this text format (`"key" "value"`
