@@ -12,7 +12,7 @@ while IFS= read -r name; do
     [ "$name" = ntdll ] || modules+=("$name")
 done < <(python3 "$R/build/windows-runtime/targets.py" arm64ec list)
 [ ${#modules[@]} -gt 0 ] || { echo 'No ARM64EC Wine modules selected' >&2; exit 1; }
-bash "$R/build/wine-pe/build-modules.sh" "${modules[@]}"
+UNDELAY=0 bash "$R/build/wine-pe/build-modules.sh" "${modules[@]}"
 bash "$R/build/wine-pe/build-ntdll.sh"
 python3 "$R/build/windows-runtime/targets.py" aarch64 install
 # Vulkan Wine DLLs are isolated from the default Metal farm.
