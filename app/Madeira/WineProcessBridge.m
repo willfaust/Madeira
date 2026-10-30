@@ -1031,6 +1031,41 @@ static void madeira_link_wine_mono(NSFileManager *fm, NSString *prefix, NSString
         dprintf(STDERR_FILENO, "[wine-mono] ml1275 FAILED to link C:\\windows\\mono\\mono-2.0 errno=%d\n", errno);
 }
 
+/* Wine Gecko: the MSIs Madeira downloaded (WineGecko.swift, Library/Application
+ * Support/WineGecko) go into this prefix's Wine download cache, $HOME/.cache/
+ * wine (HOME is the prefix). The first program that needs mshtml then gets
+ * Gecko from appwiz.cpl's install_from_cache, which checks the same SHA-256,
+ * instead of its "Wine Gecko Installer" download window: the x86 MSI for a
+ * 32-bit program, x86_64 for a 64-bit (ARM64EC) one. Renewed every session
+ * (the path is per install); a real file there is the prefix's own. */
+static void madeira_link_wine_gecko(NSFileManager *fm, NSString *prefix)
+{
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *cache = [prefix stringByAppendingPathComponent:@".cache/wine"];
+    for (NSString *name in @[ @"wine-gecko-2.47.4-x86.msi", @"wine-gecko-2.47.4-x86_64.msi" ])
+    {
+        NSString *source = [[support stringByAppendingPathComponent:@"WineGecko"] stringByAppendingPathComponent:name];
+        NSString *dst = [cache stringByAppendingPathComponent:name];
+        struct stat st;
+
+        if (lstat(dst.fileSystemRepresentation, &st) == 0 && !S_ISLNK(st.st_mode))
+            continue;
+        if (access(source.fileSystemRepresentation, R_OK) != 0)
+        {
+            if (lstat(dst.fileSystemRepresentation, &st) == 0)
+                [fm removeItemAtPath:dst error:nil];
+            dprintf(STDERR_FILENO, "[wine-gecko] %s not downloaded yet; Wine asks for it if a program needs it\n", name.UTF8String);
+            continue;
+        }
+        [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:dst error:nil];
+        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:source error:nil])
+            dprintf(STDERR_FILENO, "[wine-gecko] Wine's download cache has %s\n", name.UTF8String);
+        else
+            dprintf(STDERR_FILENO, "[wine-gecko] FAILED to link %s errno=%d\n", name.UTF8String, errno);
+    }
+}
+
 /* C:\windows\winsxs for 32-bit processes: the x86 side-by-side assemblies Wine
  * ships. Re-seeded every session, because the links name the bundle path.
  *
@@ -2056,6 +2091,7 @@ static void *wine_process_thread(void *arg) {
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);
+            madeira_link_wine_gecko(fm, prefix);
             if (madeira_d3d9_wined3d_wanted())
                 madeira_link_d3d9_wined3d(fm, prefix, bundlePath, has_i386_set);
             madeira_setup_vulkan(fm, prefix, bundlePath, use_arm64ec);

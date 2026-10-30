@@ -416,6 +416,19 @@ configuration.
 **Settings › JIT** and **Settings › Steam** both show **Run setup again**.
 **Settings › .NET Framework** shows Wine Mono's state, with **Download Wine
 Mono** or **Remove Wine Mono** (hidden in a build that carries it).
+**Settings › Web pages in programs** does the same for **Wine Gecko**
+(`app/Madeira/WineGecko.swift`), the HTML engine Wine's mshtml (Internet
+Explorer's web view) loads for installers and launchers that show web
+pages. Wine's own "Wine Gecko Installer" window downloaded it
+through Wine's networking and hung at 8%. Madeira instead fetches the same two
+MSIs from WineHQ with iOS networking (x86 for 32-bit programs, x86_64 for 64-bit
+ones: clang defines `__x86_64__` for ARM64EC, so Wine's 64-bit side asks for it), by itself on app start when on Wi-Fi (not on
+cellular or in Low Data Mode; without Wi-Fi the next start tries again), checks
+them against the SHA-256s in Wine's `appwiz.cpl`, and keeps them in Application
+Support/WineGecko. Every session links them into the prefix's Wine download
+cache (`$HOME/.cache/wine`, `[wine-gecko]` log lines), so Wine installs Gecko
+from there the first time a program needs it, without the download window.
+After **Remove Wine Gecko** they are not fetched again on its own.
 Settings › Steam also shows the signed-in account with **Sign out of Steam**
 (or **Sign in to Steam**), the **Steam Cloud saves** switch
 (`docs/STEAM_CLOUD.md`), **Madeira Dock** (Dock's sheet, with the last Dock
