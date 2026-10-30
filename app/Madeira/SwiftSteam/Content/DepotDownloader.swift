@@ -85,10 +85,13 @@ final class DepotDownloader {
     func install(_ app: SteamAppInfo, steamApps: URL,
                  ownedDepots: @escaping () async -> Set<UInt32>? = { nil },
                  progress report: @escaping (SteamDownloadProgress) -> Void) async throws -> URL {
-        let depots = app.installDepots()
+        // DLC depots come along when the account's licenses include them.
+        var ownedDLC: Set<UInt32> = []
+        if app.depots.contains(where: { $0.dlcAppID != nil }) { ownedDLC = await ownedDepots() ?? [] }
+        let depots = app.installDepots(ownedDLC: ownedDLC)
         guard !depots.isEmpty else { throw SteamError.depotNotFound(app.appID) }
         // Before the key requests, so a refused depot still has its selection logged.
-        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.buildID) language=\(app.depotLanguage)/\(app.gameLanguage) \(app.depotSelectionSummary())")
+        SteamLog.event("[steam-depot] selection app=\(app.appID) build=\(app.buildID) language=\(app.depotLanguage)/\(app.gameLanguage) \(app.depotSelectionSummary(ownedDLC: ownedDLC))")
 
         let folderName = SteamInstallFiles.safeFolderName(app.installDir.isEmpty ? "app_\(app.appID)" : app.installDir)
         let installURL = steamApps.appendingPathComponent("common", isDirectory: true)
@@ -120,6 +123,10 @@ final class DepotDownloader {
             let key: Data
             do {
                 key = try await depotKey(depotID: depot.depotID, appID: app.appID)
+            } catch SteamError.depotKeyNotFound(let refused) where depot.dlcAppID != nil {
+                // Owned DLC Steam still refuses a key for is left out; the game installs without it.
+                licenseSkipped.append(refused)
+                continue
             } catch SteamError.depotKeyNotFound(let refused) {
                 // A depot Steam refuses AND the account's licenses do not
                 // include is content this account does not own (another
@@ -141,19 +148,59 @@ final class DepotDownloader {
             }
             plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
                                    hosts: pool, auth: auth,
-                                   declaredSize: depot.publicSizeBytes, health: health))
+                                   declaredSize: depot.publicSizeBytes, health: health, installURL: installURL))
+        }
+        // Redistributables the game names (Steamworks Common Redistributables):
+        // into the owner's own folder, as Valve's client installs them. Optional:
+        // a depot that cannot be planned is logged and left out.
+        var redistDepots: [SteamAppInfo.DepotInfo] = []
+        for depot in app.redistDepots() {
+            try Task.checkCancellation()
+            guard let gid = depot.publicManifestID, let ownerID = depot.fromApp,
+                  let owner = app.sharedOwners[ownerID] else { continue }
+            let ownerFolder = SteamInstallFiles.safeFolderName(owner.installDir)
+            guard !ownerFolder.isEmpty else { continue }
+            let ownerURL = steamApps.appendingPathComponent("common", isDirectory: true)
+                .appendingPathComponent(ownerFolder, isDirectory: true)
+            do {
+                let key: Data
+                do { key = try await depotKey(depotID: depot.depotID, appID: ownerID) }
+                catch SteamError.depotKeyNotFound(_) { key = try await depotKey(depotID: depot.depotID, appID: app.appID) }
+                let manifest = try await fetchManifest(depotID: depot.depotID, appID: ownerID,
+                                                       manifestGID: gid, key: key, hosts: hosts)
+                var auth: [String: String] = [:]
+                for host in pool {
+                    auth[host] = await cdnAuthFragment(depotID: depot.depotID, appID: ownerID, host: host)
+                }
+                try FileManager.default.createDirectory(at: ownerURL, withIntermediateDirectories: true)
+                plans.append(DepotPlan(depotID: depot.depotID, manifestGID: gid, key: key, manifest: manifest,
+                                       hosts: pool, auth: auth,
+                                       declaredSize: depot.publicSizeBytes, health: health, installURL: ownerURL))
+                redistDepots.append(depot)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                SteamLog.event("[steam-redist] skipped app=\(app.appID) depot=\(depot.depotID) owner=\(ownerID) reason=\(type(of: error))")
+            }
+        }
+        if !redistDepots.isEmpty {
+            SteamLog.event("[steam-redist] install app=\(app.appID) depots=\(redistDepots.map { String($0.depotID) }.joined(separator: ","))")
+        }
+        let dlcDepots = Set(depots.filter { $0.dlcAppID != nil }.map(\.depotID))
+        if !app.dlcOff.isEmpty || !dlcDepots.isEmpty {
+            SteamLog.event("[steam-dlc] install app=\(app.appID) off=\(app.dlcOff.count) dlc-depots=\(plans.filter { dlcDepots.contains($0.depotID) }.count)")
         }
         if !licenseSkipped.isEmpty {
             SteamLog.event("[steam-depot] license app=\(app.appID) skipped=\(licenseSkipped.map(String.init).joined(separator: ",")) kept=\(plans.map { String($0.depotID) }.joined(separator: ","))")
         }
-        guard !plans.isEmpty else {
+        guard plans.contains(where: { $0.installURL == installURL }) else {
             if let refused = licenseSkipped.first { throw SteamError.depotKeyNotFound(refused) }
             throw SteamError.depotNotFound(app.appID)
         }
 
         // 2. Prepare files and load journals off the main actor.
         let prepared = try await Task.detached(priority: .userInitiated) {
-            try Self.prepare(plans: plans, installURL: installURL, journalDir: journalDir)
+            try Self.prepare(plans: plans, journalDir: journalDir)
         }.value
         state.totalBytes = prepared.totalBytes
         state.doneBytes = prepared.doneBytes
@@ -227,15 +274,18 @@ final class DepotDownloader {
         // 4. Install record. Sizes come from the manifests; no tree walk.
         state.phase = .finishing
         report(state)
+        // A DLC depot's record entry names its DLC app, as Valve's client writes it.
+        var dlcApps: [UInt32: Int] = [:]
+        for depot in depots { if let dlc = depot.dlcAppID { dlcApps[depot.depotID] = Int(dlc) } }
         let installed = plans.map { plan in
             AppManifestWriter.InstalledDepot(depotID: Int(plan.depotID), manifestGID: plan.manifestGID,
-                                             size: Int64(plan.manifest.totalUncompressedSize))
+                                             size: Int64(plan.manifest.totalUncompressedSize), dlcAppID: dlcApps[plan.depotID])
         }
         // Depots taken from another app are that app's content. Valve's client
         // refuses a launch until the owner app has its own record, so both
         // records are written the way the client writes them.
         var owners: [UInt32: UInt32] = [:]
-        for depot in depots { if let from = depot.fromApp, from != app.appID { owners[depot.depotID] = from } }
+        for depot in depots + redistDepots { if let from = depot.fromApp, from != app.appID { owners[depot.depotID] = from } }
         let own = installed.filter { owners[UInt32($0.depotID)] == nil }
         let shared = installed.filter { owners[UInt32($0.depotID)] != nil }
         // Files Valve's client must customize per user before they run, as
@@ -295,6 +345,9 @@ final class DepotDownloader {
         let auth: [String: String]
         let declaredSize: UInt64
         let health: ContentHostHealth
+        /// The folder the depot's files go to: the game's, or for a
+        /// redistributable its owner app's.
+        let installURL: URL
     }
 
     struct WorkItem: Sendable {
@@ -315,10 +368,10 @@ final class DepotDownloader {
         var fileCount = 0
     }
 
-    private nonisolated static func prepare(plans: [DepotPlan], installURL: URL, journalDir: URL) throws -> Prepared {
+    private nonisolated static func prepare(plans: [DepotPlan], journalDir: URL) throws -> Prepared {
         let fm = FileManager.default
         var result = Prepared()
-        var folded: [String: String] = [:]   // lowercased relative dir -> first spelling
+        var folded: [URL: [String: String]] = [:]   // per folder: lowercased relative dir -> first spelling
         let journalNames = Set(plans.map { "depot_\($0.depotID)_\($0.manifestGID).journal" })
         // A journal for an older manifest describes different file contents.
         for name in (try? fm.contentsOfDirectory(atPath: journalDir.path)) ?? [] where !journalNames.contains(name) {
@@ -335,11 +388,11 @@ final class DepotDownloader {
             for (fileIndex, file) in plan.manifest.files.enumerated() {
                 // Symlinks (flag 0x200) have no Windows meaning here; skip them.
                 guard file.flags & 0x200 == 0,
-                      let relative = SteamInstallFiles.safeRelativePath(file.filename, folded: &folded) else {
+                      let relative = SteamInstallFiles.safeRelativePath(file.filename, folded: &folded[plan.installURL, default: [:]]) else {
                     if file.flags & 0x200 == 0 { SteamLog.trace("rejected manifest path in depot \(plan.depotID)") }
                     paths.append(""); existing.append(false); continue
                 }
-                let url = installURL.appendingPathComponent(relative)
+                let url = plan.installURL.appendingPathComponent(relative)
                 if file.isDirectory {
                     try fm.createDirectory(at: url, withIntermediateDirectories: true)
                     paths.append(""); existing.append(false); continue

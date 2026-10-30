@@ -50,8 +50,11 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// Steam states no size.
     var downloadBytes: UInt64?
     var installBytes: UInt64?
+    /// The DLC the account owns for the game (SteamOwnedDLC), by name; nil in
+    /// older caches, whose downloads then take no DLC until the next refresh.
+    var dlc: [SteamOwnedDLC]?
 
-    init(_ info: SteamAppInfo) {
+    init(_ info: SteamAppInfo, ownedDLC: [UInt32: SteamAppInfo] = [:]) {
         id = Int(info.appID)
         name = info.name
         installDir = info.installDir
@@ -71,6 +74,16 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
         let download = info.downloadSize(for: "windows"), install = info.installSize(for: "windows")
         downloadBytes = download > 0 ? download : nil
         installBytes = install > 0 ? install : nil
+        dlc = SteamOwnedDLC.list(for: info, owned: ownedDLC)
+    }
+
+    /// The owned DLC left on whose files an installed game lacks (its record
+    /// names none of them by `dlcappid`, `installedDLC`, and lacks some of
+    /// their depots), for Download DLC on its page.
+    func dlcToDownload(installedDepots: Set<Int>, installedDLC: Set<Int> = []) -> [SteamOwnedDLC] {
+        let off = SteamDLC.off(id)
+        return (dlc ?? []).filter { !off.contains($0.id) && !$0.depots.isEmpty && !installedDLC.contains($0.id) &&
+            !Set($0.depots).isSubset(of: installedDepots) }
     }
 
     /// The language to offer on an installed game's page (Download in ...):
@@ -95,6 +108,43 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     }
 
     var folderName: String { SteamInstallFiles.safeFolderName(installDir.isEmpty ? "app_\(id)" : installDir) }
+}
+
+/// One DLC the account owns for a game: its name and the depots it adds to
+/// a Windows install of the game, with about how much they download and take
+/// on disk. A DLC without depots only unlocks content the game already has:
+/// nothing to download.
+struct SteamOwnedDLC: Codable, Identifiable, Hashable, Sendable {
+    var id: Int
+    var name: String
+    var depots: [Int]
+    var downloadBytes: UInt64
+    var installBytes: UInt64
+
+    /// The owned DLC of a game: owned DLC apps whose parent is the game, or
+    /// which the game lists or its depots name; by name, at most 1024.
+    static func list(for game: SteamAppInfo, owned: [UInt32: SteamAppInfo]) -> [SteamOwnedDLC] {
+        let known = Set(game.knownDLC)
+        let ids = owned.values.filter { $0.type == .dlc && ($0.parentID == game.appID || known.contains($0.appID)) }
+            .map(\.appID).filter { $0 != game.appID }
+        func total(_ depots: [SteamAppInfo.DepotInfo], _ bytes: (SteamAppInfo.DepotInfo) -> UInt64) -> UInt64 {
+            depots.reduce(0) { sum, depot in
+                let (next, overflow) = sum.addingReportingOverflow(bytes(depot))
+                return overflow ? UInt64.max : next
+            }
+        }
+        return ids.prefix(1024).map { id in
+            let depots = game.dlcDepots(id)
+            let download = total(depots) { $0.publicDownloadBytes > 0 ? $0.publicDownloadBytes : $0.maxSize }
+            let install = total(depots) { $0.publicSizeBytes > 0 ? $0.publicSizeBytes : ($0.publicDownloadBytes > 0 ? $0.publicDownloadBytes : $0.maxSize) }
+            let name = owned[id]?.name ?? ""
+            return SteamOwnedDLC(id: Int(id), name: name.isEmpty ? "DLC \(id)" : name,
+                                 depots: depots.map { Int($0.depotID) }, downloadBytes: download, installBytes: install)
+        }.sorted { a, b in
+            let order = a.name.localizedStandardCompare(b.name)
+            return order == .orderedSame ? a.id < b.id : order == .orderedAscending
+        }
+    }
 }
 
 // MARK: - Playtime
@@ -229,6 +279,9 @@ final class SteamOwnedLibrary: ObservableObject {
     /// Off with `env.MADEIRA_STEAM_LIBRARY = 0`, or without Madeira Dock (a
     /// downloaded game starts through it).
     static var enabled: Bool { MadeiraDock.enabled && SteamSignIn.flag("MADEIRA_STEAM_LIBRARY", default: true) }
+    /// Owned DLC is listed and downloaded with its game (SteamDLC); off with
+    /// `env.MADEIRA_STEAM_DLC = 0`, when downloads take no DLC as before.
+    static var dlcEnabled: Bool { SteamSignIn.flag("MADEIRA_STEAM_DLC", default: true) }
 
     @Published private(set) var signedIn = false
     @Published private(set) var owned: [SteamOwnedGame] = [] { didSet { ownedRevision &+= 1 } }
@@ -373,13 +426,15 @@ final class SteamOwnedLibrary: ObservableObject {
         defer { refreshing = false }
         do {
             let apps = try await fetcher.fetchOwnedApps()
-            let games = apps.filter(\.installableOnWindows).map(SteamOwnedGame.init)
+            var ownedDLC: [UInt32: SteamAppInfo] = [:]
+            if Self.dlcEnabled { for dlc in fetcher.ownedDLC { ownedDLC[dlc.appID] = dlc } }
+            let games = apps.filter(\.installableOnWindows).map { SteamOwnedGame($0, ownedDLC: ownedDLC) }
                 .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             owned = games
             libraryUpdated = Date()
             cachedAccount = Self.accountKey(SteamSignIn.accountName)
             writeCache()
-            SteamLog.event("[steam-library] owned apps=\(apps.count) windows-installable=\(games.count)")
+            SteamLog.event("[steam-library] owned apps=\(apps.count) windows-installable=\(games.count) dlc=\(ownedDLC.count)")
             await refreshPlaytime()
         } catch {
             handleSessionError(error, context: "library", report: interactive)
@@ -391,6 +446,50 @@ final class SteamOwnedLibrary: ObservableObject {
         try? FileManager.default.createDirectory(at: Self.supportFolder, withIntermediateDirectories: true)
         try? JSONEncoder().encode(Cache(version: 2, updated: updated, account: account, games: owned))
             .write(to: Self.cacheURL, options: .atomic)
+    }
+
+    /// DLC names by app ID, asked of Steam once per DLC while the app runs.
+    private var dlcNames: [Int: String] = [:]
+
+    /// The names of DLC apps (Game details › Steam › Installed DLC): known ones at
+    /// once, the others asked of Steam (signed in, no session running), at most 32,
+    /// in one request; any still unnamed take the name of their depot in the
+    /// game's own app info.
+    func names(ofDLC ids: [Int], gameAppID: Int) async -> [Int: String] {
+        var result: [Int: String] = [:]
+        for id in ids {
+            if let name = dlcNames[id] ?? game(id)?.name { result[id] = name }
+        }
+        let missing = ids.filter { result[$0] == nil && $0 > 0 && $0 <= Int(UInt32.max) }.prefix(32)
+        guard !missing.isEmpty else { return result }
+        guard Self.enabled, signedIn, !inSession else {
+            SteamLog.event("[steam-dlc] names skipped signed-in=\(signedIn ? 1 : 0) session=\(inSession ? 1 : 0)")
+            return result
+        }
+        func keep(_ id: Int, _ name: String) {
+            let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+            guard !name.isEmpty, result[id] == nil else { return }
+            dlcNames[id] = name
+            result[id] = name
+        }
+        do {
+            for info in try await fetcher.fetchAppInfos(appIDs: missing.map { UInt32($0) }) {
+                keep(Int(info.appID), info.name)
+            }
+        } catch {
+            SteamLog.event("[steam-dlc] DLC app info failed: \(error)")
+        }
+        if missing.contains(where: { result[$0] == nil }), gameAppID > 0, gameAppID <= Int(UInt32.max) {
+            do {
+                for depot in try await fetcher.fetchAppInfo(appID: UInt32(gameAppID))?.depots ?? [] {
+                    if let dlc = depot.dlcAppID { keep(Int(dlc), depot.name) }
+                }
+            } catch {
+                SteamLog.event("[steam-dlc] game app info failed: \(error)")
+            }
+        }
+        SteamLog.event("[steam-dlc] names asked=\(missing.count) found=\(missing.filter { result[$0] != nil }.count)")
+        return result
     }
 
     /// Steam's launch configuration for an owned app, for "Start with: The game"
@@ -1200,9 +1299,17 @@ final class SteamOwnedLibrary: ObservableObject {
             if let name = ExternalDrives.driveName(library: library), !ExternalDrives.isConnected(name) {
                 throw SteamDriveMissing(name: name)
             }
-            guard let info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
+            guard var info = try await fetcher.fetchInstallInfo(appID: UInt32(appID)) else {
                 throw SteamError.appInfoNotFound(UInt32(appID))
             }
+            // Owned DLC comes along unless the player turned it off (SteamDLC);
+            // with the switch off, none does.
+            info.dlcOff = Self.dlcEnabled ? SteamDLC.offApps(appID) : Set(info.knownDLC)
+            // The depots of the DLC apps the account owns count as owned too: a
+            // package often lists the DLC app but not its depots (New Vegas's
+            // Courier's Stash). Steam still refuses a key for anything not owned.
+            let ownedApps = Self.dlcEnabled ? Set((game(appID)?.dlc ?? []).map { UInt32($0.id) }) : []
+            let dlcDepots = Set(info.depots.filter { $0.dlcAppID.map { ownedApps.contains($0) } ?? false }.map(\.depotID))
             let steamApps = try ExternalDrives.nativeURL(library, write: true)
             let common = try ExternalDrives.nativeURL(library + "/common", write: true)
             _ = try ExternalDrives.nativeURL(library + "/common/" + SteamInstallFiles.safeFolderName(info.installDir.isEmpty ? "app_\(appID)" : info.installDir), write: true)
@@ -1210,7 +1317,10 @@ final class SteamOwnedLibrary: ObservableObject {
             try FileManager.default.createDirectory(at: common, withIntermediateDirectories: true)
             SteamLog.event("[steam-depot] install app=\(appID) library=\(library)")
             let folder = try await downloader.install(info, steamApps: steamApps,
-                                                      ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
+                                                      ownedDepots: { [weak self] in
+                let licensed = try? await self?.fetcher.ownedDepotIDs()
+                return licensed.map { $0.union(dlcDepots) } ?? (dlcDepots.isEmpty ? nil : dlcDepots)
+            }) { [weak self] progress in
                 self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
             }
