@@ -55,6 +55,20 @@ enum SteamInstallFiles {
         return Set(keys.prefix(512).compactMap { Int($0) })
     }
 
+    /// The DLC the install record holds: each `InstalledDepots` entry with a
+    /// `dlcappid` (written by Madeira's downloads and by Valve's client), by DLC
+    /// app, with the bytes its depots take when the record states them.
+    static func installedDLC(appID: Int, steamApps: URL) -> [Int: Int64] {
+        guard let state = record(appID: appID, steamApps: steamApps) else { return [:] }
+        var found: [Int: Int64] = [:]
+        for (_, depot) in (state["InstalledDepots"]?.fields ?? [:]).prefix(512) {
+            guard let dlc = depot["dlcappid"]?.string.flatMap({ Int($0) }), dlc > 0 else { continue }
+            let size = depot["size"]?.string.flatMap { Int64($0) } ?? 0
+            found[dlc, default: 0] += max(size, 0)
+        }
+        return found
+    }
+
     /// The install size the record states (`SizeOnDisk`, bytes), or nil.
     static func sizeOnDisk(appID: Int, steamApps: URL) -> Int64? {
         guard let state = record(appID: appID, steamApps: steamApps),

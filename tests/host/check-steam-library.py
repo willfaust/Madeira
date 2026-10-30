@@ -206,6 +206,8 @@ require(sources['SteamInstall.swift'].count(f'"{relative_root}/steamapps"') == 1
 downloader = sources['SwiftSteam/Content/DepotDownloader.swift']
 require('SteamLog.event("[steam-depot] install begin' in downloader and 'depot-key refused' in downloader, 'the download logs App IDs and depot IDs')
 require(not re.search(r'LibraryFlags|MADEIRA_STEAM_[A-Z_]+', downloader), 'the downloader has no switches of its own')
+require('app.installDepots(ownedDLC: ownedDLC)' in downloader and 'dlcAppID: dlcApps[plan.depotID]' in downloader,
+        "installs take the account's owned DLC depots and record their DLC app")
 dock = (app / 'MadeiraDock.swift').read_text()
 require('static func validate(_ game: DockGame' in dock and 'game.installed' in dock, "Dock's validation reads the install record (StateFlags)")
 
@@ -810,6 +812,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(info.buildID == 4242 && info.installableOnWindows && info.installDir == "Fixture Game", "build id, install folder and Windows installability")
     require(info.libraryCapsule == "cap/1.jpg" && info.parentID == nil, "artwork name; a parent equal to itself is not kept")
     require(info.depotSelectionSummary().contains("103[-]lang") && info.depotSelectionSummary().contains("107[-]dlc"), "the selection log names the rule that left a depot out")
+    require(info.installDepots(ownedDLC: [107]).map(\.depotID) == [101, 102, 105, 107] && info.installDepots(ownedDLC: [999]).map(\.depotID) == [101, 102, 105],
+            "owned DLC depots are installed with the game (New Vegas's Courier's Stash); DLC the account lacks is not")
+    require(info.depotSelectionSummary(ownedDLC: [107]).contains("107[-]sel"), "the selection log shows owned DLC as selected")
 
     // ---- download language (SteamLanguage): the setting, a game's own choice, the English fallback
     let languaged = SteamAppInfo.parse(appID: 11, from: appVDF(#"""
