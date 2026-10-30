@@ -45,10 +45,15 @@ class SteamLibraryFetcher {
 
         // Playable types only: games, demos and applications. This leaves out
         // DLC, soundtracks and tools (redistributables, runtimes, SDKs, servers).
+        // The owned DLC are kept aside for their games' downloads (SteamDLC).
         let games = appInfos.filter { $0.type.isPlayable }
-        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application)")
+        ownedDLC = appInfos.filter { $0.type == .dlc }
+        SteamLog.trace("\(games.count) of \(appInfos.count) apps are playable (game/demo/application), \(ownedDLC.count) DLC")
         return games
     }
+
+    /// The DLC apps of the account's licenses, from the last fetchOwnedApps.
+    private(set) var ownedDLC: [SteamAppInfo] = []
 
     /// Depot IDs included in the account's licenses, from the same package
     /// info the library uses (`depotids`). The installer consults it only when
@@ -86,6 +91,15 @@ class SteamLibraryFetcher {
         return try await fetchAppInfo(appIDs: [appID], tokens: tokens).first
     }
 
+    /// Fetches PICS info for several apps in one token and one product-info
+    /// round trip (DLC names for Game details).
+    func fetchAppInfos(appIDs: [UInt32]) async throws -> [SteamAppInfo] {
+        guard !appIDs.isEmpty else { return [] }
+        try await session.ensureConnected()
+        let tokens = try await fetchPICSAccessTokens(appIDs: appIDs)
+        return try await fetchAppInfo(appIDs: appIDs, tokens: tokens)
+    }
+
     // MARK: - Install metadata
 
     /// The app's metadata for an install, with the content metadata of the
@@ -103,6 +117,9 @@ class SteamLibraryFetcher {
         }
         var pending = app.depots.filter { eligible($0) && $0.publicManifestID == nil && $0.fromApp != nil }
             .map { ($0.fromApp!, $0.depotID) }
+        // Redistributables (sharedinstall) resolve the same way, but a missing one
+        // never fails the install: the game's own content does not depend on it.
+        pending += app.redistDepots().filter { $0.publicManifestID == nil }.map { ($0.fromApp!, $0.depotID) }
         while let (id, depotID) = pending.popLast() {
             try Task.checkCancellation()
             if !references.insert("\(id):\(depotID)").inserted { continue }
@@ -133,7 +150,11 @@ class SteamLibraryFetcher {
         guard missing.isEmpty else { throw SteamFileError.invalid("Steam did not provide required shared content metadata. Refresh and retry the download.") }
         // The direct owner of each selected shared depot, for its install
         // record. Metadata only; Valve still decides access and launch readiness.
-        for id in Set(app.installDepots().compactMap(\.fromApp)).subtracting([appID]).sorted() {
+        let redist = app.redistDepots().filter { $0.publicManifestID != nil }
+        if !redist.isEmpty {
+            SteamLog.event("[steam-redist] app=\(appID) depots=\(redist.map { "\($0.depotID)<\($0.fromApp!)" }.joined(separator: ","))")
+        }
+        for id in Set(app.installDepots().compactMap(\.fromApp) + redist.compactMap(\.fromApp)).subtracting([appID]).sorted() {
             try Task.checkCancellation()
             if owners[id] == nil {
                 guard owners.count <= 64 else { break }

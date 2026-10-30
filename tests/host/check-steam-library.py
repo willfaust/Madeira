@@ -206,6 +206,8 @@ require(sources['SteamInstall.swift'].count(f'"{relative_root}/steamapps"') == 1
 downloader = sources['SwiftSteam/Content/DepotDownloader.swift']
 require('SteamLog.event("[steam-depot] install begin' in downloader and 'depot-key refused' in downloader, 'the download logs App IDs and depot IDs')
 require(not re.search(r'LibraryFlags|MADEIRA_STEAM_[A-Z_]+', downloader), 'the downloader has no switches of its own')
+require('app.installDepots(ownedDLC: ownedDLC)' in downloader and 'dlcAppID: dlcApps[plan.depotID]' in downloader,
+        "installs take the account's owned DLC depots and record their DLC app")
 dock = (app / 'MadeiraDock.swift').read_text()
 require('static func validate(_ game: DockGame' in dock and 'game.installed' in dock, "Dock's validation reads the install record (StateFlags)")
 
@@ -400,6 +402,9 @@ class State:
         self.chunk_requests = []  # sha hex, every request
         self.manifest_requests = []
         self.denied = 0
+        self.refuse_manifests = False       # every manifest request answers 401
+        self.refuse_first_manifest = False  # the first manifest request of each depot answers 401
+        self.refused_once = set()
 
     def reset_counters(self):
         with self.lock:
@@ -426,7 +431,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             depot = int(parts[1])
             if parts[2] == 'manifest':
                 gid, code = int(parts[3]), parts[5] if len(parts) > 5 else ''
-                with state.lock: state.manifest_requests.append((depot, gid))
+                with state.lock:
+                    state.manifest_requests.append((depot, gid))
+                    if state.refuse_manifests:
+                        return self.reply(401)
+                    if state.refuse_first_manifest and depot not in state.refused_once:
+                        state.refused_once.add(depot)
+                        return self.reply(401)
                 if parts[4] != '5' or code != str(state.request_code) or (depot, gid) not in state.manifests:
                     return self.reply(404)
                 return self.reply(200, state.manifests[(depot, gid)])
@@ -810,6 +821,9 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(info.buildID == 4242 && info.installableOnWindows && info.installDir == "Fixture Game", "build id, install folder and Windows installability")
     require(info.libraryCapsule == "cap/1.jpg" && info.parentID == nil, "artwork name; a parent equal to itself is not kept")
     require(info.depotSelectionSummary().contains("103[-]lang") && info.depotSelectionSummary().contains("107[-]dlc"), "the selection log names the rule that left a depot out")
+    require(info.installDepots(ownedDLC: [107]).map(\.depotID) == [101, 102, 105, 107] && info.installDepots(ownedDLC: [999]).map(\.depotID) == [101, 102, 105],
+            "owned DLC depots are installed with the game (New Vegas's Courier's Stash); DLC the account lacks is not")
+    require(info.depotSelectionSummary(ownedDLC: [107]).contains("107[-]sel"), "the selection log shows owned DLC as selected")
 
     // ---- download language (SteamLanguage): the setting, a game's own choice, the English fallback
     let languaged = SteamAppInfo.parse(appID: 11, from: appVDF(#"""
@@ -977,6 +991,7 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
     require(app.sharedOwners[9100]?.installDir == "Fixture Game", "the owner of the shared depot is known for the record")
     let downloader = DepotDownloader(session: session)
     downloader.contentHosts = { _ in hosts }
+    downloader.manifestCacheFolder = tmp.appendingPathComponent("manifest-cache")
     var lastProgress = SteamDownloadProgress()
     let licensed: Set<UInt32> = phase == "refused-licensed" ? [9001, 9003, 9004] : [9001, 9003]
     do {
@@ -984,16 +999,36 @@ func packageBuffer(apps: [UInt32], depots: [UInt32]) -> Data {
         print("RESULT install=ok")
     } catch {
         print("RESULT install=failed reason=\(SteamOwnedLibrary.reason(error))")
-        require(phase == "interrupt" || phase == "refused-licensed", "install failed only where the phase expects it (\(error))")
+        require(phase == "interrupt" || phase == "refused-licensed" || phase == "refused", "install failed only where the phase expects it (\(error))")
         if phase == "refused-licensed" { require(error as? SteamError == .depotKeyNotFound(9004), "a refusal for a depot the account is licensed for fails the install") }
+        if phase == "refused" {
+            require(error as? SteamError == .contentRefused(401), "every server refusing the file list is reported as a refusal, not a broken download (\(error))")
+            require(session.codeRequests.filter { $0.depot == 9001 }.count == 2, "a refused file list is asked for again with a fresh request code, once")
+            require(loggedEvents.contains { $0.contains("[steam-depot] manifest refused app=9000 depot=9001 ") && $0.contains("retry=fresh-code") }
+                    && loggedEvents.contains { $0.contains("[steam-depot] manifest refused app=9000 depot=9001 ") && $0.contains("retry=none") && $0.contains(":401") },
+                    "the log says which depot every server refused, with what")
+            require(!loggedEvents.contains { $0.contains("auth=") }, "no authorization token in the log")
+        }
+    }
+    if phase == "token-refresh" {
+        // dead, flaky (refused, asked again with new authorization), good (for the chunks).
+        require(session.authRequests.filter { $0.depot == 9001 }.count >= 4, "a server that refuses the file list is asked again with fresh authorization: \(session.authRequests.filter { $0.depot == 9001 }.count)")
     }
     let found = MadeiraDock.games(drive: drive)
     print("RESULT listed=\(found.filter { $0.id == 9000 && $0.installed }.count)")
-    if phase != "interrupt" && phase != "refused-licensed" {
+    if phase != "interrupt" && phase != "refused-licensed" && phase != "refused" {
         require(lastProgress.phase == .finishing && lastProgress.doneBytes == lastProgress.totalBytes && lastProgress.totalBytes > 0, "progress ends complete: \(lastProgress.doneBytes)/\(lastProgress.totalBytes)")
         // Keys are asked for with the app being installed; manifest codes and tokens with the app that owns the content.
         require(session.keyRequests.contains { $0.depot == 9001 && $0.app == 9000 } && session.keyRequests.contains { $0.depot == 9003 && $0.app == 9000 }, "depot keys are requested for the installed app")
-        require(session.codeRequests.contains { $0.depot == 9003 && $0.app == 9100 } && session.codeRequests.contains { $0.depot == 9001 && $0.app == 9000 }, "manifest codes are requested for the app that owns the depot")
+        // A manifest fetched by an earlier phase comes from the cache, with no code request.
+        let prepared = loggedEvents.first { $0.contains("[steam-depot] prepared app=9000 ") } ?? ""
+        require(prepared.contains("manifests-ms=") && prepared.contains("files-ms=") && prepared.contains("files="), "the wait before the download is timed in the log")
+        let fetchedShared = session.codeRequests.contains { $0.depot == 9003 }, fetchedMain = session.codeRequests.contains { $0.depot == 9001 }
+        require((!fetchedShared || session.codeRequests.contains { $0.depot == 9003 && $0.app == 9100 }) && (!fetchedMain || session.codeRequests.contains { $0.depot == 9001 && $0.app == 9000 }),
+                "manifest codes are requested for the app that owns the depot")
+        require(prepared.contains("manifest-cached=\((fetchedShared ? 0 : 1) + (fetchedMain ? 0 : 1))/2"), "every manifest not asked for came from the cache: \(prepared)")
+        if phase == "resume" { require(session.codeRequests.isEmpty, "a resumed install reads both file lists from the cache the interrupted one left") }
+        if phase == "update" { require(fetchedMain && !fetchedShared, "an update fetches only the new build's file list; the unchanged depot's comes from the cache") }
         require(session.authRequests.contains { $0.depot == 9003 && $0.app == 9100 && $0.host == "127.0.0.1" }, "content authorization names the bare host name")
         require(!session.keyRequests.contains { $0.depot == 9002 }, "a depot for another language is never asked for")
         guard let game = found.first(where: { $0.id == 9000 }) else { require(false, "Madeira Dock's discovery finds the downloaded game"); return }
@@ -1246,6 +1281,21 @@ try:
     result = run('refused-licensed', other)
     require(result.get('install') == 'failed' and result.get('listed') == '0' and
             not list((work / 'root2').rglob('appmanifest_*.acf')), 'a refused licensed depot fails the install without a record')
+
+    # ---- a content server refuses a file list once (an expired authorization): asked again, the install finishes
+    state.reset_counters()
+    state.refuse_first_manifest = True
+    result = run('token-refresh', dict(fixture, tmp=str(work / 'root3')))
+    state.refuse_first_manifest = False
+    require(result.get('install') == 'ok' and result.get('listed') == '1', 'a file list refused once is fetched with fresh authorization and the install finishes')
+
+    # ---- every content server refuses the file list: one more round with a fresh request code, then a clear failure
+    state.reset_counters()
+    state.refuse_manifests = True
+    result = run('refused', dict(fixture, tmp=str(work / 'root4')))
+    state.refuse_manifests = False
+    require(result.get('install') == 'failed' and result.get('reason') == 'refused-401' and result.get('listed') == '0',
+            f'a file list every server refuses fails the install as a refusal: {result}')
 finally:
     for server in servers:
         server.shutdown(); server.server_close()

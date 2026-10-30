@@ -544,6 +544,16 @@ class SteamSession {
         body: Data,
         timeout: TimeInterval = 10
     ) async throws -> Data {
+        try await callServiceMethodWithResult(method: method, body: body, timeout: timeout).body
+    }
+
+    /// A service method call that also returns the response header's EResult
+    /// (Steam Workshop's subscribe calls answer with an empty body either way).
+    func callServiceMethodWithResult(
+        method: SteamServiceMethod,
+        body: Data,
+        timeout: TimeInterval = 10
+    ) async throws -> (eresult: Int32, body: Data) {
         resetIdleTimer()
         let jobID = nextJobID()
 
@@ -585,7 +595,7 @@ class SteamSession {
         if response.header.eresult != 1 {
             SteamLog.trace("\(method.rawValue) header eresult=\(response.header.eresult)")
         }
-        return response.body
+        return (response.header.eresult, response.body)
     }
 
     /// Send a message without waiting for response

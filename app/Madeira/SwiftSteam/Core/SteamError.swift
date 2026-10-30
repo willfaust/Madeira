@@ -43,6 +43,11 @@ enum SteamError: LocalizedError, Equatable {
     // Content
     case manifestFetchFailed(String)
     case chunkDownloadFailed(String)
+    /// A content server answered with this HTTP status.
+    case contentHTTP(Int)
+    /// Every content server refused a depot's file list (HTTP 401 or 403),
+    /// also with fresh authorization and a fresh request code.
+    case contentRefused(Int)
     case decryptionFailed(String)
     case decompressionFailed
     /// A downloaded chunk could not be decoded; the value names the encoding
@@ -92,6 +97,10 @@ enum SteamError: LocalizedError, Equatable {
             return "Could not read the game's file list: \(reason)"
         case .chunkDownloadFailed(let reason):
             return "Download failed: \(reason)"
+        case .contentHTTP(let status):
+            return "Download failed: Content server returned HTTP \(status)."
+        case .contentRefused(let status):
+            return "Steam's download servers would not hand out this game's file list (HTTP \(status)), even after Madeira asked Steam for new download permission. Wait a few minutes and tap Try again; downloaded parts are kept. If it keeps happening, check that the game still shows in your Steam library and send Madeira's log."
         case .decryptionFailed(let reason):
             return "Decryption failed: \(reason)"
         case .decompressionFailed:

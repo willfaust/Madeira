@@ -25,4 +25,13 @@ protocol SteamCMSession: AnyObject {
     func sendAndWaitPICS(eMsg: EMsg, body: Data, timeout: TimeInterval) async throws -> [SteamMessageCodec.IncomingMessage]
     /// Calls a unified-service method and returns the response body.
     func callServiceMethod(method: SteamServiceMethod, body: Data, timeout: TimeInterval) async throws -> Data
+    /// The same, with the response header's EResult (1 = OK).
+    func callServiceMethodWithResult(method: SteamServiceMethod, body: Data, timeout: TimeInterval) async throws -> (eresult: Int32, body: Data)
+}
+
+extension SteamCMSession {
+    /// A connection that reports no EResults answers OK.
+    func callServiceMethodWithResult(method: SteamServiceMethod, body: Data, timeout: TimeInterval) async throws -> (eresult: Int32, body: Data) {
+        (1, try await callServiceMethod(method: method, body: body, timeout: timeout))
+    }
 }
