@@ -63,11 +63,23 @@ path. The native ARM64 Windows PE, Wine image lifecycle check, and kernelbase
 and kernel32 loading results above remain host-only. Earlier physical proof in
 `SIGNED-FEX.md` applies to the earlier import-free workload.
 
-The latest bidirectional workload is built for iOS 17 and installed in
-LiveContainer. Its source-set ID is
-`060b55af1a05d250a0c7216bdc892444f0ca85adf7529a4d61545c0ee33b4273`.
-The phone locked before the workload could launch. Its host results do not
-extend the earlier physical-device proof.
+The latest bidirectional workload also passed on the same iPhone in
+LiveContainer on 2026-10-31, launched with `jit=false`. All six results matched
+across 1,122,648 block/import transitions, 106,752 Wine calls and 241,344
+native-to-x64 callbacks. GS-based thread-context checks passed at the entry
+point and inside callbacks. Native and translated signed code stayed unchanged.
+Before and after, `cs-flags=0x22003305` had `CS_DEBUGGED` clear and tracing was
+known with `traced=0`. No debugger was attached.
+
+This iOS 17 package has source-set ID
+`060b55af1a05d250a0c7216bdc892444f0ca85adf7529a4d61545c0ee33b4273`
+and SHA-256
+`a2f8cbc29ce18cacd65aa4ca000aa52f48e2caea5ab687e69d9d99e696ceeb42`.
+The phone used a discovered pthread byte offset of 2176; the host used 2080.
+Both used the same data-driven signed thread-state logic. The phone executed
+the ntdll wrapper with 745 offline TEB rewrites and unchanged signed trampolines.
+It still used the standalone TEB/PEB fixture. This is physical proof of the
+call/callback workload, not full Wine initialization, Windows threads or a game.
 
 ## Native library preparation
 
