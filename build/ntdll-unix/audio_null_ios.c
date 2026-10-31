@@ -423,6 +423,19 @@ struct ios_audio_device {
 };
 static struct ios_audio_device g_dev;
 static pthread_mutex_t g_dev_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Madeira in the background (app/Madeira/BackgroundRun.swift, through
+ * madeira_audio_background). Madeira declares the "audio" background mode, so
+ * iOS keeps the app running while this endpoint runs:
+ *   keepalive: the endpoint runs with no client started (silence), which is
+ *              what keeps a loading game or a download going;
+ *   mute:      the endpoint renders silence after mixing, so every client's
+ *              ring still drains and the game's audio clock keeps time;
+ *   halt:      the endpoint is stopped and no client start restarts it, so iOS
+ *              suspends Madeira as it did before the background mode existed.
+ * keepalive and halt are read and written under g_dev_lock. */
+static int g_bg_keepalive;
+static int g_bg_halt;
+static _Atomic int g_bg_mute;
 /* Published to the RT callback. Written with release, read with acquire. */
 static _Atomic(struct ios_stream *) g_mix[IOS_MAX_STREAMS];
 
@@ -777,6 +790,8 @@ static OSStatus ios_audio_render_cb(void *refcon, AudioUnitRenderActionFlags *fl
         else if (out[k] < -1.0f) { out[k] = -1.0f; clamped++; }
     }
     if (clamped) atomic_fetch_add_explicit(&g_dev.clamped, clamped, memory_order_relaxed);
+    if (atomic_load_explicit(&g_bg_mute, memory_order_relaxed))
+        memset(out, 0, total * sizeof(float));
     atomic_fetch_add_explicit(&g_dev.cb_epoch, 1, memory_order_release);
     return noErr;
 }
@@ -948,7 +963,7 @@ static void ios_dev_detach(struct ios_stream *s)
 static void ios_dev_start(void)
 {
     pthread_mutex_lock(&g_dev_lock);
-    if (g_dev.au && !g_dev.running) {
+    if (g_dev.au && !g_dev.running && !g_bg_halt) {
         OSStatus err = AudioOutputUnitStart(g_dev.au);
         if (err) fprintf(stderr, "[ios_audio] ml1026 AudioOutputUnitStart: %d -- null-mode\n", (int)err);
         else g_dev.running = 1;
@@ -965,9 +980,100 @@ static void ios_dev_stop_if_idle(void)
         struct ios_stream *m = atomic_load_explicit(&g_mix[i], memory_order_relaxed);
         if (m && m->started) { any = 1; break; }
     }
-    if (!any && g_dev.au && g_dev.running) {
+    if (!any && !g_bg_keepalive && g_dev.au && g_dev.running) {
         AudioOutputUnitStop(g_dev.au);
         g_dev.running = 0;
+    }
+    pthread_mutex_unlock(&g_dev_lock);
+}
+
+/* Madeira in the background: see g_bg_keepalive. Called by the app on the main
+ * thread (BackgroundRun.swift), also when no Wine session runs (a download):
+ * the endpoint needs only the app's AVAudioSession. With keepalive and no
+ * endpoint yet, it is made at the driver's own mix format. Returns 1 when the
+ * endpoint is running afterwards. */
+int madeira_audio_background(int keepalive, int mute, int halt)
+{
+    int i, any = 0, running;
+
+    atomic_store_explicit(&g_bg_mute, mute ? 1 : 0, memory_order_relaxed);
+    pthread_mutex_lock(&g_dev_lock);
+    g_bg_keepalive = keepalive && !halt;
+    g_bg_halt = halt ? 1 : 0;
+    for (i = 0; i < IOS_MAX_STREAMS; i++) {
+        struct ios_stream *m = atomic_load_explicit(&g_mix[i], memory_order_relaxed);
+        if (m && m->started) { any = 1; break; }
+    }
+    if (g_bg_keepalive && !g_dev.au) {
+        struct ios_stream fmt;
+        memset(&fmt, 0, sizeof(fmt));
+        fmt.sample_rate = IOS_AUDIO_SAMPLE_RATE;
+        fmt.channels = IOS_AUDIO_CHANNELS;
+        /* A failure here must not leave the game without sound for the rest of
+         * the session: its own first client tries again. */
+        int failed_before = g_dev.failed;
+        if (ios_dev_create_locked(&fmt) && !failed_before) g_dev.failed = 0;
+    }
+    if (g_dev.au && !g_dev.running && !g_bg_halt && (any || g_bg_keepalive)) {
+        OSStatus err = AudioOutputUnitStart(g_dev.au);
+        if (err) fprintf(stderr, "[ios_audio] bg AudioOutputUnitStart: %d\n", (int)err);
+        else g_dev.running = 1;
+    } else if (g_dev.au && g_dev.running && (g_bg_halt || (!any && !g_bg_keepalive))) {
+        AudioOutputUnitStop(g_dev.au);
+        g_dev.running = 0;
+    }
+    running = g_dev.au && g_dev.running;
+    pthread_mutex_unlock(&g_dev_lock);
+    fprintf(stderr, "[ios_audio] bg keepalive=%d mute=%d halt=%d clients=%d -> endpoint %s\n",
+            keepalive, mute, halt, any, running ? "running" : "stopped");
+    return running;
+}
+
+/* Is the endpoint really rendering? An interruption, or a category change
+ * while it ran, can stop the RemoteIO unit without telling us, and then iOS
+ * would suspend Madeira (and the game would be silent). Called by the app
+ * every few seconds while it keeps Madeira running, and once shortly after
+ * Madeira is active again: when a running endpoint rendered nothing since the
+ * previous call, it is started again. Returns 1 when it was restarted. */
+int madeira_audio_check(void)
+{
+    static uint64_t last_epoch;
+    static int last_valid;
+    int restarted = 0;
+    uint64_t e;
+
+    pthread_mutex_lock(&g_dev_lock);
+    e = atomic_load_explicit(&g_dev.cb_epoch, memory_order_acquire);
+    if (g_dev.au && g_dev.running && !g_bg_halt) {
+        if (last_valid && e == last_epoch) {
+            OSStatus err;
+            AudioOutputUnitStop(g_dev.au);
+            err = AudioOutputUnitStart(g_dev.au);
+            if (err) { g_dev.running = 0; fprintf(stderr, "[ios_audio] endpoint stalled; restart failed: %d\n", (int)err); }
+            else { restarted = 1; fprintf(stderr, "[ios_audio] endpoint stalled; restarted\n"); }
+        }
+        last_valid = 1;
+    } else {
+        last_valid = 0;
+    }
+    last_epoch = e;
+    pthread_mutex_unlock(&g_dev_lock);
+    return restarted;
+}
+
+/* An audio interruption (a call, Siri, another app's non-mixable audio) stops
+ * the RemoteIO unit without telling us. After it ends and the app has made
+ * its AVAudioSession active again, a unit we think is running is started
+ * again; before this it stayed silent for the rest of the session. */
+void madeira_audio_resume_after_interruption(void)
+{
+    pthread_mutex_lock(&g_dev_lock);
+    if (g_dev.au && g_dev.running) {
+        OSStatus err;
+        AudioOutputUnitStop(g_dev.au);
+        err = AudioOutputUnitStart(g_dev.au);
+        if (err) { g_dev.running = 0; fprintf(stderr, "[ios_audio] restart after interruption: %d\n", (int)err); }
+        else fprintf(stderr, "[ios_audio] restarted after an interruption\n");
     }
     pthread_mutex_unlock(&g_dev_lock);
 }

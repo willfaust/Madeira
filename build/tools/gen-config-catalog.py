@@ -43,6 +43,34 @@ INT_READERS = {"madeira_cfg_int", "mad_cfg_int_pe"}
 # Titles, kinds and fixed choices for options with a dedicated Settings row.
 # "choices" are (value, label); the empty value means "remove the key".
 OVERLAY = {
+    # Madeira in the background (app/Madeira/BackgroundRun.swift, build/ntdll-unix/audio_null_ios.c).
+    "background-run": {"category": "App & front end", "title": "Keep a game running in the background (minutes)",
+                "kind": "int", "default": "10", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Minutes a running game keeps going after you switch apps or lock the screen, so a long load "
+                        "finishes while you are away. Loading and other CPU work go on; drawing waits until Madeira is "
+                        "back (background-pause). The game's sound is muted meanwhile. 0: iOS pauses the game within "
+                        "seconds, as before. A game's own config can set it. [bg-run] lines in the log."},
+    "background-gpu-gate": {"category": "App & front end", "title": "Hold GPU work in the background",
+                "kind": "bool", "default": "1", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "On by default. While Madeira is not the active app, any thread other than the app's main "
+                        "thread that commits a Metal command buffer waits until Madeira is back, so a game that keeps "
+                        "loading in the background (Zink OpenGL, Direct3D, Vulkan) never sends GPU work iOS refuses "
+                        "and never loses its device. [metal-bg] lines in the log. 0: not installed. Read at app start."},
+    "background-cpu": {"category": "App & front end", "title": "CPU cap in the background (% of one core)",
+                "kind": "int", "default": "50", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "While Madeira keeps a game or a download running in the background, its CPU use is held under "
+                        "this percent of one core on average (threads are paused for 100 ms at a time when it is over), "
+                        "because iOS ends a background app that averages more than about 80% for a minute. Higher loads "
+                        "faster but risks that. 0: no cap. A game's own config can set it. [bg-cpu] lines in the log."},
+    "background-download": {"category": "App & front end", "title": "Keep downloads running in the background (minutes)",
+                "kind": "int", "default": "60", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Minutes a Steam, Epic, GOG, EA or itch.io download keeps going after you switch apps or lock "
+                        "the screen. Then it pauses cleanly and continues when Madeira is active again. 0: only iOS's "
+                        "short grace period, as before."},
+    "background-sound": {"category": "App & front end", "title": "Game sound in the background",
+                "kind": "bool", "default": "0", "sources": ["app/Madeira/BackgroundRun.swift"],
+                "note": "Off by default: while a game keeps running in the background its sound is muted, and other "
+                        "apps' audio plays normally. 1: you keep hearing the game. A game's own config can set it."},
     "env.MADEIRA_PASTE_INTERVAL_MS": {"category": "Windows, display & input", "title": "Clipboard typing interval (ms)",
                 "kind": "int", "default": "10",
                 "note": "Default 10 ms between pasted characters. Range 5-100 ms; use a longer interval for games "
