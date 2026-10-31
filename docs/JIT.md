@@ -3,6 +3,8 @@
 For the separate, opt-in signed-library experiment, see the
 [signed native code probe](SIGNED-CODE-PROBE.md). It does not remove the JIT
 requirement for games.
+The [signed FEX program runner](SIGNED-FEX.md) adds offline translation and
+complete freestanding PE program execution through signed code.
 
 Madeira needs an attached debugger to create executable memory on iOS. It can
 use either the StikDebug app or its built-in StikJIT helper. Both methods send

@@ -1,5 +1,9 @@
 # Signed native code probe
 
+For the complete FEX-translated program path, see
+[signed FEX program execution](SIGNED-FEX.md). This smaller probe remains useful
+for checking only the loader and signing setup.
+
 This is the first platform check for a possible ahead-of-time (AOT) FEX path.
 AOT means translating code before the game runs. Madeira still needs JIT for
 games. This probe does not translate x86 code, load a Windows program, or change

@@ -58,7 +58,8 @@ int main(int argc, char **argv)
         '-Dsysctl=probe_test_sysctl', '-c', str(source), '-o', str(obj))
     exe = folder / 'check'
     run('xcrun', '--sdk', 'macosx', 'clang', '-Wall', '-Wextra', '-Werror',
-        '-I', str(source.parent), str(harness), str(obj), '-framework', 'Foundation', '-o', str(exe))
+        '-I', str(source.parent), str(harness), str(obj), str(source.parent / 'SignedFEX.c'),
+        '-framework', 'Foundation', '-o', str(exe))
 
     def check(path, mode, status, message):
         result = subprocess.run([str(exe), str(path), mode], capture_output=True, text=True)

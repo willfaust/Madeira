@@ -1,13 +1,14 @@
 #import <Foundation/Foundation.h>
 #include "JITAllocator.h"
 #include "SignedCodeProbe.h"
+#include "SignedFEX.h"
 #include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <string.h>
 #include <sys/sysctl.h>
 
-static bool eligible(FILE *report)
+bool madeira_signed_execution_eligible(FILE *report)
 {
     uint32_t flags = 0;
     struct kinfo_proc info = {0};
@@ -53,7 +54,7 @@ int madeira_signed_code_probe_run(const char *path, FILE *report)
 #endif
     fprintf(report, "Signed-code probe v1 platform=%s os=%s\n", platform,
             NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
-    if (!eligible(report)) return 2;
+    if (!madeira_signed_execution_eligible(report)) return 2;
     if (!path || !*path) {
         fprintf(report, "FAIL: missing fixture path.\n");
         return 1;
@@ -94,7 +95,7 @@ int madeira_signed_code_probe_run(const char *path, FILE *report)
         fprintf(report, "FAIL: callback/data update or immutable code check failed.\n");
         goto done;
     }
-    if (!eligible(report)) {
+    if (!madeira_signed_execution_eligible(report)) {
         result = 2;
         goto done;
     }
@@ -124,5 +125,25 @@ void madeira_signed_code_probe_if_requested(void)
         bool written = !ferror(report);
         if (fclose(report)) written = false;
         NSLog(@"[signed-code-probe] result=%d report-written=%d path=%@", result, written, output.path);
+    }
+}
+
+void madeira_signed_fex_if_requested(void)
+{
+    const char *enabled = getenv("MADEIRA_SIGNED_FEX");
+    if (!enabled || strcmp(enabled, "1")) return;
+    @autoreleasepool {
+        NSString *framework = [NSBundle.mainBundle.privateFrameworksPath
+            stringByAppendingPathComponent:@"MadeiraSignedFEX.framework"];
+        NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
+                                                               inDomains:NSUserDomainMask].firstObject;
+        NSURL *output = [documents URLByAppendingPathComponent:@"signed-fex.txt"];
+        FILE *report = output ? fopen(output.fileSystemRepresentation, "w") : NULL;
+        if (!report) { NSLog(@"[signed-fex] FAIL: cannot open report."); return; }
+        int result = madeira_signed_fex_run([[framework stringByAppendingPathComponent:@"MadeiraSignedFEX"] fileSystemRepresentation],
+            [[framework stringByAppendingPathComponent:@"guest-image.bin"] fileSystemRepresentation], report);
+        bool written = !ferror(report);
+        if (fclose(report)) written = false;
+        NSLog(@"[signed-fex] result=%d report-written=%d path=%@", result, written, output.path);
     }
 }
