@@ -37,6 +37,12 @@ static const void *lookup(const struct MadeiraFEXImage *image, uint64_t rip)
 
 int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE *report)
 {
+    return madeira_signed_fex_run_with_imports(framework, guest_image, report, NULL, NULL);
+}
+
+int madeira_signed_fex_run_with_imports(const char *framework, const char *guest_image, FILE *report,
+                                      MadeiraFEXImportCall call, void *context)
+{
 #if TARGET_OS_IOS && !TARGET_OS_SIMULATOR && !TARGET_OS_MACCATALYST
     fprintf(report, "FEX signed-program runner v1 platform=ios-device: pretranslated x86-64 PE, no runtime compiler.\n");
 #else
@@ -52,8 +58,8 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
     unsigned char *snapshot = NULL;
     vm_address_t guest = 0;
     vm_size_t allocation = 0;
-    if (!image || image->version != 1 || image->base != UINT64_C(0x130000000) ||
-        !image->image_size || image->image_size > 16 * 1024 * 1024 ||
+    if (!image || (image->version != 1 && image->version != 2) || image->base != UINT64_C(0x130000000) ||
+        image->image_size < 64 || image->image_size > 16 * 1024 * 1024 ||
         image->frame_size < 256 || image->frame_size > 1024 * 1024 ||
         image->gregs_offset > image->frame_size - 128 || image->rip_offset > image->frame_size - 8 ||
         !image->entry_count || image->entry_count > 100000 || !image->section_count || image->section_count > 96 ||
@@ -63,6 +69,11 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
         fprintf(report, "FAIL: invalid signed FEX image descriptor.\n"); goto done;
     }
     size_t code_size = (uintptr_t)image->code_end - (uintptr_t)image->code;
+    size_t import_count = image->version >= 2 ? image->import_count : 0;
+    const uint64_t import_base = UINT64_C(0x7ffe00000000);
+    if (import_count > 1024 || (import_count && (!call || !image->imports))) {
+        fprintf(report, "FAIL: this PE needs an explicit native import bridge.\n"); goto done;
+    }
     if (!executable(image->code, code_size)) { fprintf(report, "FAIL: code is not immutable RX.\n"); goto done; }
     for (uint64_t i = 0; i < image->entry_count; ++i)
         if (image->entries[i].offset >= code_size || image->entries[i].offset % 4 ||
@@ -85,6 +96,14 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
     read = read && fgetc(input) == EOF && !ferror(input);
     fclose(input);
     if (!read) { fprintf(report, "FAIL: guest image size differs from its descriptor.\n"); goto done; }
+    for (size_t i = 0; i < import_count; ++i) {
+        const struct MadeiraFEXImport *binding = image->imports + i;
+        if (!binding->dll || !binding->name || binding->iat > image->image_size - 8 || binding->iat % 8) {
+            fprintf(report, "FAIL: invalid native import binding.\n"); goto done;
+        }
+        uint64_t target = import_base + i * 16;
+        memcpy((void *)(guest + binding->iat), &target, 8);
+    }
     for (uint64_t i = 0; i < image->section_count; ++i) {
         uint64_t start = image->sections[i].start, end = image->sections[i].end;
         if (start >= end || end > image->image_size || start % 16384 ||
@@ -96,6 +115,7 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
     const uint64_t sentinel = UINT64_C(0xfee1dead);
     const uint64_t seeds[] = {1, 17, 12345, UINT64_C(0x12345678), UINT64_C(0xfedcba98), UINT64_C(0x100000001)};
     uint64_t total_blocks = 0;
+    uint64_t total_imports = 0;
     fprintf(report, "entries=%llu translated-bytes=%zu runs=%zu guest-text=read-only guest-stack=non-executable\n",
         (unsigned long long)image->entry_count, code_size, sizeof(seeds) / sizeof(seeds[0]));
     for (unsigned test = 0; test < sizeof(seeds) / sizeof(seeds[0]); ++test) {
@@ -111,6 +131,19 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
         uint64_t blocks = 0;
         while (*rip != sentinel && blocks < 20000000) {
             const void *entry = lookup(image, *rip);
+            if (!entry && *rip >= import_base && (*rip - import_base) % 16 == 0 &&
+                (*rip - import_base) / 16 < import_count) {
+                uint64_t stack = gregs[4];
+                if (stack < guest || stack - guest > allocation - 8 || stack % 8 ||
+                    call(context, image->imports + (*rip - import_base) / 16, gregs)) {
+                    fprintf(report, "FAIL: native import call refused.\n"); goto done;
+                }
+                memcpy(rip, (void *)(uintptr_t)stack, 8);
+                gregs[4] += 8;
+                ++total_imports;
+                ++blocks;
+                continue;
+            }
             if (!entry) { fprintf(report, "FAIL: missing pretranslated RIP=0x%llx; JIT fallback is disabled.\n", (unsigned long long)*rip); goto done; }
             image->enter(frame, entry);
             ++blocks;
@@ -130,6 +163,8 @@ int madeira_signed_fex_run(const char *framework, const char *guest_image, FILE 
     if (!madeira_signed_execution_eligible(report)) { result = 2; goto done; }
     fprintf(report, "PASS: six complete x86-64 program runs, %llu block transitions, code unchanged.\n",
         (unsigned long long)total_blocks);
+    if (import_count) fprintf(report, "native-imports=%llu distinct-imports=%zu\n",
+                             (unsigned long long)total_imports, import_count);
     result = 0;
 done:
     if (guest) vm_deallocate(mach_task_self(), guest, allocation);

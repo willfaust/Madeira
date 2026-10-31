@@ -1,5 +1,8 @@
 #import <UIKit/UIKit.h>
 #include "SignedFEX.h"
+#ifdef MADEIRA_SIGNED_WINE
+#include "SignedWine.h"
+#endif
 #include "JITAllocator.h"
 #include <unistd.h>
 #include <sys/utsname.h>
@@ -19,10 +22,23 @@ bool jit_cs_status(uint32_t *flags)
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options
 {
     (void)application; (void)options;
-    setenv("MADEIRA_SIGNED_FEX", "1", 1);
-    madeira_signed_fex_if_requested();
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *report = [documents URLByAppendingPathComponent:@"signed-fex.txt"];
+#ifdef MADEIRA_SIGNED_WINE
+    NSString *framework = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"MadeiraSignedFEX.framework"];
+    NSString *wine = [NSBundle.mainBundle objectForInfoDictionaryKey:@"MadeiraWineFramework"];
+    NSString *native = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:wine];
+    FILE *output = fopen(report.fileSystemRepresentation, "w");
+    if (output) {
+        madeira_signed_wine_run([[framework stringByAppendingPathComponent:@"MadeiraSignedFEX"] fileSystemRepresentation],
+            [[framework stringByAppendingPathComponent:@"guest-image.bin"] fileSystemRepresentation],
+            [[native stringByAppendingPathComponent:wine.stringByDeletingPathExtension] fileSystemRepresentation], output);
+        fclose(output);
+    }
+#else
+    setenv("MADEIRA_SIGNED_FEX", "1", 1);
+    madeira_signed_fex_if_requested();
+#endif
     NSString *text = [NSString stringWithContentsOfURL:report encoding:NSUTF8StringEncoding error:NULL] ?: @"FAIL: no report.\n";
     struct utsname machine;
     uname(&machine);

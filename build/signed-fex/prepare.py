@@ -9,13 +9,16 @@ import struct
 import subprocess
 
 here = Path(__file__).resolve().parent
-out = here / 'out'
-out.mkdir(exist_ok=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--fex-source', type=Path, required=True)
 parser.add_argument('--fex-build', type=Path, required=True)
 parser.add_argument('--toolchain', type=Path, required=True)
+parser.add_argument('--workload', type=Path, default=here / 'workload.c')
+parser.add_argument('--wine-imports', action='store_true')
+parser.add_argument('--output', type=Path, default=here / 'out')
 args = parser.parse_args()
+out = args.output.resolve()
+out.mkdir(parents=True, exist_ok=True)
 fex, build, tools = (p.resolve() for p in (args.fex_source, args.fex_build, args.toolchain))
 
 
@@ -30,9 +33,10 @@ def run(command, **kwargs):
 revision = run(['git', '-C', fex, 'rev-parse', 'HEAD']).strip()
 expected = run(['git', '-C', here.parents[1], 'ls-tree', 'HEAD', 'FEX']).split()[2]
 assert revision == expected, f'FEX must match Madeira pin {expected}'
-run(['git', '-C', fex, 'diff', '--quiet'])
+run(['git', '-C', fex, 'diff', '--quiet', 'HEAD'])
 commands = json.loads((build / 'compile_commands.json').read_text())
 sample = next(x for x in commands if x['file'].endswith('/Interface/Context/Context.cpp'))
+assert Path(sample['file']).resolve() == fex / 'FEXCore/Source/Interface/Context/Context.cpp', 'FEX build uses another source checkout'
 flags = shlex.split(sample['command'])
 assert '-DFEX_CALLRET_STACK_UNUSED=1' in flags
 assert '-DFEX_DISABLE_TELEMETRY=1' in flags
@@ -48,10 +52,12 @@ while i < len(flags):
 run(clean + ['-I' + str(fex / 'Source/Tools/CommonTools'), str(here / 'export.cpp'),
     str(fex / 'Source/Tools/CommonTools/DummyHandlers.cpp'),
     *[str(p) for p in build.rglob('*.a')], '-L/opt/homebrew/lib', '-lxxhash', '-o', str(out / 'export')])
-run([tools / 'x86_64-w64-mingw32-clang', here / 'workload.c', '-O2', '-ffreestanding', '-fno-builtin',
+workload = args.workload.resolve()
+run([tools / 'x86_64-w64-mingw32-clang', workload, '-O2', '-ffreestanding', '-fno-builtin',
     '-fno-stack-protector', '-mno-stack-arg-probe', '-ffp-contract=off', '-fno-unwind-tables',
     '-fno-asynchronous-unwind-tables', '-nostdlib', '-Wl,--entry,guest_workload',
-    '-Wl,--image-base,0x130000000', '-Wl,--section-alignment,16384', '-Wl,--subsystem,console', '-o', out / 'workload.exe'])
+    '-Wl,--image-base,0x130000000', '-Wl,--section-alignment,16384', '-Wl,--subsystem,console',
+    *(['-lntdll'] if args.wine_imports else []), '-o', out / 'workload.exe'])
 
 # Only import-free PE32+ images are accepted by this runner.
 pe = (out / 'workload.exe').read_bytes()
@@ -68,7 +74,6 @@ base = struct.unpack_from('<Q', pe, optional + 24)[0]
 size, headers_size = struct.unpack_from('<II', pe, optional + 56)
 assert base == 0x130000000 and 0 < size <= 16 * 1024 * 1024
 assert 0 < headers_size <= min(len(pe), size)
-assert struct.unpack_from('<II', pe, optional + 120) == (0, 0), 'Windows imports need Wine; not supported here'
 image = bytearray(size)
 image[:headers_size] = pe[:headers_size]
 code_sections = []
@@ -83,6 +88,28 @@ for i in range(sections):
     if characteristics & 0x20000000:
         code_sections.append([rva, rva + virtual_size])
 assert any(start <= entry < end for start, end in code_sections)
+imports = []
+import_rva, import_size = struct.unpack_from('<II', image, optional + 120)
+assert import_rva <= size and import_size <= size - import_rva
+def image_string(rva):
+    assert 0 <= rva < size
+    end = image.index(0, rva)
+    return bytes(image[rva:end]).decode('ascii')
+if import_size:
+    assert args.wine_imports, 'Use --wine-imports and an explicit runtime import bridge'
+    for descriptor in range(import_rva, import_rva + import_size - 19, 20):
+        lookup, _, _, dll, iat = struct.unpack_from('<IIIII', image, descriptor)
+        if not lookup and not dll and not iat: break
+        assert lookup and dll and iat
+        name = image_string(dll)
+        for index in range(size // 8):
+            assert lookup + index * 8 <= size - 8 and iat + index * 8 <= size - 8
+            thunk = struct.unpack_from('<Q', image, lookup + index * 8)[0]
+            if not thunk: break
+            assert not thunk >> 63, 'Ordinal guest imports need an explicit signature'
+            imports.append({'dll': name, 'name': image_string(thunk + 2), 'iat': iat + index * 8})
+        else: raise ValueError('Unterminated import lookup table')
+    else: raise ValueError('Unterminated import descriptors')
 (out / 'guest-image.bin').write_bytes(image)
 disassembly = run([tools / 'llvm-objdump', '-d', '--no-show-raw-insn', out / 'workload.exe'])
 rvas = []
@@ -95,7 +122,8 @@ for line in disassembly.splitlines():
 assert rvas and entry in rvas
 (out / 'instruction-rvas.txt').write_text(''.join(f'{x:x}\n' for x in rvas))
 (out / 'guest.json').write_text(json.dumps({'base': base, 'size': size, 'entry': base + entry,
-    'code_sections': code_sections, 'instruction_starts': len(rvas)}, indent=2) + '\n')
+    'code_sections': code_sections, 'instruction_starts': len(rvas), 'imports': imports,
+    'reference_source': str(workload)}, indent=2) + '\n')
 print(run([out / 'export', out / 'guest-image.bin', out / 'instruction-rvas.txt', out]), end='')
 metadata = json.loads((out / 'metadata.json').read_text())
 metadata['fex_revision'] = revision

@@ -13,25 +13,54 @@ here = Path(__file__).resolve().parent
 root = here.parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--prepared', type=Path, default=here / 'out')
+parser.add_argument('--wine-framework', type=Path)
+parser.add_argument('--wine-license', type=Path)
 args = parser.parse_args()
-out = here / 'out/device'
+if args.wine_framework:
+    args.wine_framework = args.wine_framework.resolve()
+    assert args.wine_license and args.wine_license.is_file(), 'Include Wine COPYING.LIB'
+prepared = args.prepared.resolve()
+out = prepared / 'device'
 app = out / 'Payload/MadeiraSignedFEX.app'
 app.mkdir(parents=True, exist_ok=True)
-framework = here / 'out/iphoneos/MadeiraSignedFEX.framework'
+obsolete_notice = app / 'Wine-source.md'
+if obsolete_notice.exists():
+    assert not obsolete_notice.is_symlink()
+    obsolete_notice.unlink()
+shutil.copyfile(root / 'COPYING', app / 'Madeira-COPYING')
+framework = prepared / 'iphoneos/MadeiraSignedFEX.framework'
 assert framework.is_dir(), 'Build the iphoneos bundle first'
 shutil.copytree(framework, app / 'Frameworks/MadeiraSignedFEX.framework', dirs_exist_ok=True)
 sources = [here / 'device.m', root / 'app/Madeira/SignedFEX.c', root / 'app/Madeira/SignedCodeProbe.m']
+extra = []
+if args.wine_framework:
+    assert args.wine_framework.is_dir()
+    shutil.copytree(args.wine_framework, app / 'Frameworks' / args.wine_framework.name, dirs_exist_ok=True)
+    sources += [root / 'app/Madeira/SignedWine.m', root / 'build/ntdll-unix/signed_pe_ios.c']
+    extra = ['-DMADEIRA_SIGNED_WINE=1', '-I' + str(root / 'build/signed-pe'), '-I' + str(root / 'build/ntdll-unix')]
+    shutil.copyfile(args.wine_license, app / 'Wine-COPYING.LIB')
+    wine_revision = subprocess.check_output(['git', '-C', str(root), 'ls-tree', 'HEAD', 'wine'], text=True).split()[2]
+    wine_input = json.loads((args.wine_framework / 'preparation.json').read_text())
+    (app / 'Wine-source.json').write_text(json.dumps({'repository': 'https://github.com/willfaust/wine',
+        'revision': wine_revision, 'source_url': 'https://github.com/willfaust/wine/tree/' + wine_revision,
+        'dll_sha256': wine_input['source_sha256'], 'native_code_bytes_changed': 0,
+        'preparation': 'https://github.com/willfaust/Madeira/pull/497'}, indent=2) + '\n')
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk,
     '-O2', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-I', str(root / 'app/Madeira'),
-    *[str(p) for p in sources], '-framework', 'UIKit', '-framework', 'Foundation',
+    *extra, *[str(p) for p in sources], '-framework', 'UIKit', '-framework', 'Foundation',
     '-o', str(app / 'MadeiraSignedFEX')], check=True)
-inputs = [*sources, here / 'bridge.S', here / 'support.c', here / 'workload.c', here / 'out/translated.bin',
-    here / 'out/guest-image.bin', here / 'out/metadata.json', root / 'app/Madeira/SignedFEX.h']
+guest = json.loads((prepared / 'guest.json').read_text())
+inputs = [*sources, here / 'bridge.S', here / 'support.c', Path(guest.get('reference_source', here / 'workload.c')),
+    prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', root / 'app/Madeira/SignedFEX.h']
+if args.wine_framework:
+    inputs += [root / 'build/ntdll-unix/signed_pe_ios.h', root / 'app/Madeira/SignedWine.h',
+               args.wine_framework / args.wine_framework.stem]
 hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
 source_id = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
 provenance = {'source_id': source_id, 'sha256': hashes,
-    'fex_revision': json.loads((here / 'out/metadata.json').read_text())['fex_revision']}
+    'fex_revision': json.loads((prepared / 'metadata.json').read_text())['fex_revision']}
 (app / 'source-info.json').write_text(json.dumps(provenance, indent=2) + '\n')
 info = {'CFBundleIdentifier': 'com.madeira.signed-fex.program', 'CFBundleName': 'Madeira Signed FEX',
     'CFBundleDisplayName': 'Madeira Signed FEX', 'CFBundleExecutable': 'MadeiraSignedFEX',
@@ -42,6 +71,10 @@ info = {'CFBundleIdentifier': 'com.madeira.signed-fex.program', 'CFBundleName': 
     'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False,
         'UISceneConfigurations': {'UIWindowSceneSessionRoleApplication': [{
             'UISceneConfigurationName': 'FEX', 'UISceneDelegateClassName': 'MadeiraFEXScene'}]}}}
+if args.wine_framework:
+    info['CFBundleIdentifier'] = 'com.madeira.signed-fex.wine'
+    info['CFBundleDisplayName'] = 'Madeira Signed Wine'
+    info['MadeiraWineFramework'] = args.wine_framework.name
 (app / 'Info.plist').write_bytes(plistlib.dumps(info))
 subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
 subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)

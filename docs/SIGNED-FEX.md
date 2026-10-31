@@ -1,5 +1,8 @@
 # Signed FEX program execution
 
+For the later signed Wine DLL loader and Windows import workload, see
+[SIGNED-WINE.md](SIGNED-WINE.md). Its new runtime proof is host-only.
+
 This builds and runs a complete, freestanding x86-64 Windows PE program using
 FEX-generated ARM64 code in a signed Mach-O library. All translation happens
 on the Mac. The device package contains no FEX compiler and has no JIT fallback.

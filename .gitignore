@@ -22,6 +22,7 @@ research/*.md
 # Build artifacts
 build/signed-code-probe/out/
 build/signed-fex/out/
+build/signed-pe/out/
 app/build/
 app/DerivedData/
 build/DerivedData/

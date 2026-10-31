@@ -24,7 +24,8 @@ static void initialize(void *frame)
 
 __attribute__((visibility("default")))
 const struct MadeiraFEXImage madeira_fex_image = {
-    1, FEX_IMAGE_BASE, FEX_IMAGE_SIZE, FEX_IMAGE_ENTRY, FEX_FRAME_SIZE, FEX_GREGS, FEX_RIP,
+    2, FEX_IMAGE_BASE, FEX_IMAGE_SIZE, FEX_IMAGE_ENTRY, FEX_FRAME_SIZE, FEX_GREGS, FEX_RIP,
     madeira_fex_code, madeira_fex_code_end, entries, sizeof(entries) / sizeof(entries[0]),
-    sections, sizeof(sections) / sizeof(sections[0]), initialize, madeira_fex_enter, guest_workload
+    sections, sizeof(sections) / sizeof(sections[0]), initialize, madeira_fex_enter, guest_workload,
+    imports, FEX_IMPORT_COUNT
 };

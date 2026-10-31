@@ -9,11 +9,12 @@ import struct
 import subprocess
 
 here = Path(__file__).resolve().parent
-out = here / 'out'
 parser = argparse.ArgumentParser()
 parser.add_argument('--sdk', choices=['iphoneos', 'macosx'], required=True)
 parser.add_argument('--toolchain', type=Path, required=True)
+parser.add_argument('--output', type=Path, default=here / 'out')
 args = parser.parse_args()
+out = args.output.resolve()
 tools = args.toolchain.resolve()
 sdk = args.sdk
 folder = out / sdk
@@ -57,7 +58,11 @@ image_header = '\n'.join([
     'static const struct MadeiraFEXEntry entries[] = {',
     *[f'{{UINT64_C({rip}),UINT64_C({offset})}},' for rip, offset in entries], '};',
     'static const struct MadeiraFEXSection sections[] = {',
-    *[f'{{{start},{end}}},' for start, end in guest['code_sections']], '};', ''])
+    *[f'{{{start},{end}}},' for start, end in guest['code_sections']], '};',
+    f'#define FEX_IMPORT_COUNT {len(guest.get("imports", []))}',
+    'static const struct MadeiraFEXImport imports[] = {',
+    *[f'{{{json.dumps(x["dll"])},{json.dumps(x["name"])},UINT64_C({x["iat"]})}},' for x in guest.get('imports', [])],
+    *(['{0},'] if not guest.get('imports') else []), '};', ''])
 (out / 'image.h').write_text(image_header)
 blob = folder / 'blob.S'
 blob.write_text('\n'.join([
@@ -68,7 +73,7 @@ blob.write_text('\n'.join([
 sysroot = run(['xcrun', '--sdk', sdk, '--show-sdk-path']).strip()
 compiler = ['xcrun', '--sdk', sdk, 'clang', '-target', target, '-isysroot', sysroot,
     '-O2', '-ffp-contract=off', '-I' + str(out), '-I' + str(here.parents[1] / 'app/Madeira')]
-sources = [blob, here / 'bridge.S', here / 'support.c', here / 'workload.c']
+sources = [blob, here / 'bridge.S', here / 'support.c', Path(guest.get('reference_source', here / 'workload.c'))]
 binary = bundle / 'MadeiraSignedFEX'
 
 

@@ -81,6 +81,8 @@ harness = r'''
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+static int madeira_pe_wine_enabled(void) { return 0; }
+static void *madeira_pe_wine_translate(const void *address, int reverse) { (void)reverse; return (void *)address; }
 #define IOS_JIT_MAX_CODE_RANGES 96
 #define dprintf(fd, ...) fprintf(stderr, __VA_ARGS__)
 ''' + struct_def + r'''
