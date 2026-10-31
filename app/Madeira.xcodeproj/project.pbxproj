@@ -182,6 +182,8 @@
 		A1000281 /* Winios/WiniosCursor.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000281 /* Winios/WiniosCursor.c */; };
 		A1000245 /* TouchGamepad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000245 /* TouchGamepad.swift */; };
 		A1000F01 /* GestureZones.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000F01 /* GestureZones.swift */; };
+		A1001001 /* SquareEnixSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2001001 /* SquareEnixSignIn.swift */; };
+		A1001002 /* SquareEnixSignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2001002 /* SquareEnixSignInView.swift */; };
 		A1000246 /* TouchControlPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000246 /* TouchControlPresets.swift */; };
 /* End PBXBuildFile section */
 
@@ -411,6 +413,8 @@
 		A2000281 /* Winios/WiniosCursor.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "Winios/WiniosCursor.c"; sourceTree = "<group>"; };
 		A2000245 /* TouchGamepad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchGamepad.swift; sourceTree = "<group>"; };
 		A2000F01 /* GestureZones.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GestureZones.swift; sourceTree = "<group>"; };
+		A2001001 /* SquareEnixSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquareEnixSignIn.swift; sourceTree = "<group>"; };
+		A2001002 /* SquareEnixSignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquareEnixSignInView.swift; sourceTree = "<group>"; };
 		A2000246 /* TouchControlPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchControlPresets.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -547,6 +551,8 @@
 				A2000001 /* MadeiraApp.swift */,
 				A2000245 /* TouchGamepad.swift */,
 				A2000F01 /* GestureZones.swift */,
+				A2001001 /* SquareEnixSignIn.swift */,
+				A2001002 /* SquareEnixSignInView.swift */,
 				A2000246 /* TouchControlPresets.swift */,
 				A2000244 /* Winios/WiniosGamepad.c */,
 				A2000203 /* HardwareInput.swift */,
@@ -921,6 +927,8 @@
 				A1000001 /* MadeiraApp.swift in Sources */,
 				A1000245 /* TouchGamepad.swift in Sources */,
 				A1000F01 /* GestureZones.swift in Sources */,
+				A1001001 /* SquareEnixSignIn.swift in Sources */,
+				A1001002 /* SquareEnixSignInView.swift in Sources */,
 				A1000246 /* TouchControlPresets.swift in Sources */,
 				A1000244 /* Winios/WiniosGamepad.c in Sources */,
 				A1000203 /* HardwareInput.swift in Sources */,

@@ -1,0 +1,44 @@
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index f9f412be3d8..70e855a91bf 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2664,6 +2664,31 @@ static void fa_attach( HMODULE base )
+ }
+ #endif  /* __arm64ec__ */
+ 
++/* Madeira (build/wine-pe/patches/ntdll-hide-wine-host-version.patch): with
++ * MADEIRA_HIDE_WINE_HOST_VERSION=1 in the environment, a run-time lookup of
++ * wine_get_host_version (GetProcAddress) finds nothing, as on Windows. FINAL
++ * FANTASY XIV picks its Mac version when it finds the function; the app sets the
++ * variable for the game under a Windows license (docs/SQUARE_ENIX_SIGNIN.md).
++ * Load-time imports (shell32's) resolve through import resolution, not here. */
++static BOOL hide_wine_host_version( const ANSI_STRING *name )
++{
++    static const char hidden[] = "wine_get_host_version";
++    static int on = -1;
++
++    if (!name || !name->Buffer || name->Length != sizeof(hidden) - 1 ||
++        memcmp( name->Buffer, hidden, sizeof(hidden) - 1 )) return FALSE;
++    if (on < 0)
++    {
++        UNICODE_STRING nm, val;
++        WCHAR buf[8];
++        RtlInitUnicodeString( &nm, L"MADEIRA_HIDE_WINE_HOST_VERSION" );
++        val.Buffer = buf; val.Length = 0; val.MaximumLength = sizeof(buf);
++        on = (!RtlQueryEnvironmentVariable_U( NULL, &nm, &val ) && val.Length && buf[0] == '1');
++        if (on) ERR( "[hide-host-version] wine_get_host_version hidden from run-time lookups\n" );
++    }
++    return on;
++}
++
+ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
+                                        ULONG ord, PVOID *address)
+ {
+@@ -2676,6 +2701,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
+ 
+     /* check if the module itself is invalid to return the proper error */
+     if (!(wm = get_modref( module ))) ret = STATUS_DLL_NOT_FOUND;
++    else if (hide_wine_host_version( name )) ret = STATUS_PROCEDURE_NOT_FOUND;
+     else if ((exports = RtlImageDirectoryEntryToData( module, TRUE,
+                                                       IMAGE_DIRECTORY_ENTRY_EXPORT, &exp_size )))
+     {

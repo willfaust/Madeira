@@ -17,6 +17,22 @@ B="$R/wine/build-arm64ec"
 if [ ! -f "$B/config.status" ]; then
     mkdir -p "$B" && cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --without-freetype --without-gnutls --enable-winegstreamer
 fi
+# Madeira's patches to the PE ntdll (build/wine-pe/patches/ntdll-*.patch) are
+# applied to the wine submodule for this build only, and reverted however the
+# build ends; one still applied by an interrupted run is not applied twice.
+shopt -s nullglob
+PATCHES=("$R"/build/wine-pe/patches/ntdll-*.patch)
+revert_patches() {
+    for p in "${PATCHES[@]}"; do
+        git -C "$R/wine" apply --reverse --check "$p" 2>/dev/null && git -C "$R/wine" apply --reverse "$p"
+    done
+    return 0
+}
+trap revert_patches EXIT
+for p in "${PATCHES[@]}"; do
+    git -C "$R/wine" apply --reverse --check "$p" 2>/dev/null || git -C "$R/wine" apply "$p"
+    echo "applied $(basename "$p")"
+done
 cd "$B" && make dlls/ntdll/arm64ec-windows/ntdll.dll
 SRC="$B/dlls/ntdll/arm64ec-windows/ntdll.dll"; OUT="$R/app/Madeira/arm64ec-windows/ntdll.dll"
 cp "$SRC" "$OUT.tmp"

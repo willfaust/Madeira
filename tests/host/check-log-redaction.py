@@ -120,6 +120,8 @@ redacted = [
      "game.exe -USER_PASSWORD=" + R + " -Session-Ticket " + R + " -sessionid:" + R + " -x"),
     ("other credential names", "g.exe -client_secret FAKE1 -apiKey FAKE2 --x-api-key=FAKE3 -credentials FAKE4 -authcode FAKE5 -passphrase FAKE6",
      "g.exe -client_secret " + R + " -apiKey " + R + " --x-api-key=" + R + " -credentials " + R + " -authcode " + R + " -passphrase " + R),
+    ("FINAL FANTASY XIV's session argument", "ffxiv_dx11.exe DEV.TestSID=FAKE1 SYS.Region=2 /DEV.TestSID =FAKE2",
+     "ffxiv_dx11.exe DEV.TestSID=" + R + " SYS.Region=2 /DEV.TestSID " + R),
     ("pass and pwd as whole names", "g.exe -pass hunter2 -pwd hunter2 -x", "g.exe -pass " + R + " -pwd " + R + " -x"),
     ("name=VALUE", "game.exe password=hunter2 user=player1", "game.exe password=" + R + " user=player1"),
     ("quoted value with spaces", "game.exe -token \"FAKE WITH SPACES\" -next", "game.exe -token \"" + R + "\" -next"),

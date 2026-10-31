@@ -289,6 +289,16 @@ installed files**, App ID, free space and **Uninstall**; its **Executable**
 section shows the install folder, and it has no **Remove from library** (the
 entry goes with **Uninstall**).
 
+A FINAL FANTASY XIV entry (one of the game's own programs, beside its version
+files; `docs/SQUARE_ENIX_SIGNIN.md`) adds a **Square Enix** section under Play:
+**License** (Windows or Mac, chosen before the first Play), **Free trial
+account** and **Remember sign-in** (the Square Enix ID and password in the
+Keychain). Play opens a sign-in sheet first, and on success starts
+`game/ffxiv_dx11.exe` with that launch's session, whichever of the game's
+programs the entry names. Under the Windows license that launch hides Wine's
+`wine_get_host_version` from the game and always starts in the Wine desktop,
+since the game's Windows version restarts itself.
+
 ## Sessions
 
 Play applies the profile and runs the same `runWineFullSequence` as the

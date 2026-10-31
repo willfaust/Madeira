@@ -12,7 +12,8 @@
  * What is hidden (the value only; the name before it stays readable):
  *   - the value of an option or key whose name ends in token, password, passwd,
  *     passphrase, secret, ticket, apikey, sessionid, sessionkey, credential(s),
- *     authcode or authorization, or is pass or pwd, compared ignoring case and
+ *     authcode, authorization or testsid (FINAL FANTASY XIV's session
+ *     argument), or is pass or pwd, compared ignoring case and
  *     the separators '_', '-' and '.'. The forms are -name VALUE, --name VALUE,
  *     /name VALUE and +name VALUE, the same with '=' or ':' instead of the
  *     space, name=VALUE and name:VALUE, and ?name=VALUE or &name=VALUE inside
@@ -101,7 +102,8 @@ static inline int madeira_redact__credential_name(const void *s, size_t w, size_
     static const char *const ends[] =
     {
         "token", "password", "passwd", "passphrase", "secret", "ticket", "apikey", "sessionid",
-        "sessionkey", "credential", "credentials", "authcode", "authorization", NULL
+        "sessionkey", "credential", "credentials", "authcode", "authorization",
+        "testsid", NULL  /* FINAL FANTASY XIV's DEV.TestSID (docs/SQUARE_ENIX_SIGNIN.md) */
     };
     static const char *const whole[] = { "pass", "pwd", NULL };
     size_t i;
