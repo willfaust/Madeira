@@ -1,6 +1,6 @@
 --- a/Source/Windows/WOW64/Module.cpp
 +++ b/Source/Windows/WOW64/Module.cpp
-@@ -2015,6 +2015,40 @@
+@@ -2015,6 +2015,42 @@
    InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
  }
  
@@ -29,8 +29,10 @@
 +  const NTSTATUS Status = NtWriteVirtualMemory(Process, Address, Buffer, Size, Written);
 +  static std::atomic<unsigned> Reports {};
 +  if (Size <= 16 && Reports.fetch_add(1, std::memory_order_relaxed) < 32) {
++    const DWORD SavedError = GetLastError();
 +    LogMan::Msg::EFmt("[fex-guest-write-v1] tid={:#x} target={:#x} size={:#x} smc={} status={:#x}",
 +                     GetCurrentThreadId(), Start, Size, Tracked, static_cast<uint32_t>(Status));
++    SetLastError(SavedError);
 +  }
 +  // Locks out a compiler that could re-arm the trap or publish stale code
 +  // between invalidation and the write. The caller's normal protection restore

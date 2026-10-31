@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory() as t:
 #include <chrono>
 #include <cstring>
 #include <FEXCore/Utils/IntervalList.h>
-using ULONG=uint32_t;using SIZE_T=size_t;using NTSTATUS=int32_t;using HANDLE=void*;
+using ULONG=uint32_t;using DWORD=uint32_t;using SIZE_T=size_t;using NTSTATUS=int32_t;using HANDLE=void*;
 #define WINAPI
 #define __declspec(x)
 #define PAGE_NOACCESS 1
@@ -43,7 +43,9 @@ using ULONG=uint32_t;using SIZE_T=size_t;using NTSTATUS=int32_t;using HANDLE=voi
 #define PAGE_GUARD 0x100
 #define NtCurrentProcess() ((void*)(intptr_t)-1)
 namespace FEXCore::Utils {constexpr uint64_t FEX_PAGE_SIZE=4096,FEX_PAGE_MASK=~4095ull;}
-namespace LogMan::Msg {template<class... T> void DFmt(T...){ } template<class... T> void EFmt(T...){ }}
+static DWORD last_error;
+static DWORD GetLastError(){return last_error;}static void SetLastError(DWORD e){last_error=e;}
+namespace LogMan::Msg {template<class... T> void DFmt(T...){ } template<class... T> void EFmt(T...){last_error=999;}}
 class CodeMutex {
  std::mutex m; static thread_local bool held;
 public:
@@ -115,9 +117,9 @@ int main(){
  recompile(1);assert(permissions[1]==PAGE_EXECUTE_READ);
  // Negative control: this is the old failure after a successful temporary protect.
  assert(uint32_t(NtWriteVirtualMemory(NtCurrentProcess(),target,hook,12,&written))==0xc0000005u&&!written);
- unsigned before=invalidations;expect_locked=true;
+ unsigned before=invalidations;expect_locked=true;last_error=123;
  assert(!MadeiraBTCpuWriteMemory(NtCurrentProcess(),target,hook,12,&written));
- assert(written==12&&!memcmp(storage+4096+0x6a0,hook,12)&&invalidations>before);
+ assert(written==12&&!memcmp(storage+4096+0x6a0,hook,12)&&invalidations>before&&last_error==123);
  // Restore must revoke the interval: a subsequent direct write gets no permission.
  protect_guest(1,PAGE_EXECUTE_READ);assert(!tracker.RWXIntervals.Query(GuestWindow::Base+4096).Enclosed);
  before=protects;assert(uint32_t(MadeiraBTCpuWriteMemory(NtCurrentProcess(),target,hook,12,&written))==0xc0000005u&&!written);
