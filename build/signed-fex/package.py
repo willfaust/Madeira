@@ -57,7 +57,7 @@ subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-i
     '-o', str(app / 'MadeiraSignedFEX')], check=True)
 inputs = [*sources, here / 'bridge.S', here / 'support.c', Path(guest.get('reference_source', here / 'workload.c')),
     prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', prepared / 'frame.bin', prepared / 'indexed.bin',
-    prepared / 'abi.h', prepared / 'runtime.h', prepared / 'image.h', prepared / 'guest.json', framework / 'MadeiraSignedFEX',
+    prepared / 'abi.h', prepared / 'runtime.h', prepared / 'image.h', prepared / 'guest.json', prepared / 'prepared.json', framework / 'MadeiraSignedFEX',
     framework / 'FEX-LICENSE', framework / 'FEX-LICENSE-MADEIRA.md',
     here / 'export.cpp', here / 'prepare.py', here / 'bundle.py', here / 'package.py', root / 'app/Madeira/SignedFEX.h']
 if args.wine_framework:

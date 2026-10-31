@@ -74,6 +74,8 @@ fingerprints cannot share a runtime.
 The fingerprint also includes the 20,800 bytes of indexed vector constants.
 The exporter is built once in `build/signed-fex/out`. Its cache checks source,
 compiler, generated headers, build flags, and static-library hashes.
+Preparation publishes a hash manifest only after all outputs succeed. Bundling
+refuses missing, changed or mixed outputs after a failed preparation.
 
 The current limits are 16 MiB per guest image, 32 MiB of translated code per
 framework, 100,000 prepared entry points, and 64 attached guest images. An

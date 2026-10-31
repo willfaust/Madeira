@@ -18,6 +18,13 @@ parser.add_argument('--output', type=Path, default=here / 'out')
 parser.add_argument('--name', default='MadeiraSignedFEX', help='Unique framework name when preparing several modules')
 args = parser.parse_args()
 out = args.output.resolve()
+ready = json.loads((out / 'prepared.json').read_text())
+assert ready.get('version') == 1 and ready.get('sha256'), 'Preparation is incomplete'
+artifacts = {'guest-image.bin', 'guest.json', 'instruction-rvas.txt', 'translated.bin', 'frame.bin', 'indexed.bin',
+    'metadata.json', 'abi.h', 'runtime.h', 'FEX-LICENSE', 'FEX-LICENSE-MADEIRA.md'}
+assert set(ready['sha256']) == artifacts, 'Preparation manifest differs'
+for name, digest in ready['sha256'].items():
+    assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest, 'Prepared input changed: ' + name
 tools = args.toolchain.resolve()
 sdk = args.sdk
 folder = out / sdk

@@ -23,6 +23,10 @@ parser.add_argument('--output', type=Path, default=here / 'out')
 args = parser.parse_args()
 out = args.output.resolve()
 out.mkdir(parents=True, exist_ok=True)
+ready = out / 'prepared.json'
+if ready.exists():
+    assert ready.is_file() and not ready.is_symlink()
+    ready.unlink()
 fex, build, tools = (p.resolve() for p in (args.fex_source, args.fex_build, args.toolchain))
 
 
@@ -190,4 +194,8 @@ print(run([exporter, out / 'guest-image.bin', out / 'instruction-rvas.txt', out]
 metadata = json.loads((out / 'metadata.json').read_text())
 metadata['fex_revision'] = revision
 (out / 'metadata.json').write_text(json.dumps(metadata) + '\n')
+artifacts = ['guest-image.bin', 'guest.json', 'instruction-rvas.txt', 'translated.bin', 'frame.bin', 'indexed.bin',
+    'metadata.json', 'abi.h', 'runtime.h', 'FEX-LICENSE', 'FEX-LICENSE-MADEIRA.md']
+ready.write_text(json.dumps({'version': 1, 'sha256': {
+    name: hashlib.sha256((out / name).read_bytes()).hexdigest() for name in artifacts}}, sort_keys=True) + '\n')
 print('Prepared PE guest and FEX code:', out)
