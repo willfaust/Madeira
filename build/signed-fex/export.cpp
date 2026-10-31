@@ -21,9 +21,16 @@
 using Frame = FEXCore::Core::CpuStateFrame;
 static constexpr uint64_t GuestBase = UINT64_C(0x130000000);
 
-static void fail(const char *message) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
+[[noreturn]] static void fail(const char *message) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
 static void assertion(const char *message) { fail(message); }
 static void message(LogMan::DebugLevels, const char *text) { std::fprintf(stderr, "%s\n", text); }
+class PreparingSyscalls final : public FEX::DummyHandlers::DummySyscallHandler {
+public:
+    PreparingSyscalls() { OSABI = FEXCore::HLE::SyscallOSABI::OS_GENERIC; }
+    uint64_t HandleSyscall(Frame *, FEXCore::HLE::SyscallArguments *) override {
+        fail("The preparation process must not execute guest syscalls");
+    }
+};
 
 static void *compile_memory(void *address, size_t size, int prot, int flags, int fd, off_t offset)
 {
@@ -71,15 +78,18 @@ int main(int argc, char **argv)
     FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
     FEXCore::Config::Set(FEXCore::Config::CONFIG_MULTIBLOCK, "0");
     FEXCore::Config::Set(FEXCore::Config::CONFIG_MAXINST, "64");
-    FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "0");
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_TSOENABLED, "1");
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
     FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLETELEMETRY, "1");
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_ENABLECODECACHINGWIP, "1");
     FEXCore::HostFeatures features {};
     features.DCacheLineSize = features.ICacheLineSize = 64;
     features.SupportsAtomics = true;
     features.CPUMIDRs.push_back(0x410fd070);
     auto ctx = FEXCore::Context::Context::CreateNewContext(features);
     auto signals = FEX::DummyHandlers::CreateSignalDelegator();
-    auto syscalls = FEX::DummyHandlers::CreateSyscallHandler();
+    auto syscalls = fextl::make_unique<PreparingSyscalls>();
     ctx->SetSignalDelegator(signals.get());
     ctx->SetSyscallHandler(syscalls.get());
     if (!ctx->InitCore()) fail("FEX initialization failed");
@@ -112,12 +122,17 @@ int main(int argc, char **argv)
     std::vector<uint8_t> code(buffer->Ptr, buffer->Ptr + impl->LatestOffset);
     auto relocations = thread->CPUBackend->TakeRelocations(0);
     std::vector<uint64_t> literals;
-    unsigned rewritten = 0;
+    unsigned rewritten = 0, rebased_moves = 0, rebased_literals = 0;
     for (const auto& reloc : relocations) {
         using Type = FEXCore::CPU::RelocationTypes;
         size_t slot = reloc.Header.Offset;
         if (slot > code.size() || code.size() - slot < 8) fail("FEX relocation outside code");
-        if (reloc.Header.Type == Type::RELOC_GUEST_RIP_LITERAL) literals.push_back(slot);
+        if (reloc.Header.Type == Type::RELOC_GUEST_RIP_LITERAL) {
+            uint64_t rva = reloc.GuestRIP.GuestRIP - GuestBase;
+            literals.push_back(slot);
+            std::memcpy(code.data() + slot, &rva, 8);
+            ++rebased_literals;
+        }
         else if (reloc.Header.Type == Type::RELOC_NAMED_SYMBOL_LITERAL) {
             if (reloc.NamedSymbolLiteral.Symbol != FEXCore::CPU::RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER)
                 fail("Unsupported FEX runtime symbol");
@@ -137,17 +152,49 @@ int main(int argc, char **argv)
             // FEX also emits an unused linker literal for return-only blocks.
             (void)references;
             std::memset(code.data() + slot, 0, 8);
-        } else if (reloc.Header.Type != Type::RELOC_GUEST_RIP_MOVE) fail("Named thunk needs an explicit AOT binding");
+        } else if (reloc.Header.Type == Type::RELOC_GUEST_RIP_MOVE) {
+            unsigned reg = reloc.GuestRIP.RegisterIndex;
+            bool narrow = reloc.GuestRIP.GuestRIP < UINT64_C(0x100000000);
+            int64_t rva = narrow ? int32_t(uint32_t(reloc.GuestRIP.GuestRIP - GuestBase)) :
+                                  int64_t(reloc.GuestRIP.GuestRIP - GuestBase);
+            if (slot > code.size() - 16 || reg >= 31 || reg == 28 || rva < -0xffffff || rva > 0xffffff)
+                fail("Guest RIP move needs an unsupported address range");
+            constexpr size_t base_slot = sizeof(Frame) + 24;
+            static_assert(base_slot % 8 == 0 && base_slot / 4 < 4096);
+            uint32_t words[4] = {
+                (narrow ? 0xb9400000u | (uint32_t(base_slot / 4) << 10) :
+                          0xf9400000u | (uint32_t(base_slot / 8) << 10)) | (28u << 5) | reg,
+                0xd503201f, 0xd503201f, 0xd503201f};
+            uint32_t magnitude = rva < 0 ? -rva : rva;
+            uint32_t add = (narrow ? 0x11000000u : 0x91000000u) | (rva < 0 ? 0x40000000u : 0) | (reg << 5) | reg;
+            unsigned index = 1;
+            if (magnitude & 4095) words[index++] = add | ((magnitude & 4095) << 10);
+            if (magnitude >> 12) words[index++] = add | (1u << 22) | ((magnitude >> 12) << 10);
+            std::memcpy(code.data() + slot, words, sizeof(words));
+            ++rebased_moves;
+        } else fail("Named thunk needs an explicit AOT binding");
     }
     Frame frame {};
     std::memcpy(frame.Pointers.NamedVectorConstants, thread->CurrentFrame->Pointers.NamedVectorConstants,
                 sizeof(frame.Pointers.NamedVectorConstants));
     std::string out = argv[3];
+    constexpr size_t indexed_sizes[] = {4096, 4096, 4096, 4096, 256, 64, 4096};
+    static_assert(std::size(indexed_sizes) == FEXCore::IR::IndexNamedVectorConstant::INDEXED_NAMED_VECTOR_MAX);
+    std::vector<uint8_t> indexed;
+    std::vector<size_t> indexed_offsets;
+    for (size_t i = 0; i < std::size(indexed_sizes); ++i) {
+        auto source = reinterpret_cast<const uint8_t *>(thread->CurrentFrame->Pointers.IndexedNamedVectorConstantPointers[i]);
+        if (!source) fail("Missing indexed vector constant table");
+        indexed_offsets.push_back(indexed.size());
+        indexed.insert(indexed.end(), source, source + indexed_sizes[i]);
+    }
+    write(out + "/indexed.bin", indexed.data(), indexed.size());
     write(out + "/translated.bin", code.data(), code.size());
     write(out + "/frame.bin", &frame, sizeof(frame));
     std::ofstream metadata(out + "/metadata.json");
     metadata << "{\"code_size\":" << code.size() << ",\"frame_size\":" << sizeof(Frame)
-             << ",\"rewritten_exits\":" << rewritten << ",\"ranges\":[";
+             << ",\"rewritten_exits\":" << rewritten << ",\"memory_model\":\"tso\",\"relocatable\":true,\"rebased_moves\":" << rebased_moves
+             << ",\"rebased_literals\":" << rebased_literals << ",\"ranges\":[";
     for (size_t i = 0; i < ranges.size(); ++i)
         metadata << (i ? "," : "") << '[' << ranges[i].first << ',' << ranges[i].second << ']';
     metadata << "],\"literals\":[";
@@ -166,15 +213,59 @@ int main(int argc, char **argv)
 #define OFFSET(name, field) abi << "#define FEX_" #name " " << offsetof(Frame, field) << "\n"
     OFFSET(GREGS, State.gregs); OFFSET(RIP, State.rip); OFFSET(PF, State.pf_raw); OFFSET(AF, State.af_raw);
     OFFSET(GS, State.gs_cached);
+    OFFSET(FS, State.fs_cached); OFFSET(FLAGS, State.flags); OFFSET(SEGMENTS, State.es_idx);
+    OFFSET(MXCSR, State.mxcsr); OFFSET(MM, State.mm); OFFSET(FCW, State.FCW); OFFSET(FTW, State.AbridgedFTW);
+    OFFSET(GDT_PTRS, State.segment_arrays); OFFSET(GDT, State.private_gdt);
+    OFFSET(FAULT, SynchronousFaultData);
+    OFFSET(SIGILL, Pointers.GuestSignal_SIGILL); OFFSET(SIGTRAP, Pointers.GuestSignal_SIGTRAP);
+    OFFSET(SIGSEGV, Pointers.GuestSignal_SIGSEGV); OFFSET(CPUID, Pointers.CPUIDFunction); OFFSET(XCR, Pointers.XCRFunction);
     OFFSET(NZCV, State.flags[24]); OFFSET(XMM, State.xmm.sse.data); OFFSET(L1, State.L1Pointer);
     OFFSET(L1MASK, State.L1Mask); OFFSET(STACK, ReturningStackLocation); OFFSET(PTRS, Pointers);
     OFFSET(LOOP, Pointers.DispatcherLoopTop); OFFSET(LINK, Pointers.ExitFunctionLinker);
     OFFSET(CONSTANTS, Pointers.NamedVectorConstants); OFFSET(CONSTANT_PTRS, Pointers.NamedVectorConstantPointers);
+    OFFSET(INDEXED_PTRS, Pointers.IndexedNamedVectorConstantPointers);
 #undef OFFSET
     abi << "#define FEX_FRAME_SIZE " << sizeof(Frame) << "\n#define FEX_CONSTANT_COUNT "
         << std::size(frame.Pointers.NamedVectorConstants) << "\n";
     abi << "#define FEX_GUEST_BASE " << GuestBase << "\n#define FEX_GUEST_SIZE " << image_size << "\n";
     if (!abi) fail("Cannot write FEX ABI");
+    std::ofstream runtime(out + "/runtime.h");
+    runtime << "#pragma once\n#define FEX_MEMORY_TSO 1\nstatic const unsigned unsupported_helpers[] = {\n";
+#define HELPER(field) runtime << offsetof(Frame, Pointers.field) << ",\n"
+    HELPER(PrintValue); HELPER(PrintVectorValue); HELPER(PrintMsgValue); HELPER(ThreadRemoveCodeEntryFromJIT);
+    HELPER(SyscallHandlerFunc); HELPER(ExitFunctionLink); HELPER(MonoBackpatcherWrite); HELPER(LUDIV); HELPER(LDIV);
+    HELPER(ThunkCallbackRet); HELPER(ExitFunctionEC); HELPER(ThreadStopHandlerSpillSRA); HELPER(ThreadPauseHandlerSpillSRA);
+    HELPER(DispatcherLoopTopFillSRA); HELPER(DispatcherLoopTopEnterEC); HELPER(DispatcherLoopTopEnterECFillSRA);
+    HELPER(SignalReturnHandler); HELPER(SignalReturnHandlerRT); HELPER(LUDIVHandler); HELPER(LDIVHandler);
+    HELPER(F64SinHandler); HELPER(F64CosHandler); HELPER(F64TanHandler); HELPER(F64F2XM1Handler); HELPER(F64ScaleHandler);
+    HELPER(F64AtanHandler); HELPER(F64FYL2XHandler); HELPER(F64FYL2XP1Handler); HELPER(F64FPREMHandler); HELPER(F64FPREM1Handler);
+#undef HELPER
+    for (unsigned i = 0; i < FEXCore::Core::OPINDEX_MAX; ++i) {
+        runtime << offsetof(Frame, Pointers.FallbackHandlerPointers) + i * sizeof(FEXCore::Core::FallbackABIInfo) << ",\n";
+        runtime << offsetof(Frame, Pointers.FallbackHandlerPointers) + i * sizeof(FEXCore::Core::FallbackABIInfo) + 8 << ",\n";
+    }
+    runtime << "};\nstatic const unsigned indexed_offsets[] = {";
+    for (size_t offset : indexed_offsets) runtime << offset << ',';
+    runtime << "};\nstatic const struct MadeiraFEXCPUID cpu_profile[] = {\n";
+    for (uint32_t first : {0u, 0x40000000u, 0x80000000u}) {
+        uint32_t last = ctx->RunCPUIDFunction(first, 0).eax;
+        if (last < first) continue;
+        if (last - first > 256) fail("Unbounded CPUID profile");
+        for (uint32_t function = first; function <= last; ++function) {
+            using Policy = FEXCore::CPUIDEmu;
+            bool indexed = Policy::DoesFunctionReportConstantData(function).NeedsLeaf == Policy::NeedsLeafConstant::NEEDSLEAFCONSTANT;
+            for (uint32_t leaf = 0; leaf < (indexed ? 64u : 1u); ++leaf) {
+                auto values = ctx->RunCPUIDFunction(function, leaf);
+                if (!(values.eax | values.ebx | values.ecx | values.edx)) continue;
+                runtime << '{' << function << ',' << (indexed ? leaf : UINT32_MAX) << ',' << values.eax << ',' << values.ebx
+                        << ',' << values.ecx << ',' << values.edx << "},\n";
+            }
+        }
+    }
+    auto xcr = ctx->RunXCRFunction(0);
+    runtime << "};\nstatic const uint64_t cpu_xcr0 = UINT64_C(" << (uint64_t(xcr.edx) << 32 | xcr.eax) << ");\n";
+    runtime.close();
+    if (!runtime) fail("Cannot write runtime profile");
     metadata.close();
     abi.close();
     std::printf("Exported %zu instruction starts, %zu native entries, %zu bytes, %u immutable exits\n",

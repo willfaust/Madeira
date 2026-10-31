@@ -21,6 +21,8 @@ if args.wine_framework:
     args.wine_framework = args.wine_framework.resolve()
     assert args.wine_license and args.wine_license.is_file(), 'Include Wine COPYING.LIB'
 prepared = args.prepared.resolve()
+guest = json.loads((prepared / 'guest.json').read_text())
+assert guest.get('reference_source'), 'The standalone diagnostic package needs a reference workload; attach external PEs through the runtime API'
 out = prepared / 'device'
 app = out / 'Payload/MadeiraSignedFEX.app'
 app.mkdir(parents=True, exist_ok=True)
@@ -53,10 +55,10 @@ subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-i
     '-O2', '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-I', str(root / 'app/Madeira'),
     *extra, *[str(p) for p in sources], '-framework', 'UIKit', '-framework', 'Foundation',
     '-o', str(app / 'MadeiraSignedFEX')], check=True)
-guest = json.loads((prepared / 'guest.json').read_text())
 inputs = [*sources, here / 'bridge.S', here / 'support.c', Path(guest.get('reference_source', here / 'workload.c')),
-    prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', prepared / 'frame.bin',
-    prepared / 'abi.h', prepared / 'guest.json', framework / 'MadeiraSignedFEX',
+    prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', prepared / 'frame.bin', prepared / 'indexed.bin',
+    prepared / 'abi.h', prepared / 'runtime.h', prepared / 'image.h', prepared / 'guest.json', framework / 'MadeiraSignedFEX',
+    framework / 'FEX-LICENSE', framework / 'FEX-LICENSE-MADEIRA.md',
     here / 'export.cpp', here / 'prepare.py', here / 'bundle.py', here / 'package.py', root / 'app/Madeira/SignedFEX.h']
 if args.wine_framework:
     inputs += [root / 'build/ntdll-unix/signed_pe_ios.h', root / 'app/Madeira/SignedWine.h', root / 'build/signed-pe/thread_fixture.h',
@@ -67,6 +69,8 @@ source_id = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdiges
 provenance = {'source_id': source_id, 'sha256': hashes,
     'fex_revision': json.loads((prepared / 'metadata.json').read_text())['fex_revision']}
 (app / 'source-info.json').write_text(json.dumps(provenance, indent=2) + '\n')
+(app / 'FEX-source.json').write_text(json.dumps({'repository': 'https://github.com/willfaust/FEX',
+    'revision': provenance['fex_revision'], 'source_url': 'https://github.com/willfaust/FEX/tree/' + provenance['fex_revision']}, indent=2) + '\n')
 info = {'CFBundleIdentifier': 'com.madeira.signed-fex.program', 'CFBundleName': 'Madeira Signed FEX',
     'CFBundleDisplayName': 'Madeira Signed FEX', 'CFBundleExecutable': 'MadeiraSignedFEX',
     'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0',

@@ -17,6 +17,9 @@ __declspec(dllimport) void RtlInitializeGenericTable(void *, table_compare, tabl
 __declspec(dllimport) void *RtlInsertElementGenericTable(void *, const void *, uint32_t, unsigned char *);
 __declspec(dllimport) unsigned char RtlDeleteElementGenericTable(void *, const void *);
 __declspec(dllimport) void *RtlEnumerateGenericTableWithoutSplaying(void *, void **);
+#if defined(MADEIRA_EXTERNAL_COMPARE)
+__declspec(dllimport) int guest_compare(void *, const void *, const void *);
+#endif
 #else
 #include <string.h>
 #include <math.h>
@@ -135,8 +138,14 @@ __attribute__((noinline)) uint64_t guest_workload(uint64_t seed)
         uint64_t table[80];
         arena_used = released = 0;
         table_compare comparator = compare_key;
+#if defined(_WIN32) && defined(MADEIRA_EXTERNAL_COMPARE)
+        comparator = guest_compare;
+#endif
 #if defined(_WIN32) && defined(MADEIRA_REJECT_CALLBACK)
-        comparator = (table_compare)(uintptr_t)UINT64_C(0x130010000);
+#ifndef MADEIRA_REJECT_ADDRESS
+#define MADEIRA_REJECT_ADDRESS UINT64_C(0x130010000)
+#endif
+        comparator = (table_compare)(uintptr_t)MADEIRA_REJECT_ADDRESS;
 #endif
         RtlInitializeGenericTable(table, comparator, allocate_key, release_key, &arena_used);
         for (unsigned i = 0; i < 32; ++i) {

@@ -99,3 +99,8 @@ blocks cannot be substituted into that module without an ABI adapter.
 Wine integration must handle those interfaces and load additional code through
 signed images. A successful workload run does not establish game compatibility,
 standalone iOS signing support, or production performance.
+
+The newer [ABI 4 runtime](SIGNED-FEX-RUNTIME.md) adds caller-owned Windows CPU
+contexts, relocated images, several guest modules, native-first callbacks and
+prepared memory barriers. Its new execution checks remain host-only. It still
+needs Wine process startup, thread lifecycle and exception integration.

@@ -1,0 +1,3 @@
+LIBRARY cross.dll
+EXPORTS
+guest_compare

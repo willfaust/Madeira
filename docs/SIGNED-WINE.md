@@ -13,7 +13,7 @@ Wine's generic tables. Wine calls the program's comparison, allocation and
 release callbacks. The allocation callback calls Wine again. A separate
 portable reference uses an ordered array instead of Wine's splay tree.
 
-ABI version 3 uses Wine's compiler-generated entry and exit thunks. It does not
+ABI version 3 introduced Wine's compiler-generated entry and exit thunks. It does not
 need a C signature wrapper for each imported function. It transfers integer and
 vector registers, the guest stack, and return values. Native callbacks enter a
 separate CPU frame and can call Wine recursively. Direct and indirect call
@@ -63,7 +63,7 @@ path. The native ARM64 Windows PE, Wine image lifecycle check, and kernelbase
 and kernel32 loading results above remain host-only. Earlier physical proof in
 `SIGNED-FEX.md` applies to the earlier import-free workload.
 
-The latest bidirectional workload also passed on the same iPhone in
+That ABI 3 bidirectional workload also passed on the same iPhone in
 LiveContainer on 2026-10-31, launched with `jit=false`. All six results matched
 across 1,122,648 block/import transitions, 106,752 Wine calls and 241,344
 native-to-x64 callbacks. GS-based thread-context checks passed at the entry
@@ -80,6 +80,14 @@ Both used the same data-driven signed thread-state logic. The phone executed
 the ntdll wrapper with 745 offline TEB rewrites and unchanged signed trampolines.
 It still used the standalone TEB/PEB fixture. This is physical proof of the
 call/callback workload, not full Wine initialization, Windows threads or a game.
+
+The newer ABI 4 runtime accepts caller-owned Windows contexts, stacks and
+relocated guest mappings. It can attach several prepared guest modules.
+Its context, module, CPU-query and refusal checks remain host-only. See
+`SIGNED-FEX-RUNTIME.md` for the API, evidence and remaining startup work.
+ABI 4 also has native-first thread bindings and offline memory-access repairs.
+Those changes have host execution and iOS compilation checks only. They are
+not covered by the earlier ABI 3 phone result.
 
 ## Native library preparation
 
@@ -135,8 +143,9 @@ update, immutable code, duplicate-instance refusal, and unmap.
 
 This does not replace Wine's FEX module. Enabling the native-library option alone
 does not make the normal Madeira game path JIT-less. The new call and callback
-bridge still operates on one prepared x64 image and its declared imports. It
-does not replace Wine's emulator startup, full context handling or exceptions.
+diagnostic runner still operates on one prepared x64 image. ABI 4 has a
+separate API for multiple guest modules and saved CPU contexts. Neither path
+replaces Wine's emulator startup or exception handling yet.
 
 `MADEIRA_SIGNED_WINE=1` runs the same combined workload from Madeira's startup
 path. Include the two prepared frameworks and set the app's
@@ -173,13 +182,14 @@ set. A prepared or signed package is not runtime proof.
 - Full Wine bootstrap, syscall dispatch, thread-local state, and library init.
 - Connect the signed dispatcher and call/callback bridge to Wine's emulator
   startup and full CPU contexts. Add exceptions and Windows thread lifecycle.
-- Multiple prepared guest modules, relocatable guest addresses, and missing-code
-  handling. The translated workload still uses the earlier fixed image base.
+- Connect ABI 4 module attachment and relocated execution to Wine's loader.
+  Add module removal and import rebinding. The diagnostic startup workload
+  still uses the earlier fixed image base.
 - Independent writable library instances for concurrent Windows pseudo-processes.
   The current loader rejects a second live instance of the same signed library.
 - Forwarding and delay exports/imports where the standalone binder is used.
-- General callbacks outside the one prepared x64 image, nonstandard stack
-  alignment, guest FP-control changes, and full unwind metadata. The standalone
+- Complete callback and FP-control support, nonstandard stack alignment, and
+  full unwind metadata. The standalone
   dispatcher currently limits each input to 20 million transitions and callback
   nesting to 64 levels.
 - The full Madeira app build, standalone iOS installation, game support, and

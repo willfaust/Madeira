@@ -1,6 +1,24 @@
 #include "abi.h"
 .text
 .p2align 2
+.macro LOAD_GUEST_FP
+    ldr w0, [x28, #FEX_MXCSR]
+    ubfx w1, w0, #13, #2
+    rbit w1, w1
+    lsr w1, w1, #30
+    mrs x2, FPCR
+    bic x2, x2, #(7 << 22)
+    bic x2, x2, #7
+    bic x2, x2, #0x1f00
+    bic x2, x2, #0x8000
+    bic x2, x2, #(1 << 25)
+    bfi x2, x1, #22, #2
+    ubfx w1, w0, #15, #1
+    bfi x2, x1, #24, #1
+    msr FPCR, x2
+    ldr w0, [x28, #(FEX_FRAME_SIZE + 16)]
+    msr FPSR, x0
+.endm
 .globl _madeira_fex_enter
 _madeira_fex_enter:
     stp x29, x30, [sp, #-192]!
@@ -20,6 +38,7 @@ _madeira_fex_enter:
     mov x3, x1
     mov x2, sp
     str x2, [x28, #FEX_STACK]
+    LOAD_GUEST_FP
     ldr w0, [x28, #FEX_NZCV]
     msr NZCV, x0
     ldp w26, w27, [x28, #FEX_PF]
@@ -45,6 +64,8 @@ _madeira_fex_enter:
 _madeira_fex_direct:
     // FEX's unlinked thunk leaves the immutable exit record in LR.
     ldr x0, [x30, #8]
+    ldr x1, [x28, #(FEX_FRAME_SIZE + 24)]
+    add x0, x0, x1
     str x0, [x28, #FEX_RIP]
     b _madeira_fex_indirect
 
@@ -70,6 +91,8 @@ _madeira_fex_indirect:
     mrs x0, NZCV
     str w0, [x28, #FEX_NZCV]
 Lrestore_host:
+    mrs x0, FPSR
+    str w0, [x28, #(FEX_FRAME_SIZE + 16)]
     ldr x0, [x28, #FEX_STACK]
     mov sp, x0
     ldp x0, x1, [sp, #160]
@@ -86,6 +109,15 @@ Lrestore_host:
     ldp x27, x28, [sp, #80]
     ldp x29, x30, [sp], #192
     ret
+
+.globl _madeira_fex_unsupported
+_madeira_fex_unsupported:
+    mov x0, #0xff01
+    movk x0, #0xff, lsl #16
+    str x0, [x28, #FEX_FAULT]
+.globl _madeira_fex_guest_fault
+_madeira_fex_guest_fault:
+    b Lrestore_host
 
 .p2align 2
 .globl _madeira_ec_enter
@@ -108,6 +140,7 @@ _madeira_ec_enter:
     mov x9, x1
     mov x14, sp
     str x14, [x28, #FEX_STACK]
+    LOAD_GUEST_FP
     ldr x14, [x28, #FEX_GREGS+32]
     ldr x30, [x14], #8
     mov sp, x14
@@ -185,15 +218,31 @@ _madeira_ec_call:
     stp q10, q11, [sp, #416]
     stp q12, q13, [sp, #448]
     stp q14, q15, [sp, #480]
-    mov x1, sp
+    mrs x16, FPCR
+    mrs x17, FPSR
+    str x16, [sp, #512]
+    str x17, [sp, #520]
     mov x19, sp
-    ldr x0, [x28, #FEX_FRAME_SIZE+8]
-    ldr x16, [x28, #FEX_FRAME_SIZE]
-    ldr x17, [x28, #FEX_STACK]
+    bl _madeira_ec_thread_current
+    cbz x0, Lec_unbound
+    ldr x17, [x0]
+    cbz x17, Lec_first
+    ldr x17, [x17, #FEX_STACK]
+    b Lec_bound
+Lec_first:
+    ldr x17, [x0, #24]
+Lec_bound:
+    ldr x16, [x0, #8]
+    ldr x0, [x0, #16]
+    mov x1, x19
     mov sp, x17
     sub sp, sp, #16
     blr x16
     mov sp, x19
+    ldr x16, [sp, #512]
+    ldr x17, [sp, #520]
+    msr FPCR, x16
+    msr FPSR, x17
     ldp q0, q1, [sp, #256]
     ldp q2, q3, [sp, #288]
     ldp q4, q5, [sp, #320]
@@ -220,22 +269,77 @@ _madeira_ec_call:
     ldr x30, [sp, #240]
     add sp, sp, #1024
     ret
+Lec_unbound:
+    bl _madeira_ec_thread_missing
 
 .globl _madeira_ec_check
 _madeira_ec_check:
-    adrp x16, Lec_guest_base@PAGE
-    ldr x16, [x16, Lec_guest_base@PAGEOFF]
-    sub x17, x9, x16
-    adrp x16, Lec_guest_size@PAGE
-    ldr x16, [x16, Lec_guest_size@PAGEOFF]
-    cmp x17, x16
-    csel x11, x10, x9, lo
+    sub sp, sp, #416
+    stp x0, x1, [sp]
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
+    stp x8, x9, [sp, #64]
+    stp x10, x11, [sp, #80]
+    stp x12, x30, [sp, #96]
+    str x19, [sp, #112]
+    stp q0, q1, [sp, #128]
+    stp q2, q3, [sp, #160]
+    stp q4, q5, [sp, #192]
+    stp q6, q7, [sp, #224]
+    stp q8, q9, [sp, #256]
+    stp q10, q11, [sp, #288]
+    stp q12, q13, [sp, #320]
+    stp q14, q15, [sp, #352]
+    mrs x16, FPCR
+    mrs x17, FPSR
+    stp x16, x17, [sp, #384]
+    bl _madeira_ec_thread_current
+    cbz x0, Lec_native
+    ldr x13, [x0, #32]
+    ldr x14, [x0, #40]
+    ldar x14, [x14]
+    ldr x9, [sp, #72]
+Lec_check_next:
+    cbz x14, Lec_native
+    ldp x16, x17, [x13], #16
+    sub x16, x9, x16
+    cmp x16, x17
+    b.lo Lec_guest
+    sub x14, x14, #1
+    b Lec_check_next
+Lec_native:
+    ldr x0, [sp, #72]
+    bl _madeira_ec_native_target
+    mov w13, w0
+    b Lec_checked
+Lec_guest:
+    mov w13, #0
+Lec_checked:
+    ldp x16, x17, [sp, #384]
+    msr FPCR, x16
+    msr FPSR, x17
+    ldp q0, q1, [sp, #128]
+    ldp q2, q3, [sp, #160]
+    ldp q4, q5, [sp, #192]
+    ldp q6, q7, [sp, #224]
+    ldp q8, q9, [sp, #256]
+    ldp q10, q11, [sp, #288]
+    ldp q12, q13, [sp, #320]
+    ldp q14, q15, [sp, #352]
+    ldp x0, x1, [sp]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x30, [sp, #96]
+    ldr x19, [sp, #112]
+    add sp, sp, #416
+    cmp w13, #0
+    csel x11, x9, x10, ne
     ret
 .globl _madeira_ec_check_cfg
 _madeira_ec_check_cfg:
     mov x9, x11
     b _madeira_ec_check
-.section __TEXT,__const
-.p2align 3
-Lec_guest_base: .quad FEX_GUEST_BASE
-Lec_guest_size: .quad FEX_GUEST_SIZE
