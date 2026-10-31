@@ -7,6 +7,8 @@
 extern const unsigned char madeira_fex_code[], madeira_fex_code_end[], madeira_fex_frame[];
 extern void madeira_fex_enter(void *, const void *);
 extern void madeira_fex_direct(void), madeira_fex_indirect(void);
+extern void madeira_ec_enter(void *, const void *, const void *), madeira_ec_return(void);
+extern void madeira_ec_call(void), madeira_ec_check(void), madeira_ec_check_cfg(void);
 extern uint64_t guest_workload(uint64_t);
 static const uint64_t empty_lookup[2] = {0, UINT64_MAX};
 
@@ -24,8 +26,9 @@ static void initialize(void *frame)
 
 __attribute__((visibility("default")))
 const struct MadeiraFEXImage madeira_fex_image = {
-    2, FEX_IMAGE_BASE, FEX_IMAGE_SIZE, FEX_IMAGE_ENTRY, FEX_FRAME_SIZE, FEX_GREGS, FEX_RIP,
+    3, FEX_IMAGE_BASE, FEX_IMAGE_SIZE, FEX_IMAGE_ENTRY, FEX_FRAME_SIZE + 16, FEX_GREGS, FEX_RIP,
     madeira_fex_code, madeira_fex_code_end, entries, sizeof(entries) / sizeof(entries[0]),
     sections, sizeof(sections) / sizeof(sections[0]), initialize, madeira_fex_enter, guest_workload,
-    imports, FEX_IMPORT_COUNT
+    imports, FEX_IMPORT_COUNT, madeira_ec_enter, madeira_ec_return, FEX_GS,
+    FEX_XMM, FEX_FRAME_SIZE, madeira_ec_call, madeira_ec_check, madeira_ec_check_cfg
 };

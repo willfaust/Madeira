@@ -1,7 +1,9 @@
 #include "signed_pe_ios.h"
 #include <assert.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include "thread_fixture.h"
 
 extern uint64_t guest_workload(uint64_t);
 static uint16_t get16(const void *p) { uint16_t value; memcpy(&value, p, 2); return value; }
@@ -102,11 +104,52 @@ static uint32_t crc(uint32_t seed, const unsigned char *bytes, size_t size)
     return ~value;
 }
 
+struct thread_fixture { pthread_key_t key; void *(*get_peb)(void); unsigned id; };
+static void *thread_fixture_run(void *context)
+{
+    struct thread_fixture *fixture = context;
+    unsigned char teb[8192] = {0};
+    void *peb = &fixture->id;
+    memcpy(teb + 0x60, &peb, sizeof(peb));
+    assert(!pthread_setspecific(fixture->key, teb));
+    for (unsigned i = 0; i < 100000; ++i) assert(fixture->get_peb() == peb);
+    assert(!pthread_setspecific(fixture->key, NULL));
+    return NULL;
+}
+static void thread_state_check(struct madeira_signed_pe *module)
+{
+    assert(madeira_pe_thread_offset(module, 0) == -1);
+    assert(madeira_pe_thread_offset(module, 4096) == -1);
+    assert(!madeira_pe_thread_offset(module, fixture_offset));
+    assert(madeira_pe_thread_offset(module, fixture_offset == 8 ? 16 : 8) == -1);
+    pthread_key_t key = fixture_key;
+    void *(*get_peb)(void) = madeira_pe_export(module, "RtlGetCurrentPeb", 0);
+    assert(get_peb);
+    struct thread_fixture fixtures[] = {{key, get_peb, 1}, {key, get_peb, 2}};
+    pthread_t threads[2];
+    for (unsigned i = 0; i < 2; ++i) assert(!pthread_create(threads+i, NULL, thread_fixture_run, fixtures+i));
+    for (unsigned i = 0; i < 2; ++i) assert(!pthread_join(threads[i], NULL));
+    assert(!madeira_pe_check(module));
+    puts("PASS: two host thread-state fixtures, 200000 real Wine TEB reads from immutable signed code; not Wine startup.");
+}
+
+__asm__(".text\n.globl _native_direct_check\n_native_direct_check:\nmov x11, x9\nret\n"
+            ".globl _native_indirect_check\n_native_indirect_check:\nret\n");
+extern void native_direct_check(void), native_indirect_check(void);
+
 int main(int argc, char **argv)
 {
     assert(argc >= 2);
     struct madeira_signed_pe *ntdll = madeira_pe_open(argv[1], stdout);
     assert(ntdll);
+    uintptr_t teb;
+    assert(!standalone_thread(ntdll, stdout, &teb));
+    assert(!madeira_pe_wine_thread_offset(fixture_offset));
+    assert(!madeira_pe_wine_thread_offset(fixture_offset));
+    assert(madeira_pe_wine_thread_offset(0) == -1);
+    assert(madeira_pe_wine_thread_offset(4096) == -1);
+    assert(madeira_pe_wine_thread_offset(fixture_offset == 8 ? 16 : 8) == -1);
+    assert(!madeira_pe_ec_helpers(ntdll, NULL, NULL, native_direct_check, native_indirect_check));
     uint32_t (*wine_crc)(uint32_t, const void *, int) = madeira_pe_export(ntdll, "RtlComputeCrc32", 0);
     size_t (*wine_compare)(const void *, const void *, size_t) = madeira_pe_export(ntdll, "RtlCompareMemory", 0);
     void (*wine_move)(void *, const void *, size_t) = madeira_pe_export(ntdll, "RtlMoveMemory", 0);
@@ -127,6 +170,7 @@ int main(int argc, char **argv)
         printf("Wine ntdll run=%u bytes=1048576 crc=0x%08x code=unchanged\n", test, result);
     }
     for (int i = 2; i < argc; ++i) {
+        if (!strcmp(argv[i], "--thread-state")) { thread_state_check(ntdll); continue; }
         if (!strcmp(argv[i], "--wine-map")) {
             assert(i + 2 < argc);
             registry_check(argv[i + 1], argv[i + 2], ntdll);

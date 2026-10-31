@@ -165,6 +165,7 @@ int main(int argc, char **argv)
     abi << "#pragma once\n";
 #define OFFSET(name, field) abi << "#define FEX_" #name " " << offsetof(Frame, field) << "\n"
     OFFSET(GREGS, State.gregs); OFFSET(RIP, State.rip); OFFSET(PF, State.pf_raw); OFFSET(AF, State.af_raw);
+    OFFSET(GS, State.gs_cached);
     OFFSET(NZCV, State.flags[24]); OFFSET(XMM, State.xmm.sse.data); OFFSET(L1, State.L1Pointer);
     OFFSET(L1MASK, State.L1Mask); OFFSET(STACK, ReturningStackLocation); OFFSET(PTRS, Pointers);
     OFFSET(LOOP, Pointers.DispatcherLoopTop); OFFSET(LINK, Pointers.ExitFunctionLinker);
@@ -172,6 +173,7 @@ int main(int argc, char **argv)
 #undef OFFSET
     abi << "#define FEX_FRAME_SIZE " << sizeof(Frame) << "\n#define FEX_CONSTANT_COUNT "
         << std::size(frame.Pointers.NamedVectorConstants) << "\n";
+    abi << "#define FEX_GUEST_BASE " << GuestBase << "\n#define FEX_GUEST_SIZE " << image_size << "\n";
     if (!abi) fail("Cannot write FEX ABI");
     metadata.close();
     abi.close();

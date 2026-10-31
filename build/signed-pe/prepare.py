@@ -7,6 +7,7 @@ import json
 import plistlib
 import struct
 import subprocess
+from thread_state import rewrite
 
 PAGE = 16384
 PE_OFFSET = PAGE
@@ -133,7 +134,7 @@ def exports(symbols):
         offsets = new
 
 
-def prepare(source, output, sdk):
+def prepare(source, output, sdk, thread_state=False, toolchain=None):
     raw, image, sections, data_rva, base, machine, code_hash, fixups = read_pe(source)
     name = 'WinePE_' + code_hash.hex()
     bundle = output / (name + '.framework')
@@ -142,7 +143,25 @@ def prepare(source, output, sdk):
     descriptor = struct.pack('<IIIIQII32s32sII', 0x4550504d, 1, len(image), len(sections), base,
                              data_rva, machine, hashlib.sha256(raw).digest(), code_hash, len(fixups), 0)
     descriptor += b''.join(struct.pack('<I', rva) for rva in fixups)
-    linkedit = align(identity + len(descriptor))
+    thread_offset = identity + ((len(descriptor) + 7) & -8)
+    tramp_start = align(thread_offset + 88) if thread_state else 0
+    trampolines, teb_sites, tsd_sites = bytearray(), 0, 0
+    if thread_state:
+        need(toolchain is not None, 'Pass --toolchain for offline thread-state preparation')
+        optional = struct.unpack_from('<I', image, 60)[0] + 24
+        trampolines, teb_sites, tsd_sites = rewrite(source, image, optional, base, toolchain,
+            output / 'thread-state-scratch', tramp_start, thread_offset + 4)
+        digest = hashlib.sha256(struct.pack('<II', machine, len(image)))
+        for _, start, end, flags in sections:
+            if flags & 0x20000000:
+                digest.update(struct.pack('<III', start, end, flags))
+                digest.update(image[start:end])
+        descriptor = bytearray(descriptor)
+        struct.pack_into('<I', descriptor, 4, 2)
+        descriptor += bytes(thread_offset - identity - len(descriptor))
+        descriptor += struct.pack('<IIQII32s32s', 1, 0, len(trampolines), teb_sites, tsd_sites,
+                                  digest.digest(), hashlib.sha256(trampolines).digest())
+    linkedit = align(tramp_start + len(trampolines)) if thread_state else align(identity + len(descriptor))
     data_start = PE_OFFSET + data_rva
     # One contiguous code region preserves all original PC-relative addresses.
     text_sections = [('__pe_header', PE_OFFSET, min(s[1] for s in sections), 0),
@@ -155,18 +174,25 @@ def prepare(source, output, sdk):
         rebase += b'\x21' + uleb(PE_OFFSET + rva - data_start) + b'\x51'
     rebase += b'\0'
     symbols = [('_madeira_pe_image', PE_OFFSET), ('_madeira_pe_identity', identity)]
+    if thread_state:
+        symbols += [('_madeira_pe_thread_state', thread_offset), ('_madeira_pe_trampolines', tramp_start),
+                    ('_madeira_pe_trampolines_end', tramp_start + len(trampolines))]
     trie = exports(symbols)
     rebase_off, export_off = linkedit, (linkedit + len(rebase) + 7) & -8
     symoff = (export_off + len(trie) + 7) & -8
     strings, nlists = bytearray(b'\0'), bytearray()
     for name_symbol, address in symbols:
-        nlists += struct.pack('<IBBHQ', len(strings), 0x0f, 1 if address == PE_OFFSET else 4, 0, address)
+        section = 1 if address == PE_OFFSET else 5 if thread_state and address >= tramp_start else 4
+        nlists += struct.pack('<IBBHQ', len(strings), 0x0f, section, 0, address)
         strings += name_symbol.encode() + b'\0'
     stroff = symoff + len(nlists)
     total = stroff + len(strings)
     commands = [segment('__TEXT', 0, data_start, 5, text_sections),
-                segment('__DATA', data_start, linkedit - data_start, 3, data_sections),
-                segment('__LINKEDIT', linkedit, align(total - linkedit), 1, [])]
+                segment('__DATA', data_start, (tramp_start if thread_state else linkedit) - data_start, 3, data_sections)]
+    if thread_state:
+        commands.append(segment('__THREAD', tramp_start, linkedit - tramp_start, 5,
+                                [('__teb', tramp_start, len(trampolines), 0x80000400)]))
+    commands.append(segment('__LINKEDIT', linkedit, align(total - linkedit), 1, []))
     # LINKEDIT has a virtual page-rounded extent but only its actual file bytes.
     link_segment = bytearray(commands[-1])
     struct.pack_into('<Q', link_segment, 48, total - linkedit)
@@ -191,6 +217,8 @@ def prepare(source, output, sdk):
         cursor += len(command)
     binary[PE_OFFSET:PE_OFFSET + len(image)] = image
     binary[identity:identity + len(descriptor)] = descriptor
+    if thread_state:
+        binary[tramp_start:tramp_start + len(trampolines)] = trampolines
     binary[rebase_off:rebase_off + len(rebase)] = rebase
     binary[export_off:export_off + len(trie)] = trie
     binary[symoff:symoff + len(nlists)] = nlists
@@ -203,7 +231,9 @@ def prepare(source, output, sdk):
         'CFBundleShortVersionString': '1.0', 'CFBundleSupportedPlatforms': ['iPhoneOS' if sdk == 'iphoneos' else 'MacOSX']}))
     result = {'source': str(source.resolve()), 'source_sha256': hashlib.sha256(raw).hexdigest(),
               'code_sha256': code_hash.hex(), 'image_size': len(image), 'machine': hex(machine),
-              'data_relocations': len(fixups), 'code_bytes_changed': 0, 'sdk': sdk, 'framework': str(bundle.resolve())}
+              'data_relocations': len(fixups), 'code_bytes_changed': 4 * (teb_sites + tsd_sites),
+              'offline_teb_rewrites': teb_sites, 'offline_tsd_rewrites': tsd_sites,
+              'sdk': sdk, 'framework': str(bundle.resolve())}
     (bundle / 'preparation.json').write_text(json.dumps(result, indent=2) + '\n')
     # Bundle resources must be final before signing.
     subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(bundle)], check=True)
@@ -215,7 +245,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--sdk', choices=['macosx', 'iphoneos'], required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--thread-state', action='store_true')
+    parser.add_argument('--toolchain', type=Path)
     parser.add_argument('pe', type=Path, nargs='+')
     args = parser.parse_args()
     for path in args.pe:
-        print(json.dumps(prepare(path, args.output, args.sdk)))
+        print(json.dumps(prepare(path, args.output, args.sdk, args.thread_state, args.toolchain)))

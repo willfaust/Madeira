@@ -5,29 +5,16 @@
 #include "SignedFEX.h"
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 
-struct imports {
-    uint32_t (*crc)(uint32_t, const void *, int);
-    size_t (*compare)(const void *, const void *, size_t);
-    void (*move)(void *, const void *, size_t);
-    uint64_t calls;
-};
+#include "../../build/signed-pe/thread_fixture.h"
 
-static int call(void *context, const struct MadeiraFEXImport *binding, uint64_t *registers)
+static int resolve(void *context, const struct MadeiraFEXImport *binding,
+                   const struct MadeiraFEXImage *image, struct MadeiraFEXNativeImport *native)
 {
-    struct imports *imports = context;
     if (strcasecmp(binding->dll, "ntdll.dll")) return -1;
-    uint64_t a = registers[1], b = registers[2], c = registers[8];
-    if (!strcmp(binding->name, "RtlComputeCrc32")) {
-        if (c > INT32_MAX) return -1;
-        registers[0] = imports->crc((uint32_t)a, (const void *)(uintptr_t)b, (int)c);
-    } else if (!strcmp(binding->name, "RtlCompareMemory"))
-        registers[0] = imports->compare((const void *)(uintptr_t)a, (const void *)(uintptr_t)b, c);
-    else if (!strcmp(binding->name, "RtlMoveMemory"))
-        imports->move((void *)(uintptr_t)a, (const void *)(uintptr_t)b, c);
-    else return -1;
-    ++imports->calls;
-    return 0;
+    return madeira_pe_ec_import(context, binding->name, image->return_ec, image->call_ec, image->check_ec, image->check_ec_cfg,
+                                &native->target, &native->thunk);
 }
 
 int madeira_signed_wine_run(const char *fex, const char *image, const char *ntdll, FILE *report)
@@ -35,19 +22,17 @@ int madeira_signed_wine_run(const char *fex, const char *image, const char *ntdl
     if (!madeira_signed_execution_eligible(report)) return 2;
     struct madeira_signed_pe *module = madeira_pe_open(ntdll, report);
     if (!module) return 1;
-    struct imports imports = {
-        madeira_pe_export(module, "RtlComputeCrc32", 0),
-        madeira_pe_export(module, "RtlCompareMemory", 0),
-        madeira_pe_export(module, "RtlMoveMemory", 0), 0
-    };
-    int result = 1;
-    if (imports.crc && imports.compare && imports.move) {
-        fprintf(report, "Wine-backed PE workload: actual ntdll DLL imports; full Wine process startup is not implemented.\n");
-        result = madeira_signed_fex_run_with_imports(fex, image, report, call, &imports);
-        if (madeira_pe_check(module)) result = 1;
-        fprintf(report, "Wine native calls=%llu signed DLL code=%s\n", (unsigned long long)imports.calls,
-                result ? "FAIL" : "unchanged");
+    uintptr_t teb = 0;
+    if (standalone_thread(module, report, &teb)) {
+        fprintf(report, "FAIL: prepare offline thread-state rewrites before running this ABI workload.\n");
+        madeira_pe_close(module); return 1;
     }
+    fprintf(report, "Wine ARM64EC entry-thunk dispatch: no per-function C signature bridge.\n");
+    int result = madeira_signed_fex_run_native(fex, image, report, resolve, module, teb);
+    int changed = madeira_pe_check(module);
+    if (changed) result = 1;
+    fprintf(report, "Wine signed DLL code=%s; full Wine process startup is not implemented.\n",
+            changed ? "FAIL" : "unchanged");
     madeira_pe_close(module);
     return result;
 }

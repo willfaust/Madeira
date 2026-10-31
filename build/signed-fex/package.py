@@ -44,7 +44,9 @@ if args.wine_framework:
     wine_input = json.loads((args.wine_framework / 'preparation.json').read_text())
     (app / 'Wine-source.json').write_text(json.dumps({'repository': 'https://github.com/willfaust/wine',
         'revision': wine_revision, 'source_url': 'https://github.com/willfaust/wine/tree/' + wine_revision,
-        'dll_sha256': wine_input['source_sha256'], 'native_code_bytes_changed': 0,
+        'dll_sha256': wine_input['source_sha256'], 'native_code_bytes_changed': wine_input['code_bytes_changed'],
+        'offline_teb_rewrites': wine_input.get('offline_teb_rewrites', 0),
+        'offline_tsd_rewrites': wine_input.get('offline_tsd_rewrites', 0),
         'preparation': 'https://github.com/willfaust/Madeira/pull/497'}, indent=2) + '\n')
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk,
@@ -53,9 +55,12 @@ subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang', '-target', 'arm64-apple-i
     '-o', str(app / 'MadeiraSignedFEX')], check=True)
 guest = json.loads((prepared / 'guest.json').read_text())
 inputs = [*sources, here / 'bridge.S', here / 'support.c', Path(guest.get('reference_source', here / 'workload.c')),
-    prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', root / 'app/Madeira/SignedFEX.h']
+    prepared / 'translated.bin', prepared / 'guest-image.bin', prepared / 'metadata.json', prepared / 'frame.bin',
+    prepared / 'abi.h', prepared / 'guest.json', framework / 'MadeiraSignedFEX',
+    here / 'export.cpp', here / 'prepare.py', here / 'bundle.py', here / 'package.py', root / 'app/Madeira/SignedFEX.h']
 if args.wine_framework:
-    inputs += [root / 'build/ntdll-unix/signed_pe_ios.h', root / 'app/Madeira/SignedWine.h',
+    inputs += [root / 'build/ntdll-unix/signed_pe_ios.h', root / 'app/Madeira/SignedWine.h', root / 'build/signed-pe/thread_fixture.h',
+               root / 'build/signed-pe/prepare.py', root / 'build/signed-pe/thread_state.py', root / 'build/signed-pe/workload.def',
                args.wine_framework / args.wine_framework.stem]
 hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
 source_id = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()

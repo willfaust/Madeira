@@ -4,11 +4,12 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
-_Static_assert(ATOMIC_LLONG_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2,
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2,
                "Signed PE fault lookups require lock-free atomics");
 
 struct identity {
@@ -25,7 +26,18 @@ struct madeira_signed_pe {
     const struct identity *identity;
     size_t optional, sections;
     FILE *report;
+    struct thread_state *thread;
+    const unsigned char *trampolines;
 };
+struct thread_state {
+    uint32_t version;
+    atomic_uint offset;
+    uint64_t size;
+    uint32_t teb_sites, tsd_sites;
+    unsigned char code_hash[32], trampoline_hash[32];
+};
+_Static_assert(sizeof(struct thread_state) == 88 && offsetof(struct thread_state, offset) == 4,
+               "Signed thread-state data must match the offline wrapper layout");
 static uint16_t u16(const void *p) { uint16_t v; memcpy(&v, p, 2); return v; }
 static uint32_t u32(const void *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t u64(const void *p) { uint64_t v; memcpy(&v, p, 8); return v; }
@@ -90,7 +102,14 @@ static int code_hash(const unsigned char *image, size_t size, unsigned char hash
 int madeira_pe_check(struct madeira_signed_pe *m)
 {
     unsigned char hash[32];
-    if (!m || !code_hash(m->image, m->identity->image_size, hash) || memcmp(hash, m->identity->code_hash, 32)) return -1;
+    if (!m || !code_hash(m->image, m->identity->image_size, hash) ||
+        memcmp(hash, m->thread ? m->thread->code_hash : m->identity->code_hash, 32)) return -1;
+    if (m->thread) {
+        if (!m->trampolines || !m->thread->size || m->thread->size > 16 * 1024 * 1024 ||
+            !protection(m->trampolines, m->thread->size, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_WRITE)) return -1;
+        CC_SHA256(m->trampolines, (CC_LONG)m->thread->size, hash);
+        if (memcmp(hash, m->thread->trampoline_hash, 32)) return -1;
+    }
     for (unsigned i = 0; i < m->identity->section_count; ++i) {
         const unsigned char *s = m->image + m->sections + i * 40;
         size_t start = u32(s + 12), length = u32(s + 8), raw = u32(s + 16);
@@ -113,9 +132,14 @@ struct madeira_signed_pe *madeira_pe_open(const char *framework, FILE *report)
     m->library = library; m->report = report;
     m->image = dlsym(library, "madeira_pe_image");
     m->identity = dlsym(library, "madeira_pe_identity");
+    m->thread = dlsym(library, "madeira_pe_thread_state");
+    m->trampolines = dlsym(library, "madeira_pe_trampolines");
     const struct identity *id = m->identity;
     if (!id || !m->image || !protection(id, sizeof(*id), VM_PROT_READ, VM_PROT_EXECUTE) ||
-        id->magic != 0x4550504d || id->version != 1 || !id->image_size || id->image_size > 128 * 1024 * 1024 ||
+        id->magic != 0x4550504d || (id->version != 1 && id->version != 2) || !id->image_size || id->image_size > 128 * 1024 * 1024 ||
+        (id->version == 2 && (!m->thread || !protection(m->thread, sizeof(*m->thread),
+             VM_PROT_READ | VM_PROT_WRITE, VM_PROT_EXECUTE) || m->thread->version != 1)) ||
+        (id->version == 1 && m->thread) ||
         id->data_rva >= id->image_size || id->fixup_count > id->image_size / 8 ||
         !protection(id, sizeof(*id) + (size_t)id->fixup_count * 4, VM_PROT_READ, VM_PROT_EXECUTE) ||
         !protection(m->image, id->image_size, VM_PROT_READ, 0) ||
@@ -126,6 +150,8 @@ struct madeira_signed_pe *madeira_pe_open(const char *framework, FILE *report)
             (i && id->fixups[i - 1] >= id->fixups[i])) goto fail;
     if (report) fprintf(report, "signed-pe: image=%p size=%u data-fixups=%u native-text=RX data=RW/NX\n",
                         m->image, id->image_size, id->fixup_count);
+    if (report && m->thread) fprintf(report, "signed-pe: offline-TEB-rewrites=%u offline-TSD-rewrites=%u signed-trampolines=%llu\n",
+        m->thread->teb_sites, m->thread->tsd_sites, (unsigned long long)m->thread->size);
     return m;
 fail:
     if (report) fprintf(report, "signed-pe: invalid image or changed executable bytes\n");
@@ -140,6 +166,13 @@ void madeira_pe_close(struct madeira_signed_pe *m)
     free(m);
 }
 void *madeira_pe_image(struct madeira_signed_pe *m) { return m ? m->image : NULL; }
+
+int madeira_pe_thread_offset(struct madeira_signed_pe *m, unsigned offset)
+{
+    if (!m || !m->thread || !offset || offset >= 4096 || offset % 8) return -1;
+    unsigned old = 0;
+    return atomic_compare_exchange_strong(&m->thread->offset, &old, offset) || old == offset ? 0 : -1;
+}
 
 static const void *data(struct madeira_signed_pe *m, size_t offset, size_t length)
 {
@@ -231,6 +264,45 @@ int madeira_pe_bind(struct madeira_signed_pe *m, madeira_pe_resolver resolver, v
     return -1;
 }
 
+int madeira_pe_ec_helpers(struct madeira_signed_pe *m, void (*return_dispatch)(void),
+                          void (*call_dispatch)(void), void (*check_call)(void), void (*check_cfg)(void))
+{
+    uint32_t config, length;
+    if (!m || m->identity->machine != 0x8664 || !directory(m, 10, &config, &length) || length < 208) return -1;
+    uintptr_t metadata = u64(m->image + config + 200), base = (uintptr_t)m->image;
+    if (metadata < base || !data(m, metadata - base, 80)) return -1;
+    /* Wine's LLVM indirect call sites pass their target in x11, including non-CFG calls. */
+    void (*functions[])(void) = {call_dispatch, return_dispatch, check_call, check_cfg, check_cfg};
+    void *slots[5] = {0};
+    for (unsigned i = 0; i < 5; ++i) if (functions[i]) {
+        uint32_t rva = u32((const unsigned char *)metadata + 20 + i * 4);
+        slots[i] = (void *)data(m, rva, 8);
+        if (!rva || !slots[i] || !protection(slots[i], 8, VM_PROT_WRITE, VM_PROT_EXECUTE) ||
+            (u64(slots[i]) && u64(slots[i]) != (uintptr_t)functions[i])) return -1;
+    }
+    for (unsigned i = 0; i < 5; ++i) if (slots[i]) memcpy(slots[i], functions+i, 8);
+    return 0;
+}
+
+int madeira_pe_ec_import(struct madeira_signed_pe *m, const char *name,
+                         void (*return_dispatch)(void), void (*call_dispatch)(void), void (*check_call)(void), void (*check_cfg)(void),
+                         const void **target, const void **thunk)
+{
+    if (!name || !target || !thunk || !return_dispatch || !call_dispatch || !check_call || !check_cfg) return -1;
+    unsigned char *function = madeira_pe_export(m, name, 0);
+    if (!function || function < m->image + 4) return -1;
+    uintptr_t base = (uintptr_t)m->image;
+    int32_t displacement;
+    memcpy(&displacement, function - 4, 4);
+    displacement &= ~3;
+    uintptr_t entry = (uintptr_t)function + (intptr_t)displacement;
+    if (entry < base || !data(m, entry - base, 4) ||
+        !protection((void *)entry, 4, VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_WRITE)) return -1;
+    if (madeira_pe_ec_helpers(m, return_dispatch, call_dispatch, check_call, check_cfg)) return -1;
+    *target = function; *thunk = (void *)entry;
+    return 0;
+}
+
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { void *original; struct madeira_signed_pe *module; } registry[128];
 static struct {
@@ -239,6 +311,14 @@ static struct {
 } published[128];
 static _Atomic(uint64_t) next_generation = 1;
 static atomic_int enabled;
+static atomic_uint wine_thread_offset;
+
+int madeira_pe_wine_thread_offset(unsigned offset)
+{
+    if (!offset || offset >= 4096 || offset % 8) return -1;
+    unsigned old = 0;
+    return atomic_compare_exchange_strong(&wine_thread_offset, &old, offset) || old == offset ? 0 : -1;
+}
 static pthread_once_t configured = PTHREAD_ONCE_INIT;
 static char registry_root[4096];
 static int configuration_error;
@@ -334,6 +414,11 @@ int madeira_pe_wine_attach(void *image, size_t size)
     for (index = 0; index < 128 && registry[index].module; ++index) {}
     struct madeira_signed_pe *m = index < 128 ? madeira_pe_open(path, stderr) : NULL;
     if (!m) { pthread_mutex_unlock(&registry_lock); return -1; }
+    if (m->thread) {
+        if (madeira_pe_thread_offset(m, atomic_load(&wine_thread_offset))) {
+            madeira_pe_close(m); pthread_mutex_unlock(&registry_lock); return -1;
+        }
+    }
     for (unsigned i = 0; i < 128; ++i) if (registry[i].module && registry[i].module->image == m->image) {
         /* shortcut: one data instance per signed library; reject concurrent pseudo-process copies. */
         madeira_pe_close(m); pthread_mutex_unlock(&registry_lock); return -1;

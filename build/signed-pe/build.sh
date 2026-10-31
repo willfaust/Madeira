@@ -15,29 +15,31 @@ git -C "$runtime" diff --quiet HEAD -- app/Madeira/arm64ec-windows/ntdll.dll \
     app/Madeira/arm64ec-windows/kernelbase.dll app/Madeira/arm64ec-windows/kernel32.dll
 mkdir -p "$out"
 for sdk in macosx iphoneos; do
-    python3 "$root/build/signed-pe/prepare.py" --sdk "$sdk" --output "$out/$sdk" \
+    python3 "$root/build/signed-pe/prepare.py" --sdk "$sdk" --thread-state --toolchain "$toolchain" --output "$out/$sdk-runtime" \
         "$farm/ntdll.dll" "$farm/kernelbase.dll" "$farm/kernel32.dll" > "$out/$sdk-preparation.jsonl"
 done
 native="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["framework"])' "$out/macosx-preparation.jsonl")"
 native_ios="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["framework"])' "$out/iphoneos-preparation.jsonl")"
 python3 "$root/build/signed-fex/prepare.py" --fex-source "$fex" --fex-build "$fex_build" \
-    --toolchain "$toolchain" --workload "$root/build/signed-pe/workload.c" --wine-imports --output "$out/fex"
+    --toolchain "$toolchain" --workload "$root/build/signed-pe/workload.c" --wine-imports \
+    --import-definition "$root/build/signed-pe/workload.def" --output "$out/fex"
 for sdk in macosx iphoneos; do
     python3 "$root/build/signed-fex/bundle.py" --sdk "$sdk" --toolchain "$toolchain" --output "$out/fex"
 done
+"$toolchain/llvm-dlltool" -m arm64 -d "$root/build/signed-pe/workload.def" -l "$out/imports-arm64.lib"
 "$toolchain/aarch64-w64-mingw32-clang" -shared -nostdlib -O2 -ffreestanding -fno-builtin \
     -fno-stack-protector -mno-stack-arg-probe -ffp-contract=off -Wl,--entry,guest_workload \
     -Wl,--export-all-symbols -Wl,--section-alignment,65536 \
-    "$root/build/signed-pe/workload.c" -lntdll -o "$out/native-workload.dll"
+    "$root/build/signed-pe/workload.c" "$out/imports-arm64.lib" -lntdll -o "$out/native-workload.dll"
 python3 "$root/build/signed-pe/prepare.py" --sdk macosx --output "$out/macosx" \
     "$out/native-workload.dll" > "$out/native-workload.json"
 program="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["framework"])' "$out/native-workload.json")"
 xcrun clang -target arm64-apple-macos13.0 -O2 -Wall -Wextra -Werror -I "$root/build/ntdll-unix" \
     "$root/build/signed-pe/host.c" "$root/build/signed-pe/workload.c" \
     "$root/build/ntdll-unix/signed_pe_ios.c" -o "$out/host"
-"$out/host" "$native/$(basename "$native" .framework)" \
+"$out/host" "$native/$(basename "$native" .framework)" --thread-state \
     --program "$program/$(basename "$program" .framework)" \
-    --wine-map "$farm/ntdll.dll" "$out/macosx" > "$out/host-native.txt"
+    --wine-map "$farm/ntdll.dll" "$out/macosx-runtime" > "$out/host-native.txt"
 xcrun clang -target arm64-apple-macos13.0 -O2 -fobjc-arc -Wall -Wextra -Werror \
     -I "$root/app/Madeira" -I "$root/build/ntdll-unix" -I "$root/build/signed-pe" \
     "$root/build/signed-pe/host-wine.m" "$root/app/Madeira/SignedWine.m" \
@@ -45,6 +47,20 @@ xcrun clang -target arm64-apple-macos13.0 -O2 -fobjc-arc -Wall -Wextra -Werror \
     "$root/app/Madeira/SignedCodeProbe.m" -framework Foundation -o "$out/host-wine"
 "$out/host-wine" "$out/fex/macosx/MadeiraSignedFEX.framework/MadeiraSignedFEX" \
     "$out/fex/guest-image.bin" "$native/$(basename "$native" .framework)" > "$out/host-wine.txt"
+python3 "$root/build/signed-fex/prepare.py" --fex-source "$fex" --fex-build "$fex_build" \
+    --toolchain "$toolchain" --workload "$root/build/signed-pe/refusal.c" --wine-imports \
+    --import-definition "$root/build/signed-pe/workload.def" --output "$out/refusal"
+python3 "$root/build/signed-fex/bundle.py" --sdk macosx --toolchain "$toolchain" --output "$out/refusal"
+python3 - "$out" "$native" <<'PY'
+from pathlib import Path
+import subprocess, sys
+out, native = map(Path, sys.argv[1:])
+run = subprocess.run([out/'host-wine', out/'refusal/macosx/MadeiraSignedFEX.framework/MadeiraSignedFEX',
+    out/'refusal/guest-image.bin', native/native.stem], capture_output=True, text=True, timeout=15)
+(out/'callback-refusal.txt').write_text(run.stdout + run.stderr)
+assert run.returncode == 1 and 'missing pretranslated RIP=0x130010000' in run.stdout
+assert 'callback dispatch refused' in run.stdout
+PY
 python3 "$root/build/signed-fex/package.py" --output "$delivery" --prepared "$out/fex" \
     --wine-framework "$native_ios" --wine-license "$runtime/wine/COPYING.LIB"
 cat "$out/host-native.txt" "$out/host-wine.txt"

@@ -14,6 +14,7 @@ bool jit_cs_status(uint32_t *flags)
 int main(int argc, char **argv)
 {
     if (argc != 4) return 64;
+    setvbuf(stdout, NULL, _IONBF, 0);
     @autoreleasepool {
         puts("Host Wine-backed program check; no iPhone access or device proof.");
         return madeira_signed_wine_run(argv[1], argv[2], argv[3], stdout);

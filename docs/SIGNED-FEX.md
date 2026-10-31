@@ -1,15 +1,16 @@
 # Signed FEX program execution
 
 For the later signed Wine DLL loader and Windows import workload, see
-[SIGNED-WINE.md](SIGNED-WINE.md). Its new runtime proof is host-only.
+[SIGNED-WINE.md](SIGNED-WINE.md). It records separate host and device results.
 
 This builds and runs a complete, freestanding x86-64 Windows PE program using
 FEX-generated ARM64 code in a signed Mach-O library. All translation happens
 on the Mac. The device package contains no FEX compiler and has no JIT fallback.
 
-This is an experimental execution path. It does not yet run a normal Windows
-game or call Wine APIs. The test program has no Windows imports. The regular
-Madeira game path still uses JIT.
+This is an experimental execution path. The original test program described
+here has no Windows imports. The later Wine workload uses ARM64EC entry thunks
+and callbacks. Neither path runs a normal Windows game yet. The regular Madeira
+game path still uses JIT.
 
 ## Included work
 
@@ -88,7 +89,7 @@ window. A collision fails without releasing or replacing the existing region.
 
 ## Boundaries for the next runtime change
 
-The current bundle has a fixed program, ABI, image base and set of native
+The original bundle has a fixed program, ABI, image base and set of native
 helpers. It supports precompiled basic blocks and refuses missing translations.
 It does not support dynamic code generation, self-modifying code, signals,
 exception delivery, threads, runtime DLL loading or Wine calls. The ELF/Mach-O

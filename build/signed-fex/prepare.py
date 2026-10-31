@@ -15,6 +15,7 @@ parser.add_argument('--fex-build', type=Path, required=True)
 parser.add_argument('--toolchain', type=Path, required=True)
 parser.add_argument('--workload', type=Path, default=here / 'workload.c')
 parser.add_argument('--wine-imports', action='store_true')
+parser.add_argument('--import-definition', type=Path)
 parser.add_argument('--output', type=Path, default=here / 'out')
 args = parser.parse_args()
 out = args.output.resolve()
@@ -53,11 +54,16 @@ run(clean + ['-I' + str(fex / 'Source/Tools/CommonTools'), str(here / 'export.cp
     str(fex / 'Source/Tools/CommonTools/DummyHandlers.cpp'),
     *[str(p) for p in build.rglob('*.a')], '-L/opt/homebrew/lib', '-lxxhash', '-o', str(out / 'export')])
 workload = args.workload.resolve()
+libraries = ['-lntdll'] if args.wine_imports else []
+if args.import_definition:
+    library = out / 'guest-imports.lib'
+    run([tools / 'llvm-dlltool', '-m', 'i386:x86-64', '-d', args.import_definition.resolve(), '-l', library])
+    libraries.insert(0, library)
 run([tools / 'x86_64-w64-mingw32-clang', workload, '-O2', '-ffreestanding', '-fno-builtin',
     '-fno-stack-protector', '-mno-stack-arg-probe', '-ffp-contract=off', '-fno-unwind-tables',
     '-fno-asynchronous-unwind-tables', '-nostdlib', '-Wl,--entry,guest_workload',
     '-Wl,--image-base,0x130000000', '-Wl,--section-alignment,16384', '-Wl,--subsystem,console',
-    *(['-lntdll'] if args.wine_imports else []), '-o', out / 'workload.exe'])
+    *libraries, '-o', out / 'workload.exe'])
 
 # Only import-free PE32+ images are accepted by this runner.
 pe = (out / 'workload.exe').read_bytes()

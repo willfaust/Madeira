@@ -23870,7 +23870,9 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if (nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 && config->Size >= 208 &&
             config->VirtualAddress <= total_size && config->Size <= total_size - config->VirtualAddress)
             native = !!((const IMAGE_LOAD_CONFIG_DIRECTORY64 *)(ptr + config->VirtualAddress))->CHPEMetadataPointer;
-        if (native && madeira_pe_wine_attach(ptr, nt->OptionalHeader.SizeOfImage))
+        extern int ios_teb_tls_slot_offset;
+        if (native && (madeira_pe_wine_thread_offset(ios_teb_tls_slot_offset) ||
+                       madeira_pe_wine_attach(ptr, nt->OptionalHeader.SizeOfImage)))
         {
             dprintf(2, "[signed-pe] missing or incompatible prepared native image: %s\n", debugstr_us(nt_name));
             status = STATUS_INVALID_IMAGE_FORMAT;

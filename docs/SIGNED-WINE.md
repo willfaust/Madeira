@@ -7,12 +7,32 @@ compiler. It does not yet boot a complete Wine process or run a game.
 
 ## What runs
 
-The Windows workload imports `RtlComputeCrc32`, `RtlCompareMemory`, and
-`RtlMoveMemory` from `ntdll.dll`. It fills and checks buffers, copies memory,
-checks deliberately changed bytes, and accumulates CRC results. The native
-reference uses separate portable C implementations.
+The Windows workload imports eleven functions from `ntdll.dll`. It checks
+memory copies, CRC, UTF-8/UTF-16 conversion, floating-point square roots, and
+Wine's generic tables. Wine calls the program's comparison, allocation and
+release callbacks. The allocation callback calls Wine again. A separate
+portable reference uses an ordered array instead of Wine's splay tree.
 
-The translated x86-64 program passed six input cases on an ARM64 Mac. It made
+ABI version 3 uses Wine's compiler-generated entry and exit thunks. It does not
+need a C signature wrapper for each imported function. It transfers integer and
+vector registers, the guest stack, and return values. Native callbacks enter a
+separate CPU frame and can call Wine recursively. Direct and indirect call
+checkers follow their separate register contracts. An unknown callback inside
+the prepared image fails without executing it or starting a compiler.
+
+The latest host workload passed all six seeds: 1,122,648 block/import transitions,
+106,752 Wine calls across eleven imports, and 241,344 native-to-x64 callbacks.
+The deliberate missing-callback case returned a refusal without a crash. The
+earlier import-free workload also passed through the current loader.
+
+The x64 entry point and comparison callbacks also check their GS-based TEB and
+PEB pointers. This checks that nested CPU frames retain the same thread context.
+
+This standalone ABI workload uses an explicit TEB/PEB test fixture, including
+Wine's debug-option storage. It is not Wine process startup. The normal Wine
+mapping hooks use the actual TEB slot discovered by Wine's Unix runtime.
+
+The earlier three-import x86-64 program passed six input cases on an ARM64 Mac. It made
 3,072 calls into the actual Wine DLL across 9,996 translated block/import
 transitions. All six results matched. Both the translated code and native Wine
 code stayed unchanged. The signing/debugger checks passed before and after.
@@ -23,8 +43,10 @@ one-MiB copy/compare/CRC passes checked Wine's native exports directly.
 
 The host loaded signed wrappers for `ntdll.dll`, `kernelbase.dll`, and
 `kernel32.dll`. Their 459, 1,116, and 1,878 absolute data pointers were prepared
-for dyld rebasing. No native instruction bytes were changed. Loading the latter
-two libraries is not proof that their imports or Windows initialization work.
+for dyld rebasing. The initial wrappers kept native instructions unchanged.
+The newer thread-state wrappers use the offline changes described below.
+Loading kernelbase and kernel32 is not proof that their imports or Windows
+initialization work.
 
 The translated x86-64 workload also passed on an iPhone 15 Pro running iOS
 27.0.1 in LiveContainer 3.8.11 on 2026-10-31, launched with `jit=false`. All six
@@ -41,6 +63,12 @@ path. The native ARM64 Windows PE, Wine image lifecycle check, and kernelbase
 and kernel32 loading results above remain host-only. Earlier physical proof in
 `SIGNED-FEX.md` applies to the earlier import-free workload.
 
+The latest bidirectional workload is built for iOS 17 and installed in
+LiveContainer. Its source-set ID is
+`060b55af1a05d250a0c7216bdc892444f0ca85adf7529a4d61545c0ee33b4273`.
+The phone locked before the workload could launch. Its host results do not
+extend the earlier physical-device proof.
+
 ## Native library preparation
 
 `build/signed-pe/prepare.py` maps PE sections to their original relative virtual
@@ -48,11 +76,25 @@ addresses inside a Mach-O library. Executable sections are RX. Non-executable
 sections are RW and never executable. DIR64 pointers in data are expressed as
 Mach-O rebases, which dyld resolves without changing signed instructions.
 
+With `--thread-state`, preparation also rewrites ARM64EC TEB reads before
+signing. Signed trampolines use the ABI-reserved x13/x14 registers and obtain
+the current TEB through a runtime data slot. The slot holds Wine's discovered
+pthread offset. It is not an instruction immediate, so a different key does
+not require a code write. Both the modified PE instructions and trampolines
+have independent integrity checks. The original code hash still identifies
+the matching source image.
+
+The current ntdll, kernelbase and kernel32 wrappers contain 745, 1,653 and 477
+offline TEB rewrites. Two host thread fixtures completed 200,000 calls to real
+Wine `RtlGetCurrentPeb` with distinct thread contexts and unchanged signed code.
+The native ARM64 Windows workload also passed eight runs with real Wine
+imports and native callbacks. These are host checks, not Windows process boot.
+
 Preparation rejects unsupported machines, plain x86-64 images, overlapping or
 invalid sections, writable executable sections, executable sections after data,
 unaligned code/data boundaries, external absolute relocations, and relocations
-inside native code. The last two restrictions require offline rewriting rather
-than runtime patching. In particular, the existing 4-KiB-aligned FEX DLL cannot
+inside native code. External pointers and text relocations need further offline
+rewriting. In particular, the existing 4-KiB-aligned FEX DLL cannot
 be wrapped unchanged by this preparer.
 
 The loader validates the descriptor, code hashes, section bounds, and actual VM
@@ -80,8 +122,9 @@ in signed mode. The host lifecycle check covers map, pointer rebasing, data
 update, immutable code, duplicate-instance refusal, and unmap.
 
 This does not replace Wine's FEX module. Enabling the native-library option alone
-does not make the normal Madeira game path JIT-less. The translated program's
-three typed import bridges are not a general ARM64EC call adapter.
+does not make the normal Madeira game path JIT-less. The new call and callback
+bridge still operates on one prepared x64 image and its declared imports. It
+does not replace Wine's emulator startup, full context handling or exceptions.
 
 `MADEIRA_SIGNED_WINE=1` runs the same combined workload from Madeira's startup
 path. Include the two prepared frameworks and set the app's
@@ -116,11 +159,16 @@ set. A prepared or signed package is not runtime proof.
 ## Remaining work
 
 - Full Wine bootstrap, syscall dispatch, thread-local state, and library init.
-- A general x86/ARM64EC transition adapter, callbacks, exceptions, and threads.
+- Connect the signed dispatcher and call/callback bridge to Wine's emulator
+  startup and full CPU contexts. Add exceptions and Windows thread lifecycle.
 - Multiple prepared guest modules, relocatable guest addresses, and missing-code
   handling. The translated workload still uses the earlier fixed image base.
 - Independent writable library instances for concurrent Windows pseudo-processes.
   The current loader rejects a second live instance of the same signed library.
 - Forwarding and delay exports/imports where the standalone binder is used.
+- General callbacks outside the one prepared x64 image, nonstandard stack
+  alignment, guest FP-control changes, and full unwind metadata. The standalone
+  dispatcher currently limits each input to 20 million transitions and callback
+  nesting to 64 levels.
 - The full Madeira app build, standalone iOS installation, game support, and
   sustained performance measurements.
