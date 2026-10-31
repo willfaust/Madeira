@@ -4,6 +4,9 @@ import SwiftUI
 @main
 struct MadeiraApp: App {
     init() {
+        madeira_signed_code_probe_if_requested()
+        madeira_signed_fex_if_requested()
+        madeira_signed_wine_if_requested()
         // Opt-in iPhone pointer experiments (PhonePointer.m): before any scene exists.
         madeira_phone_pointer_setup()
         // madeira-bcd: the Metal Performance HUD's performance insights (the

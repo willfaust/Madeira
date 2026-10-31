@@ -85,6 +85,7 @@ extern kern_return_t vm_protect(mach_port_t target_task, vm_address_t address,
 #include <unistd.h>
 #include <dlfcn.h>
 #ifdef WINE_IOS
+#include "signed_pe_ios.h"
 #include <libkern/OSCacheControl.h>
 #endif
 #include <CommonCrypto/CommonDigest.h>   /* CC_SHA256: the Social Club helper code checks */
@@ -5386,6 +5387,8 @@ void *ios_jit_translate_addr_for_owner(void *addr, void *owner_peb)
     int i, fallback = -1, any_live = -1;
     uintptr_t a = (uintptr_t)addr;
 
+    if (madeira_pe_wine_enabled()) return madeira_pe_wine_translate(addr, 0);
+
     for (i = 0; i < ios_jit_mapping_count; i++)
     {
         uintptr_t base = (uintptr_t)ios_jit_mappings[i].pe_base;
@@ -6153,6 +6156,7 @@ void *ios_jit_pool_copy_owner(const void *addr, void **pe_base_out)
 void *ios_jit_reverse_translate_addr(const void *addr)
 {
     int i;
+    if (madeira_pe_wine_enabled()) return madeira_pe_wine_translate(addr, 1);
     for (i = 0; i < ios_jit_mapping_count; i++)
     {
         uintptr_t a = (uintptr_t)addr;
@@ -6335,6 +6339,12 @@ static int ios_iat_skip_exec_dest( void )
 
 void ios_jit_sync_write(void *addr, size_t size)
 {
+    if (madeira_pe_wine_enabled())
+    {
+        if (madeira_pe_wine_sync(addr, size) < 0)
+            dprintf(2, "[signed-pe] invalid data update %p+0x%lx\n", addr, (unsigned long)size);
+        return;
+    }
     int i, fallback = -1;
     uintptr_t a = (uintptr_t)addr;
     void *cur_peb = ios_jit_current_peb();
@@ -14371,6 +14381,7 @@ static void ios_vh_dump( const void *addr )
  */
 static void delete_view( struct file_view *view ) /* [in] View */
 {
+    if ((view->protect & SEC_IMAGE) && madeira_pe_wine_enabled()) madeira_pe_wine_detach(view->base);
     ios_vh_note( 'd', view );   /* madeira-bcd: view history */
     /* ml989: entered BEFORE any field of `view` is read, so "call never
      * entered" is distinguishable from "died reading the view". */
@@ -17092,6 +17103,19 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
 #ifdef WINE_IOS
+    if (madeira_pe_wine_enabled())
+    {
+        if (ios_in_mach_exc) { errno = EACCES; return -1; }
+        if ((unix_prot & PROT_WRITE) && madeira_pe_wine_code_overlap(base, size))
+        {
+            errno = EACCES;
+            return -1;
+        }
+        /* The original PE is data. Native instructions run only from the signed image. */
+        int protection = unix_prot & ~PROT_EXEC;
+        if (!protection && (unix_prot & PROT_EXEC)) protection = PROT_READ;
+        return mprotect(base, size, protection);
+    }
     /* iOS-Madeira ml1030: A 32-BIT IMAGE PAGE IS DATA TO THE HOST — SO STOP
      * ROUTING ITS WRITE REQUESTS THROUGH THE EXECUTABLE MACHINERY.
      *
@@ -23372,6 +23396,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     INT_PTR delta;
 
 #ifdef WINE_IOS
+    if (madeira_pe_wine_configure()) return STATUS_INVALID_PARAMETER;
     ios_wow_note_image( view->base, nt_name );   /* ml1282 */
 #endif
 
@@ -23837,6 +23862,23 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     status = STATUS_SUCCESS;
 
 #ifdef WINE_IOS
+    if (madeira_pe_wine_enabled() && !ios_noexec_resource)
+    {
+        const IMAGE_DATA_DIRECTORY *config = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+        int native = nt->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64 ||
+                     nt->FileHeader.Machine == IMAGE_FILE_MACHINE_ARM64EC;
+        if (nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 && config->Size >= 208 &&
+            config->VirtualAddress <= total_size && config->Size <= total_size - config->VirtualAddress)
+            native = !!((const IMAGE_LOAD_CONFIG_DIRECTORY64 *)(ptr + config->VirtualAddress))->CHPEMetadataPointer;
+        extern int ios_teb_tls_slot_offset;
+        if (native && (madeira_pe_wine_thread_offset(ios_teb_tls_slot_offset) ||
+                       madeira_pe_wine_attach(ptr, nt->OptionalHeader.SizeOfImage)))
+        {
+            dprintf(2, "[signed-pe] missing or incompatible prepared native image: %s\n", debugstr_us(nt_name));
+            status = STATUS_INVALID_IMAGE_FORMAT;
+        }
+        goto done;
+    }
     /* Eagerly JIT-copy all EXEC sections right here — every PE load goes
      * through map_image_into_view, regardless of whether it's via
      * virtual_map_image (builtin flag) or any alternate path. */
@@ -32818,6 +32860,11 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
                 ERR("iOS NtProtect-sync: SKIP (new_prot=0x%x has no READ bit)\n", new_prot);
                 return status;
             }
+        }
+        if (madeira_pe_wine_enabled())
+        {
+            if (madeira_pe_wine_sync(base, size) < 0) return STATUS_INVALID_IMAGE_FORMAT;
+            return status;
         }
         if (1)
         {

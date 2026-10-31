@@ -1,0 +1,13 @@
+LIBRARY ntdll.dll
+EXPORTS
+RtlComputeCrc32
+RtlCompareMemory
+RtlMoveMemory
+RtlUTF8ToUnicodeN
+RtlUnicodeToUTF8N
+RtlInitUnicodeString
+sqrt
+RtlInitializeGenericTable
+RtlInsertElementGenericTable
+RtlDeleteElementGenericTable
+RtlEnumerateGenericTableWithoutSplaying
