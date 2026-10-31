@@ -653,7 +653,13 @@ struct ExternalDrivesSection: View {
         }
         progress(1)
         LogStore.shared.log("[move] copied and checked files=\(sources.reduce(0) { $0 + $1.count }) bytes=\(total)")
-        for item in items { try? fm.removeItem(at: item.from) }
+        // The copy is already checked, so the move stands; a source that cannot be
+        // removed (read-only or busy files) is logged rather than left unexplained,
+        // because it keeps using the old drive's space.
+        for item in items {
+            do { try fm.removeItem(at: item.from) }
+            catch { LogStore.shared.log("[move] copied, but the original \(item.from.lastPathComponent) could not be removed: \(error.localizedDescription)") }
+        }
     }
 }
 
