@@ -20,6 +20,7 @@ research/Winlator-Ludashi/
 research/*.md
 
 # Build artifacts
+build/signed-code-probe/out/
 app/build/
 app/DerivedData/
 build/DerivedData/
