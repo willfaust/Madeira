@@ -26,7 +26,7 @@ def run(code, cpp=False):
         exe = Path(tmp) / 'check'
         subprocess.run([os.environ.get('CXX' if cpp else 'CC', 'c++' if cpp else 'cc'),
                         '-std=c++20' if cpp else '-std=gnu11', '-O1', '-g', '-pthread',
-                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all', str(p), '-o', str(exe)], check=True)
+                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-I'+str(root/'build/ntdll-unix'), str(p), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True, env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'))
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +162,9 @@ static int ios_fault_read(uint64_t a,void* out,size_t n){
  for(unsigned i=0;i<4;i++) if(a>=lo[i]&&a-lo[i]<=size[i]&&n<=size[i]-(a-lo[i])){memcpy(out,(void*)(uintptr_t)a,n);return 1;}
  return 0;
 }
+''' + r'''
+static int ios_g32_read(uint64_t a,void* out,size_t n){return ios_fault_read(a,out,n);}
+#include "guest32_origin.h"
 ''' + body(v,'static int fex_arena_covers(') + chr(10) + body(s,'static int ios_verified_guest_breakpoint(') + r'''
 int main(){
  assert(fex_arena_covers((void*)0xc00000000,(void*)0xeffffffff));

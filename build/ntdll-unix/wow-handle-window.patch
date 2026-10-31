@@ -1,0 +1,89 @@
+--- a/dlls/wow64/syscall.c
++++ b/dlls/wow64/syscall.c
+@@ -96,53 +96,19 @@
+  * helpers are exactly the ULongToPtr/PtrToUlong they replaced. */
+ ULONG_PTR wow_guest_base = 0;
+ 
+-/* Same, for another process.  Cross-process VM calls must use the TARGET's
+- * window (target-window rule, wow64_private.h), never ours.  Cached per handle value because the
+- * query is a syscall and these calls come in bursts; a handle is closed and
+- * reused only after the process object is gone, and a pseudo-process's window
+- * dies with it, so a stale entry can only appear after a handle is recycled —
+- * revalidated by comparing the process's unique id below. */
++/* Resolve the target guest window, never the caller window, for mixed
++ * process VM operations. Handle values alone cannot identify an owner. */
+ ULONG_PTR wow_guest_base_for_process( HANDLE process )
+ {
+-    static struct { HANDLE volatile handle; ULONG_PTR pid; ULONG_PTR base; } cache[8];
+-    static LONG cache_pos;
+-    PROCESS_BASIC_INFORMATION pbi;
+-    ULONG_PTR base = 0, pid;
+-    unsigned int i;
+-
+-    /* on a platform that keeps the classic WoW64 identity
+-     * there are no windows at all, so answer without any syscall — this runs
+-     * on every cross-process VM call. */
++    ULONG_PTR base = 0;
+     if (!wow_guest_base) return 0;
+     if (process == GetCurrentProcess() || !process) return wow_guest_base;
+-
+-    /* Cache lookup FIRST: the ProcessBasicInformation query below is itself a
+-     * syscall, so doing it before the lookup made the cache pointless. */
+-    for (i = 0; i < ARRAY_SIZE(cache); i++)
+-    {
+-        HANDLE h = ReadPointerAcquire( &cache[i].handle );   /* pairs with the release below */
+-
+-        if (h == process) return cache[i].base;
+-    }
+-
+-    /* Not cached.  Resolve the unique id so a recycled handle value cannot
+-     * alias a dead process's entry, then query B. */
+-    if (NtQueryInformationProcess( process, ProcessBasicInformation, &pbi, sizeof(pbi), NULL ))
++    /* Handles are recycled while their caller remains alive. A handle-only
++     * cache hit cannot validate a PID or reservation generation. Resolve the
++     * target through the server-backed registry on every cross-process call;
++     * failure stays untranslatable rather than borrowing our own window. */
++    if (NtQueryInformationProcess( process, ProcessWineIosWowGuestBase, &base, sizeof(base), NULL ))
+         return 0;
+-    pid = pbi.UniqueProcessId;
+-    for (i = 0; i < ARRAY_SIZE(cache); i++)
+-        if (cache[i].handle == process && cache[i].pid == pid) return cache[i].base;
+-    if (NtQueryInformationProcess( process, ProcessWineIosWowGuestBase, &base, sizeof(base), NULL ))
+-        base = 0;
+-
+-    /* Ordered publish: base and pid are visible before the handle that makes
+-     * the entry findable, so a concurrent reader can never match a handle and
+-     * then read a half-written base. */
+-    i = (unsigned int)InterlockedIncrement( &cache_pos ) % ARRAY_SIZE(cache);
+-    WritePointerRelease( &cache[i].handle, NULL );   /* retire the old entry first */
+-    cache[i].base = base;
+-    cache[i].pid = pid;
+-    WritePointerRelease( &cache[i].handle, process );
+     return base;
+ }
+ 
+@@ -344,7 +310,7 @@
+ 
+             C_ASSERT( offsetof(struct exc_stack_layout32, context) == 0x58 );
+ 
+-            pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
++            NTSTATUS context_status = pBTCpuGetContext( GetCurrentThread(), GetCurrentProcess(), NULL, &ctx );
+ 
+             if (ctx32_ptr)
+             {
+@@ -380,6 +346,15 @@
+             /* adjust Eip for breakpoints in software emulation (hardware exceptions already adjust Rip) */
+             if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && (wow64info->CpuFlags & WOW64_CPUFLAGS_SOFTWARE))
+                 stack->context.Eip--;
++
++            if (rec->ExceptionCode == EXCEPTION_BREAKPOINT)
++            {
++                static LONG reports;
++                if (InterlockedIncrement(&reports) <= 8)
++                    ERR("[wow-break-deliver-v1] context-status=%08lx record=%08lx before-eip=%08lx dispatched-eip=%08lx esp=%08lx dispatcher=%08lx cpu-flags=%lx\n",
++                        (long)context_status, (long)rec->ExceptionAddress, (long)ctx.Eip, (long)stack->context.Eip,
++                        (long)ctx.Esp, (long)pLdrSystemDllInitBlock->pKiUserExceptionDispatcher, (long)wow64info->CpuFlags);
++            }
+ 
+             ctx.Esp = host_ptr32( stack );
+             ctx.Eip = pLdrSystemDllInitBlock->pKiUserExceptionDispatcher;

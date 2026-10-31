@@ -3411,6 +3411,11 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     BOOL self;
 
 #ifdef WINE_IOS
+    if ((unsigned int)exit_code == 0x80000003u && handle == NtCurrentProcess())
+    {
+        extern void ios_guest32_trace_current(const char *, const void *);
+        ios_guest32_trace_current("breakpoint-terminate", NULL);
+    }
     if ((unsigned int)exit_code == 0xE0000008u && handle == NtCurrentProcess())
         ios_term_oom_record( NtCurrentTeb() );
     {
@@ -4117,7 +4122,10 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
             {
                 req->handle = wine_server_obj_handle( handle );
                 ret = wine_server_call( req );
-                if (!ret) val = ios_wow_base_for_peb( wine_server_get_ptr( reply->peb ) );
+                /* A retired process object can outlive its window. Its PEB
+                 * address may already belong to a new process after reuse. */
+                if (!ret && !reply->end_time)
+                    val = ios_wow_base_for_peb( wine_server_get_ptr( reply->peb ) );
             }
             SERVER_END_REQ;
             if (!ret) *(ULONG_PTR *)info = val;

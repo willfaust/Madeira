@@ -24,15 +24,22 @@ def check(staged, app, ipa):
     native = (app / 'Madeira.debug.dylib').read_bytes()
     assert CONSUMER in native, 'native IOSB consumer missing from linked image'
     assert b'[wow-thread-init-v1]' in expected, 'stale Wine CPU initialization consumer'
+    assert b'[wow-break-deliver-v1]' in expected, 'stale Wine breakpoint diagnostics'
+    assert b'[wow-write]' in native and b'[guest32-symbols]' in native, 'native guest memory diagnostics missing'
     cpu = staged.parent / 'xtajit.dll'
     cpu_data = cpu.read_bytes()
     assert struct.unpack_from('<H', cpu_data, struct.unpack_from('<I', cpu_data, 0x3c)[0] + 4)[0] == 0xaa64
     assert b'MadeiraBTCpuThreadInit' in cpu_data and b'[fex-thread-init-v1]' in cpu_data, 'stale FEX CPU producer'
     assert (app / 'aarch64-windows/xtajit.dll').read_bytes() == cpu_data, 'Xcode packaged stale FEX'
+    guest = (staged.parent.parent / 'i386-windows/kernelbase.dll').read_bytes()
+    assert struct.unpack_from('<H', guest, struct.unpack_from('<I', guest, 0x3c)[0] + 4)[0] == 0x14c
+    assert b'[wpm-call-v1]' in guest, 'stale guest32 memory API producer'
+    assert (app / 'i386-windows/kernelbase.dll').read_bytes() == guest, 'Xcode packaged stale guest32 caller'
     with zipfile.ZipFile(ipa) as archive:
         assert archive.read('Payload/Madeira.app/aarch64-windows/wow64.dll') == expected, 'ZIP producer differs'
         assert archive.read('Payload/Madeira.app/Madeira.debug.dylib') == native, 'ZIP native consumer differs'
         assert archive.read('Payload/Madeira.app/aarch64-windows/xtajit.dll') == cpu_data, 'ZIP FEX producer differs'
+        assert archive.read('Payload/Madeira.app/i386-windows/kernelbase.dll') == guest, 'ZIP guest32 caller differs'
     print('PASS final IPA contains matching native IOSB consumer and byte-identical rebuilt ARM64 WoW64 producer')
 
 

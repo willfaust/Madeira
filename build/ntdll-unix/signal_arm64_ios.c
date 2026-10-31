@@ -2460,6 +2460,37 @@ static uint64_t exc_peek64( uint64_t addr )
     return v;
 }
 
+static int ios_g32_read( uint64_t addr, void *out, size_t size )
+{
+    mach_vm_size_t got = 0;
+    return addr && size <= UINT64_MAX - addr &&
+           mach_vm_read_overwrite( mach_task_self(), addr, size,
+                                   (mach_vm_address_t)(uintptr_t)out, &got ) == KERN_SUCCESS && got == size;
+}
+#include "guest32_origin.h"
+
+void ios_guest32_trace_current( const char *tag, const void *target )
+{
+    int saved_errno = errno;
+    static unsigned reports[3];
+    unsigned bucket = !strcmp(tag,"cef-assert") ? 0 : !strcmp(tag,"write-memory") ? 1 : 2;
+    TEB *teb = NtCurrentTeb();
+    uint64_t fex = 0, frame = 0, window = ios_wow_base();
+    struct ios_g32_origin origin;
+    if (!teb || !window || __atomic_fetch_add(&reports[bucket],1,__ATOMIC_RELAXED) >= (bucket == 1 ? 4 : 2)) goto done;
+    if (ios_g32_read((uintptr_t)teb + offsetof(TEB,TlsSlots) + 14*sizeof(void*), &fex,8) && fex &&
+        ios_g32_read(fex,&frame,8) && ios_g32_capture(&origin,(uintptr_t)teb,window,frame))
+    {
+        uint64_t a=(uintptr_t)target;
+        dprintf(2,"[guest32-event] tag=%s pid=%04x tid=%04x\n",tag,
+                (unsigned)(ULONG_PTR)teb->ClientId.UniqueProcess,(unsigned)(ULONG_PTR)teb->ClientId.UniqueThread);
+        ios_g32_report(&origin,tag,a>=window && a-window<=UINT32_MAX ? (uint32_t)(a-window) : 0);
+    }
+    else dprintf(2,"[guest32-origin] tag=%s saved context unavailable\n",tag);
+done:
+    errno = saved_errno;
+}
+
 /* Read the current thread's saved guest32 state without executing guest code or
  * acquiring its loader lock. Stack words are reported only if they fall inside
  * a loader-listed module, as candidates rather than a fabricated unwind. */
@@ -2532,6 +2563,7 @@ void ios_cef_assert_context(void)
     }
 out:
 #undef CEF_READ
+    ios_guest32_trace_current("cef-assert", NULL);
     errno = saved_errno;
 }
 
@@ -2567,7 +2599,13 @@ static int ios_verified_guest_breakpoint( uint64_t pc, uint64_t frame, uintptr_t
         !ios_fault_read(frame + 0x40, &rsp, sizeof(rsp)) || rsp < 0x10000 || rsp >= 0x100000000ULL) return 0;
     {
         static unsigned count;
-        if (__atomic_fetch_add(&count, 1, __ATOMIC_RELAXED) < 16)
+        unsigned event = __atomic_fetch_add(&count, 1, __ATOMIC_RELAXED);
+        if (event < 4)
+        {
+            struct ios_g32_origin origin;
+            if (ios_g32_capture(&origin,teb,window,frame)) ios_g32_report(&origin,"breakpoint",0);
+        }
+        if (event < 16)
             dprintf(2, "[guest-breakpoint] pc=%p owner=%p window=%p rip=%p rsp=%p action=forward\n",
                     (void *)(uintptr_t)pc, (void *)(uintptr_t)owner, (void *)window,
                     (void *)(uintptr_t)rip, (void *)(uintptr_t)rsp);

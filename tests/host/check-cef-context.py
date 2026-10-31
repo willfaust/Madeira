@@ -38,7 +38,7 @@ static int capture(int fd,const char *fmt,...) {assert(fd==2);va_list ap;va_star
 #define dprintf capture
 static int path_calls;
 static int ios_guest_log_fd_path(int fd,char *path,size_t size) {path_calls++;errno=EINTR;snprintf(path,size,"/private/account/debug.log");return fd==7;}
-''' + context + r'''
+''' + signal[signal.index('static int ios_g32_read('):signal.index('/* Read the current thread') ] + context + r'''
 #include "cef_log_context.h"
 static void put64(unsigned char *p,uint64_t v) {memcpy(p,&v,8);}
 static void put32(unsigned char *p,uint32_t v) {memcpy(p,&v,4);}

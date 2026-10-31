@@ -35213,10 +35213,136 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
         }
         SERVER_END_REQ;
     }
+#ifdef WINE_IOS
+    if (status && ios_wow_base())
+    {
+        static unsigned reports;
+        if (__atomic_fetch_add(&reports,1,__ATOMIC_RELAXED) < 16)
+            dprintf(2,"[wow-read-failed] pid=%04x tid=%04x handle=%p target=%p status=%08x bytes=%#lx\n",
+                    (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess,(unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread,
+                    process,addr,status,(unsigned long)size);
+    }
+#endif
     if (bytes_read) *bytes_read = size;
     return status;
 }
 
+
+#ifdef WINE_IOS
+static _Thread_local struct {
+    int active, before_ok, source_ok;
+    HANDLE handle;
+    void *address;
+    SIZE_T size;
+    BYTE vprot;
+    unsigned char before[16], source[16];
+} ios_wow_write_trace;
+
+static void ios_trace_wow_write_begin( HANDLE process, void *addr, const void *buffer, SIZE_T size )
+{
+    static unsigned reports;
+    ULONG_PTR base = ios_wow_base(), a = (ULONG_PTR)addr;
+    sigset_t sigset;
+    BYTE prot = 0;
+    ios_wow_write_trace.active = 0;
+    if (!base || !size || size > 16 || a < base || a - base >= IOS_WOW_WINDOW_SIZE ||
+        size > IOS_WOW_WINDOW_SIZE - (a - base)) return;
+    server_enter_uninterrupted_section(&virtual_mutex,&sigset);
+    prot = get_page_vprot(addr);
+    server_leave_uninterrupted_section(&virtual_mutex,&sigset);
+    if (!(prot & VPROT_EXEC) || __atomic_fetch_add(&reports,1,__ATOMIC_RELAXED) >= 32) return;
+    ios_wow_write_trace.active=1;
+    ios_wow_write_trace.handle=process;
+    ios_wow_write_trace.address=addr;
+    ios_wow_write_trace.size=size;
+    ios_wow_write_trace.vprot=prot;
+    ios_wow_write_trace.before_ok=ios_ec_hook_peek(a,ios_wow_write_trace.before,size);
+    ios_wow_write_trace.source_ok=ios_ec_hook_peek((uintptr_t)buffer,ios_wow_write_trace.source,size);
+}
+
+static void ios_trace_wow_write( NTSTATUS status, SIZE_T written, const char *route )
+{
+    int saved_errno=errno;
+    char before[49]={0},source[49]={0},after[49]={0},region[256];
+    unsigned char bytes[16];
+    extern void ios_guest32_trace_current(const char *, const void *);
+    if (!ios_wow_write_trace.active) return;
+    ios_wow_write_trace.active=0;
+    SIZE_T size=ios_wow_write_trace.size;
+    int after_ok=ios_ec_hook_peek((uintptr_t)ios_wow_write_trace.address,bytes,size);
+    for (unsigned i=0;i<size;i++)
+    {
+        if(ios_wow_write_trace.before_ok)snprintf(before+3*i,4,"%02x ",ios_wow_write_trace.before[i]);
+        if(ios_wow_write_trace.source_ok)snprintf(source+3*i,4,"%02x ",ios_wow_write_trace.source[i]);
+        if(after_ok)snprintf(after+3*i,4,"%02x ",bytes[i]);
+    }
+    ios_va_describe_range(ios_wow_write_trace.address,size,region,sizeof(region));
+    dprintf(2,"[wow-write] pid=%04x tid=%04x handle=%p target=%p size=%#lx logical-vprot=%#x status=%08x written=%#lx route=%s region={%s} before={%s} request={%s} after={%s}\n",
+            (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess,(unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread,
+            ios_wow_write_trace.handle,ios_wow_write_trace.address,(unsigned long)size,ios_wow_write_trace.vprot,(unsigned)status,(unsigned long)written,
+            route,region,before,source,after);
+    ios_guest32_trace_current("write-memory",ios_wow_write_trace.address);
+    errno=saved_errno;
+}
+#endif
+
+#ifdef WINE_IOS
+/* Validate the logical process AND its handle rights. Sharing a Mach task is
+ * not authority to write another Wine process. Real handles retain VM_WRITE
+ * checks; handles lacking query rights fall back to the existing server path. */
+static int ios_wow_self_write_target( HANDLE process, const void *addr, SIZE_T size )
+{
+    ULONG_PTR base = ios_wow_base(), a = (ULONG_PTR)addr;
+    OBJECT_BASIC_INFORMATION obi;
+    PROCESS_BASIC_INFORMATION pbi;
+    if (!base || a < base || a - base >= IOS_WOW_WINDOW_SIZE ||
+        size > IOS_WOW_WINDOW_SIZE - (a - base)) return 0;
+    if (process == NtCurrentProcess()) return 1;
+    if (NtQueryObject( process, ObjectBasicInformation, &obi, sizeof(obi), NULL ) ||
+        !(obi.GrantedAccess & PROCESS_VM_WRITE) ||
+        NtQueryInformationProcess( process, ProcessBasicInformation, &pbi, sizeof(pbi), NULL )) return 0;
+    return pbi.UniqueProcessId == (ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess;
+}
+
+static NTSTATUS ios_wow_write_self( void *addr, const void *buffer, SIZE_T size )
+{
+    sigset_t sigset;
+    NTSTATUS status = STATUS_SUCCESS;
+    BOOL watch = FALSE;
+    ULONG_PTR a = (ULONG_PTR)addr, end = a + size, page;
+    unsigned char local[256];
+    void *snapshot;
+    if (!size) return STATUS_SUCCESS;
+    if (end < a || !virtual_check_buffer_for_read( buffer, size )) return STATUS_PARTIAL_COPY;
+    /* The old server request snapshots its input before writing. Preserve
+     * overlap semantics even when two guest addresses alias the same backing. */
+    snapshot = size <= sizeof(local) ? local : malloc(size);
+    if (!snapshot) return STATUS_NO_MEMORY;
+    memcpy(snapshot,buffer,size);
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    /* Check individual guest pages, not the union of a 16 KB host page's
+     * permissions. An alias is a storage path, never permission to write. */
+    for (page = a & ~(ULONG_PTR)page_mask; page < end; page += page_size)
+    {
+        BYTE prot = get_page_vprot( (const void *)page );
+        if (!(prot & VPROT_COMMITTED) || (prot & VPROT_GUARD) ||
+            !(prot & (VPROT_WRITE | VPROT_WRITECOPY)))
+        {
+            status = STATUS_ACCESS_VIOLATION;
+            break;
+        }
+    }
+    if (!status) status = check_write_access( addr, size, &watch );
+    if (!status && !ios_kw_dest_ok( addr, size )) status = STATUS_ACCESS_VIOLATION;
+    if (!status && !ios_kw_store( addr, snapshot, size )) status = STATUS_ACCESS_VIOLATION;
+    if (watch) update_write_watches( addr, size, status ? 0 : size );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    if (snapshot != local) free(snapshot);
+    /* WriteProcessMemory's existing WoW64 NtFlushInstructionCache wrapper
+     * invalidates FEX translations. No native RX mapping is made writable. */
+    return status;
+}
+#endif
 
 /***********************************************************************
  *             NtWriteVirtualMemory   (NTDLL.@)
@@ -35226,6 +35352,16 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
                                       SIZE_T size, SIZE_T *bytes_written )
 {
     unsigned int status;
+#ifdef WINE_IOS
+    ios_trace_wow_write_begin( process, addr, buffer, size );
+    if (ios_wow_self_write_target( process, addr, size ))
+    {
+        status = ios_wow_write_self( addr, buffer, size );
+        if (bytes_written) *bytes_written = status ? 0 : size;
+        ios_trace_wow_write( status, status ? 0 : size, "self" );
+        return status;
+    }
+#endif
 
     if (virtual_check_buffer_for_read( buffer, size ))
     {
@@ -35245,6 +35381,9 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
         size = 0;
     }
     if (bytes_written) *bytes_written = size;
+#ifdef WINE_IOS
+    ios_trace_wow_write( status, size, "server" );
+#endif
     return status;
 }
 

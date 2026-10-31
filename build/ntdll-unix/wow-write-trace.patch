@@ -1,0 +1,32 @@
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -622,10 +622,17 @@
+     MEMORY_BASIC_INFORMATION info;
+     void *base_addr;
+     SIZE_T region_size;
+-    NTSTATUS status, status2;
++    NTSTATUS status, status2 = STATUS_SUCCESS;
++    static LONG trace_count;
++    BOOL trace = size == 5 && InterlockedIncrement( &trace_count ) <= 16;
++    void *caller = __builtin_return_address(0);
+ 
+     if (!VirtualQueryEx( process, addr, &info, sizeof(info) ))
+     {
++        DWORD error = GetLastError();
++        if (trace) ERR( "[wpm-call-v1] stage=query process=%p target=%p size=%Iu caller=%p error=%lu\n",
++                        process, addr, size, caller, error );
++        SetLastError( error );
+         close_cross_process_connection( list );
+         return FALSE;
+     }
+@@ -678,6 +685,10 @@
+         break;
+     }
+ 
++    DWORD error = GetLastError();
++    if (trace) ERR( "[wpm-call-v1] stage=complete process=%p target=%p size=%Iu caller=%p region=%p+%Iu protect=%lx type=%lx status=%08lx restore=%08lx\n",
++                    process, addr, size, caller, info.BaseAddress, info.RegionSize, info.Protect, info.Type, status, status2 );
++    SetLastError( error );
+     close_cross_process_connection( list );
+     return set_ntstatus( status );
+ }

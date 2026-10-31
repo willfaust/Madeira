@@ -20,3 +20,23 @@ size = struct.unpack_from('<I', data, pe + 24 + 56)[0]
 if len(data) < size: path.write_bytes(data + bytes(size - len(data)))
 print('PASS native ARM64 WoW64 IOSB producer rebuilt')
 PY
+
+# Rebuild the actual guest32 caller so query/protect failures are visible even
+# when WriteProcessMemory never reaches the native NtWriteVirtualMemory path.
+if [[ ! -f "$ROOT/wine/build-i386/Makefile" ]]; then
+  mkdir -p "$ROOT/wine/build-i386"
+  (cd "$ROOT/wine/build-i386" && ../configure --enable-archs=i386 --without-x --without-vulkan \
+      --without-freetype --without-gnutls --disable-tests --enable-winegstreamer)
+fi
+make -C "$ROOT/wine/build-i386" -j"${JOBS:-8}" dlls/kernelbase/i386-windows/kernelbase.dll
+cp "$ROOT/wine/build-i386/dlls/kernelbase/i386-windows/kernelbase.dll" "$ROOT/app/Madeira/i386-windows/kernelbase.dll"
+"$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/i686-w64-mingw32-strip" --strip-debug "$ROOT/app/Madeira/i386-windows/kernelbase.dll"
+python3 - "$ROOT/app/Madeira/i386-windows/kernelbase.dll" <<'PY'
+from pathlib import Path
+import struct, sys
+data = Path(sys.argv[1]).read_bytes()
+pe = struct.unpack_from('<I', data, 0x3c)[0]
+assert struct.unpack_from('<H', data, pe + 4)[0] == 0x14c
+assert b'[wpm-call-v1]' in data, 'stale guest32 WriteProcessMemory diagnostics'
+print('PASS rebuilt i386 WriteProcessMemory caller includes bounded query/result diagnostics')
+PY

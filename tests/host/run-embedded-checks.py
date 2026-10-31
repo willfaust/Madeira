@@ -6,6 +6,8 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 commands = [
+    ['python3', 'tests/host/check-wow-self-write.py'],
+    ['python3', 'tests/host/check-guest32-origin.py'],
     ['python3', 'tests/host/check-steam-allocation.py'],
     ['python3', 'tests/host/check-lazy-windows.py'],
     ['python3', 'tests/host/check-steam-protection.py'],
