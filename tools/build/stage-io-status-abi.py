@@ -10,7 +10,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 FILES = ('dlls/ntdll/unix/unix_private.h', 'dlls/ntdll/unix/file.c',
          'dlls/wow64/wow64_private.h', 'dlls/wow64/file.c', 'dlls/wow64/syscall.c',
-         'include/Makefile.in', 'dlls/kernelbase/memory.c')
+         'include/Makefile.in', 'dlls/kernelbase/memory.c', 'dlls/wow64/virtual.c')
 HEADER = 'include/wine/ios_io_abi.h'
 PATCH = ROOT / 'build/ntdll-unix/io-status-abi.patch'
 
@@ -35,6 +35,9 @@ def stage(destination, source):
     window_patch = ROOT / 'build/ntdll-unix/wow-handle-window.patch'
     subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(window_patch)], check=True)
     subprocess.run(['git', '-C', str(destination), 'apply', str(window_patch)], check=True)
+    memory_patch = ROOT / 'build/ntdll-unix/wow-guest-write.patch'
+    subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(memory_patch)], check=True)
+    subprocess.run(['git', '-C', str(destination), 'apply', str(memory_patch)], check=True)
     header = destination / HEADER
     header.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / 'build/ntdll-unix/io_status_abi.h', header)

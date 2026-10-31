@@ -48,8 +48,12 @@ int main(void){
  assert(strstr(output,"rip+0=libcef.dll+0x1124"));assert(strstr(output,"libcef.dll+0x1123 bytes=cc"));
  assert(strstr(output,"nearest-export=ExportedTarget+0"));
  assert(strstr(output,"stack-candidate+0=libcef.dll+0x1155"));assert(strstr(output,"ebp-return+0=libcef.dll+0x1177"));
+ assert(strstr(output,"[guest32-callsite-v1] tag=breakpoint frame=0 return=libcef.dll+0x1177 code=libcef.dll+0x1137 bytes="));
  assert(strstr(output,"seh-handler+0=libcef.dll+0x1180"));assert(!strstr(output,"deadbeef"));
  assert(strstr(output,"pdb=libcef.pdb guid=030201000504070608090A0B0C0D0E0F age=2"));assert(!strstr(output,"private")&&!strstr(output,"builder"));
+ size_t before=used;ios_g32_callsite(&g,"cef-assert",0,0x28400);assert(used==before); // data cannot be captured
+ ios_g32_callsite(&g,"cef-assert",0,0x21002);assert(strstr(output,"code=libcef.dll+0x1000 bytes=")); // clamp to executable section
+ denied=1;before=used;ios_g32_callsite(&g,"cef-assert",0,0x21177);assert(used==before);denied=0;
  assert(reads<2000);unsigned old=reads;u32(0x15000,0x15000);assert(ios_g32_capture(&g,window+0x10000,window,(uintptr_t)frame));assert(reads-old<150);
  // Malformed offsets, unreadable state and out-of-window TEB32 fail closed.
  denied=1;assert(!ios_g32_capture(&g,window+0x10000,window,(uintptr_t)frame));denied=0;

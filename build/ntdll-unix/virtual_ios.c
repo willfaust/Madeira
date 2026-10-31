@@ -32820,9 +32820,29 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
     if (!status) VIRTUAL_DEBUG_DUMP_VIEW( view );
 
 #ifdef WINE_IOS
+    /* WriteProcessMemory tags its temporary code protection and restore with
+     * ENCLAVE_NO_CHANGE. Observe those requests without spending the bounded
+     * budget on ordinary loader/SMC protection changes before CEF starts. */
+    if (!ios_in_mach_exc && view && ios_wow_in_window( base ) && size && size <= 0x4000 &&
+        (new_prot & PAGE_ENCLAVE_NO_CHANGE))
+    {
+        static unsigned reports;
+        if (__atomic_fetch_add(&reports,1,__ATOMIC_RELAXED) < 24)
+        {
+            int saved_errno=errno;
+            char region[256];
+            ios_va_describe_range(base,size,region,sizeof(region));
+            dprintf(2,"[wow-code-protect-v1] pid=%04x tid=%04x window=%p requested=%p+%#lx normalized=%p+%#lx new=%#x old=%#x status=%08x logical-vprot=%#x host-page=%#lx region={%s}\n",
+                    (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess,
+                    (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread,(void*)ios_wow_base(),
+                    ios_patch_requested,(unsigned long)ios_patch_length,base,(unsigned long)size,new_prot,
+                    status?0:old,status,get_page_vprot(base),(unsigned long)host_page_size,region);
+            errno=saved_errno;
+        }
+    }
     /* FEX's guard-page warning omits the owning process, failure status and
      * actual host page size. Observe NOACCESS requests without changing their
-     * result or any mapping: FEX's Windows wrapper inverts the BOOL result, so
+     * result or any mapping: older Windows wrappers invert the BOOL result, so
      * its warning alone cannot distinguish success from failure. */
     if (!ios_in_mach_exc && new_prot == PAGE_NOACCESS)
     {

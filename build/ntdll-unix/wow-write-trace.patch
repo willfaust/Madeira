@@ -7,7 +7,7 @@
 -    NTSTATUS status, status2;
 +    NTSTATUS status, status2 = STATUS_SUCCESS;
 +    static LONG trace_count;
-+    BOOL trace = size == 5 && InterlockedIncrement( &trace_count ) <= 16;
++    BOOL trace = (size == 5 || size == 12) && InterlockedIncrement( &trace_count ) <= 24;
 +    void *caller = __builtin_return_address(0);
  
      if (!VirtualQueryEx( process, addr, &info, sizeof(info) ))
@@ -19,7 +19,16 @@
          close_cross_process_connection( list );
          return FALSE;
      }
-@@ -678,6 +685,10 @@
+@@ -655,6 +662,8 @@
+         status = NtProtectVirtualMemory( process, &base_addr, &region_size, prot, &old_prot );
+         send_cross_process_notification( list, CrossProcessPostVirtualProtect,
+                                          base_addr, region_size, 2, prot, status );
++        if (trace) ERR( "[wpm-call-v1] stage=protect process=%p target=%p base=%p+%Iu requested=%lx old=%lx status=%08lx\n",
++                        process, addr, base_addr, region_size, prot, status ? 0 : old_prot, status );
+         if (status) break;
+ 
+         status = NtWriteVirtualMemory( process, addr, buffer, size, bytes_written );
+@@ -678,6 +687,10 @@
          break;
      }
  

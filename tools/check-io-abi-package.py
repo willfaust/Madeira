@@ -25,11 +25,13 @@ def check(staged, app, ipa):
     assert CONSUMER in native, 'native IOSB consumer missing from linked image'
     assert b'[wow-thread-init-v1]' in expected, 'stale Wine CPU initialization consumer'
     assert b'[wow-break-deliver-v1]' in expected, 'stale Wine breakpoint diagnostics'
+    assert b'MadeiraBTCpuWriteMemory' in expected, 'stale Wine native-write consumer'
     assert b'[wow-write]' in native and b'[guest32-symbols]' in native, 'native guest memory diagnostics missing'
     cpu = staged.parent / 'xtajit.dll'
     cpu_data = cpu.read_bytes()
     assert struct.unpack_from('<H', cpu_data, struct.unpack_from('<I', cpu_data, 0x3c)[0] + 4)[0] == 0xaa64
     assert b'MadeiraBTCpuThreadInit' in cpu_data and b'[fex-thread-init-v1]' in cpu_data, 'stale FEX CPU producer'
+    assert b'MadeiraBTCpuWriteMemory' in cpu_data and b'[fex-guest-write-v1]' in cpu_data, 'stale FEX native-write producer'
     assert (app / 'aarch64-windows/xtajit.dll').read_bytes() == cpu_data, 'Xcode packaged stale FEX'
     guest = (staged.parent.parent / 'i386-windows/kernelbase.dll').read_bytes()
     assert struct.unpack_from('<H', guest, struct.unpack_from('<I', guest, 0x3c)[0] + 4)[0] == 0x14c

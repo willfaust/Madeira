@@ -1,0 +1,59 @@
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -2015,6 +2015,40 @@
+   InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
+ }
+ 
++// Madeira's native memory writer deliberately checks Wine's per-guest-page permissions.
++// A translated store normally faults on FEX's SMC write trap and untraps it. An NT
++// memory write is checked before any store, so bracket that write explicitly with
++// the same tracked-RWX invalidation and compilation exclusion as NtReadFile.
++// HOST addresses, self process only (enforced by wow64.dll and again by ntdll).
++extern "C" NTSYSAPI NTSTATUS NTAPI NtWriteVirtualMemory(HANDLE, void*, const void*, SIZE_T, SIZE_T*);
++extern "C" __declspec(dllexport) NTSTATUS WINAPI MadeiraBTCpuWriteMemory(
++  HANDLE Process, void* Address, const void* Buffer, SIZE_T Size, SIZE_T* Written) {
++  const auto Start = reinterpret_cast<uint64_t>(Address);
++  if (!GuestWindow::Base || !Size || !GuestWindow::Contains(Start) ||
++      Size > (1ULL << 32) - (Start - GuestWindow::Base) || !GetTLS().ThreadStateIfInitialised()) {
++    return NtWriteVirtualMemory(Process, Address, Buffer, Size, Written);
++  }
++  std::scoped_lock ThreadLock(ThreadCreationMutex);
++  auto& Mutex = CTX->GetCodeInvalidationMutex();
++  std::unique_lock CodeLock(Mutex, std::defer_lock);
++  if (!Mutex.IosHeldExclusiveByThisThread()) {
++    CodeLock.lock();
++  }
++  // Only intervals whose guest protection allows writes can be untrapped. An
++  // RX/guard/decommitted page stays protected and the native writer rejects it.
++  const bool Tracked = InvalidationTracker->BeginUntrackedWriteLocked(Start, Size);
++  const NTSTATUS Status = NtWriteVirtualMemory(Process, Address, Buffer, Size, Written);
++  static std::atomic<unsigned> Reports {};
++  if (Size <= 16 && Reports.fetch_add(1, std::memory_order_relaxed) < 32) {
++    LogMan::Msg::EFmt("[fex-guest-write-v1] tid={:#x} target={:#x} size={:#x} smc={} status={:#x}",
++                     GetCurrentThreadId(), Start, Size, Tracked, static_cast<uint32_t>(Status));
++  }
++  // Locks out a compiler that could re-arm the trap or publish stale code
++  // between invalidation and the write. The caller's normal protection restore
++  // and instruction-cache flush remain in place, including on write failure.
++  return Status;
++}
++
+ // HOST: only caller is wine/dlls/wow64/syscall.c:1618 (CrossProcessMemoryWrite), entry->addr.
+ void BTCpuNotifyMemoryDirty(void* Address, SIZE_T Size) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -114,7 +114,12 @@
+       XIntervals.Insert(ProtInterval);
+       if (EffectiveRWX) {
+         LogMan::Msg::DFmt("Add SMC interval: {:X} - {:X}", AlignedBase, AlignedBase + AlignedSize);
+-        RWXIntervals.Insert(ProtInterval);
++        if (!(Prot & PAGE_GUARD)) RWXIntervals.Insert(ProtInterval);
++        else RWXIntervals.Remove(ProtInterval);
++      } else {
++        // Restoring RX after WriteProcessMemory revokes guest write access.
++        // An old SMC interval must not authorize a later native memory write.
++        RWXIntervals.Remove(ProtInterval);
+       }
+       if (EagerDEP && !HasExec) {
+         DEPPromotedIntervals.Insert(ProtInterval);

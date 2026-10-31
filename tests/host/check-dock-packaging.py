@@ -28,10 +28,10 @@ with tempfile.TemporaryDirectory() as temp:
     wow[:2] = b'MZ'; struct.pack_into('<I', wow, 0x3c, 0x80)
     wow[0x80:0x84] = b'PE\0\0'; struct.pack_into('<H', wow, 0x84, 0xaa64)
     wow[0xa0:0xa0+len(b'madeira-io-abi-v1')] = b'madeira-io-abi-v1'
-    wow.extend(b'[wow-thread-init-v1][wow-break-deliver-v1]')
+    wow.extend(b'[wow-thread-init-v1][wow-break-deliver-v1]MadeiraBTCpuWriteMemory')
     (t/'app/Madeira/aarch64-windows/wow64.dll').write_bytes(wow)
     cpu = bytearray(wow)
-    cpu.extend(b'MadeiraBTCpuThreadInit[fex-thread-init-v1]')
+    cpu.extend(b'MadeiraBTCpuThreadInit[fex-thread-init-v1]MadeiraBTCpuWriteMemory[fex-guest-write-v1]')
     (t/'app/Madeira/aarch64-windows/xtajit.dll').write_bytes(cpu)
     guest = bytearray(wow)
     struct.pack_into('<H',guest,0x84,0x14c)

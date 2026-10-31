@@ -170,6 +170,32 @@ static void ios_g32_code( const struct ios_g32_origin *g, const char *tag, uint3
         dprintf(2,"[guest32-code] tag=%s %s+%#x bytes=%s\n",tag,m->name,p-m->base,hex);return;
     }
 }
+/* Exact symbols may be unavailable for Valve's CEF build. Capture a small
+ * executable-only window around real EBP returns so an offline disassembler
+ * can inspect the call/branch and nearby API arguments. Never scan strings,
+ * data, arbitrary stack contents or guessed function boundaries. */
+static void ios_g32_callsite( const struct ios_g32_origin *g, const char *tag, unsigned frame, uint32_t p )
+{
+    const struct ios_g32_module *m=ios_g32_find(g,p);
+    uint32_t nt;uint16_t sections,opt;
+    if(!m||strcmp(m->name,"libcef.dll")||!ios_g32_pe(g,m,&nt)||
+       !ios_g32_rva(g,m,nt+6,&sections,2)||sections>96||
+       !ios_g32_rva(g,m,nt+20,&opt,2)||opt>4096)return;
+    for(unsigned i=0;i<sections;i++)
+    {
+        uint32_t row[10],rva=p-m->base;unsigned char bytes[80];char hex[241]={0};
+        if(!ios_g32_rva(g,m,nt+24+opt+40*i,row,sizeof(row)))return;
+        if(!(row[9]&0x20000000)||rva<row[3]||rva-row[3]>=row[2])continue;
+        unsigned prefix=rva-row[3];if(prefix>64)prefix=64;
+        uint32_t start=rva-prefix;size_t size=(uint64_t)row[3]+row[2]-start;
+        if(size>sizeof(bytes))size=sizeof(bytes);
+        if(!ios_g32_rva(g,m,start,bytes,size))return;
+        for(unsigned j=0;j<size;j++)snprintf(hex+3*j,4,"%02x ",bytes[j]);
+        dprintf(2,"[guest32-callsite-v1] tag=%s frame=%u return=%s+%#x code=%s+%#x bytes=%s\n",
+                tag,frame,m->name,rva,m->name,start,hex);
+        return;
+    }
+}
 static void ios_g32_report( const struct ios_g32_origin *g, const char *tag, uint32_t target )
 {
     dprintf(2,"[guest32-state] tag=%s window=%p rip=%#x esp=%#x ebp=%#x stack=[%#x,%#x) seh=%#x\n",
@@ -193,6 +219,8 @@ static void ios_g32_report( const struct ios_g32_origin *g, const char *tag, uin
         uint32_t row[2];
         if((bp&3)||bp<g->esp||(uint64_t)bp+8>g->high||!ios_g32_guest(g,bp,row,8))break;
         ios_g32_address(g,tag,"ebp-return",i,row[1]);
+        if(!strcmp(tag,"cef-assert")||!strcmp(tag,"breakpoint")||!strcmp(tag,"breakpoint-terminate"))
+            ios_g32_callsite(g,tag,i,row[1]);
         if(row[0]<=bp||row[0]-bp>0x100000)break;bp=row[0];
     }
     uint32_t seh=g->seh;

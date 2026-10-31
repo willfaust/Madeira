@@ -2,3 +2,5 @@ app/Frameworks/StikJIT.xcframework/** -whitespace
 # Unified-diff context markers precede upstream tabs and blank lines. Check the
 # applied source separately; these two diagnostics are artifacts in patch text.
 build/vulkan-ios/patches/*.patch whitespace=-blank-at-eol,-space-before-tab
+build/fex-compat/*.patch whitespace=-blank-at-eol,-space-before-tab
+build/ntdll-unix/*.patch whitespace=-blank-at-eol,-space-before-tab

@@ -8,7 +8,8 @@ import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-FILES = ('Source/Windows/WOW64/Module.cpp', 'FEXCore/include/FEXCore/Utils/AllocatorHooks.h')
+FILES = ('Source/Windows/WOW64/Module.cpp', 'FEXCore/include/FEXCore/Utils/AllocatorHooks.h',
+         'Source/Windows/Common/InvalidationTracker.cpp')
 PATCH = ROOT / 'build/fex-compat/thread-init.patch'
 
 
@@ -23,6 +24,9 @@ def stage(destination, source):
         shutil.copyfile(source / name, target)
     subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(PATCH)], check=True)
     subprocess.run(['git', '-C', str(destination), 'apply', str(PATCH)], check=True)
+    memory_patch = ROOT / 'build/fex-compat/guest-write.patch'
+    subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(memory_patch)], check=True)
+    subprocess.run(['git', '-C', str(destination), 'apply', str(memory_patch)], check=True)
 
 
 def apply(state, source):

@@ -12,6 +12,7 @@ p = Path(sys.argv[1]); data = p.read_bytes()
 pe = struct.unpack_from('<I', data, 0x3c)[0]
 assert struct.unpack_from('<H', data, pe + 4)[0] == 0xaa64, 'WOW64 FEX must be ARM64'
 assert b'MadeiraBTCpuThreadInit' in data and b'[fex-thread-init-v1]' in data, 'stale FEX CPU producer'
+assert b'MadeiraBTCpuWriteMemory' in data and b'[fex-guest-write-v1]' in data, 'stale FEX native-write producer'
 size = struct.unpack_from('<I', data, pe + 24 + 56)[0]
 if len(data) < size: p.write_bytes(data + bytes(size - len(data)))
 print('PASS rebuilt ARM64 FEX CPU producer exports checked thread initialization')
