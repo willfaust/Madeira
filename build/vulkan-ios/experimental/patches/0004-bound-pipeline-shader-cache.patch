@@ -1,0 +1,220 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+@@ -489,8 +489,9 @@
+ 	 * Return a shader library for the shader conversion configuration, from the
+ 	 * pipeline's pipeline cache, or compiled from source in the shader module.
+ 	 */
+-	MVKShaderLibrary* getShaderLibrary(mvk::SPIRVToMSLConversionConfiguration* pContext,
++	MVKMTLFunction getMTLFunction(mvk::SPIRVToMSLConversionConfiguration* pContext,
+ 									   MVKShaderModule* shaderModule,
++                                      const VkSpecializationInfo* specialization,
+ 									   MVKPipeline* pipeline,
+ 									   VkPipelineCreationFeedback* pShaderFeedback = nullptr,
+ 									   uint64_t startTime = 0);
+@@ -510,16 +511,22 @@
+ 	MVKShaderLibraryCache* getShaderLibraryCache(MVKShaderModuleKey smKey);
+ 	void readData(const VkPipelineCacheCreateInfo* pCreateInfo);
+ 	void writeData(std::ostream& outstream, bool isCounting = false);
+-	MVKShaderLibrary* getShaderLibraryImpl(mvk::SPIRVToMSLConversionConfiguration* pContext,
++	MVKMTLFunction getMTLFunctionImpl(mvk::SPIRVToMSLConversionConfiguration* pContext,
+ 										   MVKShaderModule* shaderModule,
++                                      const VkSpecializationInfo* specialization,
+ 										   MVKPipeline* pipeline,
+ 										   VkPipelineCreationFeedback* pShaderFeedback,
+ 										   uint64_t startTime);
+ 	VkResult writeDataImpl(size_t* pDataSize, void* pData);
+ 	VkResult mergePipelineCachesImpl(uint32_t srcCacheCount, const VkPipelineCache* pSrcCaches);
+ 	void markDirty();
++	void trimShaderCache();
+ 
+ 	std::unordered_map<MVKShaderModuleKey, MVKShaderLibraryCache*> _shaderCache;
++	// Bounds optional cache residency, not live Vulkan pipelines or total device memory.
++	uint32_t _shaderLibraryLimit = 0;
++	uint64_t _shaderCacheUse = 0;
++	uint64_t _shaderCacheEvictions = 0;
+ 	size_t _dataSize = 0;
+ 	std::mutex _shaderCacheLock;
+ 	bool _isExternallySynchronized = false;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -27,6 +27,9 @@
+ #include "mvk_datatypes.hpp"
+ #include <sys/stat.h>
+ #include <sstream>
++#include <cstdlib>
++#include <cerrno>
++#include <limits>
+ 
+ #ifndef MVK_USE_CEREAL
+ #define MVK_USE_CEREAL (1)
+@@ -2567,21 +2570,23 @@
+ #pragma mark MVKPipelineCache
+ 
+ // Return a shader library from the specified shader conversion configuration sourced from the specified shader module.
+-MVKShaderLibrary* MVKPipelineCache::getShaderLibrary(SPIRVToMSLConversionConfiguration* pContext,
++MVKMTLFunction MVKPipelineCache::getMTLFunction(SPIRVToMSLConversionConfiguration* pContext,
+ 													 MVKShaderModule* shaderModule,
++                                                     const VkSpecializationInfo* specialization,
+ 													 MVKPipeline* pipeline,
+ 													 VkPipelineCreationFeedback* pShaderFeedback,
+ 													 uint64_t startTime) {
+ 	if (_isExternallySynchronized) {
+-		return getShaderLibraryImpl(pContext, shaderModule, pipeline, pShaderFeedback, startTime);
++		return getMTLFunctionImpl(pContext, shaderModule, specialization, pipeline, pShaderFeedback, startTime);
+ 	} else {
+ 		lock_guard<mutex> lock(_shaderCacheLock);
+-		return getShaderLibraryImpl(pContext, shaderModule, pipeline, pShaderFeedback, startTime);
+-	}
+-}
+-
+-MVKShaderLibrary* MVKPipelineCache::getShaderLibraryImpl(SPIRVToMSLConversionConfiguration* pContext,
++		return getMTLFunctionImpl(pContext, shaderModule, specialization, pipeline, pShaderFeedback, startTime);
++	}
++}
++
++MVKMTLFunction MVKPipelineCache::getMTLFunctionImpl(SPIRVToMSLConversionConfiguration* pContext,
+ 														 MVKShaderModule* shaderModule,
++                                                     const VkSpecializationInfo* specialization,
+ 														 MVKPipeline* pipeline,
+ 														 VkPipelineCreationFeedback* pShaderFeedback,
+ 														 uint64_t startTime) {
+@@ -2590,7 +2595,56 @@
+ 	MVKShaderLibrary* shLib = slCache->getShaderLibrary(pContext, shaderModule, pipeline, &wasAdded, pShaderFeedback, startTime);
+ 	if (wasAdded) { markDirty(); }
+ 	else if (pShaderFeedback) { mvkEnableFlags(pShaderFeedback->flags, VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT); }
+-	return shLib;
++	// Obtain an independently retained function while the cache lock still protects
++	// the library. Eviction must never race a borrowed MVKShaderLibrary pointer.
++	slCache->_lastCacheUse = ++_shaderCacheUse;
++	MVKMTLFunction function = shLib ? shLib->getMTLFunction(specialization, pShaderFeedback, shaderModule) : MVKMTLFunctionNull;
++	trimShaderCache();
++	return function;
++}
++
++// Local iOS cache residency policy. Zero explicitly preserves upstream unlimited
++// caching. Other platforms keep the upstream default unless explicitly selected.
++static uint32_t mvkShaderLibraryLimit() {
++    static const uint32_t limit = [] {
++#if MVK_IOS
++        uint32_t fallback = 256;
++#else
++        uint32_t fallback = 0;
++#endif
++        const char* text = getenv("MADEIRA_VK_SHADER_CACHE_MAX_LIBRARIES");
++        if (!text || !*text || *text == '-') { return fallback; }
++        char* end = nullptr;
++        errno = 0;
++        unsigned long value = strtoul(text, &end, 10);
++        return errno || *end || value > std::numeric_limits<uint32_t>::max() ? fallback : uint32_t(value);
++    }();
++    return limit;
++}
++
++void MVKPipelineCache::trimShaderCache() {
++    if (!_shaderLibraryLimit) { return; }
++    size_t count = 0;
++    for (auto& pair : _shaderCache) { count += pair.second->residentLibraryCount(); }
++    bool trimmed = false;
++    while (count > _shaderLibraryLimit && !_shaderCache.empty()) {
++        auto oldest = _shaderCache.begin();
++        for (auto it = _shaderCache.begin(); it != _shaderCache.end(); ++it) {
++            if (it->second->_lastCacheUse < oldest->second->_lastCacheUse) { oldest = it; }
++        }
++        count -= oldest->second->residentLibraryCount();
++        oldest->second->destroy();
++        _shaderCache.erase(oldest);
++        ++_shaderCacheEvictions;
++        trimmed = true;
++    }
++    if (trimmed) {
++        markDirty();
++        if (_shaderCacheEvictions <= 4 || _shaderCacheEvictions % 512 == 0) {
++            fprintf(stderr, "[vk-cache] cache=%p limit=%u resident-library-units=%zu evicted-groups=%llu\n",
++                    this, _shaderLibraryLimit, count, (unsigned long long)_shaderCacheEvictions);
++        }
++    }
+ }
+ 
+ // Returns a shader library cache for the specified shader module key, creating it if necessary.
+@@ -2791,6 +2845,8 @@
+ 					MVKShaderLibraryCache* slCache = getShaderLibraryCache(smKey);
+ 					addPerformanceInterval(getPerformanceStats().pipelineCache.readPipelineCache, startTime);
+ 					slCache->addShaderLibrary(&shaderConversionConfig, resultInfo, compressedMSL);
++                    slCache->_lastCacheUse = ++_shaderCacheUse;
++                    trimShaderCache();
+ 
+ 					break;
+ 				}
+@@ -2828,7 +2884,10 @@
+ 	for (uint32_t srcIdx = 0; srcIdx < srcCacheCount; srcIdx++) {
+ 		MVKPipelineCache* srcPLC = (MVKPipelineCache*)pSrcCaches[srcIdx];
+ 		for (auto& srcPair : srcPLC->_shaderCache) {
+-			getShaderLibraryCache(srcPair.first)->merge(srcPair.second);
++			MVKShaderLibraryCache* target = getShaderLibraryCache(srcPair.first);
++            target->merge(srcPair.second);
++            target->_lastCacheUse = ++_shaderCacheUse;
++            trimShaderCache();
+ 		}
+ 	}
+ 	markDirty();
+@@ -3081,6 +3140,9 @@
+ 	_isMergeInternallySynchronized(getEnabledPipelineCreationCacheControlFeatures().pipelineCreationCacheControl &&
+ 								   mvkIsAnyFlagEnabled(pCreateInfo->flags, VK_PIPELINE_CACHE_CREATE_INTERNALLY_SYNCHRONIZED_MERGE_BIT_KHR)) {
+ 
++	_shaderLibraryLimit = mvkShaderLibraryLimit();
++    fprintf(stderr, "[vk-cache] cache=%p library-limit=%u (0=unlimited) compression=%u\n",
++            this, _shaderLibraryLimit, (unsigned)getMVKConfig().shaderSourceCompressionAlgorithm);
+ 	readData(pCreateInfo);
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+@@ -138,6 +138,7 @@
+ 	friend MVKShaderCacheIterator;
+ 	friend MVKShaderLibraryCache;
+ 	friend MVKShaderModule;
++	friend MVKPipelineCache;
+ 
+ 	MVKMTLFunction getMTLFunction(const VkSpecializationInfo* pSpecializationInfo,
+ 								  VkPipelineCreationFeedback* pShaderFeedback,
+@@ -205,6 +206,8 @@
+ 									   const mvk::SPIRVToMSLConversionResultInfo& resultInfo,
+ 									   const MVKCompressor<std::string> compressedMSL);
+ 	void merge(MVKShaderLibraryCache* other);
++    size_t residentLibraryCount() const;
++    uint64_t _lastCacheUse = 0;
+ 
+ 	MVKVulkanAPIDeviceObject* _owner;
+ 	MVKSmallVector<std::pair<mvk::SPIRVToMSLConversionConfiguration, MVKShaderLibrary*>> _shaderLibraries;
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -385,6 +385,16 @@
+ 	}
+ }
+ 
++// Include macro-specialized libraries; reserve one unit for empty/failed groups
++// so repeated failures cannot accumulate an unbounded map of empty caches.
++size_t MVKShaderLibraryCache::residentLibraryCount() const {
++    size_t count = 0;
++    for (auto& pair : _shaderLibraries) {
++        count += 1 + pair.second->_specializationVariants.size();
++    }
++    return std::max(size_t(1), count);
++}
++
+ MVKShaderLibraryCache::~MVKShaderLibraryCache() {
+ 	for (auto& slPair : _shaderLibraries) { slPair.second->destroy(); }
+ }
+@@ -402,7 +412,7 @@
+ 		uint64_t startTime = pShaderFeedback ? mvkGetTimestamp() : getPerformanceTimestamp();
+ 		MVKPipelineCache* pipelineCache = pipeline->getPipelineCache();
+ 		if (pipelineCache) {
+-			mvkLib = pipelineCache->getShaderLibrary(pShaderConfig, this, pipeline, pShaderFeedback, startTime);
++			return pipelineCache->getMTLFunction(pShaderConfig, this, pSpecializationInfo, pipeline, pShaderFeedback, startTime);
+ 		} else {
+ 			lock_guard<mutex> lock(_accessLock);
+ 			mvkLib = _shaderLibraryCache.getShaderLibrary(pShaderConfig, this, pipeline, nullptr, pShaderFeedback, startTime);

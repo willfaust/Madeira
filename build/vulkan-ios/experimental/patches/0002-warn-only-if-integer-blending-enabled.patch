@@ -1,0 +1,13 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 7eae64c..d2b25e9 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -1991,7 +1991,7 @@ static void setEmulatedReversedDepthViewportConfig(SPIRVToMSLConversionConfigura
+ 					plDesc.logicOperationMVK = mvkMTLLogicOperationFromVkLogicOp(pCreateInfo->pColorBlendState->logicOp);
+ 				}
+ #endif
+-            } else if (mtlPixFmt && !supportsBlend) {
++            } else if (mtlPixFmt && !supportsBlend && pCA->blendEnable) {
+                 reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "Blending is enabled for attachment with format %s, which does not support it.", getPixelFormats()->getName(attachFmt));
+             }
+         }

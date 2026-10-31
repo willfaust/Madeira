@@ -1,0 +1,67 @@
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+index 406f4f8..20d35d0 100644
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+@@ -192,8 +192,15 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConversionConfiguration::matches(const SPIRVToM
+ 
+     if ( !options.matches(other.options) ) { return false; }
+ 
++	// Incomplete or deserialized vertex configurations must not hide inputs
++	// absent from their recorded layout. Fully covered configurations can use
++	// the upstream used-input comparison, so unused attributes do not force
++	// redundant MSL conversions and Metal library compilations.
++	bool compareAllInputs = options.entryPointStage == ExecutionModelVertex && !vertexInputsFullyCovered;
++	if (compareAllInputs && shaderInputs.size() != other.shaderInputs.size()) { return false; }
+ 	for (const auto& si : shaderInputs) {
+-		if (si.outIsUsedByShader && !containsMatching(other.shaderInputs, si)) { return false; }
++		if ((compareAllInputs || si.outIsUsedByShader) &&
++			!containsMatching(other.shaderInputs, si)) { return false; }
+ 	}
+ 
+ 	for (const auto& so : shaderOutputs) {
+@@ -387,6 +394,29 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConverter::convert(SPIRVToMSLConversionConfigur
+ 			ctxSI.outIsUsedByShader = pMSLCompiler->is_msl_shader_input_used(ctxSI.shaderVar.location);
+ 		}
+ 	}
++	// This is an optimization hint, never evidence that incomplete input is
++	// valid. Complex interfaces conservatively retain full-layout matching.
++	shaderConfig.vertexInputsFullyCovered = false;
++	if (pMSLCompiler && shaderConfig.options.entryPointStage == ExecutionModelVertex) {
++		bool covered = true;
++		for (const auto& input : pMSLCompiler->get_shader_resources().stage_inputs) {
++			const auto& type = pMSLCompiler->get_type(input.type_id);
++			if (!pMSLCompiler->has_decoration(input.id, DecorationLocation) ||
++				!type.array.empty() || type.columns != 1 || type.width > 32 ||
++				(type.basetype != SPIRType::Float && type.basetype != SPIRType::Int && type.basetype != SPIRType::UInt) ||
++				pMSLCompiler->get_decoration(input.id, DecorationComponent) != 0) {
++				covered = false;
++				break;
++			}
++			uint32_t location = pMSLCompiler->get_decoration(input.id, DecorationLocation);
++			if (pMSLCompiler->is_msl_shader_input_used(location) &&
++				!shaderConfig.isShaderInputLocationUsed(location)) {
++				covered = false;
++				break;
++			}
++		}
++		shaderConfig.vertexInputsFullyCovered = covered;
++	}
+ 	for (auto& ctxSO : shaderConfig.shaderOutputs) {
+ 		if (ctxSO.shaderVar.builtin != spv::BuiltInMax) {
+ 			ctxSO.outIsUsedByShader = pMSLCompiler->has_active_builtin(ctxSO.shaderVar.builtin, spv::StorageClassOutput);
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+index bffc072..1ae54c7 100644
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+@@ -154,6 +154,11 @@ namespace mvk {
+ 		std::vector<uint32_t> discreteDescriptorSets;
+ 		std::vector<DescriptorBinding> dynamicBufferDescriptors;
+ 
++		// Derived cache-lookup hint, deliberately NOT serialized. Loaded caches
++		// default to the conservative complete-layout comparison until converted.
++		// True only when all simple active vertex inputs have supplied mappings.
++		bool vertexInputsFullyCovered = false;
++
+ 		/** Returns whether the pipeline stage being converted supports vertex attributes. */
+ 		bool stageSupportsVertexAttributes() const;
+ 

@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "experimental": true,
+  "default_enabled": false,
+  "moltenvk_revision": "db66022459ffb663aa2b50f6b018bc2e124f5edf",
+  "moltenvk_patches": [
+    {
+      "path": "patches/0001-isolate-vertex-input-cache.patch",
+      "sha256": "8f140b01e609d921cbbbe819e90d8296ab9fd3a6ae89ac1d1d8a3e54f27ad81d"
+    },
+    {
+      "path": "patches/0002-warn-only-if-integer-blending-enabled.patch",
+      "sha256": "4e4d9a96e7c6e50031d669b25db972f67f9004913e2faefc5217078ebb923ffe"
+    },
+    {
+      "path": "patches/0003-size-cache-before-direct-export.patch",
+      "sha256": "08fd0b8eef75f8c920067c3e75badb72eea3c84f88b3e28f2bdaa1a4bf19bda5"
+    },
+    {
+      "path": "patches/0004-bound-pipeline-shader-cache.patch",
+      "sha256": "b9451dccfb13fea9b9abce7abf70e22455d1a7d3655ae4fa9e1b392620437101"
+    },
+    {
+      "path": "patches/0005-account-for-nonserialized-cache-hint.patch",
+      "sha256": "f0c09a85c9a6985261336d57f3cfc841e5a7965e63ec86fe06bd6309dab435c9"
+    },
+    {
+      "path": "patches/0006-own-merged-specialization-libraries.patch",
+      "sha256": "2a20226035306d29d1ac9c62f49e5f38de66dbdb8fba37b7c553ae3bf7ad57f1"
+    },
+    {
+      "path": "patches/0007-observe-metal-library-compile-inputs.patch",
+      "sha256": "1657b101e1f080c407ef1d0b597c4828f8fbe6b6dfacb2deecadfe7979eb5829"
+    },
+    {
+      "path": "patches/0008-zero-unbound-vertex-inputs-opt-in.patch",
+      "sha256": "a3e30cec269611ca50f500324603f26bbf22cab790bde2ce5b87b005ab30657b"
+    },
+    {
+      "path": "patches/0009-select-metal-library-optimization.patch",
+      "sha256": "864dc92bd89aa1ab6386b7ed2043ed4200af3b93a574ec1e8d104c1b85a2c751"
+    },
+    {
+      "path": "patches/0010-integer-fragment-output-compatibility.patch",
+      "sha256": "12a88ae0cb47d645ec636a85fd0d634ab6991750fa7a11bebc4ee37a6f427cbd"
+    }
+  ],
+  "historical_source": {
+    "base": "279fd0f83170425db002fe25d6bd62f6355f497d",
+    "snapshot": "509d54532f849d75f27b32c0fb412ee9fa228fd9",
+    "tree": "344ca88d8caa3fa4559651baa85ef6a0041f4e64",
+    "patch": "historical/madeira.patch",
+    "patch_sha256": "d82c2ec727efc3bf62f466382f30f453e39f0d2c1a72b6835bb514b7fdd41980",
+    "manifest": "historical/EXPERIMENTAL-SOURCE-MANIFEST.json",
+    "manifest_sha256": "08d4554755ded2be6bcbe1539d9d87247a8c2632d8e74489ebe4baa7092caa88",
+    "changed_files": 91,
+    "matching_historical_ipa_rebuild_verified": false
+  },
+  "historical_ipa": {
+    "asset": "Madeira-Experimental-2026-10-20-Debug-unsigned.ipa",
+    "sha256": "c48f9e645badf8fde57c739ad8a787116ab7551625f1166eb676b6b964efcb4e",
+    "bytes": 111480832,
+    "build_date": "2026-10-20",
+    "source_publication_base": "509d54532f849d75f27b32c0fb412ee9fa228fd9",
+    "build_provenance": "Historical local Debug build created before source publication. Not rebuilt from the release tag; no bit-reproducibility claim. Broader snapshot and overlays are published with build instructions.",
+    "bundle_id": "com.willfaust.madeora",
+    "bundle_version": "4",
+    "app_image_uuid": "19C01ED6-159C-3067-AA9D-CFCB96F40DA5",
+    "unsigned_macho": [
+      "Madeira.debug.dylib",
+      "PlugIns/MadeiraJITHelper.appex/MadeiraJITHelper",
+      "PlugIns/MadeiraJITHelper.appex/MadeiraJITHelper.debug.dylib",
+      "PlugIns/MadeiraJITHelper.appex/__preview.dylib",
+      "__preview.dylib",
+      "d3d12/libmetalirconverter.dylib",
+      "Frameworks/StikJIT.framework/StikJIT",
+      "Madeira"
+    ],
+    "dll_sha256": {
+      "vulkan-1.dll": "574ac8002fe83e7a428e3d4402b19a55193475657e13f755b8922792567367d2",
+      "winevulkan.dll": "c3d2df4ddc3699d9659c83582a0b35828a79fd6734c9c0094a3c2077a2024cba",
+      "xtajit64.dll": "ae33cd6af7b87ae2bae0aa52059093337edd7bd0df83f0e1594824138be07146"
+    },
+    "game_files_bundled": false,
+    "integer_output_default": "off",
+    "integer_output_policy_ipad_verified": false,
+    "earlier_screenshots_prove_this_ipa": false,
+    "warnings": [
+      "Experimental prerelease; not a full-game compatibility claim.",
+      "Earlier game screenshots precede this integer-output build.",
+      "Cached native prerequisites used; not a clean-machine rebuild.",
+      "Original bundle ID may replace an existing Madeira install if retained by a signing tool; back up saves and use a separate ID for parallel installation.",
+      "Sign with your own certificate/profile and enable JIT; no certificate or pairing file supplied."
+    ],
+    "release_target_commit": "c893e69acbab0c43760679514b83dfb1720e7620",
+    "url": "https://github.com/Jelly-RayTian/Madeira-Experimental/releases/download/experimental-2026-10-20/Madeira-Experimental-2026-10-20-Debug-unsigned.ipa"
+  },
+  "imported_probes": [
+    "tests/vulkan/cache-compile-overlap.mm",
+    "tests/vulkan/check-cache-memory-native.py",
+    "tests/vulkan/check-integer-blend-native.py",
+    "tests/vulkan/check-integer-output-native.py",
+    "tests/vulkan/check-metal-library-options-native.py",
+    "tests/vulkan/check-shader-compiler-observer-native.py",
+    "tests/vulkan/check-surface-geometry-native.py",
+    "tests/vulkan/check-unbound-vertex-native.py",
+    "tests/vulkan/check-vertex-cache-reuse-native.py",
+    "tests/vulkan/integer-blend-probe.c",
+    "tests/vulkan/integer-output-readback.c",
+    "tests/vulkan/integer-output-spirv-alias.cpp",
+    "tests/vulkan/metal-library-options.mm",
+    "tests/vulkan/shader-compiler-ledger.mm",
+    "tests/vulkan/surface-geometry-probe.m",
+    "tests/vulkan/unbound-vertex-probe.c",
+    "tests/vulkan/vertex-cache-reuse-probe.c",
+    "tests/vulkan/vertex-converter-probe.cpp",
+    "tests/x64/vulkan-cache-budget.c",
+    "tests/x64/vulkan-cache-handoff.c",
+    "tests/x64/vulkan-cache-specialization.c",
+    "tests/x64/vulkan-memory-regression.c",
+    "tests/x64/vulkan-postcompile.c",
+    "tests/x64/vulkan-regression-all.c",
+    "tests/x64/vulkan-vertex-cache.c",
+    "tests/x64/windows-handoff.c"
+  ],
+  "current_main_configs": [
+    {
+      "path": "configs/detroit-baseline.cfg",
+      "sha256": "d388b63db14a9c1d260b86927bf11f5793d0229e6136fc087fb06f741e282882"
+    },
+    {
+      "path": "configs/detroit-integer-output-experimental.cfg",
+      "sha256": "6b4d8efdaa8320688d8758dbf992a790e45ce2a1f3004219317673423bf029be"
+    }
+  ]
+}

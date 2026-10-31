@@ -1,0 +1,12 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -3264,7 +3264,7 @@
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
+-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(109);	// Contains collection
++	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(117);	// Collections + nonserialized coverage hint and tail padding
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(40);		// Contains collection
+ 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
+ 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();

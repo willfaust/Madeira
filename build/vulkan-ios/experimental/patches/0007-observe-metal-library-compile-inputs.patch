@@ -1,0 +1,131 @@
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -19,6 +19,7 @@
+ #include "MVKShaderModule.h"
+ #include "MVKPipeline.h"
+ #include "MVKFoundation.h"
++#include "MVKShaderCompilerDiagnostics.h"
+ #include <sys/stat.h>
+ 
+ using namespace std;
+@@ -595,9 +596,12 @@
+ 				}
+ 				logCompilation(mtlCompileOptions);
+ 
++				const auto diagnosticTicket = madeiraCompilerDiagnostics::begin(mslSourceCode, mtlCompileOptions, mtlDev);
++
+ 				[mtlDev newLibraryWithSource: mslSourceCode
+ 									options: mtlCompileOptions
+ 						completionHandler: ^(id<MTLLibrary> mtlLib, NSError* error) {
++							madeiraCompilerDiagnostics::end(diagnosticTicket, mtlLib != nil);
+ 							bool isLate = compileComplete(mtlLib, error);
+ 							if (isLate) { destroy(); }
+ 						}];
+--- /dev/null
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderCompilerDiagnostics.h
+@@ -0,0 +1,105 @@
++/* Copyright (c) 2026 Madeira contributors. SPDX-License-Identifier: Apache-2.0
++ * Opt-in, bounded observations of actual Metal library compile inputs.
++ * No source, options, return values, or compiler scheduling are changed.
++ */
++#pragma once
++#include <CommonCrypto/CommonDigest.h>
++#include <array>
++#include <algorithm>
++#include <cstdint>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++
++namespace madeiraCompilerDiagnostics {
++struct Ticket {
++    bool enabled = false;
++    unsigned category = 2; // unique, repeated, or untracked
++    std::chrono::steady_clock::time_point start;
++};
++struct Entry { std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{}; bool used = false; };
++struct Ledger {
++    std::mutex mutex;
++    std::array<Entry, 32768> entries{};
++    uint64_t completed = 0, counts[3] = {}, failed = 0;
++    double milliseconds[3] = {};
++};
++inline Ledger& ledger() { static Ledger value; return value; }
++inline bool enabled() {
++    static const bool value = [] { const char* p = getenv("MADEIRA_VK_SHADER_COMPILE_DIAGNOSTICS"); return p && !strcmp(p, "1"); }();
++    return value;
++}
++inline void bytes(CC_SHA256_CTX& c, const void* p, size_t size) {
++    // SHA API accepts 32-bit lengths; do not silently truncate long inputs.
++    while (size) { CC_LONG n = (CC_LONG)std::min(size, size_t(UINT32_MAX)); CC_SHA256_Update(&c, p, n); p = (const char*)p + n; size -= n; }
++}
++inline void number(CC_SHA256_CTX& c, uint64_t value) { bytes(c, &value, sizeof(value)); }
++inline void string(CC_SHA256_CTX& c, NSString* value) {
++    NSData* data = [value dataUsingEncoding:NSUTF8StringEncoding];
++    number(c, data.length); bytes(c, data.bytes, data.length);
++}
++inline Ticket begin(NSString* source, MTLCompileOptions* options, id<MTLDevice> device) {
++    Ticket ticket;
++    if (!enabled()) { return ticket; }
++    ticket.enabled = true;
++    CC_SHA256_CTX context; CC_SHA256_Init(&context);
++    number(context, (uintptr_t)device);
++    string(context, source);
++    number(context, options.languageVersion);
++    number(context, options.preserveInvariance);
++#if MVK_XCODE_16
++    if ([options respondsToSelector:@selector(mathMode)]) {
++        number(context, options.mathMode);
++        number(context, options.mathFloatingPointFunctions);
++    } else
++#endif
++    { number(context, options.fastMathEnabled); }
++    if ([options respondsToSelector:@selector(optimizationLevel)]) { number(context, options.optimizationLevel); }
++    // These cover every option set by the pinned getMTLCompileOptions().
++    // Sort actual macro names, and hash NSNumber type/value without struct padding.
++    NSArray* keys = [[options.preprocessorMacros allKeys] sortedArrayUsingSelector:@selector(compare:)];
++    number(context, keys.count);
++    for (NSString* key in keys) {
++        string(context, key);
++        NSNumber* value = (NSNumber*)options.preprocessorMacros[key];
++        const char* type = value.objCType;
++        number(context, strlen(type)); bytes(context, type, strlen(type));
++        if (*type == 'f') { float v = value.floatValue; bytes(context, &v, sizeof(v)); }
++        else if (*type == 'd') { double v = value.doubleValue; bytes(context, &v, sizeof(v)); }
++        else if (strchr("CSILQ", *type)) { number(context, value.unsignedLongLongValue); }
++        else { number(context, (uint64_t)value.longLongValue); }
++    }
++    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest;
++    CC_SHA256_Final(digest.data(), &context);
++    Ledger& state = ledger();
++    {
++        std::lock_guard<std::mutex> lock(state.mutex);
++        uint64_t hash = 0; memcpy(&hash, digest.data(), sizeof(hash));
++        // Fixed memory and bounded lock work. Saturated/colliding entries are
++        // explicitly untracked, never reported as a newly observed input.
++        for (size_t i = 0; i < 64; ++i) {
++            Entry& entry = state.entries[(hash + i) % state.entries.size()];
++            if (entry.used && entry.digest == digest) { ticket.category = 1; break; }
++            if (!entry.used) { entry.used = true; entry.digest = digest; ticket.category = 0; break; }
++        }
++    }
++    ticket.start = std::chrono::steady_clock::now();
++    return ticket;
++}
++inline void end(const Ticket& ticket, bool success) {
++    if (!ticket.enabled) { return; }
++    double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ticket.start).count();
++    Ledger& state = ledger();
++    std::lock_guard<std::mutex> lock(state.mutex);
++    ++state.completed; ++state.counts[ticket.category]; state.failed += !success;
++    state.milliseconds[ticket.category] += elapsed;
++    if (state.completed == 1 || !(state.completed % 256)) {
++        fprintf(stderr, "[vk-compiler] completed=%llu unique=%llu repeated=%llu untracked=%llu failed=%llu unique-ms=%.3f repeated-ms=%.3f untracked-ms=%.3f ledger-capacity=32768\n",
++                (unsigned long long)state.completed, (unsigned long long)state.counts[0],
++                (unsigned long long)state.counts[1], (unsigned long long)state.counts[2],
++                (unsigned long long)state.failed, state.milliseconds[0], state.milliseconds[1], state.milliseconds[2]);
++    }
++}
++} // namespace madeiraCompilerDiagnostics

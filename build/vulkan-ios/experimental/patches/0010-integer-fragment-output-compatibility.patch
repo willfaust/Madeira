@@ -1,0 +1,264 @@
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h
+@@ -45,6 +45,8 @@
+ 		uint32_t numTessControlPoints = 0;
+ 		bool shouldFlipVertexY = true;
+ 		bool shouldFixupClipSpace = false;
++        uint32_t integerFragmentUnsignedMask = 0;
++        uint32_t integerFragmentSignedMask = 0;
+ 
+ 		/**
+ 		 * Returns whether the specified options match this one.
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.cpp
+@@ -17,11 +17,13 @@
+  */
+ 
+ #include "SPIRVToMSLConverter.h"
++#include "SPIRVIntegerFragmentOutputs.h"
+ #include "MVKCommonEnvironment.h"
+ #include "MVKStrings.h"
+ #include "FileSupport.h"
+ #include "SPIRVSupport.h"
+ #include <fstream>
++#include <atomic>
+ 
+ using namespace mvk;
+ using namespace std;
+@@ -54,6 +56,8 @@
+ 	if (numTessControlPoints != other.numTessControlPoints) { return false; }
+ 	if (shouldFlipVertexY != other.shouldFlipVertexY) { return false; }
+ 	if (shouldFixupClipSpace != other.shouldFixupClipSpace) { return false; }
++    if (integerFragmentUnsignedMask != other.integerFragmentUnsignedMask ||
++        integerFragmentSignedMask != other.integerFragmentSignedMask) { return false; }
+ 	return true;
+ }
+ 
+@@ -283,7 +287,23 @@
+ #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+ 	try {
+ #endif
+-		pMSLCompiler = new CompilerMSL(_spirv);
++		std::vector<uint32_t> compatibleSPIRV;
++        std::string compatibilityError;
++        const auto& options = shaderConfig.options;
++        bool integerOutput = options.entryPointStage == ExecutionModelFragment &&
++            (options.integerFragmentUnsignedMask || options.integerFragmentSignedMask);
++        if (integerOutput && !integerFragmentOutputs(_spirv, options.integerFragmentUnsignedMask,
++                options.integerFragmentSignedMask, compatibleSPIRV, compatibilityError)) {
++            SPIRV_CROSS_THROW(compatibilityError);
++        }
++        if (integerOutput && compatibleSPIRV != _spirv) {
++            static std::atomic<uint32_t> reports{0};
++            if (reports.fetch_add(1) < 8) {
++                fprintf(stderr, "[vk-integer-output] remapped float32 output bits unsigned-mask=%08x signed-mask=%08x\n",
++                        options.integerFragmentUnsignedMask, options.integerFragmentSignedMask);
++            }
++        }
++        pMSLCompiler = new CompilerMSL(integerOutput ? compatibleSPIRV : _spirv);
+ 
+ 		if (shaderConfig.options.hasEntryPoint()) {
+ 			pMSLCompiler->set_entry_point(shaderConfig.options.entryPointName, shaderConfig.options.entryPointStage);
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -1767,6 +1767,32 @@
+ 			shaderConfig.options.mslOptions.arrayed_subpass_input = true;
+ 		}
+ 		addPrevStageOutputToShaderConversionConfig(shaderConfig, shaderOutputs);
++        shaderConfig.options.integerFragmentUnsignedMask = 0;
++        shaderConfig.options.integerFragmentSignedMask = 0;
++        const char* compatibility = getenv("MADEIRA_VK_INTEGER_FRAGMENT_OUTPUTS");
++        if (compatibility && !strcmp(compatibility, "1") && _isRasterizingColor &&
++                !(pCreateInfo->pMultisampleState && pCreateInfo->pMultisampleState->alphaToCoverageEnable)) {
++            static const bool logged = [] {
++                fprintf(stderr, "[vk-integer-output] bit-preserving float32 output compatibility enabled (undefined Vulkan outputs only)\n");
++                return true;
++            }();
++            (void)logged;
++            // Metal output descriptors are populated after shader conversion.
++            // Use the original Vulkan rendering formats and write masks here.
++            const auto* rendering = getRenderingCreateInfo(pCreateInfo);
++            const auto* blend = pCreateInfo->pColorBlendState;
++            for (uint32_t i = 0; _isRasterizingColor && blend && i < 32 &&
++                    i < rendering->colorAttachmentCount && i < blend->attachmentCount; ++i) {
++                if (!blend->pAttachments[i].colorWriteMask) { continue; }
++                switch (getPixelFormats()->getFormatType(rendering->pColorAttachmentFormats[i])) {
++                    case kMVKFormatColorUInt8: case kMVKFormatColorUInt16: case kMVKFormatColorUInt32:
++                        shaderConfig.options.integerFragmentUnsignedMask |= 1u << i; break;
++                    case kMVKFormatColorInt8: case kMVKFormatColorInt16: case kMVKFormatColorInt32:
++                        shaderConfig.options.integerFragmentSignedMask |= 1u << i; break;
++                    default: break;
++                }
++            }
++        }
+ 
+ 		MVKMTLFunction func = getMTLFunction(shaderConfig, pFragmentSS, pFragmentFB, _fragmentModule, "Fragment");
+ 		id<MTLFunction> mtlFunc = func.getMTLFunction();
+@@ -3127,7 +3153,9 @@
+ 				opt.tessPatchKind,
+ 				opt.numTessControlPoints,
+ 				opt.shouldFlipVertexY,
+-				opt.shouldFixupClipSpace);
++				opt.shouldFixupClipSpace,
++                opt.integerFragmentUnsignedMask,
++                opt.integerFragmentSignedMask);
+ 	}
+ 
+ 	template<class Archive>
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -3278,6 +3278,9 @@
+ 	mtlFeatures |= _isUsingMetalArgumentBuffers << 0;
+ 	*(uint32_t*)&_properties.pipelineCacheUUID[uuidComponentOffset] = NSSwapHostIntToBig(mtlFeatures);
+ 	uuidComponentOffset += sizeof(mtlFeatures);
++    // Local conversion archive v1 adds the two fragment numeric-type masks.
++    // Reject previous archives rather than reading them with a changed layout.
++    *(uint32_t*)&_properties.pipelineCacheUUID[uuidComponentOffset] = NSSwapHostIntToBig(0x494f0001u);
+ }
+ 
+ // Combine OS major (8 bits), OS minor (8 bits), Mac GPU family (8 bits), and
+diff --git a/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVIntegerFragmentOutputs.h b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVIntegerFragmentOutputs.h
+new file mode 100644
+--- /dev/null
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVIntegerFragmentOutputs.h
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++#include <cstdint>
++#include <initializer_list>
++#include <map>
++#include <set>
++#include <string>
++#include <vector>
++
++namespace mvk {
++// Compatibility for Vulkan's undefined float output / integer attachment case.
++// Change only a private compiler copy, preserving the original module and value
++// bits. Restricted to directly located 32-bit scalar/vector output variables.
++inline bool integerFragmentOutputs(const std::vector<uint32_t>& input,
++                                   uint32_t unsignedMask, uint32_t signedMask,
++                                   std::vector<uint32_t>& output, std::string& error) {
++    output = input;
++    if (!(unsignedMask | signedMask)) { return true; }
++    if (input.size() < 5 || input[0] != 0x07230203) { error="Invalid SPIR-V header"; return false; }
++    struct Type { uint32_t op=0, base=0, size=0, storage=0; };
++    struct Decorations { uint32_t location=~0u, component=0, index=0; bool builtin=false; };
++    struct Variable { uint32_t oldType, type, pointer; };
++    std::map<uint32_t, Type> types;
++    std::map<uint32_t, Decorations> decorations;
++    std::map<uint32_t, Variable> variables;
++    std::vector<std::vector<uint32_t>> instructions;
++    for (size_t i=5; i<input.size();) {
++        uint32_t count=input[i]>>16, op=input[i]&65535;
++        if (!count || count>input.size()-i) { error="Invalid SPIR-V instruction"; return false; }
++        std::vector<uint32_t> w(input.begin()+i,input.begin()+i+count);
++        instructions.push_back(w);
++        if (op==21 && count==4) { types[w[1]]={op,w[3],w[2],0}; }
++        if (op==22 && count==3) { types[w[1]]={op,0,w[2],0}; }
++        if (op==23 && count==4) { types[w[1]]={op,w[2],w[3],0}; }
++        if (op==32 && count==4) { types[w[1]]={op,w[3],0,w[2]}; }
++        if (op==71 && count>=3) {
++            auto& d=decorations[w[1]];
++            if (w[2]==11) { d.builtin=true; }
++            if (count>=4) {
++                if(w[2]==30) d.location=w[3];
++                if(w[2]==31) d.component=w[3];
++                if(w[2]==32) d.index=w[3];
++            }
++        }
++        i+=count;
++    }
++    uint32_t bound=input[3];
++    auto id=[&]() { return bound++; };
++    std::vector<uint32_t> declarations;
++    auto emit=[&](std::initializer_list<uint32_t> w) { declarations.insert(declarations.end(),w); };
++    std::set<uint32_t> movedTypes;
++    // Reuse existing integer/vector/pointer types, moving their declarations
++    // ahead of global variables. SPIR-V prohibits duplicate scalar types.
++    auto scalarType=[&](uint32_t sign) {
++        uint32_t result=0;
++        for(const auto& t:types) if(t.second.op==21 && t.second.size==32 && t.second.base==sign) { result=t.first;break; }
++        if(!result){result=id();types[result]={21,sign,32,0};}
++        if(movedTypes.insert(result).second) emit({(4u<<16)|21,result,32,sign});
++        return result;
++    };
++    auto vectorType=[&](uint32_t base,uint32_t width) {
++        uint32_t result=0;
++        for(const auto& t:types) if(t.second.op==23 && t.second.base==base && t.second.size==width) {result=t.first;break;}
++        if(!result){result=id();types[result]={23,base,width,0};}
++        if(movedTypes.insert(result).second) emit({(4u<<16)|23,result,base,width});
++        return result;
++    };
++    auto pointerType=[&](uint32_t base) {
++        uint32_t result=0;
++        for(const auto& t:types) if(t.second.op==32 && t.second.base==base && t.second.storage==3) {result=t.first;break;}
++        if(!result){result=id();types[result]={32,base,0,3};}
++        if(movedTypes.insert(result).second) emit({(4u<<16)|32,result,3,base});
++        return result;
++    };
++    for (const auto& w:instructions) {
++        if ((w[0]&65535)!=59 || w.size()<4 || w[3]!=3) continue; // OpVariable Output
++        auto d=decorations[w[2]];
++        if(d.builtin || d.component || d.index || d.location>=32) continue;
++        uint32_t bit=1u<<d.location;
++        if(!((unsignedMask|signedMask)&bit)) continue;
++        Type ptr=types[w[1]], type=types[ptr.base];
++        Type scalar=type.op==23 ? types[type.base] : type;
++        if(ptr.op!=32 || ptr.storage!=3 || scalar.op!=22 || scalar.size!=32 ||
++           (type.op!=22 && (type.op!=23 || type.size<2 || type.size>4))) continue;
++        if(w.size()!=4) { error="Initialized fragment output is unsupported by integer compatibility"; return false; }
++        uint32_t typeID=scalarType((signedMask&bit)?1u:0u);
++        if(type.op==23) typeID=vectorType(typeID,type.size);
++        uint32_t pointerID=pointerType(typeID);
++        variables[w[2]]={ptr.base,typeID,pointerID};
++    }
++    if(variables.empty()) return true;
++    // Do not guess pointer-alias/component/block transformations. They need
++    // separate handling rather than silently producing a partially valid module.
++    for(const auto& w:instructions) {
++        uint32_t op=w[0]&65535;
++        if ((op==63 || op==64) && w.size()>=3 &&
++            (variables.count(w[1]) || variables.count(w[2]))) {
++            error="Copied fragment output pointer is unsupported by integer compatibility";return false;
++        }
++        if (op==62 && w.size()>=3 && variables.count(w[2])) {
++            error="Stored fragment output pointer is unsupported by integer compatibility";return false;
++        }
++        if (op==254 && w.size()>=2 && variables.count(w[1])) {
++            error="Returned fragment output pointer is unsupported by integer compatibility";return false;
++        }
++        if(op==169 || op==65 || op==66 || op==67 || op==70 || op==83 || op==57 || op==245) {
++            for(size_t j=3;j<w.size();j++) if(variables.count(w[j])) {
++                error="Aliased/composite fragment output is unsupported by integer compatibility";return false;
++            }
++        }
++    }
++    output.assign(input.begin(),input.begin()+5);
++    bool inserted=false;
++    for(auto w:instructions) {
++        uint32_t op=w[0]&65535;
++        if(!inserted && op>=19 && op<=39) {
++            output.insert(output.end(),declarations.begin(),declarations.end());inserted=true;
++        }
++        if(op>=19 && op<=39 && w.size()>1 && movedTypes.count(w[1])) continue;
++        if(op==59 && w.size()>=4 && variables.count(w[2])) w[1]=variables.at(w[2]).pointer;
++        if(op==62 && w.size()>=3 && variables.count(w[1])) {
++            const auto& var=variables.at(w[1]);uint32_t value=id();
++            output.insert(output.end(),{(4u<<16)|124,var.type,value,w[2]});w[2]=value;
++        }
++        if(op==61 && w.size()>=4 && variables.count(w[3])) {
++            const auto& var=variables.at(w[3]);uint32_t result=w[2], value=id();
++            w[1]=var.type;w[2]=value;output.insert(output.end(),w.begin(),w.end());
++            output.insert(output.end(),{(4u<<16)|124,var.oldType,result,value});continue;
++        }
++        output.insert(output.end(),w.begin(),w.end());
++    }
++    if(!inserted || bound<input[3]) { error="Invalid SPIR-V type section or ID bound";return false; }
++    output[3]=bound;
++    return true;
++}
++}

@@ -1,0 +1,130 @@
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandEncoderState.mm
+@@ -1446,6 +1446,12 @@
+ 	} else {
+ 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageVertex,   MVKMetalGraphicsStage::Vertex);
+ 		bindVertexBuffers(encoder, vk, _exists.vertex(), _bindings.vertex(), MVKVertexBufferBinder::Vertex());
++        uint32_t zeroIndex = pipeline->getZeroVertexInputBufferIndex();
++        if (zeroIndex != UINT32_MAX) {
++            const uint32_t zeros[4] = {};
++            // Tracked binding ensures the next pipeline restores real data.
++            bindVertexBytes(encoder, zeros, sizeof(zeros), zeroIndex);
++        }
+ 	}
+ 	bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageFragment, MVKMetalGraphicsStage::Fragment);
+ 	mvkEncoder.getState().mtlShared()._useResource.bindAndResetGraphics(encoder);
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.h
+@@ -316,6 +316,7 @@
+ 	const MVKStaticBitSet<kMVKMaxBufferCount>& getVkVertexBuffers() const { return _vkVertexBuffers; }
+ 	/** Returns a list of the vertex buffers used by this pipeline by Metal buffer ID */
+ 	const MVKStaticBitSet<kMVKMaxBufferCount>& getMtlVertexBuffers() const { return _mtlVertexBuffers; }
++	uint32_t getZeroVertexInputBufferIndex() const { return _zeroVertexInputBufferIndex; }
+ 	const VkViewport* getViewports() const { return _viewports; }
+ 	const VkRect2D* getScissors() const { return _scissors; }
+ 	const MTLSamplePosition* getSampleLocations() const { return _sampleLocations; }
+@@ -364,6 +365,7 @@
+     bool isDepthClipNegativeOneToOne(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+ 	bool verifyImplicitBuffers(MVKShaderStage stage);
+ 	uint32_t getTranslatedVertexBinding(uint32_t binding, uint32_t translationOffset, uint32_t maxBinding);
++	bool addZeroVertexInputFallback(MTLVertexDescriptor*, const VkPipelineShaderStageCreateInfo*);
+ 	uint32_t getImplicitBufferIndex(MVKShaderStage stage, uint32_t bufferIndexOffset);
+ 	MVKMTLFunction getMTLFunction(mvk::SPIRVToMSLConversionConfiguration& shaderConfig,
+ 								  const VkPipelineShaderStageCreateInfo* pShaderStage,
+@@ -386,6 +388,7 @@
+ 	std::unordered_map<uint32_t, id<MTLRenderPipelineState>> _multiviewMTLPipelineStates;
+ 	MVKStaticBitSet<kMVKMaxBufferCount> _vkVertexBuffers;
+ 	MVKStaticBitSet<kMVKMaxBufferCount> _mtlVertexBuffers;
++	uint32_t _zeroVertexInputBufferIndex = UINT32_MAX;
+ 	MVKPipelineStageResourceInfo _stageResources[kMVKShaderStageFragment + 1] = {};
+ 
+ 	id<MTLComputePipelineState> _mtlTessVertexStageState = nil;
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -1194,6 +1194,7 @@
+ 	// Vertex input
+ 	// This needs to happen before compiling the fragment shader, or we'll lose information on vertex attributes.
+ 	if (!addVertexInputToPipeline(plDesc.vertexDescriptor, pCreateInfo->pVertexInputState, shaderConfig)) { return nil; }
++	if (!addZeroVertexInputFallback(plDesc.vertexDescriptor, pVertexSS)) { return nil; }
+ 
+ 	// Fragment shader - only add if rasterization is enabled
+ 	if (!addFragmentShaderToPipeline(plDesc, pCreateInfo, shaderConfig, vtxOutputs, pFragmentSS, pFragmentFB)) { return nil; }
+@@ -1207,6 +1208,78 @@
+ 	setMetalObjectLabel(plDesc, ((MVKPipelineLayout*)pCreateInfo->layout)->getDebugName());
+ 
+ 	return plDesc;
++}
++
++// Optional compatibility for undefined unbound vertex inputs. No feature is
++// advertised and no application-provided attribute is replaced. A dedicated
++// real zero buffer avoids fetching unrelated application data.
++bool MVKGraphicsPipeline::addZeroVertexInputFallback(MTLVertexDescriptor* desc,
++                                                    const VkPipelineShaderStageCreateInfo* stage) {
++    const char* policy = getenv("MADEIRA_VK_ZERO_UNBOUND_VERTEX_INPUTS");
++    if (!policy || strcmp(policy, "1") || _vertexModule->getSPIRV().empty()) { return true; }
++    SPIRVShaderInputs inputs;
++    std::string error;
++    if (!getShaderInputs(_vertexModule->getSPIRV(), spv::ExecutionModelVertex, stage->pName, inputs, error)) {
++        setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Cannot reflect unbound vertex inputs: %s", error.c_str()));
++        return false;
++    }
++    VkPhysicalDeviceProperties properties;
++    getPhysicalDevice()->getProperties(&properties);
++    const auto& resource = _stageResources[kMVKShaderStageVertex];
++    uint32_t zeroIndex = UINT32_MAX;
++    static const VkFormat floats[] = {VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT};
++    static const VkFormat ints[] = {VK_FORMAT_R32_SINT, VK_FORMAT_R32G32_SINT, VK_FORMAT_R32G32B32_SINT, VK_FORMAT_R32G32B32A32_SINT};
++    static const VkFormat uints[] = {VK_FORMAT_R32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32A32_UINT};
++    for (const auto& input : inputs) {
++        if (!input.isUsed || input.builtin != spv::BuiltInMax) { continue; }
++        if (input.location >= properties.limits.maxVertexInputAttributes) {
++            setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Vertex input location %u exceeds device limit", input.location));
++            return false;
++        }
++        auto attr = desc.attributes[input.location];
++        if (attr.format != MTLVertexFormatInvalid) { continue; }
++        const VkFormat* formats = nullptr;
++        switch (input.baseType) {
++            case SPIRType::Float: formats = floats; break;
++            case SPIRType::Int: formats = ints; break;
++            case SPIRType::UInt: formats = uints; break;
++            default: break;
++        }
++        if (!formats || input.component || !input.vecWidth || input.vecWidth > 4) {
++            setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Unsupported unbound vertex input type at location %u", input.location));
++            return false;
++        }
++        if (zeroIndex == UINT32_MAX) {
++            // Descriptor/argument buffers occupy the low range. Exclude all
++            // reserved implicit IDs and explicit/translated vertex buffers.
++            for (uint32_t i = _descriptorBufferCounts.stages[kMVKShaderStageVertex];
++                 i < getMetalFeatures().maxPerStageBufferCount && i < kMVKMaxBufferCount; i++) {
++                if (_mtlVertexBuffers.get(i)) { continue; }
++                bool reserved = false;
++                for (uint32_t b = 0; b < static_cast<uint32_t>(MVKImplicitBuffer::Count); b++) {
++                    if (resource.implicitBuffers.ids[static_cast<MVKImplicitBuffer>(b)] == i) { reserved = true; break; }
++                }
++                if (!reserved) { zeroIndex = i; break; }
++            }
++            if (zeroIndex == UINT32_MAX) {
++                setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "No collision-free buffer slot for unbound vertex input"));
++                return false;
++            }
++        }
++        attr.format = getPixelFormats()->getMTLVertexFormat(formats[input.vecWidth - 1]);
++        attr.bufferIndex = zeroIndex;
++        attr.offset = 0;
++    }
++    if (zeroIndex != UINT32_MAX) {
++        auto layout = desc.layouts[zeroIndex];
++        layout.stride = 16;
++        layout.stepFunction = MTLVertexStepFunctionConstant;
++        layout.stepRate = 0;
++        _zeroVertexInputBufferIndex = zeroIndex;
++        static std::atomic<uint32_t> messages{0};
++        if (messages.fetch_add(1) < 16) { reportWarning(VK_SUCCESS, "[vk-unbound] dedicated zero vertex input buffer=%u (compatibility policy)", zeroIndex); }
++    }
++    return true;
+ }
+ 
+ // Returns a retained MTLComputePipelineDescriptor for the vertex stage of a tessellated draw constructed from this instance, or nil if an error occurs.
