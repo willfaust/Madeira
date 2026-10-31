@@ -26,9 +26,20 @@ The host loaded signed wrappers for `ntdll.dll`, `kernelbase.dll`, and
 for dyld rebasing. No native instruction bytes were changed. Loading the latter
 two libraries is not proof that their imports or Windows initialization work.
 
-These new results are **host-only**. The iOS 17 deployment-target guest is built
-and packaged. It has not been installed or tested on a phone. Earlier physical
-proof in `SIGNED-FEX.md` applies to the earlier import-free workload only.
+The translated x86-64 workload also passed on an iPhone 15 Pro running iOS
+27.0.1 in LiveContainer 3.8.11 on 2026-10-31, launched with `jit=false`. All six
+results matched across 9,996 block/import transitions and 3,072 calls into real
+Wine ntdll. The signed Wine image reported 459 data fixups, RX native code and
+RW/NX data. Both translated and Wine instruction bytes stayed unchanged.
+Before and after, `cs-flags=0x22003305` had `CS_DEBUGGED` clear and tracing was
+known with `traced=0`. This run did not attach a debugger or enable JIT.
+
+The tested package targets iOS 17. Its source-set ID is
+`b52dc65c5dce1bb7768e70d74d8165b95fb4178b7e580be9f3df128360ca30a8`.
+Physical proof covers this workload through LiveContainer's signing/loading
+path. The native ARM64 Windows PE, Wine image lifecycle check, and kernelbase
+and kernel32 loading results above remain host-only. Earlier physical proof in
+`SIGNED-FEX.md` applies to the earlier import-free workload.
 
 ## Native library preparation
 
@@ -111,5 +122,5 @@ set. A prepared or signed package is not runtime proof.
 - Independent writable library instances for concurrent Windows pseudo-processes.
   The current loader rejects a second live instance of the same signed library.
 - Forwarding and delay exports/imports where the standalone binder is used.
-- Device execution of this new path, the full Madeira app build, game support,
-  and sustained performance measurements.
+- The full Madeira app build, standalone iOS installation, game support, and
+  sustained performance measurements.
