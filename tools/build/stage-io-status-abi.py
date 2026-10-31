@@ -38,6 +38,9 @@ def stage(destination, source):
     memory_patch = ROOT / 'build/ntdll-unix/wow-guest-write.patch'
     subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(memory_patch)], check=True)
     subprocess.run(['git', '-C', str(destination), 'apply', str(memory_patch)], check=True)
+    query_patch = ROOT / 'build/ntdll-unix/wow-query-origin.patch'
+    subprocess.run(['git', '-C', str(destination), 'apply', '--check', str(query_patch)], check=True)
+    subprocess.run(['git', '-C', str(destination), 'apply', str(query_patch)], check=True)
     header = destination / HEADER
     header.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / 'build/ntdll-unix/io_status_abi.h', header)

@@ -92,6 +92,40 @@ startup requires the new IPA on the device.
 
 ## Fatal breakpoint and distinct CEF diagnostic
 
+### Additional confirmed query-origin bug
+
+Crashpad's public `ProcessInfo::ReadMemoryInfo` starts VirtualQueryEx at address
+zero, collects regions, then tests snapshot ranges against that map. Its
+`LoggingRangeIsFullyReadable` emits the observed `process_info.cc(620)` messages
+when the recorded map contains no readable overlap. Those messages alone do
+not establish that ReadProcessMemory failed; the current run has no
+`[wow-read-failed]` record for them.
+
+The WoW64 query wrapper used the ordinary NULL-preserving pointer converter
+for its address argument. A query for address zero therefore reached native
+NtQueryVirtualMemory as host NULL, even when the target had a guest window.
+Native logging in this capture includes a map walk starting at host zero and
+the iOS mapping floor 0x100a94000. This is not the guest's address map. The
+first host reservation exceeds the guest's entire user range; clipping it to
+that range can make an enumerator skip the guest heap completely (or truncate
+to a zero-size region with a full 4 GB limit). The untagged host map lines do
+not prove which guest caller initiated them.
+
+The query overlay now maps address zero to the target window's origin for
+actual memory-query classes only. Special Wine load/unload classes and all
+optional-pointer/sentinel converters retain their semantics. Nonzero query
+addresses, native targets, handle checks and process isolation are unchanged.
+`check-wow-query-zero.py` executes the actual staged BasicInformation branch,
+reproduces the old skipped-heap result, then verifies self and cross-process
+enumeration reaches the readable guest heap. It checks limits, denied queries,
+buffer lengths, error state and the 12-event query diagnostic budget. The
+final IPA validator requires the query marker in the rebuilt WOW64 DLL.
+
+This is a source/host-test verified API fix. Its connection to Crashpad's
+observed unreadable ranges and deliberate trap still requires device evidence.
+
+### Trap and symbol evidence
+
 The fatal event is in the `--type=crashpad-handler` child PID 0088, thread 00d8,
 not proof of total browser PID 0064 failure. At guest libcef+0x308def3 the bytes
 are `cc 0f 0b cc cc`: a deliberate INT3 followed by UD2. Saved EIP is one byte
@@ -169,7 +203,8 @@ IPA checks. Packaging now requires matching rebuilt Wine consumer/FEX writer
 exports as well as existing IOSB, checked-thread-init and breakpoint markers.
 The stagers restore exact pinned Wine/FEX inputs and reject concurrent edits.
 
-New diagnostics are bounded: 24 kernelbase 5/12-byte calls, 24 tagged native
+New diagnostics are bounded: 12 zero-origin queries per WOW64 module,
+24 kernelbase 5/12-byte calls, 24 tagged native
 code-protection transitions, 32 small backend writes, and eight executable
 callsite windows per already bounded assertion/trap event. On the next run,
 confirm the 12-byte ntdll hook status and bytes, old-protection restoration,

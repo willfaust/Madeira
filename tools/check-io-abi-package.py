@@ -26,6 +26,7 @@ def check(staged, app, ipa):
     assert b'[wow-thread-init-v1]' in expected, 'stale Wine CPU initialization consumer'
     assert b'[wow-break-deliver-v1]' in expected, 'stale Wine breakpoint diagnostics'
     assert b'MadeiraBTCpuWriteMemory' in expected, 'stale Wine native-write consumer'
+    assert b'[wow-query-zero-v1]' in expected, 'stale Wine guest memory-enumeration consumer'
     assert b'[wow-write]' in native and b'[guest32-symbols]' in native, 'native guest memory diagnostics missing'
     cpu = staged.parent / 'xtajit.dll'
     cpu_data = cpu.read_bytes()

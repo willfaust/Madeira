@@ -1,0 +1,33 @@
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -626,7 +626,10 @@
+     case MemoryRegionInformation:
+     case MemoryWorkingSetExInformation:
+     case MemoryImageInformation:
+-        addr = retarget_ptr( base, addr );
++        /* A query's NULL address means the first page, not an optional
++         * pointer. Start enumeration at guest zero in the TARGET window;
++         * asking the host about address zero describes iOS's map instead. */
++        addr = base ? (void *)(base + addr_guest) : retarget_ptr( base, addr );
+         break;
+     default:
+         break;
+@@ -655,6 +658,18 @@
+                 info32->Type = info.Type;
+                 if ((ULONG_PTR)info32->BaseAddress + info.RegionSize > highest_user_address)
+                     info32->RegionSize = highest_user_address - info32->BaseAddress + 1;
++            }
++            if (base && !addr_guest)
++            {
++                static LONG zero_reports;
++                if (InterlockedIncrement( &zero_reports ) <= 12)
++                {
++                    ULONG error = NtCurrentTeb()->LastErrorValue;
++                    ERR( "[wow-query-zero-v1] process=%p window=%p target=%p status=%08lx guest-region=%08lx+%08lx state=%lx protect=%lx\n",
++                         handle, (void *)base, addr, status, status ? 0 : info32->BaseAddress,
++                         status ? 0 : info32->RegionSize, status ? 0 : info32->State, status ? 0 : info32->Protect );
++                    NtCurrentTeb()->LastErrorValue = error;
++                }
+             }
+         }
+         res_len = sizeof(MEMORY_BASIC_INFORMATION32);
