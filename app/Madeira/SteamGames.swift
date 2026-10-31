@@ -492,6 +492,10 @@ struct SteamGamesSection: View {
         if SteamOwnedLibrary.enabled && SteamOwnedLibrary.shared.signedIn {
             await SteamOwnedLibrary.shared.refreshLibrary(interactive: true)
         }
+        // The itch.io section refreshes with the same pull (ItchGames.swift).
+        if ItchLibrary.enabled && ItchLibrary.shared.signedIn {
+            await ItchLibrary.shared.refreshLibrary(interactive: true)
+        }
         // The Epic Games section refreshes with the same pull (EpicGames.swift).
         if EpicLibrary.enabled && EpicLibrary.shared.signedIn {
             await EpicLibrary.shared.refreshLibrary(interactive: true)
