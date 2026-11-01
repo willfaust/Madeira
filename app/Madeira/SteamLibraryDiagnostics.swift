@@ -64,7 +64,8 @@ import Darwin
             while !Task.isCancelled && Date() < end {
                 guard let self, self.generation == current else { return }
                 await self.discover()
-                try? await Task.sleep(nanoseconds: 500_000_000)
+                let delay: UInt64 = self.sockets.isEmpty ? 500_000_000 : 2_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
             }
             if self?.generation == current { self?.stop() }
         }
@@ -76,6 +77,7 @@ import Darwin
         sockets.removeAll(); requests.removeAll(); replies.removeAll(); commands.removeAll(); promises = 0; port = 0; unsetenv("MADEIRA_STEAM_CDP_PORT")
     }
     private func discover() async {
+        expireRequests()
         guard let url = URL(string: "http://127.0.0.1:\(port)/json/list") else { return }
         discoveries += 1
         var request = URLRequest(url: url); request.timeoutInterval = 1
@@ -92,7 +94,7 @@ import Darwin
             sockets[id] = socket; socket.resume()
             note("page-attached url=\(Self.safeURL(target["url"] as? String ?? ""))")
             await send(socket, "Runtime.enable"); await send(socket, "Page.enable")
-            await send(socket, "Network.enable", ["maxPostDataSize": 0])
+            await send(socket, "Network.enable", ["maxPostDataSize": 0, "maxTotalBufferSize": 1_048_576, "maxResourceBufferSize": 16_384])
             await send(socket, "Runtime.addBinding", ["name": "__madeiraLibraryEvent"])
             await send(socket, "Page.addScriptToEvaluateOnNewDocument", ["source": Self.observer])
             await send(socket, "Runtime.evaluate", ["expression": Self.observer])
@@ -170,6 +172,9 @@ import Darwin
         } else if ["Network.webSocketFrameSent", "Network.webSocketFrameReceived"].contains(method), let frame = p["response"] as? [String: Any], let payload = frame["payloadData"] as? String {
             note("websocket direction=\(method.hasSuffix("Sent") ? "send" : "receive") bytes=\(payload.utf8.count) opcode=\(frame["opcode"] ?? 0)", category: "websocket")
         }
+        expireRequests()
+    }
+    private func expireRequests() {
         for (id, value) in requests where Date().timeIntervalSince(value.1) > 30 {
             note("resource-timeout url=\(value.0)", category: "failure"); requests.removeValue(forKey: id)
         }

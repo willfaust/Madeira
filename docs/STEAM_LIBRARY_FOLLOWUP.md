@@ -65,7 +65,7 @@ bound retention. Read-only/locked bindings can refuse instrumentation; this is
 reported rather than overriding their attributes.
 
 Bounds: four page connections,300 emitted records,8,000 received events,512
-in-flight request records,64 command callbacks and24 inspected promises (eight per selected namespace per page).
+in-flight request records, a1MB inspector network buffer per page,64 command callbacks and24 inspected promises (eight per selected namespace per page).
 Each page's JS observer emits at most160 events and samples each selected method at
 most eight times. Separate category budgets reserve output for failures; repeated
 WebSocket traffic cannot consume the exception budget. Metadata inspection does
