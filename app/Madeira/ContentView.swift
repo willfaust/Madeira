@@ -2562,6 +2562,9 @@ struct ContentView: View {
             guard wine_process_is_running() == 0, wineserver_is_running() == 0, library.current == nil else {
                 library.error = "Close the running Wine session before starting through the Steam client."; return
             }
+            if LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
+                library.restartNotice = LibraryModel.restartMessage; return
+            }
             guard let game = MadeiraDock.games(drive: MadeiraDock.drive).first(where: { $0.id == appID && $0.installed }) else {
                 library.error = "Steam's appmanifest does not list this game as ready."; return
             }
@@ -3722,11 +3725,14 @@ struct ContentView: View {
         let arguments = (getenv("MADEIRA_ARGS").map { String(cString: $0) } ?? "").lowercased()
         if image.contains("steam.exe") || arguments.contains("steam-launch.bat") || arguments.contains("madeira-native-steam.cmd") {
             SteamLibraryDiagnostics.shared.start()
+        } else {
+            SteamLibraryDiagnostics.shared.stop()
         }
         let result = wine_process_start(winePrefixPath)
         if result == 0 {
             logStore.log("Wine process thread launched", level: .success)
         } else {
+            SteamLibraryDiagnostics.shared.stop()
             logStore.log("Failed to start Wine process (error: \(result))", level: .error)
         }
     }

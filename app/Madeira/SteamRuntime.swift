@@ -335,6 +335,16 @@ enum NativeSteamPlay {
     static let mode = "client"
     static let script = "madeira-native-steam.cmd"
     static let clientArguments = "-no-cef-sandbox -cef-disable-gpu -console -nocrashmonitor -cef-disable-features=SegmentationPlatform,OptimizationTargetPrediction,OptimizationHints"
+    static func libraryListed(_ game: DockGame, root: String, drive: URL) -> Bool {
+        if game.library.caseInsensitiveCompare(root + "/steamapps") == .orderedSame { return true }
+        let file = drive.appendingPathComponent(root + "/steamapps/libraryfolders.vdf")
+        guard let data = try? Data(contentsOf: file), data.count <= 1 << 20,
+              var parser = try? SteamKeyValues(data), let value = try? parser.read() else { return false }
+        return (value["libraryfolders"]?.fields ?? [:]).values.contains { entry in
+            guard let path = entry["path"]?.string ?? entry.string, let library = MadeiraDock.libraryRelative(path) else { return false }
+            return library.caseInsensitiveCompare(game.library) == .orderedSame
+        }
+    }
     static func prepare(_ game: DockGame, drive: URL) throws -> String {
         let fm = FileManager.default
         guard MadeiraDock.validAppID(game.id), game.installed,
@@ -355,6 +365,12 @@ enum NativeSteamPlay {
         let roots = ["Program Files (x86)/Steam", "Program Files/Steam"]
         guard let root = roots.first(where: { fm.fileExists(atPath: drive.appendingPathComponent($0).appendingPathComponent("steam.exe").path) }) else {
             throw DockError.message("The Windows Steam client is not installed in this prefix.")
+        }
+        guard libraryListed(game, root: root, drive: drive) else {
+            throw DockError.message("The Windows Steam client does not list this existing library folder. Add it in Steam Storage before launching; no game files were changed.")
+        }
+        if game.id == 730 && !fm.fileExists(atPath: folder.appendingPathComponent("game/bin/win64/cs2.exe").path) {
+            throw DockError.message("CS2's appmanifest exists, but its recorded installation has no game/bin/win64/cs2.exe. Its files were kept.")
         }
         let windows = "C:\\" + root.replacingOccurrences(of: "/", with: "\\")
         let body = "@echo off\r\n\"C:\\windows\\system32\\madeira-steam-service.exe\" \"\(windows)\"\r\nif not \"%errorlevel%\"==\"0\" exit /b %errorlevel%\r\ncd /d \"\(windows)\"\r\n\"\(windows)\\steam.exe\" \(clientArguments) -applaunch \(game.id)\r\n"

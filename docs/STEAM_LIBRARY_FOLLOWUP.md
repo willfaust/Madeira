@@ -48,7 +48,8 @@ script enable the observer. Dock and ordinary game starts retain their paths.
 The observer records navigation, failed resource URL/status or net error,
 console error classifications with source line/column stacks, unhandled
 exceptions/rejections, WebSocket direction/length/errors, and selected
-SteamClient.Apps method names and argument counts. Query strings, fragments,
+SteamClient.Apps, Storage and CloudStorage read/subscription method names and
+argument counts. No extra native API calls or writes are issued. Query strings, fragments,
 headers, cookies, bodies and raw RPC payloads are excluded. Public resource
 paths remain available for diagnosis. It does not record the whole owned-game
 list; array count and presence of AppID730 are sufficient for this test.
@@ -64,8 +65,18 @@ bound retention. Read-only/locked bindings can refuse instrumentation; this is
 reported rather than overriding their attributes.
 
 Bounds: four page connections,300 emitted records,8,000 received events,512
-in-flight request records,64 command callbacks and24 inspected promises.
-Each page's JS observer emits at most160 events. The observer is diagnostic;
+in-flight request records,64 command callbacks and24 inspected promises (eight per selected namespace per page).
+Each page's JS observer emits at most160 events and samples each selected method at
+most eight times. Separate category budgets reserve output for failures; repeated
+WebSocket traffic cannot consume the exception budget. Metadata inspection does
+not invoke array getters and scans at most4,096 array entries. CS2 absence is not
+claimed for larger lists without a match. Callback payloads remain uninspected
+to preserve callback identity. A read-only snapshot of the existing window.appStore
+reports initialization, map count and whether730 is present; it neither creates a
+store nor supplies missing data. Its normal MobX map getters are read; array
+metadata getters are not invoked. The probe tolerates absent/changed fields and
+observes for five minutes, with32 of its160 events reserved for state/errors. Inspector command failures and unavailable loopback
+endpoints are reported explicitly. The observer is diagnostic;
 it does not claim to repair the still-unidentified Library RPC.
 
 ## Normal Windows Steam launch alternative
@@ -77,7 +88,9 @@ sign-in, ownership checks, launch settings and game creation. No game executable
 is substituted and no Dock authentication handoff is used.
 
 The app re-reads the original appmanifest, checks its numeric ID and installed
-state, confirms its recorded game folder and existing steam.exe, and writes only
+state, confirms its recorded game folder, CS2 executable and existing steam.exe,
+checks that the actual client libraryfolders.vdf lists the library (or it is
+the client’s default steamapps folder), and writes only
 an app-owned transient launch script. It does not reinstall, repair, rewrite
 manifests, clear sign-in data, or modify Steam/CS2 files. The original saved game
 entry and per-game preferences remain separate from the generated command.
@@ -94,6 +107,13 @@ failure isolation and logging bounds. The macOS suite compiles the actual Swift
 actor and native-launch preparation, using real appmanifest parsing and fixture
 files to check no installed/auth data changes. Existing CEF-policy, Steam
 identity, JIT, process, controller-related and packaging checks remain in CI.
+
+Public SteamTracking source for the same chunk name at
+92ca4e627045baf35f46182db2023bb21d89662b shows AppStore.Init waiting for
+RegisterForAppOverviewChanges before using cloud storage. It exports
+window.appStore, including m_mapApps and m_bIsInitialized. This is a structural
+guide for read-only probes, not an exact contenthash match or proof that the
+installed build failed in that function.
 
 The underlying Library failure is unresolved until a device trace names its
 first failed RPC/resource and response. No Library success, Windows Steam

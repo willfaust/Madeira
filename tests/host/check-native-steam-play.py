@@ -17,24 +17,35 @@ def fn(marker):
  while depth:depth+=(dock[i]=='{')-(dock[i]=='}');i+=1
  return dock[a:i]
 game=dock[dock.index('struct DockGame:'):dock.index('\n/// Madeira Dock:')]
-code='import Foundation\n'+game+'\nenum DockError:Error{case message(String)}\nenum MadeiraDock{\n'+ '\n'.join(fn(x) for x in ['static func validAppID(', 'static func validFolderName(', 'static func game(manifest'])+'\n}\n'+helper+r'''
+code='import Foundation\n'+game+'\nenum DockError:Error{case message(String)}\nenum MadeiraDock{\n'+ '\n'.join(fn(x) for x in ['static func validAppID(', 'static func validFolderName(', 'static func game(manifest', 'static func libraryRelative('])+'\n}\n'+helper+r'''
 @main struct Check {
  static func main() throws {
   let fm=FileManager.default,drive=fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer {try? fm.removeItem(at:drive)}
   let root=drive.appendingPathComponent("Program Files (x86)/Steam")
   let apps=root.appendingPathComponent("steamapps"),folder=apps.appendingPathComponent("common/Counter-Strike Global Offensive")
-  try fm.createDirectory(at:folder,withIntermediateDirectories:true)
+  try fm.createDirectory(at:folder.appendingPathComponent("game/bin/win64"),withIntermediateDirectories:true)
+  try Data("game-fixture".utf8).write(to:folder.appendingPathComponent("game/bin/win64/cs2.exe"))
   let exe=root.appendingPathComponent("steam.exe"),login=root.appendingPathComponent("loginusers.vdf"),manifest=apps.appendingPathComponent("appmanifest_730.acf")
   try Data("genuine-fixture".utf8).write(to:exe);try Data("auth-fixture-must-stay".utf8).write(to:login)
   let data=Data(#"""
   "AppState" {"appid" "730" "StateFlags" "4" "installdir" "Counter-Strike Global Offensive"}
   """#.utf8);try data.write(to:manifest)
   let game=MadeiraDock.game(manifest:data,library:"Program Files (x86)/Steam/steamapps")!
+  let other=DockGame(id:730,name:"CS2",installDir:game.installDir,library:"Other/steamapps",installed:true,customExecutables:false)
+  assert(!NativeSteamPlay.libraryListed(other,root:"Program Files (x86)/Steam",drive:drive))
+  let vdf=Data(#"""
+  "libraryfolders" {"1" {"path" "C:\\Other"}}
+  """#.utf8)
+  try vdf.write(to:apps.appendingPathComponent("libraryfolders.vdf"))
+  assert(NativeSteamPlay.libraryListed(other,root:"Program Files (x86)/Steam",drive:drive))
   let script=try NativeSteamPlay.prepare(game,drive:drive)
   let body=try String(contentsOf:drive.appendingPathComponent(script),encoding:.utf8)
   assert(body.contains("steam.exe\" \(NativeSteamPlay.clientArguments) -applaunch 730"))
   assert(try Data(contentsOf:manifest)==data);assert(try String(contentsOf:login,encoding:.utf8)=="auth-fixture-must-stay")
+  try fm.removeItem(at:folder.appendingPathComponent("game/bin/win64/cs2.exe"))
+  do {_=try NativeSteamPlay.prepare(game,drive:drive);assertionFailure("missing CS2 image must reject")}catch{}
+  try Data("game-fixture".utf8).write(to:folder.appendingPathComponent("game/bin/win64/cs2.exe"))
   try fm.removeItem(at:manifest)
   do {_=try NativeSteamPlay.prepare(game,drive:drive);assertionFailure("missing manifest must reject")}catch{}
   try data.write(to:manifest);try fm.removeItem(at:folder)
