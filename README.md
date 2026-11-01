@@ -122,6 +122,7 @@ containing the iOS work; upstream clones will not build here.
 | 32-bit games (WoW64) | [`docs/WOW64.md`](docs/WOW64.md) |
 | Controllers and touch controls | [`docs/CONTROLLERS.md`](docs/CONTROLLERS.md) |
 | Keyboard, mouse and trackpad | [`docs/KEYBOARD_MOUSE.md`](docs/KEYBOARD_MOUSE.md) |
+| iPhone Duo: laptop fold, deck and game switching | [`docs/DUO.md`](docs/DUO.md) |
 | Audio and video | [`docs/MEDIA.md`](docs/MEDIA.md) |
 | Licensing in detail | [`docs/LICENSING.md`](docs/LICENSING.md) |
 

@@ -43,6 +43,10 @@ void winios_post_touch_up(int x, int y);
  * down=1 press, down=0 release. */
 void winios_post_key(int vk, int down);
 
+/* Quit game: WM_CLOSE to the foreground window, for games that never turn
+ * Alt+F4 into a close (raw keyboard input without legacy messages). */
+void winios_post_close(void);
+
 /* Text-only paste: one Unicode scalar, optionally represented by a US-layout
  * virtual key. Returns 0 when the queue is busy; retry without advancing.
  * Cancel invalidates text already queued, without discarding physical input. */
@@ -76,6 +80,10 @@ void winios_cursor_move(int x, int y);
  * mapping (0 when there is no desktop). */
 unsigned long long winios_surface_present_count(void);
 int winios_compositor_set_hidden(int hidden);
+
+/* The view a desktop session draws in, for the game mirror (FoldDeck.swift), and
+ * the rect its desktop takes in that view's points; NULL when there is none. */
+void *winios_compositor_mirror_source(double *x, double *y, double *w, double *h);
 
 /* Game-mode windows (Winios.m). The window a game session's swapchain
  * presents from (IOSDisplayShim) is never drawn as a GDI window; a Wine

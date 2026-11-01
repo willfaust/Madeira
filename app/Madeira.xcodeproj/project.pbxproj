@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A1000E07 /* EpicCloudSaves.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E07 /* EpicCloudSaves.swift */; };
 		A1000E06 /* EpicCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E06 /* EpicCloud.swift */; };
+		A100097D /* MadeiraVPN.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200097D /* MadeiraVPN.swift */; };
 		A1000520 /* MadeiraDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000520 /* MadeiraDock.swift */; };
 		A1000521 /* MadeiraDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000521 /* MadeiraDockView.swift */; };
 		A1000650 /* DockStartScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000650 /* DockStartScreen.swift */; };
@@ -155,6 +156,10 @@
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
+		A100097B /* PortraitPin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200097B /* PortraitPin.swift */; };
+		A100097A /* SessionSwitch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200097A /* SessionSwitch.swift */; };
+		A1000979 /* FoldDeck.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000979 /* FoldDeck.swift */; };
+		A100097C /* DeviceFold.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200097C /* DeviceFold.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
 		A1000400 /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000400 /* Library.swift */; };
 		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
@@ -222,6 +227,7 @@
 /* Begin PBXFileReference section */
 		A2000E07 /* EpicCloudSaves.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEpic/EpicCloudSaves.swift"; sourceTree = "<group>"; };
 		A2000E06 /* EpicCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicCloud.swift"; sourceTree = "<group>"; };
+		A200097D /* MadeiraVPN.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraVPN.swift"; sourceTree = "<group>"; };
 		A2000520 /* MadeiraDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDock.swift"; sourceTree = "<group>"; };
 		A2000521 /* MadeiraDockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MadeiraDockView.swift"; sourceTree = "<group>"; };
 		A2000650 /* DockStartScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartScreen.swift"; sourceTree = "<group>"; };
@@ -384,6 +390,10 @@
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
+		A200097B /* PortraitPin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortraitPin.swift; sourceTree = "<group>"; };
+		A200097A /* SessionSwitch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionSwitch.swift; sourceTree = "<group>"; };
+		A2000979 /* FoldDeck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoldDeck.swift; sourceTree = "<group>"; };
+		A200097C /* DeviceFold.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceFold.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
 		A2000400 /* Library.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Library.swift; sourceTree = "<group>"; };
 		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
@@ -554,6 +564,7 @@
 				A2000243 /* GamepadInput.swift */,
 				A2000260 /* PadKeyboardMouse.swift */,
 				A2000002 /* ContentView.swift */,
+				A200097D /* MadeiraVPN.swift */,
 				A2000003 /* LogStore.swift */,
 				A2000077 /* MadeiraConfig.swift */,
 				A2000200 /* LogPattern.swift */,
@@ -564,6 +575,10 @@
 				A2000990 /* GameIniFiles.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
+				A200097B /* PortraitPin.swift */,
+				A200097A /* SessionSwitch.swift */,
+				A2000979 /* FoldDeck.swift */,
+				A200097C /* DeviceFold.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
 				A2000400 /* Library.swift */,
 				A2000977 /* LibraryCoverSpot.swift */,
@@ -928,6 +943,7 @@
 				A1000243 /* GamepadInput.swift in Sources */,
 				A1000260 /* PadKeyboardMouse.swift in Sources */,
 				A1000002 /* ContentView.swift in Sources */,
+				A100097D /* MadeiraVPN.swift in Sources */,
 				A1000003 /* LogStore.swift in Sources */,
 				A1000077 /* MadeiraConfig.swift in Sources */,
 				A1000200 /* LogPattern.swift in Sources */,
@@ -938,6 +954,10 @@
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
+				A100097B /* PortraitPin.swift in Sources */,
+				A100097A /* SessionSwitch.swift in Sources */,
+				A1000979 /* FoldDeck.swift in Sources */,
+				A100097C /* DeviceFold.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,
 				A1000400 /* Library.swift in Sources */,
 				A1000977 /* LibraryCoverSpot.swift in Sources */,

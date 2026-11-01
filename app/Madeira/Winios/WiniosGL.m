@@ -277,14 +277,22 @@ static BOOL pipeline_ensure(MadeiraGLPresenter *p, MTLPixelFormat format) {
     return YES;
 }
 
-// Frames put on screen by GL, both backends. DXMT counts its own presents
-// (madeira_get_present_count); madeira_frame_count adds the two, so the FPS
-// readout and the launch checks that wait for a first frame see GL games too.
+// Frames put on screen by GL, both backends, and by Vulkan (build/win32u-unix/
+// vulkan_ios.c calls madeira_note_vulkan_present). DXMT counts its own presents
+// (madeira_get_present_count); madeira_frame_count adds the three, so the FPS
+// readout and the launch checks that wait for a first frame see GL and Vulkan
+// games too.
 static _Atomic uint64_t gl_present_count;
+static _Atomic uint64_t vulkan_present_count;
 extern uint64_t madeira_get_present_count(void);
 
+void madeira_note_vulkan_present(void) {
+    atomic_fetch_add_explicit(&vulkan_present_count, 1, memory_order_relaxed);
+}
+
 uint64_t madeira_frame_count(void) {
-    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed);
+    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed)
+        + atomic_load_explicit(&vulkan_present_count, memory_order_relaxed);
 }
 
 // The presenter behind *state, created on first use for hwnd's layer.

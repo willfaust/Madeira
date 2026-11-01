@@ -50,6 +50,11 @@ let screens: [(String, ControlPresetScreen)] = [
     ("13in tablet", ControlPresetScreen(width: 1366, height: 1024, top: 24, bottom: 20)),
     ("mini tablet", ControlPresetScreen(width: 1133, height: 744, top: 24, bottom: 20)),
     ("phone, portrait", ControlPresetScreen(width: 402, height: 874, left: 0, right: 0, top: 62, bottom: 34)),
+    // The iPhone Duo: open in landscape, the folded deck, and upright the space below
+    // a game pinned to the top (PortraitDeck; a 1.25 game leaves about 370 points).
+    ("Duo open", ControlPresetScreen(width: 951, height: 669, top: 24, bottom: 20)),
+    ("Duo folded deck", ControlPresetScreen(width: 669, height: 455)),
+    ("Duo upright deck", ControlPresetScreen(width: 669, height: 360)),
 ]
 let expected = ["LS", "RS", "D↑", "D↓", "D←", "D→", "A", "B", "X", "Y",
                 "LB", "RB", "LT", "RT", "View", "Menu", "L3", "R3"]
@@ -223,9 +228,13 @@ gamepad = (app / 'GamepadInput.swift').read_text()
 for flag, where in (('MADEIRA_CONTROL_PRESETS', presets), ('MADEIRA_CONTROLS_EDITOR_DONE', content)):
     assert f'.flag("{flag}")' in where, flag + ' is a kill switch'
 # Defaults an existing user would notice are opt-in: the built-in is never applied
-# automatically and player 1 is not reserved unless the switch is set to 1.
-for flag, where in (('MADEIRA_CONTROLS_XBOX_DEFAULT', presets), ('MADEIRA_PAD_EARLY_SLOT', gamepad)):
+# automatically unless the switch is set to 1.
+for flag, where in (('MADEIRA_CONTROLS_XBOX_DEFAULT', presets),):
     assert f'.optIn("{flag}")' in where and f'.flag("{flag}")' not in where, flag + ' is opt-in'
+# Player 1 is reserved at session start unless the switch is "0": on by default since
+# DOOM Eternal on the Duo never saw a controller paired mid-game (build 20).
+reserve = function(gamepad, '@MainActor func reserveSessionSlot(')
+assert 'MADEIRA_PAD_EARLY_SLOT' in reserve and 'early != "0"' in reserve, 'MADEIRA_PAD_EARLY_SLOT is on unless "0"'
 assert '!= "0"' in function(gamepad, 'static func flag('), 'only "0" disables'
 assert '== "1"' in function(gamepad, 'static func optIn('), 'only "1" enables'
 assert 'Self.xboxDefault' in function(presets, 'var defaultPending: Bool {'), 'the automatic built-in needs the opt-in'
@@ -246,8 +255,8 @@ assert 'TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2' in model, 'the menu 
 window = function(content, 'final class ControlsWindow: UIWindow {')
 assert window.index('if m.editing {') < window.index('!hit.isDescendant(of: root)') \
     < window.index('guard m.hitsInteractive('), 'menu and dialog presentations take their touches in play mode'
-reserve = function(gamepad, '@MainActor func reserveSessionSlot(touchControls: Bool) {')
-assert reserve.index('guard Self.enabled, Self.optIn("MADEIRA_PAD_EARLY_SLOT")') < reserve.index('touchState.reserved = true')
+reserve = function(gamepad, '@MainActor func reserveSessionSlot(touchControls: Bool, gameLines: String? = nil) {')
+assert reserve.index('guard Self.enabled, early != "0"') < reserve.index('touchState.reserved = true')
 run = function(content, 'private func runWineFullSequence(profile: LibraryEntry? = nil) {')
 assert run.index('GamepadInput.shared.reserveSessionSlot(') < run.index('DispatchQueue.global'), 'reserved before Wine starts'
 
@@ -257,7 +266,9 @@ lib = (app / 'Library.swift').read_text()
 hud = function(lib, 'struct LibraryHUD: View {')
 menu = function(hud, 'private var menu: some View {')
 row = menu.index('ControlLayoutMenu(style: .row)')
-assert 'if session && !m.editing { LibraryHUD() } else { topBar }' in overlay, 'a session shows the HUD instead of the top bar'
+# Folded, or upright with touch controls, the HUD is framed to the deck (DeviceFold.swift, PortraitDeck).
+assert overlay.index('if session && !m.editing {') < overlay.index('LibraryHUD()') < overlay.index('} else { topBar }'), \
+    'a session shows the HUD instead of the top bar'
 assert menu.index('Toggle("Touch controls"') < row < menu.index('LabeledContent("Opacity")'), \
     'the Session menu offers the layout menu with the touch-control settings'
 assert 'controls.visible && ControlPresetsModel.enabled' in menu[row - 80:row], \

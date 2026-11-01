@@ -118,13 +118,15 @@ connects only once the landscape overlay shows its controller mappings, and a
 paired controller may not have reported an extended profile yet, so such a game
 would never see a pad.
 
-This is **opt-in** (`env.MADEIRA_PAD_EARLY_SLOT = 1`), because the reserved
-player 1 stays connected for the whole session. With the switch, when a Wine
+This is **on by default** (`env.MADEIRA_PAD_EARLY_SLOT = 0` turns it off), even
+though the reserved player 1 stays connected for the whole session: in DOOM
+Eternal on the Duo, touch connected slot 0 only after the game had looked, and
+a controller paired mid-game was never seen. When a Wine
 session starts with visible touch controller mappings (or the built-in about
 to be applied by `MADEIRA_CONTROLS_XBOX_DEFAULT = 1`) or with a paired
 controller, slot 0 is published as connected with neutral input. Live touch or
 physical input takes it over. Hiding the controls or disconnecting the pad then
-leaves player 1 connected at rest until the app exits. Without the switch,
+leaves player 1 connected at rest until the app exits. With the switch at `0`,
 slot 0 connects only when a real source appears, as before.
 
 ## A controller as keyboard and mouse
@@ -340,7 +342,7 @@ user sees are opt-in (only `1` enables); the others are on unless set to `0`:
 | `MADEIRA_CONTROL_PRESETS` | on | `0`: no layout menu, no write-back |
 | `MADEIRA_CONTROLS_EDITOR_DONE` | on | `0`: the checkmark and show/hide glyph while editing |
 | `MADEIRA_CONTROLS_XBOX_DEFAULT` | **off** | `1`: a user with no controls file gets the built-in once |
-| `MADEIRA_PAD_EARLY_SLOT` | **off** | `1`: player 1 is reserved at session start (see above) |
+| `MADEIRA_PAD_EARLY_SLOT` | **on** | `0`: player 1 is no longer reserved at session start (see above) |
 | `MADEIRA_PAD_MODE` | XInput | `hid` / `dualsense` / `generic`: player 1 as a HID controller (see above) |
 | `MADEIRA_HIDPAD_XINPUT` | **off** | `1`: in HID mode, player 1 stays an XInput pad as well |
 | `MADEIRA_PAD_OUTPUT` | on | `0`: no rumble/trigger/lightbar output to the pad; `hid` / `xinput`: only that half |
@@ -562,8 +564,8 @@ merge, rebuild the paired components and test:
   delete it; the layout menu and its dialogs respond anywhere on screen; each
   kill switch at `0`. With `MADEIRA_CONTROLS_XBOX_DEFAULT = 1`: a user without
   a controls file gets the built-in once and an existing file is kept.
-- By default player 1 is not connected until a real source appears. With
-  `MADEIRA_PAD_EARLY_SLOT = 1`, a game that enumerates XInput only at startup
-  sees player 1 with touch controls shown or a controller paired before launch.
+- By default a game that enumerates XInput only at startup sees player 1 with
+  touch controls shown or a controller paired before launch. With
+  `MADEIRA_PAD_EARLY_SLOT = 0`, player 1 is not connected until a real source appears.
 
 The fork's existing device history does not prove this isolated extraction.

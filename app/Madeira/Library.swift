@@ -102,8 +102,16 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
     private var announced = false
     private let allowed = MadeiraConfig.flag("MADEIRA_FRONTEND_CONTROLLER")
     var ownsInput: Bool { lock.lock(); defer { lock.unlock() }; return enabled && owns }
+    /// ownsInput, published on the main queue for ClaimGamepadEvents: while the
+    /// library owns the pad, iOS's own controller navigation reaches the app's controls.
+    @Published private(set) var libraryOwnsPad = false
     func configure(enabled: Bool, ownsInput: Bool) {
-        lock.lock(); self.enabled = enabled && allowed; owns = ownsInput; lock.unlock()
+        lock.lock(); self.enabled = enabled && allowed; owns = ownsInput; let now = self.enabled && owns; lock.unlock()
+        DispatchQueue.main.async {
+            guard self.libraryOwnsPad != now else { return }
+            self.libraryOwnsPad = now
+            LogStore.shared.log("[controller-ui] app has the pad=\(now ? 1 : 0)")
+        }
     }
     /// One sample of player 1's pad, in XInput button bits and stick units.
     func sample(buttons raw: UInt16, lx: Int16, ly: Int16) {
@@ -590,6 +598,13 @@ struct LibraryEntry: Codable, Identifiable {
             if let sem = semaphoreFastPath { setenv("MADEIRA_FASTSYNC_SEM", sem ? "1" : "0", 1) }
             else { unsetenv("MADEIRA_FASTSYNC_SEM") }
         }
+        // Lean diagnostics unless madeira.cfg says otherwise (this game's own line, applied
+        // below, still wins): every 20 s the samplers that stop each of the game's threads
+        // ([thread-sample] bursts, the RIP profile, Winios's stack dump) and their logging
+        // hitched DOOM Eternal on the iPhone Duo (2026-10-29). env.MADEIRA_LEAN_DIAG = 0
+        // brings them back.
+        if MadeiraConfig.get("env.MADEIRA_LEAN_DIAG") == nil,
+           ProcessInfo.processInfo.environment["MADEIRA_LEAN_DIAG"] == nil { setenv("MADEIRA_LEAN_DIAG", "1", 1) }
         madeira_set_vsync_locked(effectiveFPSMode)
         // This game's own lines; a launch without any unsets the previous game's.
         do {
@@ -792,6 +807,9 @@ final class LibraryModel: ObservableObject {
     private var launchDismissLogged = false
     var menuButtonRect = CGRect.zero
     var performanceRect = CGRect.zero
+    /// The floating button that recorded each rect (LibraryFloatingItem.forget).
+    var menuButtonOwner: UUID?
+    var performanceOwner: UUID?
     /// The in-game menu and the starting screen take every touch.
     var blocksGameplayTouch: Bool { preparing != nil || (current != nil && (menu || launching)) }
     private var timer: Timer?
@@ -1498,6 +1516,13 @@ final class LibraryModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             winios_post_key(0x73, 0); winios_post_key(0x12, 0)
         }
+        // A game that reads its keyboard as raw input without legacy messages never
+        // turns Alt+F4 into a close (DOOM Eternal): a second later its window is also
+        // sent WM_CLOSE, as its title bar's close button would.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.quitRequested, self.current != nil else { return }
+            winios_post_close()
+        }
         sessionMessage = "Close requested. Confirm any in-game exit dialog."
         menu = false
         fputs("[frontend] graceful close requested\n", stderr)
@@ -1688,6 +1713,7 @@ struct LibraryLargeTitle: ToolbarContent {
 /// Symbol at the title's own size is nearly twice the height of its M.
 struct LibraryTitleText: View {
     @ObservedObject private var alignment = LibraryHeaderAlignment.shared
+    @ObservedObject private var fold = DeviceFold.shared
     @ObservedObject private var jitState = LibraryJITState.shared
     var body: some View {
         let jit = jitState.enabled
@@ -1702,7 +1728,7 @@ struct LibraryTitleText: View {
         }
         .font(.largeTitle.bold())
         .fixedSize()
-        .offset(x: alignment.shift)
+        .offset(x: alignment.shift + (fold.portraitFold ? 12 : 0))   // in from the open Duo's edge
         .background(LibraryTitleAnchor())   // after the offset: marks where the text is laid out
     }
 }
@@ -2182,6 +2208,96 @@ struct AmbientRays: View {
 /// those masks, a slight hue drift and the rays' sway move, at 30 frames a second.
 /// Dark appearance adds the light (plusLighter), as light does on a dark wall; light
 /// appearance tints more softly. Reduce Motion holds it still.
+/// The library holds its moving light still while it scrolls and while the iPhone is
+/// hot (thermal state serious or worse): every visible card's glow is three layers of
+/// blurred artwork redrawn 30 times a second (AmbientGlow), which on a large screen, or
+/// with the GPU throttled, left too little for scrolling. Each scroll is timed and
+/// logged: [ui-scroll] frames, frames over 25 ms, the slowest, and whether a Steam
+/// download ran and how hot the iPhone was.
+@MainActor
+final class LibraryMotion: NSObject, ObservableObject {
+    static let shared = LibraryMotion()
+    /// The cards' light holds still.
+    @Published private(set) var still = false
+    private var scrolling = false
+    private var hot = false
+    private var thermal: NSObjectProtocol?
+    private var link: CADisplayLink?
+    private var began: CFTimeInterval = 0, last: CFTimeInterval = 0, worst: CFTimeInterval = 0
+    private var frames = 0, slow = 0
+
+    private override init() {
+        super.init()
+        hot = Self.isHot
+        still = hot
+        thermal = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
+                                                         object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hot = Self.isHot
+                self.update()
+            }
+        }
+    }
+
+    private static var isHot: Bool {
+        ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+    }
+
+    /// The library's scroll view started or stopped moving (LibraryScrollTracking).
+    func scrolling(_ now: Bool) {
+        guard now != scrolling else { return }
+        scrolling = now
+        update()
+        if now { measure() } else { report() }
+    }
+
+    private func update() {
+        let now = scrolling || hot
+        if now != still { still = now }
+    }
+
+    private func measure() {
+        link?.invalidate()
+        frames = 0; slow = 0; worst = 0; last = 0; began = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = link.timestamp
+        if last > 0 {
+            let gap = now - last
+            frames += 1
+            if gap > 0.025 { slow += 1 }
+            worst = max(worst, gap)
+        }
+        last = now
+    }
+
+    private func report() {
+        link?.invalidate(); link = nil
+        guard frames > 0 else { return }
+        let downloading = SteamOwnedLibrary.shared.downloads.values.contains { $0.state == .active }
+        LogStore.shared.log(String(format: "[ui-scroll] %.1f s frames=%d over-25ms=%d worst=%.0f ms downloading=%d thermal=%d",
+                                   CACurrentMediaTime() - began, frames, slow, worst * 1000,
+                                   downloading ? 1 : 0, ProcessInfo.processInfo.thermalState.rawValue))
+    }
+}
+
+/// Tells LibraryMotion when the library scrolls.
+struct LibraryScrollTracking: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, phase in LibraryMotion.shared.scrolling(phase.isScrolling) }
+                .onDisappear { LibraryMotion.shared.scrolling(false) }
+        } else {
+            content
+        }
+    }
+}
+
 struct AmbientGlow: View {
     let image: Image
     let size: CGSize
@@ -2194,6 +2310,7 @@ struct AmbientGlow: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var settings = AmbientGlowSettings.shared
+    @ObservedObject private var motion = LibraryMotion.shared
 
     private func layer(_ angle: Double, _ mirror: Bool, frame: CGSize) -> some View {
         func art() -> some View {
@@ -2234,7 +2351,7 @@ struct AmbientGlow: View {
         // A game that is not installed throws a fainter, less vivid light.
         let strength = (dark ? 0.92 : 0.8) * (dimmed ? 0.3 : 1)
         let plain = layer(0, false, frame: frame), turned = layer(180, false, frame: frame), mirrored = layer(0, true, frame: frame)
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || motion.still)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let f = movie.frame(at: reduceMotion ? 0 : t)
             ZStack {
@@ -2879,6 +2996,10 @@ struct LibraryView: View {
     /// The games you added in the page's order, for the controller's focus. Grouping
     /// and sorting go game by game, so their order among the Steam games is the
     /// order without them.
+    /// focusOrder, without the games you added while Other games is collapsed.
+    private var padFocusOwn: [LibraryEntry] {
+        group == "platform" && SteamGamesSection.shown && SteamGamesSection.collapsible && hideOthers ? [] : focusOrder
+    }
     private var focusOrder: [LibraryEntry] {
         guard group != "platform" else { return entries }
         // A library file edited by hand (or written by a fork) may repeat an id: keep the first.
@@ -3180,15 +3301,24 @@ struct LibraryView: View {
             .padding(16).frame(maxWidth: 1100).frame(maxWidth: .infinity)
         }
         .refreshable { await SteamGamesSection.refresh() }
+        .modifier(LibraryScrollTracking())   // the cards' light holds still while scrolling
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
-            let items = focusOrder
-            let ids = [LibraryEntry.desktopID] + items.map(\.id)
-            let index = ids.firstIndex(where: { $0 == focused }) ?? 0
+            guard tab == 0, selected == nil, !browser, !onboarding.presented, !LibrarySteamFocus.shared.sheetOpen else { return }
+            // Desktop, then the Steam section's games and the games you added in the page's
+            // order (LibrarySteamFocus); a collapsed section is skipped.
+            let items = padFocusOwn
+            let steam = LibrarySteamFocus.shared
+            let ids = [LibraryEntry.desktopID] + steam.installed.map(LibrarySteamFocus.key) + items.map(\.id)
+                + steam.notInstalled.map(LibrarySteamFocus.key)
+            let found = ids.firstIndex(where: { $0 == focused })
+            let index = found ?? 0
             if command == "add" { browser = true }
             else if command == "accept" {
+                // The focused game left the page (its section collapsed, a search): start over.
+                if found == nil, focused != nil { focused = ids.first; return }
                 if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
-                else { selected = items[index - 1] }
+                else if let appID = LibrarySteamFocus.appID(ids[index]) { steam.select(appID) }
+                else if let entry = items.first(where: { $0.id == ids[index] }) { selected = entry }
             }
             else if ["left", "right", "up", "down"].contains(command) {
                 let delta = command == "left" || command == "up" ? -1 : 1
@@ -3202,6 +3332,7 @@ struct LibraryView: View {
             GlassSkin.shared.start()   // liquid metal on the navigation bar's glass pills
         }
         .onChange(of: focused) { _, id in
+            LibrarySteamFocus.shared.focused = LibrarySteamFocus.appID(id)   // its card's ring
             if let id { withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { reader.scrollTo(id, anchor: .center) } }
         }
         }
@@ -3241,14 +3372,22 @@ struct LibraryView: View {
                         open: { selected = $0 },
                         desktop: { AnyView(desktopButton) })
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
-            let items = focusOrder
-            let ids = [LibraryEntry.desktopID] + items.map(\.id)
-            let index = ids.firstIndex(where: { $0 == focused }) ?? 0
+            guard tab == 0, selected == nil, !browser, !onboarding.presented, !LibrarySteamFocus.shared.sheetOpen else { return }
+            // Desktop, then the Steam section's games and the games you added in the page's
+            // order (LibrarySteamFocus); a collapsed section is skipped.
+            let items = padFocusOwn
+            let steam = LibrarySteamFocus.shared
+            let ids = [LibraryEntry.desktopID] + steam.installed.map(LibrarySteamFocus.key) + items.map(\.id)
+                + steam.notInstalled.map(LibrarySteamFocus.key)
+            let found = ids.firstIndex(where: { $0 == focused })
+            let index = found ?? 0
             if command == "add" { browser = true }
             else if command == "accept" {
+                // The focused game left the page (its section collapsed, a search): start over.
+                if found == nil, focused != nil { focused = ids.first; return }
                 if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
-                else { selected = items[index - 1] }
+                else if let appID = LibrarySteamFocus.appID(ids[index]) { steam.select(appID) }
+                else if let entry = items.first(where: { $0.id == ids[index] }) { selected = entry }
             }
             else if ["left", "right", "up", "down"].contains(command) {
                 let delta = command == "left" || command == "up" ? -1 : 1
@@ -4727,6 +4866,7 @@ struct LibraryFloatingItem: View {
     @State private var measured = CGSize(width: 48, height: 48)
     @State private var faded = false
     @State private var touched = 0
+    @State private var owner = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(isMenu: Bool, viewport: CGSize, insets: EdgeInsets) {
@@ -4741,7 +4881,16 @@ struct LibraryFloatingItem: View {
                        y: min(max(top, viewport.height * ny + translation.height), max(top, viewport.height - insets.bottom - measured.height / 2 - 8)))
     }
     private func record(_ rect: CGRect) {
-        if isMenu { model.menuButtonRect = rect } else { model.performanceRect = rect }
+        if isMenu { model.menuButtonRect = rect; model.menuButtonOwner = owner }
+        else { model.performanceRect = rect; model.performanceOwner = owner }
+    }
+    /// The Duo folding to the laptop deck and back lays the HUD out again: the new
+    /// button appeared before the old one went, and the old one's clearing left the
+    /// menu button's rect empty, so ControlsWindow passed its taps to the game and the
+    /// menu opened only on the deck. Only the button that recorded a rect clears it.
+    private func forget() {
+        if isMenu { if model.menuButtonOwner == owner { model.menuButtonRect = .zero } }
+        else if model.performanceOwner == owner { model.performanceRect = .zero }
     }
     var body: some View {
         let center = position(drag)
@@ -4771,7 +4920,7 @@ struct LibraryFloatingItem: View {
         })
         .position(center)
         .onAppear { record(rect) }.onChange(of: rect) { _, value in record(value) }
-        .onDisappear { record(.zero) }
+        .onDisappear { forget() }
         .task(id: touched) {
             guard isMenu else { return }
             faded = false
@@ -4795,6 +4944,8 @@ struct LibraryHUD: View {
     }
     @ObservedObject private var model = LibraryModel.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    /// The folded Duo's deck has its own Menu key (FoldDeck.swift).
+    @ObservedObject private var foldDeck = FoldDeckState.shared
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
     private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
@@ -4836,10 +4987,10 @@ struct LibraryHUD: View {
                     // (and measured) all the same.
                     launchView(entry, geometry: geo).opacity(curtain.hidesStartingScreen ? 0 : 1)
                 }
-                if !model.startingScreen && model.performance { LibraryFloatingItem(isMenu: false, viewport: geo.size, insets: geo.safeAreaInsets) }
+                if !model.startingScreen && model.performance && !foldDeck.shown { LibraryFloatingItem(isMenu: false, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.liveLogs && !model.startingScreen { LibraryLiveLogs().frame(maxWidth: 550, maxHeight: 140).padding(.top, Self.topInset(geo) + 60).padding(.horizontal, 12).allowsHitTesting(false) }
                 if !model.sessionMessage.isEmpty && !model.startingScreen { Text(model.sessionMessage).font(.caption).padding(10).background(.regularMaterial, in: Capsule()).frame(maxWidth: .infinity).padding(.top, Self.topInset(geo) + 12).allowsHitTesting(false) }
-                if !model.startingScreen { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
+                if !model.startingScreen && !foldDeck.shown { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.menu {
                     Color.black.opacity(0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
                     (bindsPage ? AnyView(bindsMenu) : AnyView(menu))

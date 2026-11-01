@@ -1,0 +1,57 @@
+MoltenVK: presents honour Madeira's FPS limit
+
+A present with no desired present time is shown with presentAfterMinimumDuration
+and the frame time of the session's FPS limit, as DXMT's presents are. The limit
+comes from the app's madeira_get_vsync_locked() (DXMT's winemetal_unix.c, found
+with dlsym(RTLD_DEFAULT), so it works for gl/libMoltenVK.dylib and for a static
+link): 1 = 60, 3 = 30, 4 = 40 FPS; 0 (display maximum) and 2 (uncapped) present
+at once, as does a process without that symbol. Without it DOOM Eternal ran at
+whatever the panel showed with a 30 or 40 FPS limit.
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index 2b39492..c60acc7 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -30,6 +30,7 @@
+ #import "CAMetalLayer+MoltenVK.h"
+ 
+ #import <IOSurface/IOSurfaceRef.h>
++#include <dlfcn.h>
+ 
+ using namespace std;
+ using namespace SPIRV_CROSS_NAMESPACE;
+@@ -1644,6 +1645,22 @@ static void signalAndUntrack(const MVKSwapchainSignaler& signaler) {
+ 	return _mtlTextureHeadless ? _mtlTextureHeadless : getCAMetalDrawable().texture;
+ }
+ 
++// Madeira: the session's FPS limit spaces a Vulkan game's presents the way DXMT spaces a
++// Direct3D game's, with presentAfterMinimumDuration: the drawable is shown at a vblank at least
++// that long after the previous one. Without it a Vulkan game (DOOM Eternal) ignored the limit:
++// 30 and 40 ran at whatever the panel showed. The app's madeira_get_vsync_locked gives the
++// limit (1 = 60, 3 = 30, 4 = 40; 0 = display maximum and 2 = uncapped present as before); any
++// other program has no such symbol and presents as before.
++static double mvkMadeiraMinimumPresentDuration() {
++	static int (*const limit)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "madeira_get_vsync_locked");
++	switch (limit ? limit() : -1) {
++		case 1: return 1.0 / 60.0;
++		case 3: return 1.0 / 30.0;
++		case 4: return 1.0 / 40.0;
++		default: return 0;
++	}
++}
++
+ // Present the drawable and make myself available only once the command buffer has completed.
+ // Pass MVKImagePresentInfo by value because it may not exist when the callback runs.
+ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffer> mtlCmdBuff,
+@@ -1665,8 +1682,11 @@ static void signalAndUntrack(const MVKSwapchainSignaler& signaler) {
+ 		if (presentInfo.presentMode != VK_PRESENT_MODE_MAX_ENUM_KHR) {
+ 			mtlDrwbl.layer.displaySyncEnabledMVK = (presentInfo.presentMode != VK_PRESENT_MODE_IMMEDIATE_KHR);
+ 		}
++		double minimumDuration = mvkMadeiraMinimumPresentDuration();
+ 		if (presentInfo.desiredPresentTime) {
+ 			[mtlDrwbl presentAtTime: (double)presentInfo.desiredPresentTime * 1.0e-9];
++		} else if (minimumDuration > 0) {
++			[mtlDrwbl presentAfterMinimumDuration: minimumDuration];
+ 		} else {
+ 			[mtlDrwbl present];
+ 		}

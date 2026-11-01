@@ -34,7 +34,7 @@ final class GamepadInput: @unchecked Sendable {
         }
     }
 
-    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT=1; default OFF).
+    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT; on unless "0").
     ///
     /// Some input layers enumerate XInput once at startup and only rescan on a
     /// device-arrival broadcast, which this port does not deliver. Touch slot 0
@@ -45,12 +45,20 @@ final class GamepadInput: @unchecked Sendable {
     /// is connected at rest from the start; live input takes it over. The
     /// reservation lasts until the process exits (one Wine session per run),
     /// so player 1 then shows as connected for the whole session even while no
-    /// controller is in use. That is why it is opt-in: without the switch,
-    /// slot 0 connects only when a real source appears, as before.
-    @MainActor func reserveSessionSlot(touchControls: Bool) {
-        guard Self.enabled, Self.optIn("MADEIRA_PAD_EARLY_SLOT") else { return }
+    /// controller is in use. It is on by default since DOOM Eternal on the Duo:
+    /// touch connected slot 0 only after the game had looked, and a controller
+    /// paired mid-game was never seen. "0" connects slot 0 only when a real
+    /// source appears, as before.
+    /// `gameLines`: the library game's own config lines, which win as they do at launch
+    /// (MadeiraConfig.applyGame runs after this, on the launch worker).
+    @MainActor func reserveSessionSlot(touchControls: Bool, gameLines: String? = nil) {
+        let key = "env.MADEIRA_PAD_EARLY_SLOT"
+        let early = gameLines.flatMap { MadeiraConfig.parse($0)[key] }
+            ?? MadeiraConfig.get(key) ?? ProcessInfo.processInfo.environment["MADEIRA_PAD_EARLY_SLOT"]
+        guard Self.enabled, early != "0" else { return }
         let touch = touchControls && Self.touchEnabled
-        let paired = !GCController.controllers().isEmpty
+        // In keyboard-and-mouse mode the pad is keys and a mouse, so no XInput player 1 for it.
+        let paired = LibraryModel.shared.controllerMode != "keys" && !GCController.controllers().isEmpty
         guard touch || paired else { return }
         queue.async { [self] in touchState.reserved = true; sample() }
         LogStore.shared.log("[xinput] ml1990 slot=0 reserved for the session touch=\(touch ? 1 : 0) paired=\(paired ? 1 : 0)")
@@ -548,11 +556,26 @@ final class GamepadInput: @unchecked Sendable {
     }
 }
 
-/// iOS 18 otherwise routes stick input into UIKit/SwiftUI focus navigation.
+/// iOS 18 otherwise routes stick input into UIKit/SwiftUI focus navigation. The
+/// game claims the pad; while the library owns it (no session, or the in-game menu
+/// open: LibraryController), the claim is lifted so that navigation reaches the
+/// app's own controls. Off unless MADEIRA_CONTROLLER_UI=1: not yet confirmed on iPhone.
+/// Log tag: [controller-ui] (who has the pad, and where iOS moves the focus).
 struct ClaimGamepadEvents: ViewModifier {
+    @ObservedObject private var library = LibraryController.shared
+    private static let appNavigation = MadeiraConfig.get("env.MADEIRA_CONTROLLER_UI") == "1"
+    private static let focusLog = NotificationCenter.default.addObserver(
+        forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main) { note in
+        let context = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext
+        let item = context?.nextFocusedItem.map { String(describing: type(of: $0)) } ?? "none"
+        LogStore.shared.log("[controller-ui] focus \(item)")
+    }
+
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *), GamepadInput.enabled {
-            content.handlesGameControllerEvents(matching: .gamepad)
+            let _ = Self.appNavigation ? Self.focusLog : nil
+            let claimed: GCUIEventTypes = Self.appNavigation && library.libraryOwnsPad ? [] : .gamepad
+            content.handlesGameControllerEvents(matching: claimed)
         } else { content }
     }
 }

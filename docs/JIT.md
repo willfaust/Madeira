@@ -7,17 +7,22 @@ process.
 
 ## Automatic selection
 
-The default **Automatic** method uses StikDebug when iOS reports that its
-`stikdebug://` URL scheme is installed. Otherwise, it uses Built-in StikJIT.
-Madeira does not silently switch methods after a failed attempt; the error is
-shown so the pairing, VPN, or Developer Disk Image problem can be fixed.
+The default **Automatic** method uses Built-in StikJIT once a pairing is
+stored, so Madeira never leaves the app for it. Without one, it uses StikDebug
+when iOS reports that its `stikdebug://` URL scheme is installed, and Built-in
+StikJIT otherwise. A StikDebug choice stored by an earlier build is moved to
+Automatic once. Madeira does not silently switch methods after a failed
+attempt; the error is shown so the pairing, VPN, or Developer Disk Image
+problem can be fixed.
 
-Choose a method under **Settings → JIT**, or open **JIT setup** for its guided
-setup and status. First-run setup offers three ways in, each with its own
-numbered steps: **In-app** (pair this iPhone with Madeira, iOS 27 and
-later) and **In-app with pairing file** both select Built-in StikJIT,
-**StikDebug** selects StikDebug, and setting it up later leaves the current
-method unchanged.
+**Set up JIT**, in first-run setup and under **Settings → JIT**, does it in one
+action: it connects the loopback VPN, pairs when no pairing is stored (iOS 27),
+and enables JIT. It keeps the method, the shortcut and automatic start as they
+are. The method picker, **Pair this device again**, **Import pairing file**, the
+Madeira JIT shortcut and **Reset Developer Disk Image** are under **Advanced**.
+First-run setup also offers the other ways in under **Other setup methods**,
+each with its own numbered steps: pairing on this device, a pairing file, and
+StikDebug. Setting it up later leaves the current method unchanged.
 
 **Play** enables JIT itself when it is off: it runs the same flow as **Enable
 JIT** (the loopback check and the Madeira JIT shortcut included), then starts
@@ -26,6 +31,13 @@ JIT**, with a spinner, and the game's page stays open. If JIT does not come on, 
 error is shown and the game is not started; enabling JIT later starts nothing.
 This also covers JIT enabled from StikDebug's own list, which sets CS_DEBUGGED
 and leaves, so no debugger is attached.
+
+**Prepare JIT automatically** (**Settings → JIT**, on by default) starts JIT
+when Madeira opens if Built-in StikJIT has a stored pairing, so Play does not
+wait for it; Play during that start joins it. That start stays quiet: it never
+replaces another VPN that is connected (Tailscale, say), never runs the Madeira
+JIT shortcut and never pairs again on its own, and a failure is only logged.
+Play then runs the full flow.
 
 ## StikDebug
 
@@ -54,15 +66,15 @@ iOS 27 can pair with a computer it finds on the local network, started from
 the iPhone. Madeira plays that computer for its own iPhone, so no computer is
 needed.
 
-1. Turn on Wi-Fi. Tap **In-app**, then **Start pairing**, during first-run setup, or
-   **Pair in Madeira** in **Settings → JIT → JIT setup**, and allow Local
-   Network access when iOS asks.
+1. Turn on Wi-Fi. Tap **Set up JIT** (or, under **Other setup methods**,
+   **Pair on this device**) during first-run setup, or **Set up JIT** in
+   **Settings → JIT**, and allow Local Network access when iOS asks.
 2. Open **Settings → Privacy & Security → Developer Mode**, scroll down and
    tap **Pair with Madeira**.
 3. Enter the code Madeira shows. It appears in iOS's background-task banner
    and as a notification, and in Madeira when you return.
-4. Back in Madeira, continue with LocalDevVPN, **Check setup** and
-   **Enable JIT** as below.
+4. Back in Madeira, JIT continues on its own: the Play or Set up JIT that
+   started the pairing goes on once Madeira is in front again.
 
 Madeira keeps running in the background while you are in Settings through an
 iOS continued-processing task (`<bundle id>.pairing.session`). If iOS refuses
@@ -84,15 +96,18 @@ only the Local Network permission is needed.
 
 1. Create a pairing file for this iPhone by following the
    [StikDebug pairing-file guide](https://github.com/StikDebug/StikDebug-Guide/blob/main/pairing_file.md).
-2. Tap **In-app with pairing file**, then **Choose pairing file**, during first-run setup, or open
-   **Settings → JIT → JIT setup** and tap **Import pairing file**.
+2. Under **Other setup methods**, tap **Import pairing file** during first-run
+   setup, or open **Settings → JIT → Set up JIT → Advanced** and tap **Import
+   pairing file**. Before iOS 27, where Madeira cannot pair on the device, Set up
+   JIT asks for this file before connecting any VPN.
 
 ### Enabling JIT
 
-1. Install and connect LocalDevVPN.
-2. Tap **Check setup**. Madeira checks VPN reachability and downloads, mounts,
-   and verifies the matching Developer Disk Image when needed.
-3. Tap **Enable JIT**.
+Tap **Set up JIT**, or Play. Madeira connects the loopback VPN (Madeira's own,
+or LocalDevVPN; see below), checks that this device answers through it,
+downloads, mounts and verifies the matching Developer Disk Image when needed,
+and attaches the debugger. The bar at the top of the library shows the VPN's
+state until JIT is ready.
 
 Either way, the pairing file is kept in the Keychain, for this device only and
 readable while it is unlocked, as the Steam sign-in token is. It is a credential
@@ -124,13 +139,34 @@ iOS registers none for the renamed Madeira and the lookup fails ("Failed to add
 observer").
 
 If setup reports stale Developer Disk Image data after an iOS update, use
-**Reset Developer Disk Image**, then **Check setup** again.
+**Reset Developer Disk Image** (under Advanced), then **Set up JIT** again.
 
-If the device resets the connection, it no longer accepts the pairing (each
-in-app pairing replaces the last), so Madeira offers **Pair Again**. If the
-device can't be reached, it offers **Connect LocalDevVPN**, or **Get
-LocalDevVPN** when the app isn't installed; LocalDevVPN returns to Madeira
-through its `madeira://` URL scheme once connected.
+If the device resets the connection, Madeira tries once more. A second reset
+means the device no longer accepts the pairing: each pairing on a device
+replaces the last, so pairing another app undoes Madeira's. On iOS 27 Madeira
+then pairs again on the spot and keeps the request, so the game starts once
+Settings approves; otherwise it offers **Pair Again**. If the device can't be
+reached, it offers to connect the VPN, or **Get LocalDevVPN** when no VPN is
+available; LocalDevVPN returns to Madeira through its `madeira://` URL scheme
+once connected.
+
+### Madeira's own VPN (optional)
+
+`build/madeira-loopback` builds `MadeiraLoopback.appex`, a packet tunnel that
+stands in for LocalDevVPN. It swaps each packet's source and destination, so
+`lockdownd` answers this device's own connection to 10.7.0.1 as it would a
+computer's (`app/Madeira/MadeiraVPN.swift` starts and stops it). iOS asks once
+to allow the configuration, listed as **Madeira JIT** in **Settings → VPN**, and
+it replaces any other VPN while it runs.
+
+It needs the Network Extensions capability, which free developer accounts
+lack, so it is not part of the Xcode project or the default IPA. To use it,
+run `build/madeira-loopback/build.sh <build> <version>` (XcodeGen), copy the
+extension into `Madeira.app/PlugIns`, and sign it as `<bundle id>.Loopback`,
+with `com.apple.developer.networking.networkextension` =
+`packet-tunnel-provider` for the app and the extension. A build without it, or
+before iOS 26, uses LocalDevVPN; so does one whose VPN cannot start (no
+entitlement, or Don't Allow), when LocalDevVPN is installed.
 
 ## LocalDevVPN, cellular data and the Madeira JIT shortcut
 

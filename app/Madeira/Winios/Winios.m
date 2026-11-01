@@ -844,6 +844,7 @@ void winios_pWindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data, void *hwnd);
 extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
 extern void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift);
+extern void winios_drv_post_close(void);
 extern void winios_dump_window_tree(void);
 extern void ios_dump_all_thread_stacks(void);
 extern int winios_drv_size_game_window(void *hwnd, int width, int height);
@@ -866,6 +867,7 @@ static void winios_request_game_size(void *hwnd, int cw, int ch) {
 #define WINIOS_EV_MOUSE 0
 #define WINIOS_EV_KEY   1
 #define WINIOS_EV_TEXT  2
+#define WINIOS_EV_CLOSE 3
 #define KEYEVENTF_KEYUP 0x0002
 typedef struct {
     unsigned int type;       /* WINIOS_EV_MOUSE / WINIOS_EV_KEY */
@@ -962,6 +964,13 @@ void winios_post_key(int vk, int down) {
     winios_q_push_ev(WINIOS_EV_KEY, vk, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
 }
 
+/* Quit game: WM_CLOSE to the front window (winios_drv_post_close), queued with
+ * the input so a Wine thread posts it. */
+void winios_post_close(void) {
+    fprintf(stderr, "[winios] post_close\n"); fflush(stderr);
+    winios_q_push_ev(WINIOS_EV_CLOSE, 0, 0, 0, 0);
+}
+
 /* Serial, nonblocking consumer: keys remain FIFO even with several Wine
  * threads polling at once. Only the queue owner injects into wineserver. */
 static BOOL winios_drain_input(void) {
@@ -996,6 +1005,8 @@ static BOOL winios_drain_input(void) {
         }
         if (e.type == WINIOS_EV_KEY)
             winios_drv_post_key((unsigned short)e.x, e.flags);
+        else if (e.type == WINIOS_EV_CLOSE)
+            winios_drv_post_close();
         else
             winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
         drained = TRUE;
@@ -1211,6 +1222,21 @@ void winios_set_compositor_frame(double x, double y, double w, double h) {
         g_comp_frame_set = YES;
         winios_layout_compositor();
     });
+}
+
+/* FoldDeck.swift GameMirror: a desktop (Madeira Dock) session draws in
+ * g_compositor_view, a window subview beside the game view, so the mirror copies
+ * that view, cropped to the desktop it draws (g_desk_bg's frame, in the view's
+ * points). NULL when there is none, it is hidden, or it is the game-mode overlay
+ * (MetalHostView draws the game then). Main thread. */
+void *winios_compositor_mirror_source(double *x, double *y, double *w, double *h) {
+    if (!g_compositor_view || g_comp_game || g_compositor_view.hidden || !g_desk_bg) return NULL;
+    CGRect r = g_desk_bg.frame;
+    if (x) *x = r.origin.x;
+    if (y) *y = r.origin.y;
+    if (w) *w = r.size.width;
+    if (h) *h = r.size.height;
+    return (__bridge void *)g_compositor_view;
 }
 
 /* Library front end (Library.swift): a desktop session's compositor view sits
@@ -1431,11 +1457,11 @@ static void winios_ensure_compositor(void) {
     g_compositor_view = [[UIView alloc] initWithFrame:win.bounds];
     g_compositor_view.userInteractionEnabled = NO;  /* touches fall through */
     g_compositor_view.clipsToBounds = YES;
-    /* letterbox area: black, like the rest of a session's screen (the game
-     * view's host and the library's session view are black); an 8 % grey
+    /* letterbox area: clear, so the library's session view shows there (black,
+     * or the game's glow in portrait, ContentView sessionBody); an 8 % grey
      * showed as grey bands around a fitted desktop. desktop area: classic
      * teal (until explorer's own background paint works) */
-    g_compositor_view.backgroundColor = UIColor.blackColor;
+    g_compositor_view.backgroundColor = UIColor.clearColor;
     g_desk_bg = [CALayer layer];
     g_desk_bg.backgroundColor = [UIColor colorWithRed:0.0 green:0.502 blue:0.502 alpha:1.0].CGColor;
     [g_compositor_view.layer addSublayer:g_desk_bg];
@@ -1456,9 +1482,14 @@ static void winios_ensure_compositor(void) {
     }
     /* Wedged-thread triage: sample every thread's stack every 20s from
      * an app-side timer — keeps firing even when all wine threads are
-     * stuck (unlike the tree dump, which rides wine's event drain). */
+     * stuck (unlike the tree dump, which rides wine's event drain).
+     * MADEIRA_LEAN_DIAG (a library game's default, LibraryEntry.applyEnvironment)
+     * leaves it out: reading each of ~80 threads' state stops it, and the dump's
+     * ~1200 lines every 20 s hitched DOOM Eternal. A stalled main thread still
+     * dumps every stack ([main-stall]). */
+    const char *lean = getenv("MADEIRA_LEAN_DIAG");
     static dispatch_source_t stack_timer;
-    if (!stack_timer) {
+    if (!stack_timer && !(lean && *lean && strcmp(lean, "0") != 0)) {
         stack_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(stack_timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC),

@@ -119,9 +119,9 @@ require('$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*' in plist.get('BGTaskSchedulerPe
 
 # ------------------------------------------------------------------ the three choices
 choices = block(onboarding, 'private var jitChoices')
-require(all(f'jitChoice("{title}"' in choices for title in ['In-app', 'In-app with pairing file', 'StikDebug'])
+require(all(f'jitChoice("{title}"' in choices for title in ['Pair on this device', 'Import pairing file', 'StikDebug'])
         and 'enabled: OnDevicePairing.isSupported' in choices,
-        'setup: In-app (iOS 27), In-app with pairing file, StikDebug')
+        'setup: alternate pairing and StikDebug methods remain available')
 require('OnDevicePairingPanel()' in block(onboarding, 'private var onDeviceGuide')
         and 'pairing.start()' in block(onboarding, 'private func startPairing'),
         'setup: the on-device guide pairs and shows its progress')

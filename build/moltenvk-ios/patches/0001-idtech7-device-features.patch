@@ -1,0 +1,71 @@
+MoltenVK: report what idTech 7 checks for, with MADEIRA_MVK_IDTECH=1
+
+The community workaround from KhronosGroup/MoltenVK#2818 (see also #2830), for
+DOOM Eternal. idTech 7 stops at vkCreateDevice or at pipeline setup unless the
+device lists subgroup operations in vertex, geometry and tessellation evaluation
+shaders, the geometryShader, depthBounds, wideLines and shaderCullDistance
+features, and a GPU vendor other than Apple (AMD here). Metal has none of those
+subgroup stages; this only reports them, and the game runs with it. Without
+MADEIRA_MVK_IDTECH=1 every program sees MoltenVK's own answers.
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 359f8a2..53deb31 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -1481,9 +1481,24 @@
+ 	pVk11Props->deviceLUIDValid = VK_TRUE;
+ }
+ 
++// Madeira: idTech 7 (DOOM Eternal) checks for subgroup operations in vertex,
++// geometry and tessellation evaluation shaders, for geometryShader, depthBounds,
++// wideLines and shaderCullDistance, and for a non-Apple GPU vendor, and stops at
++// vkCreateDevice or pipeline setup without them (KhronosGroup/MoltenVK #2818, #2830).
++// Metal has none of those subgroup stages, so this only reports them, as the
++// community workaround in #2818 does; the game runs with it. MADEIRA_MVK_IDTECH=1
++// turns it on; every other program sees MoltenVK's own answers.
++static bool mvkMadeiraIdTechSpoof() {
++	static const bool on = [] { const char* v = getenv("MADEIRA_MVK_IDTECH"); return v && v[0] == '1'; }();
++	return on;
++}
++
+ void MVKPhysicalDevice::populateSubgroupProperties(VkPhysicalDeviceVulkan11Properties* pVk11Props) {
+ 	pVk11Props->subgroupSize = _metalFeatures.maxSubgroupSize;
+ 	pVk11Props->subgroupSupportedStages = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
++	if (mvkMadeiraIdTechSpoof()) {
++		pVk11Props->subgroupSupportedStages |= VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
++	}
+ 	if (_features.tessellationShader) {
+ 		pVk11Props->subgroupSupportedStages |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+ 	}
+@@ -2864,6 +2879,13 @@
+ 		_features.shaderInt64 = true;
+     }
+ 
++	if (mvkMadeiraIdTechSpoof()) {
++		_features.geometryShader = true;
++		_features.depthBounds = true;
++		_features.wideLines = true;
++		_features.shaderCullDistance = true;
++	}
++
+ 	// Additional non-extension Vulkan 1.2 features.
+ 	mvkClear(&_vulkan12NoExtFeatures);		// Start with everything cleared
+ 	_vulkan12NoExtFeatures.samplerMirrorClampToEdge = _metalFeatures.samplerMirrorClampToEdge;
+@@ -3182,7 +3204,7 @@ static uint32_t mvkGetEntryProperty(io_registry_entry_t entry, CFStringRef prope
+ 	// We determine Apple Silicon directly from the GPU, instead
+ 	// of from the build, in case we are running Rosetta2.
+ 	if (_gpuCapabilities.isAppleGPU) {
+-		_properties.vendorID = kAppleVendorId;
++		_properties.vendorID = mvkMadeiraIdTechSpoof() ? kAMDVendorId : kAppleVendorId;
+ 		_properties.deviceID = getHighestGPUCapability();
+ 		return;
+ 	}
+@@ -3276,7 +3298,7 @@ static uint32_t mvkGetEntryProperty(io_registry_entry_t entry, CFStringRef prope
+ // For Apple Silicon, the Device ID is determined by the highest
+ // GPU capability, which is a combination of OS version and GPU type.
+ void MVKPhysicalDevice::initGPUInfoProperties() {
+-	_properties.vendorID = kAppleVendorId;
++	_properties.vendorID = mvkMadeiraIdTechSpoof() ? kAMDVendorId : kAppleVendorId;
+ 	_properties.deviceID = getHighestGPUCapability();
+ 	_properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+ 	strlcpy(_properties.deviceName, _mtlDevice.name.UTF8String, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE);
