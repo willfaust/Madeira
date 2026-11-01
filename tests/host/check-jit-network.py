@@ -41,18 +41,20 @@ project = (root / 'app/Madeira.xcodeproj/project.pbxproj').read_text()
 require('/* JITNetwork.swift in Sources */,' in project, 'JITNetwork.swift is built by the Xcode project')
 require('static let address = "10.7.0.1"' in net and 'static let port: UInt16 = 62078' in net,
         "the check targets lockdownd through LocalDevVPN's loopback (10.7.0.1:62078, StikDebug's address)")
-enable = setup[setup.index('    func enable(completion:'):setup.index('    private func enableResolved(')]
+enable = setup[setup.index('    func enable(interactive: Bool = true, completion:'):setup.index('    private func enableResolved(')]
 require(enable.index('ensureLoopback') < enable.index('self?.enableResolved'),
         'Enable JIT checks the loopback before any JIT method')
 ensure = enable[enable.index('private func ensureLoopback('):]
-require('guard let self, !probe.reachable, JITNetworkShortcut.shared.enabled else { proceed(false); return }' in ensure,
-        'the shortcut runs only when the loopback does not answer and the shortcut is turned on')
+require('guard !probe.reachable else { proceed(false); return }' in ensure
+        and 'guard JITNetworkShortcut.shared.enabled else {' in ensure
+        and 'LocalDevVPNControl.shared.connect' in ensure,
+        'unreachable loopback connects LocalDevVPN directly unless the user selected the shortcut')
 require('JITNetworkShortcut.shared.restoreIfNeeded' in enable,
         'a JIT attempt that fails after the shortcut ran puts back what it changed')
 start = net[net.index('    func start(completion:'):net.index('    /// From the launch thread')]
 require('let cellular = cellularOnly' in start
         and start.index('pending = base') < start.index('run(cellular ? "start cellular" : "start")')
-        and 'guard let input = pending else { completion(); return }' in start and 'run(input)' in start,
+        and 'guard let input = pending else { completion(); return }' in start and 'run(input)' in start and 'if restoring { restoreWaiters.append(completion); return }' in start,
         '"start" asks for the cellular step only without Wi-Fi, and records the "done" it owes before it runs')
 require('self?.pending = base + (vpnWasOn ? " vpn-restore" : " vpn-off")' in start
         and 'if case .done(let output) = outcome, !localDevVPNWasUp' in start,
@@ -76,16 +78,15 @@ require('Bundle.main.url(forResource: "Madeira JIT", withExtension: "shortcut")'
         and 'static let name = "Madeira JIT"' in net,
         "the file's name is the shortcut's name Madeira runs (Shortcuts names an import after its file)")
 require('OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)' in net
-        and 'if JITShortcutFile.supported, let url = JITShortcutFile.url {' in setup,
+        and 'if shortcut.enabled, JITShortcutFile.supported, let url = JITShortcutFile.url {' in setup,
         'the shortcut is offered on iOS 27 or later only (it uses Store Content)')
-shortcut_page = onboarding[onboarding.index('private var shortcutPage'):onboarding.index('private var signInPage')]
-require('case .shortcut: shortcutPage' in onboarding and 'JITShortcutOffer' not in onboarding
-        and onboarding.count('finishJIT()') == 3 and 'jitPath = .shortcut' in onboarding,
-        "setup offers it on its own page after any of the three JIT guides, so the guides fit on one screen")
-require('UIApplication.shared.open(JITShortcutFile.iCloudLink)' in shortcut_page and 'ShareLink(item: url)' in shortcut_page
-        and 'UIApplication.shared.open(JITShortcutFile.iCloudLink)' in setup and 'ShareLink(item: url)' in setup,
-        "setup's page and Settings › JIT add it from its iCloud link (straight to Add Shortcut), "
-        "and Madeira's copy through the share sheet with no connection")
+require('JITQuickSetup { if model.step == .jit { model.next() } }' in onboarding and 'shortcutPage' not in onboarding
+        and 'private func finishJIT() { model.next() }' in onboarding,
+        "setup uses one direct JIT action; alternate methods finish without a shortcut page")
+require('struct JITShortcutAdvanced: View' in setup
+        and 'UIApplication.shared.open(JITShortcutFile.iCloudLink)' in setup
+        and 'ShareLink("Import a local copy", item: url)' in setup,
+        "the optional shortcut remains available under advanced settings")
 require('static let iCloudLink = URL(string: "https://www.icloud.com/shortcuts/' in net
         and 'THE TWO MUST BE THE SAME SHORTCUT' in net,
         'the iCloud link and the bundled file are kept as one shortcut')
