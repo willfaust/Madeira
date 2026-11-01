@@ -65,11 +65,12 @@ has no public API, so the Wi-Fi mark is always full.
 The controls window (`ControlsWindow`) owns the whole deck while folded. The deck
 has no game under it, so no touch there becomes a mouse event.
 
-The deck is black, with the game glowing through it: a copy of the game covering
-the deck, flipped at the fold like a reflection, blurred until only its colours
-are left, and dimming down the deck but never to black, the way Netflix lights
-the lower screen of a folded Duo (`FoldDeckBackground`, `DeviceFold.swift`). Its
-contents sit on top:
+The deck is black, with the game glowing through it, the way Netflix lights the
+lower screen of a folded Duo (`FoldDeckBackground`, `DeviceFold.swift`). A copy
+of the game covers the deck, flipped at the fold like a reflection, with the
+game's lower edge on the fold. It is blurred until only its colours are left
+and dimmed evenly, a little more down the deck but never to black, so the keys
+on it stay the brightest thing there. Its contents sit on top:
 
 - **Touch controls.** The built-in controller layout, while it is untouched, is
   laid out again for the deck, and again for the whole screen when the Duo
@@ -82,22 +83,29 @@ contents sit on top:
   Done, Keyboard, Edit controls and Quit game are within reach without leaning
   over the fold. The starting screen still covers the whole window.
 - **With a controller** (or with touch controls hidden), the deck shows
-  `FoldDeck` instead of the controls: the controller's name over the glow, above
-  four buttons:
-  - Home quits the game and goes back to the library, the in-game menu's Quit
-    game. It asks first, on the deck itself: the question takes the controller's
-    place and the buttons become Keep playing and Quit game. A system alert
-    would sit across the fold, half out of reach. The in-game menu is the menu
-    button's, already on the deck;
-  - Keyboard shows the keyboard;
-  - Touch brings the touch controls back (offered while no controller is
-    connected);
-  - Mirror turns the glow off. It's the same setting as the key above the
-    touch controls (`madeiraFoldGlow` in the app's preferences).
+  `FoldDeck` instead of the controls, laid out as Netflix lays out its player on
+  the Duo, in three rows:
+  - Home; the game now playing (its artwork, its name and the controller), which
+    opens the in-game menu; and the glow's key. Home quits the game and goes back
+    to the library, the in-game menu's Quit game. It asks first, on the deck
+    itself: the large keys become Keep playing and Quit game around the
+    question. A system alert would sit across the fold, half out of reach.
+  - Three large keys: Keyboard; Menu, the in-game menu, widest in the middle;
+    and Touch controls, which brings the touch controls back. With a controller
+    connected the controls would not show on the deck, so Aspect & scaling
+    takes that place (the performance overlay where the in-game menu has no
+    Aspect & scaling, `MADEIRA_SESSION_TOOLS = 0`).
+  - Small keys for what changes most in play: Aspect & scaling (one tap to the
+    next mode), the performance overlay and Eco mode, lit while on.
+
+  The Menu key replaces the floating menu button, which would sit on Home, so
+  `LibraryHUD` leaves it out while `FoldDeck` is shown (`FoldDeckState`). The
+  glow's key is the same setting as the one above the touch controls
+  (`madeiraFoldGlow` in the app's preferences).
 
 Folded, the deck lies on the table like a keyboard, so its controls are drawn as
 physical keys rather than glass. That covers the touch controls, `FoldDeck`'s
-buttons and the mirror key:
+keys and the glow's key:
 - Each key is a raised cap, lit from above, on a darker skirt.
 - The cap sinks onto the skirt while held, and its shadow tightens.
 - Coloured buttons such as A/B/X/Y keep their colour.
