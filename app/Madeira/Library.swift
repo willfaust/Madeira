@@ -792,6 +792,9 @@ final class LibraryModel: ObservableObject {
     private var launchDismissLogged = false
     var menuButtonRect = CGRect.zero
     var performanceRect = CGRect.zero
+    /// The floating button that recorded each rect (LibraryFloatingItem.forget).
+    var menuButtonOwner: UUID?
+    var performanceOwner: UUID?
     /// The in-game menu and the starting screen take every touch.
     var blocksGameplayTouch: Bool { preparing != nil || (current != nil && (menu || launching)) }
     private var timer: Timer?
@@ -4728,6 +4731,7 @@ struct LibraryFloatingItem: View {
     @State private var measured = CGSize(width: 48, height: 48)
     @State private var faded = false
     @State private var touched = 0
+    @State private var owner = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(isMenu: Bool, viewport: CGSize, insets: EdgeInsets) {
@@ -4742,7 +4746,16 @@ struct LibraryFloatingItem: View {
                        y: min(max(top, viewport.height * ny + translation.height), max(top, viewport.height - insets.bottom - measured.height / 2 - 8)))
     }
     private func record(_ rect: CGRect) {
-        if isMenu { model.menuButtonRect = rect } else { model.performanceRect = rect }
+        if isMenu { model.menuButtonRect = rect; model.menuButtonOwner = owner }
+        else { model.performanceRect = rect; model.performanceOwner = owner }
+    }
+    /// The Duo folding to the laptop deck and back lays the HUD out again: the new
+    /// button appeared before the old one went, and the old one's clearing left the
+    /// menu button's rect empty, so ControlsWindow passed its taps to the game and the
+    /// menu opened only on the deck. Only the button that recorded a rect clears it.
+    private func forget() {
+        if isMenu { if model.menuButtonOwner == owner { model.menuButtonRect = .zero } }
+        else if model.performanceOwner == owner { model.performanceRect = .zero }
     }
     var body: some View {
         let center = position(drag)
@@ -4772,7 +4785,7 @@ struct LibraryFloatingItem: View {
         })
         .position(center)
         .onAppear { record(rect) }.onChange(of: rect) { _, value in record(value) }
-        .onDisappear { record(.zero) }
+        .onDisappear { forget() }
         .task(id: touched) {
             guard isMenu else { return }
             faded = false
