@@ -161,7 +161,12 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
   uncapped, so the choice is hidden and a saved 30 runs as 60), and 40 (mode 4)
   when DXMT has its 40 FPS cap (`madeira_dxmt_has_40_cap`) and the panel reaches
   120 Hz, which is held while it runs (25 ms is three 120 Hz refreshes but
-  rounds to 33 ms at 60 Hz); a saved 40 runs as 60 otherwise;
+  rounds to 33 ms at 60 Hz); a saved 40 runs as 60 otherwise. A Vulkan game
+  (MoltenVK, DOOM Eternal) keeps the same 30, 40 and 60 limits: Madeira's
+  MoltenVK presents with the same minimum spacing as DXMT
+  (`presentAfterMinimumDuration`, the limit read from `madeira_get_vsync_locked`;
+  `build/moltenvk-ios/patches/0003-fps-limit-present-pacing.patch`). Without
+  it, a Vulkan game ran at the panel rate whatever the limit;
 - reduced-precision x87: off by default, as in FEX; only an explicit choice
   exports `FEX_X87REDUCEDPRECISION=1`;
 - **AVX and AVX2**: off by default, as in FEX's iOS build; only an explicit
