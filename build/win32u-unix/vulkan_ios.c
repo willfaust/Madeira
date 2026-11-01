@@ -19,12 +19,18 @@
  * instance is NULL on that thread (d3dkmt_ios.c), and that nested GPU listing
  * goes without Vulkan GPUs. The same idea as NutsEmu's Wine patch 0083
  * (no-vulkan-gpu-listing-inside-vulkan-setup), written for this tree.
+ *
+ * The library's vkGetInstanceProcAddr and vkGetDeviceProcAddr are wrapped
+ * (madeira_vulkan_host_sym), so a few host entry points pass through this file
+ * first: each present is counted with DXMT's (madeira_note_vulkan_present), and
+ * queue work waits while Madeira is in the background (madeira_vulkan_wait_active).
  */
 
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #if MADEIRA_MOLTENVK
@@ -65,6 +71,7 @@ static int ios_vulkan_close(void *handle)
 }
 
 static void *madeira_vulkan_dlopen( const char *name, int flags );
+static void *madeira_vulkan_host_sym( void *handle, const char *name );
 static int madeira_vulkan_pthread_once( pthread_once_t *once, void (*init)(void) );
 
 /* config_ios.h #undefs it for every translation unit; this one loads the library
@@ -72,7 +79,7 @@ static int madeira_vulkan_pthread_once( pthread_once_t *once, void (*init)(void)
 #undef SONAME_LIBVULKAN
 #define SONAME_LIBVULKAN "MADEIRA_VULKAN_LIBRARY"
 #define dlopen( name, flags ) madeira_vulkan_dlopen( name, flags )
-#define dlsym ios_vulkan_sym
+#define dlsym madeira_vulkan_host_sym
 #define dlclose ios_vulkan_close
 #define pthread_once( once, init ) madeira_vulkan_pthread_once( once, init )
 #include "../../wine/dlls/win32u/vulkan.c"
@@ -119,6 +126,119 @@ static void *madeira_vulkan_dlopen( const char *name, int flags )
     return handle;
 }
 
+/* IOSDisplayShim.m: 0 from UIApplicationWillResignActive until DidBecomeActive.
+ * WiniosGL.m: one Vulkan present, counted into madeira_frame_count with DXMT's and
+ * GL's, so launch detection, the layout after the first frame and the FPS overlay
+ * see Vulkan games too. */
+extern int madeira_app_active( void );
+extern void madeira_note_vulkan_present( void );
 
+/* iOS refuses GPU work from an app that is not in front, and MoltenVK then loses
+ * its device for good (VK_ERROR_DEVICE_LOST, "Insufficient Permission (to submit
+ * GPU work from background)"): DOOM Eternal died that way when the player switched
+ * to another app. Submits and presents wait here instead; the game pauses and
+ * carries on when Madeira is active again. */
+static void madeira_vulkan_wait_active( const char *what )
+{
+    unsigned waited = 0;
+
+    while (!madeira_app_active())
+    {
+        if (!waited++)
+            dprintf( 2, "[winios-vk] %s waits: Madeira is not active, and iOS refuses GPU work then\n", what );
+        usleep( 16000 );
+    }
+    if (waited) dprintf( 2, "[winios-vk] %s resumed after about %u ms\n", what, waited * 16 );
+}
+
+static PFN_vkGetInstanceProcAddr host_vkGetInstanceProcAddr;
+static PFN_vkGetDeviceProcAddr host_vkGetDeviceProcAddr;
+static PFN_vkQueueSubmit host_vkQueueSubmit;
+static PFN_vkQueueSubmit2 host_vkQueueSubmit2;
+static PFN_vkQueueSubmit2KHR host_vkQueueSubmit2KHR;
+static PFN_vkQueueBindSparse host_vkQueueBindSparse;
+static PFN_vkQueuePresentKHR host_vkQueuePresentKHR;
+
+static VkResult VKAPI_CALL madeira_vkQueueSubmit( VkQueue queue, uint32_t count, const VkSubmitInfo *submits,
+                                                  VkFence fence )
+{
+    madeira_vulkan_wait_active( "vkQueueSubmit" );
+    return host_vkQueueSubmit( queue, count, submits, fence );
+}
+
+static VkResult VKAPI_CALL madeira_vkQueueSubmit2( VkQueue queue, uint32_t count, const VkSubmitInfo2 *submits,
+                                                   VkFence fence )
+{
+    madeira_vulkan_wait_active( "vkQueueSubmit2" );
+    return host_vkQueueSubmit2( queue, count, submits, fence );
+}
+
+static VkResult VKAPI_CALL madeira_vkQueueSubmit2KHR( VkQueue queue, uint32_t count, const VkSubmitInfo2 *submits,
+                                                      VkFence fence )
+{
+    madeira_vulkan_wait_active( "vkQueueSubmit2KHR" );
+    return host_vkQueueSubmit2KHR( queue, count, submits, fence );
+}
+
+static VkResult VKAPI_CALL madeira_vkQueueBindSparse( VkQueue queue, uint32_t count, const VkBindSparseInfo *binds,
+                                                      VkFence fence )
+{
+    madeira_vulkan_wait_active( "vkQueueBindSparse" );
+    return host_vkQueueBindSparse( queue, count, binds, fence );
+}
+
+static VkResult VKAPI_CALL madeira_vkQueuePresentKHR( VkQueue queue, const VkPresentInfoKHR *present_info )
+{
+    VkResult res;
+
+    madeira_vulkan_wait_active( "vkQueuePresentKHR" );
+    res = host_vkQueuePresentKHR( queue, present_info );
+    if (res >= VK_SUCCESS) madeira_note_vulkan_present();
+    return res;
+}
+
+/* One saved host pointer per name: the drivers Madeira bundles (MoltenVK,
+ * KosmicKrisp) return the same entry point for every instance and device. */
+static PFN_vkVoidFunction madeira_vulkan_wrap( const char *name, PFN_vkVoidFunction fn )
+{
+    if (!fn || !name) return fn;
+#define WRAP( f ) if (!strcmp( name, #f )) { host_##f = (PFN_##f)fn; return (PFN_vkVoidFunction)madeira_##f; }
+    WRAP( vkQueueSubmit )
+    WRAP( vkQueueSubmit2 )
+    WRAP( vkQueueSubmit2KHR )
+    WRAP( vkQueueBindSparse )
+    WRAP( vkQueuePresentKHR )
+#undef WRAP
+    return fn;
+}
+
+static PFN_vkVoidFunction VKAPI_CALL madeira_vkGetInstanceProcAddr( VkInstance instance, const char *name )
+{
+    return madeira_vulkan_wrap( name, host_vkGetInstanceProcAddr( instance, name ) );
+}
+
+static PFN_vkVoidFunction VKAPI_CALL madeira_vkGetDeviceProcAddr( VkDevice device, const char *name )
+{
+    return madeira_vulkan_wrap( name, host_vkGetDeviceProcAddr( device, name ) );
+}
+
+/* vulkan.c's dlsym: the library's symbol, with the two lookups above in place of
+ * its own. */
+static void *madeira_vulkan_host_sym( void *handle, const char *name )
+{
+    void *fn = ios_vulkan_sym( handle, name );
+
+    if (fn && !strcmp( name, "vkGetInstanceProcAddr" ))
+    {
+        host_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)fn;
+        return (void *)madeira_vkGetInstanceProcAddr;
+    }
+    if (fn && !strcmp( name, "vkGetDeviceProcAddr" ))
+    {
+        host_vkGetDeviceProcAddr = (PFN_vkGetDeviceProcAddr)fn;
+        return (void *)madeira_vkGetDeviceProcAddr;
+    }
+    return fn;
+}
 
 #include "vulkan_surface_ios.c"
