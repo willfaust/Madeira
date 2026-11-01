@@ -102,8 +102,16 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
     private var announced = false
     private let allowed = MadeiraConfig.flag("MADEIRA_FRONTEND_CONTROLLER")
     var ownsInput: Bool { lock.lock(); defer { lock.unlock() }; return enabled && owns }
+    /// ownsInput, published on the main queue for ClaimGamepadEvents: while the
+    /// library owns the pad, iOS's own controller navigation reaches the app's controls.
+    @Published private(set) var libraryOwnsPad = false
     func configure(enabled: Bool, ownsInput: Bool) {
-        lock.lock(); self.enabled = enabled && allowed; owns = ownsInput; lock.unlock()
+        lock.lock(); self.enabled = enabled && allowed; owns = ownsInput; let now = self.enabled && owns; lock.unlock()
+        DispatchQueue.main.async {
+            guard self.libraryOwnsPad != now else { return }
+            self.libraryOwnsPad = now
+            LogStore.shared.log("[controller-ui] app has the pad=\(now ? 1 : 0)")
+        }
     }
     /// One sample of player 1's pad, in XInput button bits and stick units.
     func sample(buttons raw: UInt16, lx: Int16, ly: Int16) {
@@ -2890,6 +2898,10 @@ struct LibraryView: View {
     /// The games you added in the page's order, for the controller's focus. Grouping
     /// and sorting go game by game, so their order among the Steam games is the
     /// order without them.
+    /// focusOrder, without the games you added while Other games is collapsed.
+    private var padFocusOwn: [LibraryEntry] {
+        group == "platform" && SteamGamesSection.shown && SteamGamesSection.collapsible && hideOthers ? [] : focusOrder
+    }
     private var focusOrder: [LibraryEntry] {
         guard group != "platform" else { return entries }
         // A library file edited by hand (or written by a fork) may repeat an id: keep the first.
@@ -3192,14 +3204,22 @@ struct LibraryView: View {
         }
         .refreshable { await SteamGamesSection.refresh() }
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
-            let items = focusOrder
-            let ids = [LibraryEntry.desktopID] + items.map(\.id)
-            let index = ids.firstIndex(where: { $0 == focused }) ?? 0
+            guard tab == 0, selected == nil, !browser, !onboarding.presented, !LibrarySteamFocus.shared.sheetOpen else { return }
+            // Desktop, then the Steam section's games and the games you added in the page's
+            // order (LibrarySteamFocus); a collapsed section is skipped.
+            let items = padFocusOwn
+            let steam = LibrarySteamFocus.shared
+            let ids = [LibraryEntry.desktopID] + steam.installed.map(LibrarySteamFocus.key) + items.map(\.id)
+                + steam.notInstalled.map(LibrarySteamFocus.key)
+            let found = ids.firstIndex(where: { $0 == focused })
+            let index = found ?? 0
             if command == "add" { browser = true }
             else if command == "accept" {
+                // The focused game left the page (its section collapsed, a search): start over.
+                if found == nil, focused != nil { focused = ids.first; return }
                 if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
-                else { selected = items[index - 1] }
+                else if let appID = LibrarySteamFocus.appID(ids[index]) { steam.select(appID) }
+                else if let entry = items.first(where: { $0.id == ids[index] }) { selected = entry }
             }
             else if ["left", "right", "up", "down"].contains(command) {
                 let delta = command == "left" || command == "up" ? -1 : 1
@@ -3213,6 +3233,7 @@ struct LibraryView: View {
             GlassSkin.shared.start()   // liquid metal on the navigation bar's glass pills
         }
         .onChange(of: focused) { _, id in
+            LibrarySteamFocus.shared.focused = LibrarySteamFocus.appID(id)   // its card's ring
             if let id { withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { reader.scrollTo(id, anchor: .center) } }
         }
         }
@@ -3252,14 +3273,22 @@ struct LibraryView: View {
                         open: { selected = $0 },
                         desktop: { AnyView(desktopButton) })
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
-            let items = focusOrder
-            let ids = [LibraryEntry.desktopID] + items.map(\.id)
-            let index = ids.firstIndex(where: { $0 == focused }) ?? 0
+            guard tab == 0, selected == nil, !browser, !onboarding.presented, !LibrarySteamFocus.shared.sheetOpen else { return }
+            // Desktop, then the Steam section's games and the games you added in the page's
+            // order (LibrarySteamFocus); a collapsed section is skipped.
+            let items = padFocusOwn
+            let steam = LibrarySteamFocus.shared
+            let ids = [LibraryEntry.desktopID] + steam.installed.map(LibrarySteamFocus.key) + items.map(\.id)
+                + steam.notInstalled.map(LibrarySteamFocus.key)
+            let found = ids.firstIndex(where: { $0 == focused })
+            let index = found ?? 0
             if command == "add" { browser = true }
             else if command == "accept" {
+                // The focused game left the page (its section collapsed, a search): start over.
+                if found == nil, focused != nil { focused = ids.first; return }
                 if index == 0 { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
-                else { selected = items[index - 1] }
+                else if let appID = LibrarySteamFocus.appID(ids[index]) { steam.select(appID) }
+                else if let entry = items.first(where: { $0.id == ids[index] }) { selected = entry }
             }
             else if ["left", "right", "up", "down"].contains(command) {
                 let delta = command == "left" || command == "up" ? -1 : 1

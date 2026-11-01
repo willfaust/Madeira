@@ -438,6 +438,42 @@ private struct SteamGameSelection: Identifiable { let id: Int }
 /// installed opens its download sheet. Cards follow the library's layout, and
 /// installed games its Sort by choice. Pull down on the library to read the
 /// install records and the account's library again.
+/// The Steam section's games for the controller's focus (LibraryController). The
+/// library's own focus covered Desktop and the games you added, so with only Steam
+/// games the D-pad moved nothing that could be seen. Each SteamGamesSection publishes
+/// the games it shows, in order; LibraryView moves through them with its own focus (a
+/// Steam game's focus is its `key`), and A asks the section that shows the game to
+/// open it, as a tap does.
+final class LibrarySteamFocus: ObservableObject {
+    static let shared = LibrarySteamFocus()
+    /// The focused Steam game, for its card's ring.
+    @Published var focused: Int?
+    /// A game the controller opened; the section showing it opens it and clears this.
+    @Published var request: Int?
+    /// A section's download sheet is open: the library's focus waits for it to close.
+    var sheetOpen = false
+    private(set) var installed: [Int] = []
+    private(set) var notInstalled: [Int] = []
+
+    func publish(_ part: SteamGamesSection.Part, installed: [Int], notInstalled: [Int]) {
+        switch part {
+        case .installed: self.installed = installed
+        case .notInstalled: self.notInstalled = notInstalled
+        case .all: self.installed = installed; self.notInstalled = notInstalled
+        }
+    }
+
+    func select(_ appID: Int) { request = appID }
+
+    private static let prefix = "5354454D-0000-4000-8000-"
+    /// The library focus that stands for a Steam game.
+    static func key(_ appID: Int) -> UUID { UUID(uuidString: prefix + String(format: "%012X", appID))! }
+    static func appID(_ key: UUID?) -> Int? {
+        guard let text = key?.uuidString, text.hasPrefix(prefix) else { return nil }
+        return Int(text.dropFirst(prefix.count), radix: 16)
+    }
+}
+
 struct SteamGamesSection: View {
     /// Which half the library asks for: the installed games under the Steam
     /// title, the Not installed group, or both together (the old layout).
@@ -459,6 +495,8 @@ struct SteamGamesSection: View {
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
     @State private var selected: SteamGameSelection?
     @State private var showSignIn = false
+    @ObservedObject private var padFocus = LibrarySteamFocus.shared
+    @ObservedObject private var pad = LibraryController.shared
 
     /// MADEIRA_LIBRARY_COLLAPSE=0: the section titles do not collapse.
     static var collapsible: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }
@@ -516,6 +554,12 @@ struct SteamGamesSection: View {
         let groups = SteamGamesRules.groups(items, downloading: Set(steam.downloads.keys))
         let installed = SteamGamesRules.sorted(groups.installed, by: sort, recorded: recorded)
         let collapsible = Self.collapsible
+        // What this part shows, in order, for the controller's focus (LibrarySteamFocus).
+        let shownInstalled = part == .notInstalled || !Self.shown || (hideInstalled && collapsible)
+            ? [] : groups.downloading + installed
+        let shownNotInstalled = part == .installed || !Self.shown || !signedIn || !showUninstalled
+            ? [] : groups.notInstalled
+        let padOrder = shownInstalled.map(\.id) + [0] + shownNotInstalled.map(\.id)
         Group {
             if Self.shown {
                 VStack(alignment: .leading, spacing: 14) {
@@ -594,6 +638,19 @@ struct SteamGamesSection: View {
             }
         }
         .sheet(isPresented: $showSignIn) { SteamSignInView() }
+        .onAppear {
+            padFocus.publish(part, installed: shownInstalled.map(\.id), notInstalled: shownNotInstalled.map(\.id))
+        }
+        .onChange(of: padOrder) { _, _ in
+            padFocus.publish(part, installed: shownInstalled.map(\.id), notInstalled: shownNotInstalled.map(\.id))
+        }
+        .onDisappear { padFocus.publish(part, installed: [], notInstalled: []) }
+        .onChange(of: selected?.id) { _, id in padFocus.sheetOpen = id != nil }
+        .onChange(of: padFocus.request) { _, request in
+            guard let request, selected == nil, let item = (shownInstalled + shownNotInstalled).first(where: { $0.id == request }) else { return }
+            padFocus.request = nil
+            select(item)
+        }
         .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
             Button("OK", role: .cancel) { steam.error = nil }
         } message: { Text(steam.error ?? "") }
@@ -602,6 +659,9 @@ struct SteamGamesSection: View {
     private func cell(_ item: SteamGamesRules.Item, list: Bool, dense: Bool) -> some View {
         Button { select(item) } label: { SteamGameCell(item: item, list: list, dense: dense) }
             .libraryCardButtonStyle(grid: !list)
+            .overlay(RoundedRectangle(cornerRadius: 16)
+                .stroke(padFocus.focused == item.id && pad.connected ? Color.accentColor : .clear, lineWidth: 2))
+            .id(LibrarySteamFocus.key(item.id))   // the controller's focus scrolls to it
     }
 
     /// An installed game (by Madeira's download or by Steam's client) opens its
