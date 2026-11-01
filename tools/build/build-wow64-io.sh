@@ -15,7 +15,7 @@ import struct, sys
 path = Path(sys.argv[1]); data = path.read_bytes()
 pe = struct.unpack_from('<I', data, 0x3c)[0]
 assert struct.unpack_from('<H', data, pe + 4)[0] == 0xaa64, 'wow64.dll must be native ARM64'
-assert b'madeira-io-abi-v1' in data, 'stale WoW64 IOSB producer'
+assert b'madeira-io-abi-v2' in data, 'stale WoW64 IOSB producer'
 size = struct.unpack_from('<I', data, pe + 24 + 56)[0]
 if len(data) < size: path.write_bytes(data + bytes(size - len(data)))
 print('PASS native ARM64 WoW64 IOSB producer rebuilt')

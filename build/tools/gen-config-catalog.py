@@ -429,6 +429,8 @@ OVERLAY = {
                         "after native startup rewrites. A difference alone does not prove an inline hook."},
     # Upstream's switch (build/ntdll-unix/signal_arm64_ios.c); this wave's ntdll change adds
     # mode 2, which every game list sets.
+    "env.MADEIRA_JIT_DUMP": {"category": "Exceptions & threads",
+                "note": "Compact crash context by default; 0 disables artifacts, 1 or full explicitly dumps the whole JIT pool."},
     "env.MADEIRA_CTX_CPU_AREA": {"category": "Exceptions & threads", "title": "Cross-thread GetThreadContext from the x64 snapshot",
                 "kind": "choice", "default": "",
                 "choices": [("", "Off (default)"), ("1", "Control registers"), ("2", "Control and integer registers")],

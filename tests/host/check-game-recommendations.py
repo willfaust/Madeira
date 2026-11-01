@@ -9,8 +9,8 @@ start-up, saving an entry, Game details, a start) and Reset to Recommended at
 the bottom of Game details. Every game's own list ends with madeira-bcd's
 defaults where upstream's differ, because madeira-bcd's games ran with them: MADEIRA_FREE_DELAY_MS = 2000, MADEIRA_CTX_CPU_AREA = 2 (madeira-bcd's
 fuller GetThreadContext; 1 is the control-only form) and MADEIRA_WAIT_CHILDREN = 1
-(opt-in here) and MADEIRA_JIT_DUMP = 0 (here the JIT-pool dump is on by
-default; madeira-bcd's is opt-in). The standard list, which every other game and
+(opt-in here) and MADEIRA_JIT_DUMP = 0 (explicitly disables even the compact
+crash artifact; whole-pool dumps require an explicit debugging opt-in). The standard list, which every other game and
 the Desktop get, has none of them (version 3): MADEIRA_FREE_DELAY_MS keeps a
 released block's addresses taken, so an allocator that reserves, releases and
 reserves again inside that range spins (Madeira Dock before Thumper). No list names madeira-bcd's dxgi-src.dll / d3d11-src.dll

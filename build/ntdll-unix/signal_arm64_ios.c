@@ -2224,55 +2224,131 @@ static int ios_x18_derived_base( uint64_t fault_pc, int rn )
     return 0;
 }
 
-/* ml1242: the JIT-pool dump is sparse, and MADEIRA_JIT_DUMP=0 turns it off.
- *
- * Both one-shot dumps used to write the whole 896MB RW alias. The production
- * pool is not NO_FOOTPRINT (see jit_make_region_no_footprint), and a read fault
- * on an untouched page of it materialises a real zero page, so the dump alone
- * charged ~600MB to phys_footprint: Hollow Knight went 2169 -> 2755MB while it
- * ran and hit the 4096MB jetsam limit four seconds later. Pages mincore()
- * reports neither resident nor paged out were never written; they stay holes,
- * so file offsets still equal pool offsets (head copies and tail CodeBuffers). */
-static void ios_dump_jit_pool( const char *why )
+/* Crash artifacts are compact by default. This is independent of exception
+ * dispatch: no fault is resumed or suppressed by the diagnostic choice.
+ * MADEIRA_JIT_DUMP=0 disables artifacts; =1 or =full explicitly requests the
+ * legacy sparse whole-pool image. Compact reads use Mach safe copies, never
+ * directly dereference a potentially stale register or guest pointer. */
+static void ios_jit_dump_range( int fd, const char *label, uint64_t address, size_t length )
 {
-    extern void *ios_jit_rw_base_global;
+    extern void *ios_jit_rx_base_global, *ios_jit_rw_base_global;
     extern size_t ios_jit_pool_size_global;
-    const size_t chunk = 0x100000;
-    size_t ps = vm_page_size, total = ios_jit_pool_size_global, written = 0, off, i;
-    const char *docs;
-    char path[512], vec[256];   /* one byte per page of a 1MB chunk, down to 4KB pages */
+    unsigned char bytes[4096];
+    mach_vm_size_t got = 0;
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
+    uint64_t read_address = address;
+    kern_return_t kr;
+    size_t i, j;
+
+    if (!address || !length || length > sizeof(bytes) || address > UINT64_MAX - length) return;
+    /* Execute-only pool pages can still be inspected through the known RW
+     * alias. This translates pool addresses only, never 32-bit guest values. */
+    if (rx && rw && address >= rx && address - rx < ios_jit_pool_size_global)
+    {
+        size_t offset = address - rx, remaining = ios_jit_pool_size_global - offset;
+        if (length > remaining) length = remaining;
+        if (rw > UINT64_MAX - offset) return;
+        read_address = rw + offset;
+    }
+    if (read_address > UINT64_MAX - length) return;
+    kr = mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)read_address, length,
+                                (mach_vm_address_t)bytes, &got );
+    dprintf( fd, "range=%s address=0x%llx read=0x%llx requested=%zu kr=%d copied=%llu\n",
+             label, (unsigned long long)address, (unsigned long long)read_address,
+             length, kr, (unsigned long long)got );
+    if (kr != KERN_SUCCESS || !got || got > length) return;
+    for (i = 0; i < got; i += 16)
+    {
+        dprintf( fd, "%016llx:", (unsigned long long)(address + i) );
+        for (j = i; j < got && j < i + 16; j++) dprintf( fd, " %02x", bytes[j] );
+        dprintf( fd, "\n" );
+    }
+}
+
+static void ios_dump_jit_pool( const char *why, const arm_thread_state64_t *state,
+                              uint64_t fault_address, uint64_t thread )
+{
+    extern void *ios_jit_rx_base_global, *ios_jit_rw_base_global;
+    extern size_t ios_jit_pool_size_global;
+    const char *jd = getenv( "MADEIRA_JIT_DUMP" ), *docs;
+    int full = jd && (!strcmp( jd, "1" ) || !strcmp( jd, "full" ));
+    char path[512];
     int fd;
 
-    const char *jd = getenv( "MADEIRA_JIT_DUMP" );
-    /* 0: no Documents/fex-jit-dump.bin; by default the JIT pool is written (sparse) on the
-     * first mach UNHANDLED / SIGILL, and pulled with the log (ml1242) */
-    if ((jd && jd[0] == '0') || !ios_jit_rw_base_global || !total) return;
+    if (jd && !strcmp( jd, "0" )) return;
     docs = getenv( "MADEIRA_DOCS_DIR" );
-    snprintf( path, sizeof(path), "%s/fex-jit-dump.bin", docs ? docs : "/tmp" );
-    if ((fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) < 0)
+    snprintf( path, sizeof(path), "%s/%s", docs ? docs : "/tmp",
+              full ? "fex-jit-dump.bin" : "fex-jit-crash.txt" );
+    if ((fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0600 )) < 0)
     {
-        dprintf( 2, "[jit-dump] ml1242 %s: open failed errno=%d path=%s\n", why, errno, path );
+        dprintf( 2, "[jit-dump] v2 %s mode=%s: open failed errno=%d\n", why, full ? "full" : "compact", errno );
         return;
     }
-    for (off = 0; off < total; off += chunk)
+    if (!full)
     {
-        size_t len = total - off < chunk ? total - off : chunk;
-        char *base = (char *)ios_jit_rw_base_global + off;
-        int have_vec = len / ps <= sizeof(vec) && !mincore( base, len, vec );
-
-        for (i = 0; i < len; i += ps)
+        uint64_t pc = state ? arm_thread_state64_get_pc( *state ) : 0;
+        uint64_t lr = state ? arm_thread_state64_get_lr( *state ) : 0;
+        uint64_t sp = state ? arm_thread_state64_get_sp( *state ) : 0;
+        uint64_t fp = state ? arm_thread_state64_get_fp( *state ) : 0;
+        int i;
+        off_t size;
+        dprintf( fd, "MADEIRA-JIT-CRASH-v1\nreason=%s host-pid=%d native-thread=0x%llx page-size=%u\n"
+                     "pc=0x%llx lr=0x%llx sp=0x%llx fp=0x%llx fault=0x%llx\n"
+                     "pool-rx=%p pool-rw=%p pool-size=%zu\n",
+                 why, (int)getpid(), (unsigned long long)thread, (unsigned)vm_page_size,
+                 (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)sp,
+                 (unsigned long long)fp, (unsigned long long)fault_address,
+                 ios_jit_rx_base_global, ios_jit_rw_base_global, ios_jit_pool_size_global );
+        if (state)
         {
-            size_t n = len - i < ps ? len - i : ps;
-            if (have_vec && !(vec[i / ps] & (MINCORE_INCORE | MINCORE_PAGED_OUT))) continue;
-            if (pwrite( fd, base + i, n, off + i ) != (ssize_t)n) goto done;
-            written += n;
+            for (i = 0; i < 29; i++)
+                dprintf( fd, "x%d=0x%llx%c", i, (unsigned long long)state->__x[i], i % 4 == 3 ? '\n' : ' ' );
+            dprintf( fd, "\n" );
         }
+        /* At most 8,960 data bytes (under 40KB text including metadata), no
+         * pool scan/ftruncate. Invalid or expired mappings record the Mach
+         * status and contribute no bytes; raw guest pointers stay raw. */
+        ios_jit_dump_range( fd, "pc-code", pc >= 256 ? pc - 256 : pc, 1024 );
+        if (lr != pc) ios_jit_dump_range( fd, "lr-code", lr >= 256 ? lr - 256 : lr, 1024 );
+        ios_jit_dump_range( fd, "native-stack", sp, 2048 );
+        ios_jit_dump_range( fd, "frame", fp, 256 );
+        if (state) ios_jit_dump_range( fd, "x28-state-candidate", state->__x[28], 4096 );
+        ios_jit_dump_range( fd, "fault-address", fault_address, 256 );
+        if (state && state->__x[8] != fault_address) ios_jit_dump_range( fd, "x8-candidate", state->__x[8], 256 );
+        size = lseek( fd, 0, SEEK_CUR );
+        close( fd );
+        dprintf( 2, "[jit-dump] v2 %s mode=compact bytes=%lld path=%s (full pool requires MADEIRA_JIT_DUMP=1 or full)\n",
+                 why, (long long)size, path );
+        return;
     }
-done:
-    ftruncate( fd, total );
-    close( fd );
-    dprintf( 2, "[jit-dump] ml1242 %s: wrote %zu of %zu pool bytes to %s (untouched pages left as holes)\n",
-             why, written, total, path );
+    else
+    {
+        /* Legacy full mode is deliberately explicit. mincore avoids reading
+         * never-touched pages: sparse offsets still equal pool offsets. */
+        const size_t chunk = 0x100000;
+        size_t ps = vm_page_size, total = ios_jit_pool_size_global, written = 0, off, i;
+        char vec[256];
+        int error = 0;
+        if (!ios_jit_rw_base_global || !total || !ps) { close( fd ); return; }
+        for (off = 0; off < total; off += chunk)
+        {
+            size_t len = total - off < chunk ? total - off : chunk;
+            char *base = (char *)ios_jit_rw_base_global + off;
+            int have_vec = len / ps <= sizeof(vec) && !mincore( base, len, vec );
+            for (i = 0; i < len; i += ps)
+            {
+                size_t n = len - i < ps ? len - i : ps;
+                if (have_vec && !(vec[i / ps] & (MINCORE_INCORE | MINCORE_PAGED_OUT))) continue;
+                if (pwrite( fd, base + i, n, off + i ) != (ssize_t)n) { error = errno; goto full_done; }
+                written += n;
+            }
+        }
+full_done:
+        if (ftruncate( fd, total ) && !error) error = errno;
+        close( fd );
+        dprintf( 2, "[jit-dump] v2 %s mode=full explicit=1: wrote %zu of %zu pool bytes errno=%d path=%s\n",
+                 why, written, total, error, path );
+    }
 }
 
 /* The [fault-stuck] loop breaker in ios_mach_exception_thread keeps its state per thread, in
@@ -7242,7 +7318,7 @@ dispatch_guest_fault:
                      * to verify codegen correctness independently. */
                     static volatile int dumped = 0;
                     if (cnt == 1 && __sync_bool_compare_and_swap(&dumped, 0, 1))
-                        ios_dump_jit_pool( "mach UNHANDLED" );
+                        ios_dump_jit_pool( "mach UNHANDLED", &state, fault_addr, (uint64_t)thread );
                     /* Diagnostic: query the kernel for what VM region the fault PC lives in.
                      * Helps identify mystery regions (e.g. JIT pool guard zone, wineserver heap). */
                     if (cnt <= 3)
@@ -12399,7 +12475,8 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         {
             static volatile int ill_dumped = 0;
             if (__sync_bool_compare_and_swap(&ill_dumped, 0, 1))
-                ios_dump_jit_pool( "ILL diag" );
+                ios_dump_jit_pool( "ILL diag", &context->uc_mcontext->__ss,
+                                   (uint64_t)(uintptr_t)siginfo->si_addr, (uint64_t)pthread_mach_thread_np(pthread_self()) );
         }
     }
 #endif

@@ -1,5 +1,7 @@
 # Native Steam Library failure — 2026-11-01
 
+The observer below describes the earlier candidate. The later [IOSB lifetime follow-up](IOSB_SCOPE_LIFETIME.md) fixes its default-off bug and replaces runtime hooks with passive CEF observation.
+
 Scope: the **Library** tab displays “Failed to load”; this is not Downloads.
 The user confirms successful Windows Steam sign-in and rendered Chromium UI.
 Those working paths and installed data must be retained.

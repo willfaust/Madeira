@@ -300,6 +300,11 @@ if text.count(needle) != 1:
     raise SystemExit('I/O diagnostic include boundary changed')
 text = text.replace(needle, needle + '\n#include "' + str(header) + '"')
 if source.name == 'file.c':
+    # The old tracker inferred file coverage from destination-buffer contiguity
+    # and byte sums. Replace only that maintained diagnostic at staging time.
+    start = text.index('#define IOS_JSTRACK_MAX 64')
+    end = text.index('\n#endif\n\nNTSTATUS WINAPI NtReadFile(', start)
+    text = text[:start] + '#include "' + str(header.with_name('js_read_trace.h')) + '"\n' + text[end:]
     boundary = '/* guest-log-test:end */'
     call = '        ios_guest_log_mirror( unix_handle, buffer, total );'
     if text.count(boundary) != 1 or text.count(call) != 1:

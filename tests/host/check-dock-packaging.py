@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory() as temp:
     wow = bytearray(256)
     wow[:2] = b'MZ'; struct.pack_into('<I', wow, 0x3c, 0x80)
     wow[0x80:0x84] = b'PE\0\0'; struct.pack_into('<H', wow, 0x84, 0xaa64)
-    wow[0xa0:0xa0+len(b'madeira-io-abi-v1')] = b'madeira-io-abi-v1'
+    wow[0xa0:0xa0+len(b'madeira-io-abi-v2')] = b'madeira-io-abi-v2'
     wow.extend(b'[wow-thread-init-v1][wow-break-deliver-v1]MadeiraBTCpuWriteMemory[wow-query-zero-v1][wow-group-attribute-v1]')
     (t/'app/Madeira/aarch64-windows/wow64.dll').write_bytes(wow)
     cpu = bytearray(wow)
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory() as temp:
     bodies = {
       'xcodebuild': '''mkdir -p "$TEST_APP/arm64ec-windows" "$TEST_APP/i386-windows" "$TEST_APP/x86_64-vcruntime" "$TEST_APP/aarch64-windows"
 cp "$ROOT/app/Madeira/aarch64-windows/wow64.dll" "$ROOT/app/Madeira/aarch64-windows/xtajit.dll" "$TEST_APP/aarch64-windows/"
-printf '[io-abi] v1 per-request IOSB layout active[wow-write][guest32-symbols][guest32-cxx-first-v1][cef-atexit-v1]' > "$TEST_APP/Madeira.debug.dylib"
+printf '[io-abi] v2 native-owned IOSB scopes active[wow-write][guest32-symbols][guest32-cxx-first-v1][cef-atexit-v1]' > "$TEST_APP/Madeira.debug.dylib"
 cp "$ROOT/app/Madeira/i386-windows/kernelbase.dll" "$TEST_APP/i386-windows/"
 printf fixture > "$TEST_APP/Madeira"
 printf fixture > "$TEST_APP/prefix-template.tar.gz"

@@ -6,6 +6,9 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 commands = [
+    ['python3', 'tests/host/check-jit-crash-dump.py'],
+    ['python3', 'tests/host/check-io-pointer-probe.py'],
+    ['python3', 'tests/host/check-js-read-trace.py'],
     ['python3', 'tests/host/check-steam-library-diagnostics.py'],
     ['python3', 'tests/host/check-native-steam-play.py'],
     ['python3', 'tests/host/check-cef-atexit-context.py'],

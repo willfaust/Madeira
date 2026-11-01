@@ -5,8 +5,8 @@ from pathlib import Path
 import struct
 import zipfile
 
-PRODUCER = b'madeira-io-abi-v1'
-CONSUMER = b'[io-abi] v1 per-request IOSB layout active'
+PRODUCER = b'madeira-io-abi-v2'
+CONSUMER = b'[io-abi] v2 native-owned IOSB scopes active'
 
 
 def producer(data):

@@ -1,6 +1,6 @@
 // A delayed, local CDP peer. No Steam, guest code or user data.
 const http = require('http'), crypto = require('crypto'), assert = require('assert');
-let samples = 0, summary = false, released = false;
+let sampled = false; const enabled = new Set();
 const server = http.createServer();
 server.on('upgrade', (request, socket) => {
   const accept = crypto.createHash('sha1').update(request.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -23,26 +23,31 @@ server.on('upgrade', (request, socket) => {
       const mask = buffer.subarray(offset, offset + maskBytes); offset += maskBytes;
       const payload = Buffer.from(buffer.subarray(offset, offset + length)); buffer = buffer.subarray(offset + length);
       if (masked) for (let i = 0; i < length; i++) payload[i] ^= mask[i % 4];
-      if (opcode === 8) { socket.end(); continue; }
+      if (opcode === 8) { assert(sampled); socket.end();server.close(); continue; }
       if (opcode !== 1) continue;
       const command = JSON.parse(payload.toString());
-      if (command.method === 'Runtime.evaluate') {
-        assert(!released); setTimeout(() => reply(command.id, {result: {objectId: 'promise'}}), 15);
-      } else if (command.method === 'Runtime.getProperties') {
-        assert(!released); samples++;
-        const internalProperties = [{name: '[[PromiseState]]', value: {value: samples < 6 ? 'pending' : 'fulfilled'}}];
-        if (samples === 6) internalProperties.push({name: '[[PromiseResult]]', value: {objectId: 'result'}});
-        setTimeout(() => reply(command.id, {internalProperties}), 15);
-      } else if (command.method === 'Runtime.callFunctionOn') {
-        assert(!released); setTimeout(() => { summary = true; reply(command.id, {result: {value: {type: 'array', count: 1, cs2: true}}}); }, 80);
-      } else if (command.method === 'Runtime.releaseObjectGroup') {
-        assert.strictEqual(samples, 6); assert(summary, 'object group released before final result was inspected');
-        released = true; reply(command.id, {});
-        console.log('PASS delayed CDP final sample precedes object-group release');
-        setTimeout(() => { socket.end(); server.close(); }, 100);
-      } else { throw new Error('unexpected command ' + command.method); }
+      if (['Runtime.enable','Page.enable','Log.enable','Network.enable'].includes(command.method)) {
+        enabled.add(command.method); reply(command.id, {});
+      } else if (command.method === 'Runtime.evaluate') {
+        assert.strictEqual(enabled.size, 4); assert.strictEqual(command.params.throwOnSideEffect, true);
+        assert.strictEqual(command.params.returnByValue, true);
+        for (const text of ['defineProperty', 'addEventListener', 'setInterval', 'addBinding', 'Reflect.apply']) assert(!command.params.expression.includes(text));
+        const event=(method,params)=>{const body=Buffer.from(JSON.stringify({method,params}));const head=body.length<126?Buffer.from([0x81,body.length]):Buffer.from([0x81,126,body.length>>8,body.length&255]);socket.write(Buffer.concat([head,body]));};
+        for(let i=0;i<200;i++)event('Runtime.consoleAPICalled',{type:'warning',args:[{value:'startup warning SECRET'}]});
+        const frames={callFrames:[{functionName:'AppStore.Init',url:'https://steamloopback.host/chunk.js?token=SECRET',lineNumber:1,columnNumber:44}]};
+        event('Page.navigatedWithinDocument',{url:'https://steamloopback.host/library/home?token=SECRET'});
+        event('Runtime.consoleAPICalled',{type:'error',args:[{value:'Remote call failed SECRET'}],stackTrace:frames});
+        event('Runtime.exceptionThrown',{exceptionDetails:{text:'Uncaught (in promise)',exception:{description:"TypeError: Cannot read properties of undefined (reading 'get') SECRET"},stackTrace:frames}});
+        event('Network.requestWillBeSent',{requestId:'lib',request:{url:'https://steamloopback.host/library.js?token=SECRET'}});
+        event('Network.responseReceived',{requestId:'lib',response:{url:'https://steamloopback.host/library.js?token=SECRET',status:503}});
+        event('Network.loadingFailed',{requestId:'lib',errorText:'net::ERR_CONNECTION_REFUSED'});
+        event('Network.webSocketCreated',{requestId:'ws',url:'ws://127.0.0.1:27060/client?cookie=SECRET'});
+        event('Network.webSocketHandshakeResponseReceived',{requestId:'ws',response:{status:101,headers:{authorization:'SECRET'}}});
+        event('Network.webSocketFrameError',{requestId:'ws',errorMessage:'SECRET'});
+        setTimeout(()=>{sampled=true;reply(command.id,{result:{value:{store:true,ready:true,count:19,cs2:true,apps:true,secret:'SECRET'}}});console.log('PASS passive CDP events and delayed read-only snapshot; no script hooks requested');},40);
+      } else { throw new Error('observer requested non-passive command '+command.method); }
     }
   });
 });
 server.listen(0, '127.0.0.1', () => console.log(server.address().port));
-setTimeout(() => { if (!released) { console.error('CDP fixture timed out'); process.exit(1); } }, 8000).unref();
+setTimeout(() => { if (!sampled) { console.error('CDP fixture timed out'); process.exit(1); } }, 8000).unref();

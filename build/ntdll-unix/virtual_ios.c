@@ -13665,6 +13665,199 @@ static struct file_view *find_view( const void *addr, size_t size )
 }
 
 
+/* Normal syscall context only. Metadata is copied under the owning locks;
+ * arbitrary input/candidate addresses are never dereferenced or mapped here. */
+static BOOL ios_io_trace_read( const void *source, void *out, size_t size )
+{
+    mach_vm_size_t got = 0;
+    if (!source || size > ~(ULONG_PTR)0 - (ULONG_PTR)source) return FALSE;
+    return mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)source, size,
+                                   (mach_vm_address_t)out, &got ) == KERN_SUCCESS && got == size;
+}
+
+
+BOOL ios_io_read_control( const void *source, struct madeira_io_control *dest )
+{
+    return ios_io_trace_read( source, dest, sizeof(*dest) );
+}
+
+static struct file_view *find_view_range( const void *addr, size_t size );
+
+static BOOL ios_io_mach_writable( ULONG_PTR start, ULONG_PTR end )
+{
+    for (ULONG_PTR cursor = start; cursor < end; )
+    {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t length = 0;
+        vm_region_submap_short_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+        natural_t depth = 0;
+        memset( &info, 0, sizeof(info) );
+        if (mach_vm_region_recurse( mach_task_self(), &region, &length, &depth,
+                (vm_region_recurse_info_t)&info, &count ) != KERN_SUCCESS || region > cursor ||
+            length <= cursor - region || !(info.protection & VM_PROT_WRITE) || info.is_submap) return FALSE;
+        if (length >= end - region) return TRUE;
+        cursor = region + length;
+    }
+    return TRUE;
+}
+
+/* Query rights without touching the target, committing pages, or adding B.
+ * Wine's write-copy pages remain valid: the actual I/O path owns normal COW
+ * fault handling. Query each VAD/page and any native gap independently; one
+ * missing whole-range view must not bypass a neighbouring 4KB protection. */
+BOOL ios_io_buffer_writable( const void *address, SIZE_T size )
+{
+    ULONG_PTR start = (ULONG_PTR)address, end;
+    BOOL in_window = FALSE, valid = TRUE;
+    sigset_t sigset;
+    if (!start || !size || size > ~(ULONG_PTR)0 - start) return FALSE;
+    end = start + size;
+    pthread_mutex_lock( &ios_wow_mutex );
+    {
+        for (unsigned i = 0; i < ios_wow_window_count; i++)
+        {
+            struct ios_wow_window *slot = &ios_wow_windows[i];
+            if (!slot->base || slot->base > ~(ULONG_PTR)0 - IOS_WOW_WINDOW_SIZE ||
+                start >= slot->base + IOS_WOW_WINDOW_SIZE || end <= slot->base) continue;
+            in_window = TRUE;
+            if (slot->dead || slot->leaked || !slot->peb || slot->peb != ios_jit_current_peb() ||
+                start < slot->base || end - slot->base > IOS_WOW_WINDOW_SIZE) valid = FALSE;
+        }
+    }
+    pthread_mutex_unlock( &ios_wow_mutex );
+    if (!valid) return FALSE;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    for (ULONG_PTR cursor = start; valid && cursor < end; )
+    {
+        struct file_view *view = find_view( (void *)cursor, 1 );
+        ULONG_PTR boundary = end;
+        if (view)
+        {
+            ULONG_PTR page_end = (cursor & ~page_mask) + page_size;
+            ULONG_PTR view_end = (ULONG_PTR)view->base + view->size;
+            BYTE prot = get_page_vprot( (void *)cursor );
+            if (view_end < boundary) boundary = view_end;
+            if (page_end > cursor && page_end < boundary) boundary = page_end;
+            valid = !(view->ios_flags & IOS_VIEW_QUARANTINED) && (prot & VPROT_COMMITTED) &&
+                    (prot & (VPROT_WRITE | VPROT_WRITECOPY)) && !(prot & VPROT_GUARD);
+        }
+        else if (in_window) valid = FALSE;
+        else
+        {
+            struct file_view *next = find_view_range( (void *)cursor, end - cursor );
+            if (next && (ULONG_PTR)next->base < boundary) boundary = (ULONG_PTR)next->base;
+            valid = boundary > cursor && ios_io_mach_writable( cursor, boundary );
+        }
+        if (boundary <= cursor) valid = FALSE;
+        cursor = boundary;
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return valid;
+}
+
+void ios_trace_io_scope( const struct madeira_io_control *control, const char *api,
+                         const void *record, unsigned long long generation,
+                         unsigned depth, NTSTATUS status )
+{
+    static unsigned normal, failed;
+    unsigned ticket = __atomic_fetch_add( status ? &failed : &normal, 1, __ATOMIC_RELAXED );
+    TEB *teb = NtCurrentTeb();
+    void *peb = teb ? teb->Peb : NULL;
+    ULONG_PTR window = 0, cpu_address = 0, guest_sp_host = 0, guest_teb_host = 0;
+    unsigned window_generation = 0;
+    WOW64_CPURESERVED cpu;
+    I386_CONTEXT context;
+    DWORD tib32[3] = {0};
+    BOOL context_ok = FALSE, stack_ok = FALSE;
+    const void *pointers[6];
+    const char *names[6] = { "scope-cookie-host", "native-iosb-host", "guest32-iosb-host",
+                            "guest-esp-raw", "guest-esp-host", "low-cookie-candidate-only" };
+    int saved_errno = errno;
+
+    if (ticket >= (status ? 16u : 12u)) return;
+    memset( &context, 0, sizeof(context) );
+    if (!pthread_mutex_trylock( &ios_wow_mutex ))
+    {
+        struct ios_wow_window *slot = ios_wow_slot_for_peb( peb );
+        if (slot) { window = slot->base; window_generation = slot->generation; }
+        pthread_mutex_unlock( &ios_wow_mutex );
+    }
+    if (teb)
+    {
+        cpu_address = (ULONG_PTR)teb->TlsSlots[WOW64_TLS_CPURESERVED];
+        if (ios_io_trace_read( (void *)cpu_address, &cpu, sizeof(cpu) ) && cpu.Machine == IMAGE_FILE_MACHINE_I386)
+        {
+            ULONG_PTR align = TYPE_ALIGNMENT(I386_CONTEXT);
+            ULONG_PTR address = (cpu_address + sizeof(cpu) + align - 1) & ~(align - 1);
+            if (address >= cpu_address) context_ok = ios_io_trace_read( (void *)address, &context, sizeof(context) );
+        }
+        guest_teb_host = (ULONG_PTR)teb + teb->WowTebOffset;
+        if (window && guest_teb_host >= window && guest_teb_host - window < IOS_WOW_WINDOW_SIZE)
+            stack_ok = ios_io_trace_read( (void *)guest_teb_host, tib32, sizeof(tib32) );
+    }
+    if (window && context_ok && context.Esp) guest_sp_host = window + context.Esp;
+    dprintf( 2, "[io-scope-v2] api=%s op=%#x status=%08x control-copy=%p scope=%p native-iosb=%p guest-iosb=%p "
+                "record=%p record-generation=%llu depth=%u pid=%04x tid=%04x teb=%p peb=%p "
+                "window=%p window-generation=%u cpu=%p context-valid=%u eip=%08x esp=%08x "
+                "teb32-host=%p stack-read=%u stack32=%08x..%08x stack-live=%u expected=host-addresses translation=none\n",
+             api, control->operation, (unsigned)status, control, control->scope, control->native_iosb, control->guest_iosb,
+             record, generation, depth, teb ? (unsigned)(ULONG_PTR)teb->ClientId.UniqueProcess : 0,
+             teb ? (unsigned)(ULONG_PTR)teb->ClientId.UniqueThread : 0, teb, peb, (void *)window,
+             window_generation, (void *)cpu_address, context_ok, context.Eip, context.Esp,
+             (void *)guest_teb_host, stack_ok, tib32[2], tib32[1],
+             context_ok && stack_ok && context.Esp >= tib32[2] && context.Esp < tib32[1] );
+    pointers[0] = control->scope; pointers[1] = control->native_iosb; pointers[2] = control->guest_iosb;
+    pointers[3] = context_ok ? (void *)(ULONG_PTR)context.Esp : NULL;
+    pointers[4] = (void *)guest_sp_host;
+    pointers[5] = window && control->scope && (ULONG_PTR)control->scope < IOS_WOW_WINDOW_SIZE
+        ? (void *)(window + (ULONG_PTR)control->scope) : NULL;
+    for (unsigned i = 0; i < ARRAY_SIZE(pointers); i++)
+    {
+        mach_vm_address_t address = (mach_vm_address_t)pointers[i], region = address;
+        mach_vm_size_t size = 0;
+        vm_region_submap_short_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+        natural_t map_depth = 0;
+        kern_return_t kr;
+        void *view_base = NULL, *owner = NULL;
+        size_t view_size = 0;
+        unsigned vprot = 0, view_flags = 0, owner_generation = 0;
+        int vad = -1;
+        if (!address) continue;
+        memset( &info, 0, sizeof(info) );
+        kr = mach_vm_region_recurse( mach_task_self(), &region, &size, &map_depth,
+                                    (vm_region_recurse_info_t)&info, &count );
+        if (!pthread_mutex_trylock( &virtual_mutex ))
+        {
+            struct file_view *view = find_view( pointers[i], 1 );
+            vad = view != NULL;
+            if (view)
+            {
+                view_base = view->base; view_size = view->size; view_flags = view->ios_flags;
+                vprot = get_page_vprot( pointers[i] );
+            }
+            pthread_mutex_unlock( &virtual_mutex );
+        }
+        if (!pthread_mutex_trylock( &ios_wow_mutex ))
+        {
+            struct ios_wow_window *slot = ios_wow_live_slot_for_addr( pointers[i] );
+            if (slot) { owner = slot->peb; owner_generation = slot->generation; }
+            pthread_mutex_unlock( &ios_wow_mutex );
+        }
+        if (!owner && teb && (ULONG_PTR)pointers[i] >= (ULONG_PTR)teb->Tib.StackLimit &&
+            (ULONG_PTR)pointers[i] < (ULONG_PTR)teb->Tib.StackBase) owner = peb;
+        dprintf( 2, "[io-scope-map] type=%s pointer=%p owner=%p same-process=%u window-generation=%u "
+                    "vad=%d view=%p+%#lx vprot=%#x quarantined=%u mach-kr=%d mapped=%u region=%#llx+%#llx prot=%x max=%x submap=%u\n",
+                 names[i], pointers[i], owner, owner && owner == peb, owner_generation, vad,
+                 view_base, (unsigned long)view_size, vprot, !!(view_flags & IOS_VIEW_QUARANTINED), kr,
+                 kr == KERN_SUCCESS && region <= address && address - region < size,
+                 (unsigned long long)region, (unsigned long long)size, info.protection, info.max_protection, info.is_submap );
+    }
+    errno = saved_errno;
+}
+
+
 /***********************************************************************
  *           is_write_watch_range
  */

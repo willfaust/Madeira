@@ -160,14 +160,25 @@
          wow_guest_base = 0;
      if (wow_guest_base)
 -        TRACE( "guest window base %p\n", (void *)wow_guest_base );
-+        ERR( "madeira-io-abi-v1: guest window base %p\n", (void *)wow_guest_base );
++        ERR( "madeira-io-abi-v2: guest window base %p\n", (void *)wow_guest_base );
      args_alignment = (current_machine == IMAGE_FILE_MACHINE_I386) ? sizeof(ULONG) : sizeof(ULONG64);
      NtQuerySystemInformation( SystemEmulationBasicInformation, &info, sizeof(info), NULL );
      highest_user_address = (ULONG_PTR)info.HighestUserAddress;
-@@ -1449,6 +1450,15 @@
+@@ -1449,6 +1450,26 @@
  /**********************************************************************
   *           Wow64SystemServiceEx  (wow64.@)
   */
++/* Only IOSB thunks own a request binding. Non-I/O syscalls can replace
++ * contexts or longjmp (NtContinueEx/NtCallbackReturn), bypassing __finally.
++ * Keeping their abandoned stack frames in a native TLS chain is invalid. */
++static BOOL io_scope_required( ULONG_PTR thunk )
++{
++#define IO_THUNK(id, name) if (thunk == (ULONG_PTR)wow64_ ## name) return TRUE;
++    MADEIRA_IO_THUNKS(IO_THUNK)
++#undef IO_THUNK
++    return FALSE;
++}
++
 +static void io_scope_leave( BOOL normal, void *scope )
 +{
 +    struct madeira_io_control control = { MADEIRA_IO_ABI_VERSION, MADEIRA_IO_LEAVE, scope, NULL, NULL };
@@ -180,15 +191,15 @@
  NTSTATUS WINAPI Wow64SystemServiceEx( UINT num, UINT *args )
  {
      NTSTATUS status;
-@@ -1460,7 +1470,20 @@
+@@ -1460,7 +1481,30 @@
          ERR( "unsupported syscall %04x\n", num );
          return STATUS_INVALID_SYSTEM_SERVICE;
      }
 -    status = wow64_syscall( args, table->ServiceTable[id] );
-+    if (wow_guest_base)
++    if (wow_guest_base && io_scope_required(table->ServiceTable[id]))
 +    {
 +        struct madeira_io_scope scope;
-+        struct madeira_io_control control = { MADEIRA_IO_ABI_VERSION, MADEIRA_IO_ENTER, &scope, NULL, NULL };
++        struct madeira_io_control control = { MADEIRA_IO_ABI_VERSION, MADEIRA_IO_ENTER_OPERATION(num), &scope, NULL, NULL };
 +        status = NtSetInformationThread( GetCurrentThread(), (THREADINFOCLASS)MADEIRA_THREAD_IO_ABI,
 +                                         &control, sizeof(control) );
 +        if (status) return status; /* mixed ABI versions must fail closed */
@@ -198,7 +209,17 @@
 +        }
 +        __FINALLY_CTX( io_scope_leave, &scope )
 +    }
-+    else status = wow64_syscall( args, table->ServiceTable[id] );
++    else
++    {
++        /* Log the prior fault's non-I/O entry once, without creating a scope
++         * or touching any producer stack cookie. No guest argument values. */
++        static LONG open_section_seen;
++        if (wow_guest_base && table->ServiceTable[id] == (ULONG_PTR)wow64_NtOpenSection &&
++            !InterlockedCompareExchange( &open_section_seen, 1, 0 ))
++            ERR( "[io-scope-v2] bypass api=NtOpenSection syscall=%04x scope=none base=%p\n",
++                 num, (void *)wow_guest_base );
++        status = wow64_syscall( args, table->ServiceTable[id] );
++    }
      free_temp_data();
      return status;
  }

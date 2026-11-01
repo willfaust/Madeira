@@ -1,3 +1,5 @@
+# Madeira — Windows Steam and CS2 on iOS
+
 <p align="center">
   <img src="docs/assets/banner.png" alt="Madeira — Bringing PC gaming to your iPhone." width="100%">
 </p>
@@ -12,6 +14,8 @@
 
 Madeira runs Windows PC games on an iPhone, with no jailbreak. Games run as they
 are, unmodified, inside a single iOS app.
+
+This fork is developing native Windows Steam support on iOS, with the goal of loading the authenticated Steam Library and launching an existing Counter-Strike 2 (CS2, AppID 730) installation through Steam. This is work in progress; native Steam Library loading and a stable CS2 launch are not yet verified.
 
 > [!NOTE]
 > Madeira is an active research project. Many games start and some play well,
