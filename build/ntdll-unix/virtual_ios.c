@@ -1666,6 +1666,10 @@ static unsigned          ios_jumbo_seq;
 static unsigned long long ios_jumbo_last_ms;
 static size_t            ios_jumbo_granted;      /* bytes actually handed out */
 static unsigned          ios_jumbo_ok, ios_jumbo_fail;
+/* For signal_arm64_ios.c's [brp-contain]: how many jumbo (>= 1 GB) reserves of this
+ * session failed. A refused PartitionAlloc reserve is the usual reason chrome_elf.dll
+ * stops on its own int3 (BeamNG.drive, 2026-11-01). */
+unsigned ios_jumbo_fail_count(void) { return ios_jumbo_fail; }
 
 static unsigned long long ios_now_ms( void )
 {
@@ -15795,6 +15799,122 @@ static int ios_sc_current_is_helper(void)
     return ios_sc_path_is_helper( pp->ImagePathName.Buffer, pp->ImagePathName.Length / sizeof(WCHAR) );
 }
 
+/* BeamNG.drive (2026-11-01): env.MADEIRA_CEF_PA_EXES = "a.exe;b.exe" names
+ * programs that run Chromium inside their own process and so need the large
+ * address-space room SocialClubHelper.exe gets: the layout 1/2 slots for
+ * chrome_elf.dll's and libcef.dll's PartitionAlloc pools and their metadata,
+ * Oilpan, the V8 cage, the widened HighestUserAddress and the release of a
+ * dead process's grants. BeamNG.drive.x64.exe loads chrome_elf.dll and
+ * libcef.dll itself; without this its 32 GB PartitionAlloc reserve was
+ * refused three times and chrome_elf.dll stopped on its own int3 (80000003)
+ * although layout 2 held the slots. Entries are image names (any directory,
+ * ASCII case ignored), separated by ';' or ','; spaces around them are
+ * dropped. Read once. Only the address-space paths use this: Social Club's
+ * command line, [sc-rph] patch and libcef refusal stay SocialClubHelper.exe's. */
+#define IOS_CEF_PA_MAX 8
+static char ios_cef_pa_names[IOS_CEF_PA_MAX][64];
+static int ios_cef_pa_n;
+static pthread_once_t ios_cef_pa_once = PTHREAD_ONCE_INIT;
+
+static void ios_cef_pa_parse_list( const char *list )
+{
+    ios_cef_pa_n = 0;
+    while (list && *list && ios_cef_pa_n < IOS_CEF_PA_MAX)
+    {
+        const char *end = list;
+        int n = 0, k;
+
+        while (*end && *end != ';' && *end != ',') end++;
+        while (list < end && (*list == ' ' || *list == '\t' || *list == '"')) list++;
+        n = (int)(end - list);
+        while (n > 0 && (list[n - 1] == ' ' || list[n - 1] == '\t' || list[n - 1] == '"')) n--;
+        if (n > 0 && n < (int)sizeof(ios_cef_pa_names[0]))
+        {
+            for (k = 0; k < n; k++)
+            {
+                char c = list[k];
+                ios_cef_pa_names[ios_cef_pa_n][k] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+            }
+            ios_cef_pa_names[ios_cef_pa_n][n] = 0;
+            ios_cef_pa_n++;
+        }
+        list = *end ? end + 1 : end;
+    }
+}
+
+static void ios_cef_pa_init(void)
+{
+    const char *e = getenv( "MADEIRA_CEF_PA_EXES" );
+    int k;
+
+    ios_cef_pa_parse_list( e );
+    for (k = 0; k < ios_cef_pa_n; k++)
+        dprintf( 2, "[sc-cef] env.MADEIRA_CEF_PA_EXES: %s gets SocialClubHelper.exe's CEF address space\n",
+                 ios_cef_pa_names[k] );
+}
+
+/* 1 when the path's last component is one of env.MADEIRA_CEF_PA_EXES. */
+static int ios_cef_pa_listed( const WCHAR *path, size_t len )
+{
+    size_t base = 0, k;
+    int i;
+
+    if (!path) return 0;
+    pthread_once( &ios_cef_pa_once, ios_cef_pa_init );
+    if (!ios_cef_pa_n) return 0;
+    for (k = 0; k < len; k++) if (path[k] == '\\' || path[k] == '/') base = k + 1;
+    for (i = 0; i < ios_cef_pa_n; i++)
+    {
+        const char *want = ios_cef_pa_names[i];
+        size_t n = strlen( want );
+
+        if (len - base != n) continue;
+        for (k = 0; k < n; k++)
+        {
+            WCHAR c = path[base + k];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c != (WCHAR)(unsigned char)want[k]) break;
+        }
+        if (k == n) return 1;
+    }
+    return 0;
+}
+
+/* Does the calling pseudo-process get the CEF address space? SocialClubHelper.exe
+ * always (as before), any other program when env.MADEIRA_CEF_PA_EXES names it. */
+static int ios_sc_current_is_cef_host(void)
+{
+    PEB *peb = ios_jit_current_peb();
+    RTL_USER_PROCESS_PARAMETERS *pp = peb ? peb->ProcessParameters : NULL;
+    size_t n;
+
+    if (!pp || !pp->ImagePathName.Buffer) return 0;
+    n = pp->ImagePathName.Length / sizeof(WCHAR);
+    return ios_sc_path_is_helper( pp->ImagePathName.Buffer, n ) || ios_cef_pa_listed( pp->ImagePathName.Buffer, n );
+}
+
+/* The calling process's image name for [sc-cef] lines, in `buf` (ASCII, '?'
+ * for anything else). */
+static const char *ios_sc_host_name( char *buf, size_t cap )
+{
+    PEB *peb = ios_jit_current_peb();
+    RTL_USER_PROCESS_PARAMETERS *pp = peb ? peb->ProcessParameters : NULL;
+    size_t len, base = 0, k, o = 0;
+
+    if (!cap) return "";
+    buf[0] = 0;
+    if (!pp || !pp->ImagePathName.Buffer) { snprintf( buf, cap, "the CEF host" ); return buf; }
+    len = pp->ImagePathName.Length / sizeof(WCHAR);
+    for (k = 0; k < len; k++) if (pp->ImagePathName.Buffer[k] == '\\' || pp->ImagePathName.Buffer[k] == '/') base = k + 1;
+    for (k = base; k < len && o + 1 < cap; k++)
+    {
+        WCHAR c = pp->ImagePathName.Buffer[k];
+        buf[o++] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    buf[o] = 0;
+    return buf;
+}
+
 /* madeira-bcd: [sc-rph] the renderer half of Social Club's pages under
  * --single-process.
  *
@@ -17252,7 +17372,7 @@ static void ios_sc_grants_owner_died( void *peb )
     ios_sc_grant_dead_n += n;
     pthread_mutex_unlock( &ios_sc_grant_lock );
     if (n)
-        dprintf( 2, "[sc-cef] SocialClubHelper.exe (peb=%p) exited holding %d large reservation(s); they are "
+        dprintf( 2, "[sc-cef] a CEF host (peb=%p) exited holding %d large reservation(s); they are "
                     "released when the next helper asks\n", peb, n );
 }
 
@@ -27571,7 +27691,7 @@ void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 )
     if (!wow64 && ios_sc_layout_mode == 2 && ios_sc_cef_enabled())
     {
         ULONG_PTR real = (ULONG_PTR)info->HighestUserAddress;
-        ULONG_PTR told = ios_sc2_reported_highest( real, wow64, ios_sc_layout_mode, ios_sc_current_is_helper() );
+        ULONG_PTR told = ios_sc2_reported_highest( real, wow64, ios_sc_layout_mode, ios_sc_current_is_cef_host() );
 
         if (told != real)
         {
@@ -27582,9 +27702,10 @@ void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 )
             if (said != peb)
             {
                 said = peb;
-                dprintf( 2, "[sc-cef] layout 2: SocialClubHelper.exe (peb=%p) told HighestUserAddress=%p (V8 CHECKs "
+                char hn[64];
+                dprintf( 2, "[sc-cef] layout 2: %s (peb=%p) told HighestUserAddress=%p (V8 CHECKs "
                             "its 1 TB sandbox against lpMaximumApplicationAddress); placement keeps %p\n",
-                         peb, (void *)told, (void *)real );
+                         ios_sc_host_name( hn, sizeof(hn) ), peb, (void *)told, (void *)real );
             }
         }
     }
@@ -31755,7 +31876,7 @@ static void ios_sc_reap_dead( void )
             st = NtFreeVirtualMemory( NtCurrentProcess(), &b, &s, MEM_RELEASE );
         }
         if (!st) ios_sc_rehold( kind );
-        dprintf( 2, "[sc-cef] reclaimed a dead SocialClubHelper.exe's reservation (peb=%p kind=%d): view 0x%llx "
+        dprintf( 2, "[sc-cef] reclaimed a dead CEF host's reservation (peb=%p kind=%d): view 0x%llx "
                     "(given as 0x%llx) %s\n", peb, kind, (unsigned long long)view, (unsigned long long)report,
                  st ? "was already gone" : "released and held again" );
     }
@@ -31826,7 +31947,7 @@ static int ios_sc_grant_release( void *base, SIZE_T *size, int *rehold )
     return 1;
 }
 
-/* Layout 2: serve a SocialClubHelper.exe jumbo request from its slot. Returns 0
+/* Layout 2: serve a CEF host's (SocialClubHelper.exe or env.MADEIRA_CEF_PA_EXES) jumbo request from its slot. Returns 0
  * when the request is not one of the layout's (the generic path takes it), 1
  * with *st (and *pick / *sz on success) when it was decided here. */
 static int ios_sc2_route( void *hint, SIZE_T size, ULONG type, ULONG protect, void **pick, SIZE_T *sz, NTSTATUS *st )
@@ -31837,6 +31958,7 @@ static int ios_sc2_route( void *hint, SIZE_T size, ULONG type, ULONG protect, vo
     uint64_t base, report;
     void *p;
     SIZE_T s;
+    char hn[64];
 
     if (k == IOS_SC2_NONE) return 0;
     if (k == IOS_SC2_REFUSE)
@@ -31867,8 +31989,8 @@ static int ios_sc2_route( void *hint, SIZE_T size, ULONG type, ULONG protect, vo
     ios_sc_grant_add( base, report, s, size, k, peb );
     *pick = (void *)(ULONG_PTR)report;
     *sz = size;
-    dprintf( 2, "[sc-cef] layout 2: %s for SocialClubHelper.exe: 0x%llx (0x%lx asked), [0x%llx,0x%llx) reserved\n",
-             ios_sc2_slots[k].what, (unsigned long long)report, (unsigned long)size,
+    dprintf( 2, "[sc-cef] layout 2: %s for %s: 0x%llx (0x%lx asked), [0x%llx,0x%llx) reserved\n",
+             ios_sc2_slots[k].what, ios_sc_host_name( hn, sizeof(hn) ), (unsigned long long)report, (unsigned long)size,
              (unsigned long long)base, (unsigned long long)(base + ios_sc2_slots[k].size) );
     return 1;
 }
@@ -31998,8 +32120,10 @@ static void ios_sc2_note_growth( uint64_t a, uint64_t size, const struct ios_sc2
     if ((end >> 28) > (high[k] >> 28) && lines < 64)
     {
         lines++;
-        dprintf( 2, "[sc-cef] layout 2: SocialClubHelper.exe has committed %s up to +%llu MB (%llu MB real of "
-                    "%llu MB reported)\n", ios_sc_kind_what( k ), (unsigned long long)(end >> 20),
+        char hn[64];
+        dprintf( 2, "[sc-cef] layout 2: %s has committed %s up to +%llu MB (%llu MB real of "
+                    "%llu MB reported)\n", ios_sc_host_name( hn, sizeof(hn) ), ios_sc_kind_what( k ),
+                 (unsigned long long)(end >> 20),
                  (unsigned long long)(gv->real >> 20), (unsigned long long)(gv->asked >> 20) );
     }
     high[k] = end;
@@ -32016,7 +32140,7 @@ static void ios_sc2_note_commit( void *addr, SIZE_T size )
     int i, n = 0, gi = -1, c, owner;
     void *peb;
 
-    if (a < IOS_SC2_L_BASE || !ios_sc_grant_n || !ios_sc_current_is_helper()) return;
+    if (a < IOS_SC2_L_BASE || !ios_sc_grant_n || !ios_sc_current_is_cef_host()) return;
     peb = ios_jit_current_peb();
     pthread_mutex_lock( &ios_sc_grant_lock );
     for (i = 0; i < ios_sc_grant_n; i++)
@@ -32057,9 +32181,10 @@ static void ios_sc2_note_commit( void *addr, SIZE_T size )
         void *ab = NULL;
         if (!NtQueryVirtualMemory( NtCurrentProcess(), addr, MemoryBasicInformation, &mbi, sizeof(mbi), NULL ))
             ab = mbi.AllocationBase;
-        dprintf( 2, "[sc-cef] layout 2: SocialClubHelper.exe commit 0x%llx+0x%lx is in %s's given-but-unreserved "
+        char hn[64];
+        dprintf( 2, "[sc-cef] layout 2: %s commit 0x%llx+0x%lx is in %s's given-but-unreserved "
                     "[0x%llx,0x%llx) (allocation base %p) -- it lands on another mapping\n",
-                 (unsigned long long)a, (unsigned long)size, ios_sc_kind_what( g[gi].kind ),
+                 ios_sc_host_name( hn, sizeof(hn) ), (unsigned long long)a, (unsigned long)size, ios_sc_kind_what( g[gi].kind ),
                  (unsigned long long)(g[gi].view + g[gi].real), (unsigned long long)(g[gi].report + g[gi].asked), ab );
     }
 }
@@ -32087,6 +32212,7 @@ static NTSTATUS ios_sc_glued_pools( void **pick, SIZE_T *sz, ULONG type, ULONG p
     void *lo = (void *)(uintptr_t)IOS_SC_GLUED_BASE;
     SIZE_T lsz = IOS_SC_BRP_HOLD_BASE + IOS_SC_BRP_HOLD_SIZE - IOS_SC_GLUED_BASE;   /* 20 GB */
     NTSTATUS st;
+    char hn[64];
 
     if (!ios_sc_brp_layout)
     {
@@ -32118,10 +32244,11 @@ static NTSTATUS ios_sc_glued_pools( void **pick, SIZE_T *sz, ULONG type, ULONG p
     *pick = lo;
     *sz = IOS_SC_GLUED_SIZE;
     ios_sc_grant_add( IOS_SC_GLUED_BASE, IOS_SC_GLUED_BASE, lsz, IOS_SC_GLUED_SIZE, IOS_SC_K_V1, ios_jit_current_peb() );
-    dprintf( 2, "[sc-cef] glued PartitionAlloc pools for SocialClubHelper.exe: 32 GB at 0x%llx; [0x%llx,0x%llx) "
+    dprintf( 2, "[sc-cef] glued PartitionAlloc pools for %s: 32 GB at 0x%llx; [0x%llx,0x%llx) "
                 "reserved (regular pool + the first 4 GB of the BackupRefPtr pool), the rest of it lies over FEX's "
                 "arena and is never reached\n",
-             IOS_SC_GLUED_BASE, IOS_SC_GLUED_BASE, IOS_SC_BRP_HOLD_BASE + IOS_SC_BRP_HOLD_SIZE );
+             ios_sc_host_name( hn, sizeof(hn) ), IOS_SC_GLUED_BASE, IOS_SC_GLUED_BASE,
+             IOS_SC_BRP_HOLD_BASE + IOS_SC_BRP_HOLD_SIZE );
     return STATUS_SUCCESS;
 }
 
@@ -32375,7 +32502,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
         if ((type & MEM_COMMIT) && *ret && ios_sc_layout_mode == 2)
             ios_sc2_note_commit( *ret, *size_ptr );
         /* madeira-bcd: a helper's large ask first releases what dead helpers held */
-        if (is_jumbo && ios_sc_grant_dead_n && ios_sc_cef_enabled() && ios_sc_current_is_helper())
+        if (is_jumbo && ios_sc_grant_dead_n && ios_sc_cef_enabled() && ios_sc_current_is_cef_host())
             ios_sc_reap_dead();
         /* ml151: a commit landing in a SOFT pool range — see ios_soft. The range
          * was never backed, so materialise exactly this sub-range now. Check the
@@ -32934,7 +33061,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
              * Keep the existing helper workaround scoped to its owner: its
              * boot-held pools are handed off by the routes below. */
             if (st && *ret && *size_ptr >= 0x40000000 && (type & MEM_RESERVE)
-                && ios_sc_cef_enabled() && ios_sc_current_is_helper())
+                && ios_sc_cef_enabled() && ios_sc_current_is_cef_host())
             {
                 void *hint = *ret;
                 void *pick = NULL;
@@ -32978,7 +33105,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
                  * are PartitionAlloc, V8 and Oilpan reservations, which need
                  * memory that is really theirs (jumbo#3 of the 18:24 log died
                  * freeing the soft 0x7400000000). */
-                int sc_helper = ios_sc_cef_enabled() && ios_sc_current_is_helper();
+                int sc_helper = ios_sc_cef_enabled() && ios_sc_current_is_cef_host();
                 int sc2 = sc_helper && ios_sc_layout_mode == 2;
                 if (sc2 && ios_sc2_route( hint, *size_ptr, type, protect, &pick, &sz, &st2 ))
                     goto sc_decided;
@@ -33173,7 +33300,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
         if (st && (type & MEM_COMMIT) && jumbo_hint) ios_oversize_commit_failed( jumbo_hint, jumbo_size, st );   /* ml1298 */
         if (is_jumbo) ios_jumbo_census( jumbo_hint, jumbo_size, st ? NULL : *ret, (unsigned)st );
         /* madeira-bcd: remember a helper's large reservation for ios_sc_reap_dead */
-        if (is_jumbo && !st && ios_sc_cef_enabled() && ios_sc_current_is_helper()) ios_sc_grant_note( *ret, *size_ptr );
+        if (is_jumbo && !st && ios_sc_cef_enabled() && ios_sc_current_is_cef_host()) ios_sc_grant_note( *ret, *size_ptr );
         if (!st && *size_ptr >= 0x10000000 && *size_ptr < 0x40000000 && (type & MEM_RESERVE))
             ios_bigres_note( *ret, *size_ptr );
         if (!st) ios_span_census( *ret, *size_ptr, 0 );   /* ml435 (#73) */
@@ -34660,7 +34787,7 @@ retry_code_carve_reuse:
          * V8 sandbox's 8 GB step given the cage (ios_sc2_ex_cage) and its large
          * grants remembered for ios_sc_reap_dead (ios_sc_grant_note). */
         {
-            int sc2 = is_jumbo && ios_sc_layout_mode == 2 && ios_sc_cef_enabled() && ios_sc_current_is_helper();
+            int sc2 = is_jumbo && ios_sc_layout_mode == 2 && ios_sc_cef_enabled() && ios_sc_current_is_cef_host();
             int caged = 0;
 
             if ((type & MEM_COMMIT) && *ret && ios_sc_layout_mode == 2 && (ULONG_PTR)*ret < ios_sc2_arena_lo)
@@ -34673,8 +34800,10 @@ retry_code_carve_reuse:
                 SIZE_T sz = 0;
 
                 st = ios_cage_grant( type, protect, *size_ptr, &pick, &sz, "sc2-ex" );
-                dprintf( 2, "[sc-cef] layout 2: V8 sandbox's 8 GB step (VirtualAlloc2, hint %p) for SocialClubHelper.exe: "
-                            "the cage -> %p (st=0x%x)\n", hint, st ? NULL : pick, (unsigned)st );
+                char hn[64];
+                dprintf( 2, "[sc-cef] layout 2: V8 sandbox's 8 GB step (VirtualAlloc2, hint %p) for %s: "
+                            "the cage -> %p (st=0x%x)\n", hint, ios_sc_host_name( hn, sizeof(hn) ),
+                         st ? NULL : pick, (unsigned)st );
                 if (!st)
                 {
                     *ret = pick;
