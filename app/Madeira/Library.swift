@@ -3325,10 +3325,14 @@ struct LibraryView: View {
                 JITSettingsSection()
             }
             if SigningRefresh.enabled, settingsShow("signing", "expires", "refresh", "Apple", "sign-in", "7 days") { SigningSettingsSection() }
-            if settingsShow("diagnostics", "extended logging", "logging", "log") {
+            if settingsShow("diagnostics", "extended logging", "logging", "log", "help", "Claude") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
-                } header: { Text("Diagnostics") }
+                    // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
+                    ClaudeHelpButton(entry: nil)
+                } header: { Text("Diagnostics") } footer: {
+                    Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
+                }
             }
             if settingsShow("pointer", "mouse", "cursor", "touch", "trackpad", "sensitivity") {
                 Section("Pointer") { LibraryPointerSettings() }
@@ -4276,6 +4280,8 @@ struct LibraryDetail: View {
                         let configText = entry.config ?? ""
                         UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
                     }
+                    // ClaudeHelp.swift: the fixes guide, the logs and this game's config to a chat.
+                    ClaudeHelpButton(entry: entry)
                     Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
                         .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
                                             isPresented: $confirmReset, titleVisibility: .visible) {
