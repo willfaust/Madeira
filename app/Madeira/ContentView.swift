@@ -1304,6 +1304,10 @@ struct ContentView: View {
     @StateObject private var logStore = LogStore.shared
     @StateObject private var jitCoordinator = JITCoordinator.shared
     @State private var jitStatus: JITStatus = .unknown
+    @State private var automaticJITAttempted = false
+    /// The next enableJIT() is the automatic start at launch (prepareAutomaticJIT).
+    @State private var automaticJITRequest = false
+    @ObservedObject private var jitOnboarding = OnboardingModel.shared
     /// Play without JIT: the start that waits for Enable JIT (jitReadyForLaunch).
     @State private var launchAfterJIT: (() -> Void)?
     /// The entry SessionSwitch noted before Madeira closed, until the library can start it.
@@ -1350,6 +1354,9 @@ struct ContentView: View {
                 } else {
                     developerBody
                 }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if library.current == nil { JITConnectionBar() }
             }
             .navigationTitle("Madeira")
             .navigationBarTitleDisplayMode(.inline)
@@ -1421,6 +1428,10 @@ struct ContentView: View {
                 // A game noted before Madeira closed to switch to it (SessionSwitch.swift).
                 pendingSwitch = SessionSwitch.take()
                 launchPendingSwitch()
+                DispatchQueue.main.async { prepareAutomaticJIT() }
+            }
+            .onChange(of: jitOnboarding.presented) { _, shown in
+                if !shown { prepareAutomaticJIT() }
             }
             .onReceive(NotificationCenter.default.publisher(for: SteamSignIn.didChange)) { _ in
                 if !SteamSignIn.isSignedIn { MadeiraDock.cleanup() }
@@ -2451,7 +2462,35 @@ struct ContentView: View {
         }
     }
 
+    private func prepareAutomaticJIT() {
+        guard jitCoordinator.automaticStartup, !automaticJITAttempted,
+              !jitOnboarding.presented, !jitCoordinator.showSetup,
+              !jitCoordinator.busy, !StikJITHelper.ready,
+              library.current == nil, wine_process_is_running() == 0,
+              SigningStatus.current.debuggable else { return }
+        jitCoordinator.refreshPairingStatus()
+        // Only the built-in helper with a stored pairing, which stays in Madeira: StikDebug
+        // would leave it at every launch, and the shortcut can turn Cellular Data off.
+        guard jitCoordinator.resolvedMethod == .builtIn, jitCoordinator.pairingImported,
+              !JITNetworkShortcut.shared.enabled else { return }
+        automaticJITAttempted = true
+        // It never replaces another VPN (Tailscale, say), opens LocalDevVPN or asks iOS to
+        // add Madeira's: the loopback answers already, or Madeira's VPN, allowed before,
+        // starts in place. Play does the rest.
+        LoopbackProbe.check { probe in
+            guard probe.reachable || (MadeiraVPN.available && MadeiraVPN.configured && !LoopbackProbe.otherVPNUp) else {
+                logStore.log("[jit] automatic start skipped: \(LoopbackProbe.otherVPNUp ? "another VPN is connected" : "no VPN to start in place")")
+                return
+            }
+            automaticJITRequest = true
+            enableJIT()
+        }
+    }
+
     private func enableJIT() {
+        // The start at launch fails quietly and never pairs again on its own.
+        let automatic = automaticJITRequest
+        automaticJITRequest = false
         // Explains why JIT cannot be enabled on a copy signed without get-task-allow; 0 opens StikDebug regardless.
         // A debugger can attach only to a process whose signature carries
         // get-task-allow (a development signature). A copy signed with a
@@ -2469,13 +2508,14 @@ struct ContentView: View {
         jitStatus = .testing
         logStore.log("Requesting JIT with \(jitCoordinator.resolvedMethod.title)...")
 
-        jitCoordinator.enable { result in
+        jitCoordinator.enable(interactive: !automatic) { result in
             switch result {
             case .success:
                 jitStatus = .available
                 logStore.log("JIT enabled! Debugger attached.", level: .success)
                 launchAfterJITEnded(started: true)
             case .failure(let failure):
+                let waiting = launchAfterJIT != nil   // a Play that joined this start
                 launchAfterJITEnded(started: false)
                 if let coordinatorError = failure as? JITCoordinator.CoordinatorError,
                    case .setupRequired = coordinatorError {
@@ -2484,7 +2524,8 @@ struct ContentView: View {
                 }
                 jitStatus = .unavailable
                 logStore.log("Failed to enable JIT: \(failure.localizedDescription)", level: .error)
-                if library.enabled { library.error = failure.localizedDescription }
+                // Play waiting on it says why; the start at launch alone stays quiet.
+                if library.enabled && (!automatic || waiting) { library.error = failure.localizedDescription }
             }
         }
     }
@@ -2518,7 +2559,9 @@ struct ContentView: View {
             logStore.log("[jit-on-play] JIT is not on: enabling it, then starting the game")
             launchAfterJIT = launch
             library.startingJIT = entry
-            if jitStatus != .testing { enableJIT() }   // a second Play while it runs only replaces the game
+            // A second Play while it runs only replaces the game; one during the automatic
+            // start makes that request the user's (it may pair again and open LocalDevVPN).
+            if jitStatus != .testing { enableJIT() } else { jitCoordinator.enable(interactive: true) { _ in } }
             return false
         }
         if StikJITHelper.flaggedWithoutDebugger {

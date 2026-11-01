@@ -12,10 +12,12 @@
 // game's JIT pool is mapped and the debugger has left, it runs it again to put
 // both back. Log tags: [jit-loopback], [jit-shortcut].
 
+import Combine
 import Darwin
 import Foundation
 import Network
 import UIKit
+import SwiftUI
 
 /// Whether LocalDevVPN's loopback reaches this device's lockdownd at 10.7.0.1:62078
 /// (the address StikDebug uses). Two steps, neither depending on what lockdownd says
@@ -156,6 +158,28 @@ enum LoopbackProbe {
     /// LocalDevVPN is connected: traffic to 10.7.0.1 leaves by its tunnel. Instant: no
     /// network traffic.
     static var vpnInterfaceUp: Bool { route()?.isLocalDevVPN ?? false }
+
+    /// Another VPN is connected (Tailscale, a work VPN): a VPN interface holds an IPv4
+    /// address outside 10.7.0.0/16. The route to 10.7.0.1 alone misses a split tunnel.
+    /// iOS's own utun interfaces carry only IPv6 link-local addresses.
+    static var otherVPNUp: Bool {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return false }
+        defer { freeifaddrs(list) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            let name = String(cString: entry.pointee.ifa_name)
+            guard ["utun", "ipsec", "ppp"].contains(where: { name.hasPrefix($0) }),
+                  entry.pointee.ifa_flags & UInt32(IFF_UP) != 0,
+                  let sa = entry.pointee.ifa_addr, sa.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            var sin = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &sin, &text, socklen_t(INET_ADDRSTRLEN))
+            if !String(cString: text).hasPrefix("10.7.") { return true }
+        }
+        return false
+    }
 }
 
 /// The Madeira JIT shortcut, two ways to add it. `iCloudLink` opens Shortcuts straight at
@@ -234,6 +258,8 @@ enum JITShortcutFile {
     }
     private var waiting: ((Outcome) -> Void)?
     private var timeout: Timer?
+    private var restoring = false
+    private var restoreWaiters: [() -> Void] = []
 
     /// Runs "start". Pending from before it runs: even a "start" that fails part-way may
     /// have changed something.
@@ -255,9 +281,18 @@ enum JITShortcutFile {
 
     /// Runs "done" when "start" ran since the last "done", then calls `completion`.
     func restoreIfNeeded(completion: @escaping () -> Void) {
+        if restoring { restoreWaiters.append(completion); return }
         guard let input = pending else { completion(); return }
+        restoring = true
+        restoreWaiters = [completion]
         pending = nil
-        run(input) { _ in completion() }
+        run(input) { [weak self] _ in
+            guard let self else { return }
+            self.restoring = false
+            let waiters = self.restoreWaiters
+            self.restoreWaiters.removeAll()
+            waiters.forEach { $0() }
+        }
     }
 
     /// At launch: a run that ended between "start" and "done" left the device without
@@ -330,5 +365,206 @@ enum JITShortcutFile {
         case .failed(let why):  LogStore.shared.log("[jit-shortcut] failed: \(why)", level: .error)
         }
         waiting(outcome)
+    }
+}
+
+
+/// Controls the installed LocalDevVPN app through its documented enable/disable
+/// URLs. Opening an app is not connection success: report the measured loopback.
+@MainActor final class LocalDevVPNControl: ObservableObject {
+    static let shared = LocalDevVPNControl()
+    @Published private(set) var connected = false
+    @Published private(set) var busy = false
+    @Published private(set) var message: String?
+    private var completions: [(Result<Void, Error>) -> Void] = []
+    private var operation = 0
+
+    func refresh() {
+        guard !busy else { return }
+        connected = LoopbackProbe.vpnInterfaceUp
+        if StikJITHelper.ready { message = nil }   // JIT came on another way: nothing left to say
+    }
+
+    private func failure(_ message: String) -> Error {
+        NSError(domain: "MadeiraLocalDevVPN", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    /// `openingApps`: false for the automatic start, which neither opens LocalDevVPN nor
+    /// says anything when the VPN is not there; Play does both.
+    func connect(openingApps: Bool = true, completion: @escaping (Result<Void, Error>) -> Void) {
+        if busy {
+            // Only connect operations accept joiners; disconnect disables controls.
+            if !completions.isEmpty { completions.append(completion) }
+            else { completion(.failure(failure("LocalDevVPN is disconnecting. Try again when it finishes."))) }
+            return
+        }
+        busy = true
+        message = "Checking connection…"
+        completions = [completion]
+        operation += 1
+        let current = operation
+        LoopbackProbe.check { [weak self] probe in
+            guard let self, self.operation == current else { return }
+            if probe.reachable { self.finish(.success(())); return }
+            // Madeira's own VPN when this build has it: no other app to install or open. If it
+            // cannot start (no Network Extensions entitlement, or Don't Allow), LocalDevVPN
+            // still can when it is installed.
+            if MadeiraVPN.available {
+                self.message = "Starting Madeira's VPN…"
+                MadeiraVPN.start { [weak self] result in
+                    guard let self, self.operation == current else { return }
+                    if case .failure(let error) = result, openingApps, LocalDevVPN.appInstalled {
+                        LogStore.shared.log("[jit-vpn] Madeira's VPN did not start (\(error.localizedDescription)): LocalDevVPN instead")
+                        LocalDevVPN.fellBack = true
+                        self.openLocalDevVPN(current)
+                    } else {
+                        if case .success = result { LocalDevVPN.fellBack = false }
+                        self.finish(result, quiet: !openingApps)
+                    }
+                }
+                return
+            }
+            guard openingApps else {
+                self.finish(.failure(self.failure("LocalDevVPN is not connected.")), quiet: true)
+                return
+            }
+            guard LocalDevVPN.appInstalled else {
+                self.finish(.failure(self.failure("Install LocalDevVPN, open it once to approve its VPN configuration, then try again.")))
+                return
+            }
+            self.openLocalDevVPN(current)
+        }
+    }
+
+    /// Connects LocalDevVPN through its enable URL, then waits for the loopback to answer.
+    private func openLocalDevVPN(_ current: Int) {
+        self.message = "Connecting…"
+        UIApplication.shared.open(LocalDevVPN.connect) { [weak self] opened in
+            Task { @MainActor in
+                guard let self, self.operation == current else { return }
+                guard opened else {
+                    self.finish(.failure(self.failure("LocalDevVPN could not open. Open it once, then try again.")))
+                    return
+                }
+                LoopbackProbe.waitUntilReachable(within: 25) { [weak self] result in
+                    guard let self, self.operation == current else { return }
+                    if result.reachable { self.finish(.success(())) }
+                    else {
+                        self.finish(.failure(self.failure("LocalDevVPN is not reaching this device. Approve its VPN configuration if asked. On cellular-only connections, use the Madeira JIT shortcut or connect to Wi-Fi.")))
+                    }
+                }
+            }
+        }
+    }
+
+    /// `quiet`: a failure leaves no message in the bar (the automatic start's).
+    private func finish(_ result: Result<Void, Error>, quiet: Bool = false) {
+        connected = LoopbackProbe.vpnInterfaceUp
+        busy = false
+        switch result {
+        case .success: message = nil
+        case .failure(let error): message = quiet ? nil : error.localizedDescription
+        }
+        let callbacks = completions
+        completions.removeAll()
+        callbacks.forEach { $0(result) }
+    }
+
+    func setEnabled(_ wanted: Bool) {
+        guard !busy else { return }
+        if wanted { connect { _ in }; return }
+        if MadeiraVPN.available && !LocalDevVPN.fellBack {
+            busy = true
+            message = "Disconnecting…"
+            operation += 1
+            let current = operation
+            MadeiraVPN.stop { [weak self] in
+                Task { @MainActor [weak self] in
+                    for _ in 0..<20 {
+                        guard let self, self.operation == current else { return }
+                        if !LoopbackProbe.vpnInterfaceUp { self.finish(.success(())); return }
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                    guard let self, self.operation == current else { return }
+                    self.finish(.failure(self.failure("Another VPN is still connected. Turn it off in Settings › VPN.")))
+                }
+            }
+            return
+        }
+        guard LocalDevVPN.appInstalled else {
+            message = "Open the app that owns this VPN to disconnect it."
+            return
+        }
+        busy = true
+        message = "Disconnecting…"
+        operation += 1
+        let current = operation
+        let url = URL(string: "localdevvpn://disable?scheme=madeira")!
+        UIApplication.shared.open(url) { [weak self] opened in
+            Task { @MainActor in
+                guard let self, self.operation == current else { return }
+                guard opened else {
+                    self.finish(.failure(self.failure("LocalDevVPN could not open.")))
+                    return
+                }
+                // LocalDevVPN returns before its tunnel has fully stopped.
+                for _ in 0..<40 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    guard self.operation == current else { return }
+                    if !LoopbackProbe.vpnInterfaceUp { self.finish(.success(())); return }
+                }
+                self.finish(.failure(self.failure("The local tunnel is still connected. Check LocalDevVPN or the app that owns this VPN.")))
+            }
+        }
+    }
+}
+
+/// Always visible at the top of the library, with real connection state. Disabling
+/// the tunnel mid-attach would break JIT, so the switch waits for setup to finish.
+struct JITConnectionBar: View {
+    @ObservedObject private var vpn = LocalDevVPNControl.shared
+    @ObservedObject private var jit = JITCoordinator.shared
+    @ObservedObject private var jitState = LibraryJITState.shared
+    private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    // Once JIT is ready and nothing needs attention, the bar steps aside: it sat
+    // over the library's first row (Desktop).
+    var body: some View {
+        if jitState.enabled && !vpn.busy && !jit.busy {
+            Color.clear.frame(height: 0)
+        } else {
+            bar
+        }
+    }
+
+    private var bar: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 12) {
+                if vpn.busy || jit.busy { ProgressView().controlSize(.small) }
+                Toggle(isOn: Binding(get: { vpn.connected }, set: { vpn.setEnabled($0) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(LocalDevVPN.name).font(.subheadline.weight(.semibold))
+                        Text(jit.busy ? (jit.status ?? "Preparing JIT…") :
+                             StikJITHelper.ready ? "JIT ready" : vpn.connected ? "Connected" : "Connects automatically for JIT")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .tint(.green)
+                .disabled(vpn.busy || jit.busy)
+                .accessibilityIdentifier("localdevvpn.toggle")
+                Button { jit.showSetup = true } label: {
+                    Image(systemName: "gearshape").padding(6)
+                }
+                .accessibilityLabel("JIT setup")
+            }
+            if let message = vpn.message, !vpn.busy {
+                Text(message).font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
+        .background(.regularMaterial)
+        .onAppear { vpn.refresh() }
+        .onReceive(refresh) { _ in vpn.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in vpn.refresh() }
     }
 }

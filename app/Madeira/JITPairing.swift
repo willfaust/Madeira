@@ -77,12 +77,15 @@ import UserNotifications
 
     private func log(_ line: String) { LogStore.shared.log("[jit-pairing] " + line) }
 
-    func start() {
-        guard Self.isSupported, !active, session == nil else { return }
+    /// False when nothing started and no phase change follows (a pairing is already
+    /// running, or the last one is still closing). A failure to start publishes `.failed`.
+    @discardableResult
+    func start() -> Bool {
+        guard Self.isSupported, !active, session == nil else { return false }
         var error: UnsafeMutablePointer<CChar>?
         guard let session = madeira_rppairing_new(Self.hostName, &error) else {
             fail(Self.take(error) ?? "Madeira could not open its pairing port.")
-            return
+            return true
         }
         self.session = session
         phase = .waiting
@@ -92,7 +95,7 @@ import UserNotifications
         guard publish(session) else {
             madeira_rppairing_free(session)
             self.session = nil
-            return
+            return true
         }
         beginBackground()
         deadline = Timer.scheduledTimer(withTimeInterval: Self.timeout, repeats: false) { _ in
@@ -117,6 +120,7 @@ import UserNotifications
                 OnDevicePairing.shared.finished(status: status, data: data, device: name, message: message)
             }
         }
+        return true
     }
 
     /// Stops a pairing in progress. `reason` is shown as the failure; nil returns to idle.

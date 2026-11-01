@@ -58,16 +58,17 @@ require(("jit_check_debugged()" in ready or "SigningStatus.current.debugged" in 
         and "isDebuggerAttached()" in ready,
         "readiness requires CS_DEBUGGED and a live debugger")
 
-# Automatic selection is deterministic: installed StikDebug first, otherwise
-# the built-in helper. A failure never silently falls through to another method.
+# Automatic selection prefers a ready paired built-in helper, then installed
+# StikDebug, then the built-in setup path. A failure never silently falls through to another method.
 resolved = function(setup, "var resolvedMethod: JITMethod")
-require("StikJITHelper.isAvailable ? .stikDebug : .builtIn" in resolved,
-        "Automatic prefers installed StikDebug, then Built-in StikJIT")
-coordinator_enable = function(setup, "func enable(completion:")
+require("MadeiraBuiltInJIT.isAvailable && JITPairingFileStore.isImported" in resolved
+        and "StikJITHelper.isAvailable ? .stikDebug : .builtIn" in resolved,
+        "Automatic prefers the paired built-in helper, with StikDebug fallback for unpaired devices")
+coordinator_enable = function(setup, "private func beginEnable(completion:")
 coordinator_route = function(setup, "private func enableResolved(")
 require("ensureLoopback" in coordinator_enable and "self?.enableResolved" in coordinator_enable
         and "switch resolvedMethod" in coordinator_route
-        and "enableBuiltIn(completion: completion)" in coordinator_route
+        and "enableBuiltInRepairing(completion: completion)" in coordinator_route
         and setup.count("StikJITHelper.enableJIT") == 1,
         "the coordinator routes each selected JIT method once, after the loopback check")
 require("JITSetupView()" in content and "JITSettingsSection()" in library,
