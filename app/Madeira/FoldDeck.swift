@@ -288,19 +288,15 @@ struct FoldKeyButtonStyle: ButtonStyle {
 /// system's own sits across the top of the game, and is hidden then (TouchControlsHost).
 /// Wi-Fi strength has no public API, so the Wi-Fi mark is always full.
 struct DeckStatusBar: View {
-    private static let monitor: NWPathMonitor = {
-        let m = NWPathMonitor()
-        m.start(queue: DispatchQueue(label: "madeira.deck-status.path"))
-        return m
-    }()
+    @ObservedObject private var network = DeckNetwork.shared
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 10)) { context in
+        TimelineView(.everyMinute) { context in
             let battery = Self.battery()
             HStack(spacing: 5) {
                 Text(context.date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
                     .monospacedDigit()
-                Image(systemName: Self.networkSymbol())
+                Image(systemName: network.symbol)
                 Image(systemName: battery.symbol).foregroundStyle(battery.tint)
                 if let percent = battery.percent { Text("\(percent)%").monospacedDigit() }
             }
@@ -310,14 +306,6 @@ struct DeckStatusBar: View {
         }
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
-    }
-
-    private static func networkSymbol() -> String {
-        let path = monitor.currentPath
-        guard path.status == .satisfied else { return "wifi.slash" }
-        // A VPN (LocalDevVPN, for JIT) is the path's first interface while it runs; Wi-Fi is under it.
-        if path.usesInterfaceType(.wifi) || path.availableInterfaces.contains(where: { $0.type == .wifi }) { return "wifi" }
-        return path.usesInterfaceType(.cellular) ? "cellularbars" : "network"
     }
 
     private static func battery() -> (symbol: String, percent: Int?, tint: Color) {
@@ -333,6 +321,31 @@ struct DeckStatusBar: View {
         let tint: Color = ProcessInfo.processInfo.isLowPowerModeEnabled ? .yellow
             : percent <= 20 && !charging ? .red : .white
         return (symbol, percent, tint)
+    }
+}
+
+/// The network mark for DeckStatusBar, from a path monitor started with the first deck:
+/// it reports the current path at once and every change after.
+@MainActor
+final class DeckNetwork: ObservableObject {
+    static let shared = DeckNetwork()
+    @Published private(set) var symbol = "wifi"
+    private let monitor = NWPathMonitor()
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            let symbol = Self.symbol(for: path)
+            Task { @MainActor in if self?.symbol != symbol { self?.symbol = symbol } }
+        }
+        monitor.start(queue: DispatchQueue(label: "madeira.deck-status.path"))
+    }
+
+    private nonisolated static func symbol(for path: NWPath) -> String {
+        guard path.status == .satisfied else { return "wifi.slash" }
+        // A VPN (Madeira's own or LocalDevVPN, for JIT) is the path's first interface
+        // while it runs; Wi-Fi is under it.
+        if path.usesInterfaceType(.wifi) || path.availableInterfaces.contains(where: { $0.type == .wifi }) { return "wifi" }
+        return path.usesInterfaceType(.cellular) ? "cellularbars" : "network"
     }
 }
 

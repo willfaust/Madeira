@@ -253,7 +253,7 @@ final class MetalBackedView: UIView {
         guard let w = window else { return }
         let r = gameRect()
         let frame = convert(r, to: w)
-        if reason == PortraitPin.reason {
+        if reason == PortraitPin.reason && !UIAccessibility.isReduceMotionEnabled {
             // A swipe moved the game; it slides there at the same size.
             UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
                 MetalHostView.shared.frame = frame
@@ -1487,14 +1487,16 @@ struct ContentView: View {
             // game's glow fills the bars beside it as well as the deck. Upright with
             // touch controls, the space below the game is a deck too (PortraitDeck).
             if let deck = deviceFold.layout?.deck ?? (library.current != nil ? portraitDeck.rect : nil) {
-                FoldDeckBackground(edge: false)
-                    .frame(width: deck.width, height: deviceFold.layout?.top.height ?? deck.minY)
-                FoldDeckBackground()
+                if library.displayMode == .fit || library.displayMode == .aspect {
+                    FoldDeckBackground(edge: false)
+                        .frame(width: deck.width, height: deviceFold.layout?.top.height ?? deck.minY)
+                }
+                FoldDeckBackground(hinge: deviceFold.layout != nil)
                     .frame(width: deck.width, height: deck.height)
                     .offset(x: deck.minX, y: deck.minY)
-            } else {
-                // Upright and unfolded, the game takes a band of the screen; the same
-                // glow fills the rest, behind it.
+            } else if deviceFold.portraitFold, library.displayMode == .fit || library.displayMode == .aspect {
+                // The Duo upright and unfolded: the game takes a band of the screen; the
+                // same glow fills the rest, behind it. Fill and Stretch cover it.
                 GeometryReader { geo in
                     if geo.size.height > geo.size.width { FoldDeckBackground(edge: false) }
                 }
@@ -4386,23 +4388,33 @@ struct TouchControlsOverlay: View {
                         }
                         .frame(width: area.width, height: area.height, alignment: .topLeading)
                         .offset(x: area.minX, y: area.minY)
-                        .foldKeys(deck != nil)   // keycaps on the folded deck (FoldDeck.swift)
+                        .foldKeys(fold != nil)   // keycaps on the folded deck (FoldDeck.swift)
                     }
                     if session && !m.editing {
                         // The starting screen covers the whole window; the menu button and
-                        // the in-game menu stay on the deck.
-                        if let deck, !library.startingScreen {
-                            LibraryHUD()
-                                .frame(width: deck.width, height: deck.height)
-                                .offset(x: deck.minX, y: deck.minY)
-                        } else {
-                            LibraryHUD()
+                        // the in-game menu stay on the deck. One LibraryHUD either way, so
+                        // folding with the menu open keeps its page.
+                        let hud = deck.flatMap { library.startingScreen ? nil : $0 }
+                            ?? CGRect(origin: .zero, size: geo.size)
+                        if library.menu, let deck, !library.startingScreen {
+                            // The game above the deck: a tap there closes the menu too.
+                            Color.black.opacity(0.35)
+                                .frame(width: geo.size.width, height: deck.minY)
+                                .contentShape(Rectangle())
+                                .onTapGesture { library.menu = false }
                         }
+                        LibraryHUD()
+                            .frame(width: hud.width, height: hud.height)
+                            .offset(x: hud.minX, y: hud.minY)
                     } else { topBar }
                     if m.editing, let i = m.index(of: m.selected) {
-                        MappingPanel(control: m.controls[i], screen: geo.size)
+                        MappingPanel(control: m.controls[i], screen: area.size)
+                            .frame(width: area.width, height: area.height, alignment: .topLeading)
+                            .offset(x: area.minX, y: area.minY)
                     } else if m.editing, let i = zones.index(of: zones.selected) {
-                        GestureZonePanel(zone: zones.zones[i], screen: geo.size)
+                        GestureZonePanel(zone: zones.zones[i], screen: area.size)
+                            .frame(width: area.width, height: area.height, alignment: .topLeading)
+                            .offset(x: area.minX, y: area.minY)
                     }
                 }
             }
@@ -4410,19 +4422,23 @@ struct TouchControlsOverlay: View {
             .contentShape(Rectangle())
             .gesture(scalePinch, including: m.editing ? .all : .subviews)
             .onAppear {
-                applyDefaultLayout(geo); configureGamepad(landscape: landscape); refit()
+                applyDefaultLayout(geo, switchedOn: m.visible); configureGamepad(landscape: landscape); refit()
                 TouchControlsHost.hidesStatusBar = fold != nil
             }
             .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape); refit() }
-            .onChange(of: deviceFold.layout) { _, _ in applyDefaultLayout(geo); refit() }
+            .onChange(of: deviceFold.layout) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape); refit() }
+            .onChange(of: pad.controllerConnected) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: portraitDeck.rect) { _, _ in applyDefaultLayout(geo); refit() }
+            .onChange(of: library.current) { _, current in
+                if current != nil { applyDefaultLayout(geo, switchedOn: m.visible) }
+            }
             .onChange(of: fold != nil) { _, folded in TouchControlsHost.hidesStatusBar = folded }
             .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape); refit() }
             // Shown or hidden, upright the game moves to the top or back (PortraitDeck).
             .onChange(of: m.controls.isEmpty) { _, _ in MetalBackedView.refreshDisplayMode(reason: PortraitPin.reason) }
             .onChange(of: m.sizeScale) { _, _ in refit() }
-            .onChange(of: m.visible) { _, _ in
-                applyDefaultLayout(geo); configureGamepad(landscape: landscape)
+            .onChange(of: m.visible) { _, visible in
+                applyDefaultLayout(geo, switchedOn: visible); configureGamepad(landscape: landscape)
                 MetalBackedView.refreshDisplayMode(reason: PortraitPin.reason)
             }
             .onChange(of: zones.padZoneIDs) { _, _ in configureGamepad(landscape: landscape) }
@@ -4459,7 +4475,11 @@ struct TouchControlsOverlay: View {
     }
 
     private func configureGamepad(landscape: Bool) {
-        let ids = landscape && m.visible
+        // Folded with a controller the deck shows FoldDeck: the controls are not drawn, so
+        // they feed no pad and leave the game's taps alone.
+        let folded = (library.current != nil || library.preparing != nil) && deviceFold.layout != nil
+        let shown = m.visible && !(folded && !m.editing && pad.controllerConnected)
+        let ids = landscape && shown
             ? m.controls.filter { $0.action.padName.map(TouchPadAction.supported) ?? false }.map(\.id)
                 + (GestureZonesModel.enabled ? zones.zones.filter(\.feedsPad).map(\.id) : []) : []
         // Menus and the control editor keep the pad connected but take no input (#204);
@@ -4498,12 +4518,15 @@ struct TouchControlsOverlay: View {
         return deviceFold.layout?.deck ?? portraitDeck.rect
     }
 
-    private func applyDefaultLayout(_ geo: GeometryProxy) {
+    /// `switchedOn`: touch controls have just been turned on (or a session started with
+    /// them on). Only then does a game with no controls and no gesture zones get the
+    /// built-in; folding or turning the screen keeps a layout emptied on purpose.
+    private func applyDefaultLayout(_ geo: GeometryProxy, switchedOn: Bool = false) {
         // Folded like a laptop, the controls are laid out for the deck.
         let deck = library.current != nil ? self.deck : nil
         let size = deck?.size ?? geo.size
-        let empty = library.current != nil && m.visible && !m.editing && m.controls.isEmpty
-            && ControlPresetsModel.enabled
+        let empty = switchedOn && library.current != nil && m.visible && !m.editing && m.controls.isEmpty
+            && GestureZonesModel.shared.zones.isEmpty && ControlPresetsModel.enabled
         guard (m.needsDefaultLayout && size.width > size.height) || empty else { return }
         let i = deck == nil ? geo.safeAreaInsets : EdgeInsets()
         let screen = ControlPresetScreen(
@@ -4831,7 +4854,13 @@ struct TouchControlButton: View {
                 }
             }
         }
-        .onDisappear { if control.action.isPad { padVector = .zero; isDown = false } }
+        .onDisappear {
+            if control.action.isPad { padVector = .zero; isDown = false }
+            // Taken away mid-press (FoldDeck replacing the controls when a controller
+            // connects): the drag never ends, so let go here, or the key stays down.
+            else if let q = control.action.stickKeys { if isDown { applyStick(-1, q); isDown = false } }
+            else if isDown { isDown = false; press(false) }
+        }
         .onChange(of: m.editing) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
         .onChange(of: screen) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
         .onChange(of: control.action) { old, new in
