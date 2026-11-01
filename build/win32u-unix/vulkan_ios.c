@@ -22,8 +22,10 @@
  *
  * The library's vkGetInstanceProcAddr and vkGetDeviceProcAddr are wrapped
  * (madeira_vulkan_host_sym), so a few host entry points pass through this file
- * first: each present is counted with DXMT's (madeira_note_vulkan_present), and
- * queue work waits while Madeira is in the background (madeira_vulkan_wait_active).
+ * first: each present is counted with DXMT's (madeira_note_vulkan_present),
+ * queue work waits while Madeira is in the background (madeira_vulkan_wait_active),
+ * and an acquire's host VK_SUBOPTIMAL_KHR is handled like a present's
+ * (madeira_vulkan_acquired).
  */
 
 #include <dlfcn.h>
@@ -158,6 +160,8 @@ static PFN_vkQueueSubmit2 host_vkQueueSubmit2;
 static PFN_vkQueueSubmit2KHR host_vkQueueSubmit2KHR;
 static PFN_vkQueueBindSparse host_vkQueueBindSparse;
 static PFN_vkQueuePresentKHR host_vkQueuePresentKHR;
+static PFN_vkAcquireNextImageKHR host_vkAcquireNextImageKHR;
+static PFN_vkAcquireNextImage2KHR host_vkAcquireNextImage2KHR;
 
 static VkResult VKAPI_CALL madeira_vkQueueSubmit( VkQueue queue, uint32_t count, const VkSubmitInfo *submits,
                                                   VkFence fence )
@@ -197,6 +201,34 @@ static VkResult VKAPI_CALL madeira_vkQueuePresentKHR( VkQueue queue, const VkPre
     return res;
 }
 
+/* MoltenVK calls a swapchain suboptimal while the layer's bounds times its
+ * contentsScale differ from the swapchain extent. Desktop compositor layers are
+ * sized in client pixels (VulkanLayerGeometry.h), but a game session presents to
+ * MetalHostView's layer (ContentView.swift), which the app lays out in points at
+ * the screen's scale, so there MoltenVK calls nearly every swapchain suboptimal.
+ * DOOM Eternal recreates its swapchain on that result: on a device it did so on
+ * every frame (about 1 fps) until acquires and presents both passed it as success.
+ * vulkan.c already does that for a present whose swapchain matches its client rect
+ * (ignore_host_suboptimal); acquires get the same here. vulkan.c's check against
+ * the client rect, after this call, still reports real resizes, and
+ * MADEIRA_VK_HOST_SUBOPTIMAL=1 passes the host result through. */
+static VkResult madeira_vulkan_acquired( VkResult res )
+{
+    return res == VK_SUBOPTIMAL_KHR && ignore_host_suboptimal() ? VK_SUCCESS : res;
+}
+
+static VkResult VKAPI_CALL madeira_vkAcquireNextImageKHR( VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
+                                                          VkSemaphore semaphore, VkFence fence, uint32_t *index )
+{
+    return madeira_vulkan_acquired( host_vkAcquireNextImageKHR( device, swapchain, timeout, semaphore, fence, index ) );
+}
+
+static VkResult VKAPI_CALL madeira_vkAcquireNextImage2KHR( VkDevice device, const VkAcquireNextImageInfoKHR *info,
+                                                           uint32_t *index )
+{
+    return madeira_vulkan_acquired( host_vkAcquireNextImage2KHR( device, info, index ) );
+}
+
 /* One saved host pointer per name: the drivers Madeira bundles (MoltenVK,
  * KosmicKrisp) return the same entry point for every instance and device. */
 static PFN_vkVoidFunction madeira_vulkan_wrap( const char *name, PFN_vkVoidFunction fn )
@@ -208,6 +240,8 @@ static PFN_vkVoidFunction madeira_vulkan_wrap( const char *name, PFN_vkVoidFunct
     WRAP( vkQueueSubmit2KHR )
     WRAP( vkQueueBindSparse )
     WRAP( vkQueuePresentKHR )
+    WRAP( vkAcquireNextImageKHR )
+    WRAP( vkAcquireNextImage2KHR )
 #undef WRAP
     return fn;
 }
