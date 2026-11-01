@@ -43,6 +43,10 @@ void winios_post_touch_up(int x, int y);
  * down=1 press, down=0 release. */
 void winios_post_key(int vk, int down);
 
+/* Quit game: WM_CLOSE to the foreground window, for games that never turn
+ * Alt+F4 into a close (raw keyboard input without legacy messages). */
+void winios_post_close(void);
+
 /* Text-only paste: one Unicode scalar, optionally represented by a US-layout
  * virtual key. Returns 0 when the queue is busy; retry without advancing.
  * Cancel invalidates text already queued, without discarding physical input. */
