@@ -34,7 +34,7 @@ final class GamepadInput: @unchecked Sendable {
         }
     }
 
-    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT=1; default OFF).
+    /// Publish player 1 before the game looks (MADEIRA_PAD_EARLY_SLOT; on unless "0").
     ///
     /// Some input layers enumerate XInput once at startup and only rescan on a
     /// device-arrival broadcast, which this port does not deliver. Touch slot 0
@@ -45,12 +45,20 @@ final class GamepadInput: @unchecked Sendable {
     /// is connected at rest from the start; live input takes it over. The
     /// reservation lasts until the process exits (one Wine session per run),
     /// so player 1 then shows as connected for the whole session even while no
-    /// controller is in use. That is why it is opt-in: without the switch,
-    /// slot 0 connects only when a real source appears, as before.
-    @MainActor func reserveSessionSlot(touchControls: Bool) {
-        guard Self.enabled, Self.optIn("MADEIRA_PAD_EARLY_SLOT") else { return }
+    /// controller is in use. It is on by default since DOOM Eternal on the Duo:
+    /// touch connected slot 0 only after the game had looked, and a controller
+    /// paired mid-game was never seen. "0" connects slot 0 only when a real
+    /// source appears, as before.
+    /// `gameLines`: the library game's own config lines, which win as they do at launch
+    /// (MadeiraConfig.applyGame runs after this, on the launch worker).
+    @MainActor func reserveSessionSlot(touchControls: Bool, gameLines: String? = nil) {
+        let key = "env.MADEIRA_PAD_EARLY_SLOT"
+        let early = gameLines.flatMap { MadeiraConfig.parse($0)[key] }
+            ?? MadeiraConfig.get(key) ?? ProcessInfo.processInfo.environment["MADEIRA_PAD_EARLY_SLOT"]
+        guard Self.enabled, early != "0" else { return }
         let touch = touchControls && Self.touchEnabled
-        let paired = !GCController.controllers().isEmpty
+        // In keyboard-and-mouse mode the pad is keys and a mouse, so no XInput player 1 for it.
+        let paired = LibraryModel.shared.controllerMode != "keys" && !GCController.controllers().isEmpty
         guard touch || paired else { return }
         queue.async { [self] in touchState.reserved = true; sample() }
         LogStore.shared.log("[xinput] ml1990 slot=0 reserved for the session touch=\(touch ? 1 : 0) paired=\(paired ? 1 : 0)")
