@@ -88,10 +88,13 @@ sign-in, ownership checks, launch settings and game creation. No game executable
 is substituted and no Dock authentication handoff is used.
 
 The app re-reads the original appmanifest, checks its numeric ID and installed
-state, confirms its recorded game folder, CS2 executable and existing steam.exe,
+state, confirms its recorded game folder and existing steam.exe,
 checks that the actual client libraryfolders.vdf lists the library (or it is
 the client’s default steamapps folder), and writes only
-an app-owned transient launch script. It does not reinstall, repair, rewrite
+an app-owned transient launch script. Launch validation is independent of game
+program names; the separate read-only diagnostic reports whether CS2’s expected
+executable exists. Steam resolves and checks its own launch program. The helper
+does not reinstall, repair, rewrite
 manifests, clear sign-in data, or modify Steam/CS2 files. The original saved game
 entry and per-game preferences remain separate from the generated command.
 This mode requires ending the current Wine session before starting; it is not

@@ -43,9 +43,7 @@ code='import Foundation\n'+game+'\nenum DockError:Error{case message(String)}\ne
   let body=try String(contentsOf:drive.appendingPathComponent(script),encoding:.utf8)
   assert(body.contains("steam.exe\" \(NativeSteamPlay.clientArguments) -applaunch 730"))
   assert(try Data(contentsOf:manifest)==data);assert(try String(contentsOf:login,encoding:.utf8)=="auth-fixture-must-stay")
-  try fm.removeItem(at:folder.appendingPathComponent("game/bin/win64/cs2.exe"))
-  do {_=try NativeSteamPlay.prepare(game,drive:drive);assertionFailure("missing CS2 image must reject")}catch{}
-  try Data("game-fixture".utf8).write(to:folder.appendingPathComponent("game/bin/win64/cs2.exe"))
+  let image=try String(contentsOf:folder.appendingPathComponent("game/bin/win64/cs2.exe"),encoding:.utf8);assert(image=="game-fixture")
   try fm.removeItem(at:manifest)
   do {_=try NativeSteamPlay.prepare(game,drive:drive);assertionFailure("missing manifest must reject")}catch{}
   try data.write(to:manifest);try fm.removeItem(at:folder)

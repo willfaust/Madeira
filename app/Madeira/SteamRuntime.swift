@@ -369,9 +369,6 @@ enum NativeSteamPlay {
         guard libraryListed(game, root: root, drive: drive) else {
             throw DockError.message("The Windows Steam client does not list this existing library folder. Add it in Steam Storage before launching; no game files were changed.")
         }
-        if game.id == 730 && !fm.fileExists(atPath: folder.appendingPathComponent("game/bin/win64/cs2.exe").path) {
-            throw DockError.message("CS2's appmanifest exists, but its recorded installation has no game/bin/win64/cs2.exe. Its files were kept.")
-        }
         let windows = "C:\\" + root.replacingOccurrences(of: "/", with: "\\")
         let body = "@echo off\r\n\"C:\\windows\\system32\\madeira-steam-service.exe\" \"\(windows)\"\r\nif not \"%errorlevel%\"==\"0\" exit /b %errorlevel%\r\ncd /d \"\(windows)\"\r\n\"\(windows)\\steam.exe\" \(clientArguments) -applaunch \(game.id)\r\n"
         try body.write(to: drive.appendingPathComponent(script), atomically: true, encoding: .utf8)
