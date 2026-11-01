@@ -42,6 +42,24 @@ struct macdrv_functions_t {
     void (*on_main_thread)(dispatch_block_t b);
 };
 
+// --- Whether Madeira is the active app, for Vulkan (build/win32u-unix/vulkan_ios.c):
+// iOS refuses GPU work from an app that is not in front and MoltenVK then loses its
+// device for good, so Vulkan submits and presents wait while this is 0. It follows
+// the resign-active / become-active notifications, the earliest signals iOS gives.
+#include <stdatomic.h>
+static _Atomic int g_app_active = 1;
+__attribute__((constructor)) static void madeira_watch_app_active(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+        [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil
+                    usingBlock:^(NSNotification *n) { atomic_store(&g_app_active, 0); }];
+        [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil
+                    usingBlock:^(NSNotification *n) { atomic_store(&g_app_active, 1); }];
+    });
+}
+__attribute__((used, visibility("default")))
+int madeira_app_active(void) { return atomic_load(&g_app_active); }
+
 // --- iOS-side state: one layer shared by the whole process ---
 
 static CAMetalLayer *g_layer = nil;
