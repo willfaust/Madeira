@@ -44,7 +44,13 @@ server.on('upgrade', (request, socket) => {
         event('Network.webSocketCreated',{requestId:'ws',url:'ws://127.0.0.1:27060/client?cookie=SECRET'});
         event('Network.webSocketHandshakeResponseReceived',{requestId:'ws',response:{status:101,headers:{authorization:'SECRET'}}});
         event('Network.webSocketFrameError',{requestId:'ws',errorMessage:'SECRET'});
-        setTimeout(()=>{sampled=true;reply(command.id,{result:{value:{store:true,ready:true,count:19,cs2:true,apps:true,secret:'SECRET'}}});console.log('PASS passive CDP events and delayed read-only snapshot; no script hooks requested');},40);
+        setTimeout(()=>{
+          sampled=true;reply(command.id,{result:{value:{store:true,ready:true,count:19,cs2:true,apps:true,secret:'SECRET'}}});
+          console.log('PASS passive CDP events and delayed read-only snapshot; no script hooks requested');
+          // URLSession cancellation can close TCP without flushing a WS close
+          // frame when the CLI exits. The fixture owns its listener lifetime.
+          setTimeout(()=>{socket.end();server.close();},100);
+        },40);
       } else { throw new Error('observer requested non-passive command '+command.method); }
     }
   });
