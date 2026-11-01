@@ -18,6 +18,11 @@ patches change MoltenVK code and are offered under its licence (Apache-2.0).
   names `double` (to `double4`) is compiled with `float` in its place. Metal has no
   double, and a DOOM Eternal compute shader that rounds with it failed to build, so its
   pass was missing from every frame.
+- `0003-fps-limit-present-pacing.patch`: a present with no desired present time waits
+  for the session's FPS limit (`presentAfterMinimumDuration`), as DXMT's presents do.
+  The limit is the app's `madeira_get_vsync_locked()`, looked up with
+  `dlsym(RTLD_DEFAULT)`: 1, 3 and 4 are 60, 30 and 40 FPS; 0 (display maximum), 2
+  (uncapped) or a process without the symbol present at once.
 
 The patches were made against MoltenVK 1.4.3 (`5189f8d`), with which DOOM Eternal ran
 at 55-60 fps on an iPhone Duo and an M4 iPad. They also apply cleanly, in order, to the
