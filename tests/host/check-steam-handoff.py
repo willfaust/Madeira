@@ -390,6 +390,7 @@ xcrun() { printf '%s\\0' "$@" > "$CAPTURE"; }
     probe = work / 'server_headers.c'
     probe.write_text('''#include <assert.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/time.h>
 #include <string.h>
 #include <sys/socket.h>
