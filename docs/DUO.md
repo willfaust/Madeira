@@ -7,7 +7,9 @@ nothing changes. The fold is read in `app/Madeira/DeviceFold.swift`, and the
 deck's controller view is in `app/Madeira/FoldDeck.swift`. The hooks are in
 `ContentView.swift`: `sessionBody`, `TouchControlsOverlay` and
 `ControlsWindow.hitTest`. Two parts at the end apply to every iPhone: moving the
-game in portrait with a controller, and switching games.
+game in portrait with a controller, and switching games. A third, the portrait
+deck, applies wherever the space below the game is wider than tall, which in
+practice is the Duo open flat.
 
 ## Reading the fold
 
@@ -154,20 +156,24 @@ Log tag: `[portrait-pin]`.
 
 ## Portrait with touch controls
 
-This part applies to every iPhone. Held upright without a controller, touch
-controls used to lie over the game in the middle band, their landscape layout
-squeezed into the narrow window until the buttons ran into each other. Now, while
-touch controls are on screen, the game moves to the top (as if pinned there), and
-the space below it becomes a deck like the folded Duo's (`PortraitDeck`,
+Held upright without a controller, touch controls used to lie over the game in
+the middle band, their landscape layout squeezed into the narrow window until the
+buttons ran into each other. Now, while touch controls are on screen and the
+space below the game can hold them, the game moves to the top (as if pinned
+there), and that space becomes a deck like the folded Duo's (`PortraitDeck`,
 `PortraitPin.swift`):
 - the controls, the menu button and the in-game menu are drawn there, and the
   controls window takes every touch in it;
 - the built-in layout is laid out again for it, as on the fold;
-- the game's reflection fills it, and its glow fills the space around the game.
+- the game's reflection fills it, and on the Duo its glow fills the space around
+  the game.
 
-Hiding touch controls, connecting a controller, or a game that fills the height
-puts things back as before. A space of less than 160 points is not used. Log tag:
-`[portrait-deck]`.
+The space must be at least 160 points tall and wider than tall: the controls'
+layout is a landscape one, and on an ordinary iPhone upright the space below a
+16:9 game is taller than wide, so there the controls stay over the game as before.
+In practice this is the Duo open flat. iPads are left as they were. Hiding touch
+controls, connecting a controller, or a game that fills the height puts things
+back as before. Log tag: `[portrait-deck]`.
 
 ## Switching games
 

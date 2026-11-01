@@ -41,8 +41,9 @@ enum PortraitPin: String {
     /// (GameSurfaceLayout.rect); laid out in the band, it moves there at the
     /// same size.
     static func bounds(_ bounds: CGRect, game: CGRect, insets: UIEdgeInsets) -> CGRect {
-        // Touch controls take the space below the game (PortraitDeck).
-        let deck = PortraitDeck.applies(in: bounds)
+        // Touch controls take the space below the game (PortraitDeck), when it is usable.
+        let below = CGSize(width: bounds.width, height: bounds.maxY - (bounds.minY + insets.top + game.height))
+        let deck = PortraitDeck.applies(in: bounds) && PortraitDeck.usable(below)
         let pin: PortraitPin = deck ? .top : current
         guard pin != .middle, deck || applies(in: bounds), game.height < bounds.height - 1 else { return bounds }
         let y = pin == .top
@@ -88,23 +89,32 @@ final class PortraitDeck: ObservableObject {
     static let shared = PortraitDeck()
 
     /// The space below the game, in window coordinates; nil when this does not apply
-    /// or leaves less than 160 points.
+    /// or that space is not usable.
     @Published private(set) var rect: CGRect?
 
-    /// It can apply: a library session in a portrait view, not folded, with touch
-    /// controls on screen and no controller.
+    /// It can apply: a library session in a portrait view on an iPhone, not folded,
+    /// with touch controls on screen and no controller.
     static func applies(in bounds: CGRect) -> Bool {
         let controls = TouchControlsModel.shared
-        return bounds.height > bounds.width && LibraryModel.shared.current != nil
+        return UIDevice.current.userInterfaceIdiom == .phone
+            && bounds.height > bounds.width && LibraryModel.shared.current != nil
             && DeviceFold.shared.layout == nil && !PadStickMouse.shared.controllerConnected
             && controls.visible && !controls.controls.isEmpty
+    }
+
+    /// The space below the game can hold the controls: 160 points or more, and wider
+    /// than tall. The controls' landscape layout does not survive a taller space: on an
+    /// ordinary iPhone upright it was squeezed sideways, so there they stay over the game
+    /// as before. The Duo open flat leaves a space wider than tall.
+    static func usable(_ below: CGSize) -> Bool {
+        below.height >= 160 && below.height <= below.width
     }
 
     /// MetalBackedView has laid the game out at `game` in a window of `window`.
     func update(game: CGRect, in window: CGRect, applies: Bool) {
         let below = CGRect(x: window.minX, y: game.maxY.rounded(), width: window.width,
                            height: window.maxY - game.maxY.rounded())
-        let new = applies && below.height >= 160 ? below : nil
+        let new = applies && Self.usable(below.size) ? below : nil
         guard new != rect else { return }
         rect = new
         LogStore.shared.log("[portrait-deck] \(new.map { "deck=\($0)" } ?? "off")")
