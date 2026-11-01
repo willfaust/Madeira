@@ -1977,7 +1977,7 @@ struct ContentView: View {
                     // untouched=0 on the login window proved Chromium writes
                     // every pixel — so it must not ship enabled. Re-enable
                     // with MADEIRA_SURF_SENTINEL=1 if the question returns.
-                    runWineFullSequence()
+                    runWineFullSequence(nativeSteamClient: true)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -2576,7 +2576,7 @@ struct ContentView: View {
                 LogStore.shared.log("[native-steam-play-v1] app=\(appID) manifest=ready install-directory=present mechanism=steam-applaunch")
                 guard jitReadyForLaunch(inLibrary: true, entry: entry.id, then: { launchLibraryEntry(entry) }) else { return }
                 // The generated command is transient, never the saved game entry.
-                startLibraryEntry(launch, remember: false, preferences: entry)
+                startLibraryEntry(launch, remember: false, preferences: entry, nativeSteamClient: true)
             } catch { library.error = error.localizedDescription }
             return
         }
@@ -2617,7 +2617,7 @@ struct ContentView: View {
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     /// An Epic game first gets Epic's sign-in arguments with a fresh one-use code
     /// (EpicLibrary.launchArguments), for this launch only.
-    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, remember: Bool = true, preferences: LibraryEntry? = nil) {
+    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, remember: Bool = true, preferences: LibraryEntry? = nil, nativeSteamClient: Bool = false) {
         guard !EpicCloud.shared.isBusy else {
             library.error = "Wait for Epic Cloud save sync to finish before starting a game."
             return
@@ -2659,7 +2659,7 @@ struct ContentView: View {
             : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
         LogStore.shared.startSessionLog(program: program)
         library.begin(entry, remember: remember)
-        runWineFullSequence(profile: effectiveProfile)
+        runWineFullSequence(profile: effectiveProfile, nativeSteamClient: nativeSteamClient)
     }
 
     /// madeira-bcd: LibraryPrefs' AVX, NVIDIA and Wine C++ runtime switches for a
@@ -2696,7 +2696,7 @@ struct ContentView: View {
     /// Debugger stays attached during PE loading so mprotect_exec can use BRK
     /// to prepare code pages. Detach happens after Wine finishes + recovery.
     /// `profile` is a library entry whose launch profile applies to this run.
-    private func runWineFullSequence(profile: LibraryEntry? = nil) {
+    private func runWineFullSequence(profile: LibraryEntry? = nil, nativeSteamClient: Bool = false) {
         guard jit_check_debugged() else {
             logStore.log("JIT not enabled. Press 'Enable JIT' first.", level: .error)
             if profile != nil { LibraryModel.shared.launchFailed() }
@@ -3356,7 +3356,7 @@ struct ContentView: View {
                 Thread.sleep(forTimeInterval: 2.0)
             }
             winios_phase("wine-start")
-            self.startWineProcess()
+            self.startWineProcess(nativeSteamClient: nativeSteamClient)
 
             // Step 4: Wait for Wine to finish instead of fixed timer
             // Poll wine_process_is_running() — it clears when __wine_main returns
@@ -3709,7 +3709,7 @@ struct ContentView: View {
         }
     }
 
-    private func startWineProcess() {
+    private func startWineProcess(nativeSteamClient: Bool) {
         logStore.log("Starting Wine process...")
 
         if wineserver_is_running() == 0 {
@@ -3720,10 +3720,16 @@ struct ContentView: View {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let winePrefixPath = documentsPath.appendingPathComponent("wine").path
 
+        // Only the two app-generated Steam launch actions pass this signal. A
+        // cmd/explorer wrapper must not publish an unrelated game's Steam ID.
+        // Set it after profile.applyEnvironment; the bridge consumes it before
+        // Wine snapshots the environment. Every other launch clears it.
+        if nativeSteamClient { setenv("MADEIRA_NATIVE_STEAM_LAUNCH", "1", 1) }
+        else { unsetenv("MADEIRA_NATIVE_STEAM_LAUNCH") }
         // Call synchronously — caller already waited for wineserver to be ready
         let image = (getenv("MADEIRA_EXE").map { String(cString: $0) } ?? "").lowercased()
         let arguments = (getenv("MADEIRA_ARGS").map { String(cString: $0) } ?? "").lowercased()
-        if image.contains("steam.exe") || arguments.contains("steam-launch.bat") || arguments.contains("madeira-native-steam.cmd") {
+        if nativeSteamClient || image.contains("steam.exe") || arguments.contains("steam-launch.bat") || arguments.contains("madeira-native-steam.cmd") {
             SteamLibraryDiagnostics.shared.start()
         } else {
             SteamLibraryDiagnostics.shared.stop()
@@ -3732,6 +3738,7 @@ struct ContentView: View {
         if result == 0 {
             logStore.log("Wine process thread launched", level: .success)
         } else {
+            unsetenv("MADEIRA_NATIVE_STEAM_LAUNCH")
             SteamLibraryDiagnostics.shared.stop()
             logStore.log("Failed to start Wine process (error: \(result))", level: .error)
         }

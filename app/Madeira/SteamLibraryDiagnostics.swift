@@ -74,7 +74,8 @@ import Darwin
         generation += 1
         poll?.cancel(); poll = nil
         for socket in sockets.values { socket.cancel(with: .goingAway, reason: nil) }
-        sockets.removeAll(); requests.removeAll(); replies.removeAll(); commands.removeAll(); promises = 0; port = 0; unsetenv("MADEIRA_STEAM_CDP_PORT")
+        sockets.removeAll(); requests.removeAll(); let waiting = Array(replies.values); replies.removeAll(); commands.removeAll(); promises = 0; port = 0; unsetenv("MADEIRA_STEAM_CDP_PORT")
+        for reply in waiting { reply([:]) }
     }
     private func discover() async {
         expireRequests()
@@ -107,13 +108,31 @@ import Darwin
             }
         }
     }
-    private func send(_ socket: URLSessionWebSocketTask, _ method: String, _ params: [String: Any] = [:], reply: (([String: Any]) -> Void)? = nil) async {
+    private func send(_ socket: URLSessionWebSocketTask, _ method: String, _ params: [String: Any] = [:]) async {
         sequence += 1
-        if commands.count < 128 { commands[sequence] = method }
-        if let reply, replies.count < 64 { replies[sequence] = reply }
-        guard let data = try? JSONSerialization.data(withJSONObject: ["id": sequence, "method": method, "params": params]),
-              let text = String(data: data, encoding: .utf8) else { return }
-        try? await socket.send(.string(text))
+        await transmit(socket, id: sequence, method: method, params: params)
+    }
+    private func transmit(_ socket: URLSessionWebSocketTask, id: Int, method: String, params: [String: Any]) async {
+        if commands.count < 128 { commands[id] = method }
+        guard let data = try? JSONSerialization.data(withJSONObject: ["id": id, "method": method, "params": params]),
+              let text = String(data: data, encoding: .utf8) else { replies.removeValue(forKey: id)?([:]); return }
+        do { try await socket.send(.string(text)) }
+        catch { commands.removeValue(forKey: id); replies.removeValue(forKey: id)?([:]) }
+    }
+    // A send only queues bytes. Wait for the reply before using/releasing its object IDs.
+    private func command(_ socket: URLSessionWebSocketTask, _ method: String, _ params: [String: Any]) async -> [String: Any] {
+        guard replies.count < 64, sockets.values.contains(where: { $0 === socket }) else { return [:] }
+        sequence += 1; let id = sequence
+        return await withCheckedContinuation { continuation in
+            replies[id] = { continuation.resume(returning: $0) }
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, let reply = self.replies.removeValue(forKey: id) else { return }
+                self.commands.removeValue(forKey: id)
+                self.note("CEF command-timeout method=\(method)", category: "failure"); reply([:])
+            }
+            Task { [weak self] in await self?.transmit(socket, id: id, method: method, params: params) }
+        }
     }
     private func receive(_ text: String, socket: URLSessionWebSocketTask) async {
         events += 1
@@ -137,7 +156,9 @@ import Darwin
             if let data = payload.data(using: .utf8), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 note("js context=\(p["executionContextId"] as? Int ?? 0) \(Self.safeEvent(value))", category: ["throw", "error", "unhandled-rejection", "unavailable"].contains(value["event"] as? String ?? "") ? "failure" : "js")
                 if value["inspect"] as? Bool == true, let id = value["id"] as? Int, promises < 24 {
-                    promises += 1; inspectPromise(id, context: p["executionContextId"] as? Int, socket: socket)
+                    promises += 1
+                    let context = p["executionContextId"] as? Int
+                    Task { [weak self] in await self?.inspectPromise(id, context: context, socket: socket) }
                 }
             }
         } else if method == "Runtime.exceptionThrown", let detail = p["exceptionDetails"] as? [String: Any] {
@@ -200,45 +221,42 @@ import Darwin
         let data = (try? JSONSerialization.data(withJSONObject: clean, options: .sortedKeys)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
-    private func inspectPromise(_ id: Int, context: Int?, socket: URLSessionWebSocketTask) {
-        Task { [weak self] in
-            var settled = false
-            for attempt in 0..<6 {
-                guard let self else { return }
-                if attempt > 0 { try? await Task.sleep(nanoseconds: 5_000_000_000) }
-                if settled { break }
-                guard self.sockets.values.contains(where: { $0 === socket }) else { return }
-                var evaluation: [String: Any] = ["expression": "globalThis.__madeiraLibraryPromises?.get(\(id))?.deref()", "objectGroup": "madeira-library-\(context ?? 0)-\(id)"]
-                if let context { evaluation["contextId"] = context }
-                await self.send(socket, "Runtime.evaluate", evaluation) { [weak self] r in
-                    guard let object = (r["result"] as? [String: Any])?["objectId"] as? String else { return }
-                    Task { [weak self] in
-                        await self?.send(socket, "Runtime.getProperties", ["objectId": object, "ownProperties": true]) { [weak self] result in
-                            let internals = result["internalProperties"] as? [[String: Any]] ?? []
-                            let state = (internals.first { $0["name"] as? String == "[[PromiseState]]" }?["value"] as? [String: Any])?["value"] as? String ?? "unknown"
-                            guard ["pending", "fulfilled", "rejected"].contains(state) else { return }
-                            settled = state != "pending"
-                            self?.note("promise context=\(context ?? 0) id=\(id) state=\(state) sample=\(attempt)", category: state == "rejected" ? "failure" : "promise")
-                            if state == "pending" && attempt == 5 { self?.note("promise-timeout context=\(context ?? 0) id=\(id) elapsed=25s", category: "failure") }
-                            if let value = internals.first(where: { $0["name"] as? String == "[[PromiseResult]]" })?["value"] as? [String: Any], let resultID = value["objectId"] as? String, state != "pending" {
-                                Task { [weak self] in
-                                    await self?.send(socket, "Runtime.callFunctionOn", ["objectId": resultID, "functionDeclaration": "function(){const d=k=>Object.getOwnPropertyDescriptor(this,k)?.value;const c=d('eresult')??d('code')??d('result');return {type:Array.isArray(this)?'array':'object',...((()=>{if(!Array.isArray(this))return {};let found=false;for(let i=0;i<Math.min(this.length,4096);i++){const x=d(String(i));if(x===730||Object.getOwnPropertyDescriptor(x||{},'appid')?.value===730){found=true;break}}return {count:this.length,...(found||this.length<=4096?{cs2:found}:{})}})()),code:Number.isInteger(c)?c:undefined,remoteFailed:typeof d('message')==='string'&&d('message').includes('Remote call failed')}}", "returnByValue": true]) { [weak self] r in
-                                        if let summary = (r["result"] as? [String: Any])?["value"] as? [String: Any] { self?.note("promise-data id=\(id) \(Self.safeEvent(["result":summary]))", category: summary["remoteFailed"] as? Bool == true ? "failure" : "promise") }
-                                    }
-                                }
-                            } else if state != "pending", let value = internals.first(where: { $0["name"] as? String == "[[PromiseResult]]" })?["value"] as? [String: Any] {
-                                let raw = value["value"] as? String
-                                var summary: [String: Any] = ["type": value["type"] as? String ?? "undefined", "remoteFailed": raw?.contains("Remote call failed") ?? false]
-                                if let raw { summary["count"] = raw.count }
-                                if let number = value["value"] as? Int { summary["code"] = number }
-                                self?.note("promise-data id=\(id) \(Self.safeEvent(["result": summary]))", category: state == "rejected" ? "failure" : "promise")
-                            }
-                        }
+    private func inspectPromise(_ id: Int, context: Int?, socket: URLSessionWebSocketTask, interval: TimeInterval = 5) async {
+        let start = Date(), group = "madeira-library-\(context ?? 0)-\(id)"
+        for attempt in 0..<6 {
+            let delay = max(0, Double(attempt) * interval - Date().timeIntervalSince(start))
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard sockets.values.contains(where: { $0 === socket }), !Task.isCancelled else { return }
+            var evaluation: [String: Any] = ["expression": "globalThis.__madeiraLibraryPromises?.get(\(id))?.deref()", "objectGroup": group]
+            if let context { evaluation["contextId"] = context }
+            let evaluated = await command(socket, "Runtime.evaluate", evaluation)
+            guard let object = (evaluated["result"] as? [String: Any])?["objectId"] as? String else { break }
+            let result = await command(socket, "Runtime.getProperties", ["objectId": object, "ownProperties": true])
+            let internals = result["internalProperties"] as? [[String: Any]] ?? []
+            let state = (internals.first { $0["name"] as? String == "[[PromiseState]]" }?["value"] as? [String: Any])?["value"] as? String ?? "unknown"
+            guard ["pending", "fulfilled", "rejected"].contains(state) else { break }
+            note("promise context=\(context ?? 0) id=\(id) state=\(state) sample=\(attempt)", category: state == "rejected" ? "failure" : "promise")
+            if state == "pending" {
+                if attempt == 5 { note("promise-timeout context=\(context ?? 0) id=\(id) elapsed=\(Int(Date().timeIntervalSince(start)))s", category: "failure") }
+                continue
+            }
+            if let value = internals.first(where: { $0["name"] as? String == "[[PromiseResult]]" })?["value"] as? [String: Any] {
+                if let resultID = value["objectId"] as? String {
+                    let response = await command(socket, "Runtime.callFunctionOn", ["objectId": resultID, "functionDeclaration": "function(){const d=k=>Object.getOwnPropertyDescriptor(this,k)?.value;const c=d('eresult')??d('code')??d('result');return {type:Array.isArray(this)?'array':'object',...((()=>{if(!Array.isArray(this))return {};let found=false;for(let i=0;i<Math.min(this.length,4096);i++){const x=d(String(i));if(x===730||Object.getOwnPropertyDescriptor(x||{},'appid')?.value===730){found=true;break}}return {count:this.length,...(found||this.length<=4096?{cs2:found}:{})}})()),code:Number.isInteger(c)?c:undefined,remoteFailed:typeof d('message')==='string'&&d('message').includes('Remote call failed')}}", "returnByValue": true])
+                    if let summary = (response["result"] as? [String: Any])?["value"] as? [String: Any] {
+                        note("promise-data id=\(id) \(Self.safeEvent(["result": summary]))", category: summary["remoteFailed"] as? Bool == true ? "failure" : "promise")
                     }
+                } else {
+                    let raw = value["value"] as? String
+                    var summary: [String: Any] = ["type": value["type"] as? String ?? "undefined", "remoteFailed": raw?.contains("Remote call failed") ?? false]
+                    if let raw { summary["count"] = raw.count }
+                    if let number = value["value"] as? Int { summary["code"] = number }
+                    note("promise-data id=\(id) \(Self.safeEvent(["result": summary]))", category: state == "rejected" ? "failure" : "promise")
                 }
             }
-            await self?.send(socket, "Runtime.releaseObjectGroup", ["objectGroup": "madeira-library-\(context ?? 0)-\(id)"])
+            break
         }
+        _ = await command(socket, "Runtime.releaseObjectGroup", ["objectGroup": group])
     }
 
     // Contract: original functions/callback arguments/this/results/errors pass through.

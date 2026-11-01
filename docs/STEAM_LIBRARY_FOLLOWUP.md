@@ -34,6 +34,21 @@ Other sockets show real Darwin errors65/61 but lack the request ownership and
 endpoint correlation needed to attribute them to the Library RPC. No socket
 error is converted to success and no connection guard is removed.
 
+## Confirmed source fix: Steam launcher identity
+
+WineProcessBridge recognized a direct steam.exe image, but the native Steam
+button and new Play path actually start cmd/explorer wrappers. Without a scoped
+signal, those wrappers took the ordinary-game fallback and exported AppID356400
+and the Thumper install path to Steam. Source and host fixtures reproduce this
+branch; its role in the Library RPC failure is not proven on the device.
+
+Both app-generated native Steam actions now carry a caller-scoped launch flag.
+The bridge consumes it before the Wine environment snapshot, clears all three
+inherited Steam identity variables, and leaves Steam to supply the child's own
+identity. This does not select Dock memory/process policies. The normal cmd,
+Dock and direct-game paths retain their behavior. The actual bridge block passes
+ASan/UBSan fixtures, including signal consumption and stale direct-game metadata.
+
 ## On-device observer
 
 The candidate uses CEF's normal developer protocol, with a randomly selected
@@ -61,7 +76,10 @@ Runtime.getProperties; no then/catch/awaitPromise handler is attached, preservin
 unhandled-rejection behavior. Response metadata reports type/count,730 presence,
 numeric error code and the specific Remote-call-failed classification. Pending
 responses are sampled for25seconds. Weak references and inspector object groups
-bound retention. Read-only/locked bindings can refuse instrumentation; this is
+bound retention. CDP commands now await replies, with three-second timeouts,
+and object groups release only after the final result summary completes. A
+delayed local protocol fixture covers a promise settling on its sixth sample.
+Read-only/locked bindings can refuse instrumentation; this is
 reported rather than overriding their attributes.
 
 Bounds: four page connections,300 emitted records,8,000 received events,512

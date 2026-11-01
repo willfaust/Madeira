@@ -40,4 +40,41 @@ if os.uname().sysname=='Darwin':
   subprocess.run(['swiftc','-parse-as-library','-swift-version','5','-emit-module',str(stub),str(root/'app/Madeira/SteamLibraryDiagnostics.swift'),'-o',str(d/'Observer.swiftmodule')],check=True)
   main=d/'main.swift';main.write_text("import Foundation\n@main struct Check { @MainActor static func main(){ let url=SteamLibraryDiagnostics.safeURL(\"https://name:password@steamloopback.host/library/home?token=SECRET#cookie\");assert(!url.contains(\"SECRET\") && !url.contains(\"password\") && !url.contains(\"cookie\"));let event=SteamLibraryDiagnostics.safeEvent([\"event\":\"return\",\"method\":\"GetLibraryApps\",\"token\":\"SECRET\",\"result\":[\"type\":\"array\",\"count\":2,\"cs2\":true,\"body\":\"SECRET\"]]);assert(!event.contains(\"SECRET\") && event.contains(\"cs2\"));print(\"PASS real Swift diagnostic privacy filters\") } }\n")
   exe=d/'privacy';subprocess.run(['swiftc','-parse-as-library','-swift-version','5',str(stub),str(root/'app/Madeira/SteamLibraryDiagnostics.swift'),str(main),'-o',str(exe)],check=True);subprocess.run([str(exe)],check=True)
+  # Compile the real actor plus a same-file test extension, then use a delayed
+  # local CDP peer to exercise the final (sixth) promise sample and object lifetime.
+  stub.write_text(stub.read_text().replace('func log(_ s:String){}','var lines:[String]=[];func log(_ s:String){lines.append(s)}'))
+  probe=d/'probe.swift';probe.write_text(s+r'''
+
+extension SteamLibraryDiagnostics {
+ func runCDPFixture(_ endpoint:URL) async {
+  let socket=session.webSocketTask(with:endpoint);sockets["fixture"]=socket;socket.resume()
+  let reader=Task { [weak self] in
+   while let message=try? await socket.receive() {
+    if case .string(let text)=message {await self?.receive(text,socket:socket)}
+   }
+  }
+  await inspectPromise(1,context:nil,socket:socket,interval:0.05)
+  stop();reader.cancel()
+ }
+}
+''')
+  main.write_text(r'''import Foundation
+@main struct Check {
+ @MainActor static func main() async {
+  await SteamLibraryDiagnostics.shared.runCDPFixture(URL(string:CommandLine.arguments[1])!)
+  assert(LogStore.shared.lines.contains(where:{$0.contains("sample=5") && $0.contains("fulfilled")}))
+  assert(LogStore.shared.lines.contains(where:{$0.contains("promise-data") && $0.contains("cs2")}))
+  assert(!LogStore.shared.lines.contains(where:{$0.contains("command-failed") || $0.contains("command-timeout")}))
+  print("PASS real Swift inspector awaits delayed replies through the final sample and summary")
+ }
+}
+''')
+  exe=d/'cdp';subprocess.run(['swiftc','-parse-as-library','-swift-version','5',str(stub),str(probe),str(main),'-o',str(exe)],check=True)
+  server=subprocess.Popen(['node',str(root/'tests/host/steam-library-cdp-fixture.js')],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+  try:
+   port=int(server.stdout.readline().strip())
+   subprocess.run([str(exe),'ws://127.0.0.1:'+str(port)],check=True,timeout=15)
+   out=server.communicate(timeout=10)[0];print(out,end='');assert server.returncode==0 and 'PASS delayed CDP' in out
+  finally:
+   if server.poll() is None:server.kill();server.wait()
 print('PASS observer source scope: loopback endpoint validation, no request/certificate interception or Promise handlers')
