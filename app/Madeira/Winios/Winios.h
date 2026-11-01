@@ -77,6 +77,10 @@ void winios_cursor_move(int x, int y);
 unsigned long long winios_surface_present_count(void);
 int winios_compositor_set_hidden(int hidden);
 
+/* The view a desktop session draws in, for the game mirror (FoldDeck.swift), and
+ * the rect its desktop takes in that view's points; NULL when there is none. */
+void *winios_compositor_mirror_source(double *x, double *y, double *w, double *h);
+
 /* Game-mode windows (Winios.m). The window a game session's swapchain
  * presents from (IOSDisplayShim) is never drawn as a GDI window; a Wine
  * session start clears the overlay. */

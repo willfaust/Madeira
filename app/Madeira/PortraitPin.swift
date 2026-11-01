@@ -10,9 +10,11 @@ import UIKit
 // tall window, with empty space above and below. A swipe up or down in that space
 // moves the game to the top or the bottom of the screen, and back to the middle,
 // so it can sit where the eyes are while the hands hold the controller. The choice
-// is kept (`madeiraPortraitPin`). Without a controller, in landscape, folded
-// (DeviceFold.swift) or where the game fills the height, nothing changes, and
-// touches in the empty space reach the game as before. Log tag: [portrait-pin].
+// is kept (`madeiraPortraitPin`). Without a controller but with touch controls, the
+// game goes to the top and the controls take the space below it (PortraitDeck). In
+// landscape, folded (DeviceFold.swift) or where the game fills the height, nothing
+// changes, and touches in the empty space reach the game as before. Log tag:
+// [portrait-pin].
 
 @MainActor
 enum PortraitPin: String {
@@ -39,8 +41,10 @@ enum PortraitPin: String {
     /// (GameSurfaceLayout.rect); laid out in the band, it moves there at the
     /// same size.
     static func bounds(_ bounds: CGRect, game: CGRect, insets: UIEdgeInsets) -> CGRect {
-        let pin = current
-        guard pin != .middle, applies(in: bounds), game.height < bounds.height - 1 else { return bounds }
+        // Touch controls take the space below the game (PortraitDeck).
+        let deck = PortraitDeck.applies(in: bounds)
+        let pin: PortraitPin = deck ? .top : current
+        guard pin != .middle, deck || applies(in: bounds), game.height < bounds.height - 1 else { return bounds }
         let y = pin == .top
             ? min(bounds.minY + insets.top, bounds.maxY - game.height)
             : max(bounds.maxY - insets.bottom - game.height, bounds.minY)
@@ -69,6 +73,41 @@ enum PortraitPin: String {
         NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
             MetalBackedView.refreshDisplayMode(reason: "controller")
         }
+    }
+}
+
+/// Portrait with touch controls (docs/DUO.md). Held upright without a controller, a
+/// library session's touch controls lay over the game, their landscape layout
+/// squeezed into the narrow window until they ran into each other. Instead the game
+/// moves to the top, as pinned there, and the space below it becomes a deck like the
+/// folded Duo's: the controls, the menu button and the game's glow are drawn there
+/// (TouchControlsOverlay, sessionBody) and the controls window takes every touch in
+/// it. Log tag: [portrait-deck].
+@MainActor
+final class PortraitDeck: ObservableObject {
+    static let shared = PortraitDeck()
+
+    /// The space below the game, in window coordinates; nil when this does not apply
+    /// or leaves less than 160 points.
+    @Published private(set) var rect: CGRect?
+
+    /// It can apply: a library session in a portrait view, not folded, with touch
+    /// controls on screen and no controller.
+    static func applies(in bounds: CGRect) -> Bool {
+        let controls = TouchControlsModel.shared
+        return bounds.height > bounds.width && LibraryModel.shared.current != nil
+            && DeviceFold.shared.layout == nil && !PadStickMouse.shared.controllerConnected
+            && controls.visible && !controls.controls.isEmpty
+    }
+
+    /// MetalBackedView has laid the game out at `game` in a window of `window`.
+    func update(game: CGRect, in window: CGRect, applies: Bool) {
+        let below = CGRect(x: window.minX, y: game.maxY.rounded(), width: window.width,
+                           height: window.maxY - game.maxY.rounded())
+        let new = applies && below.height >= 160 ? below : nil
+        guard new != rect else { return }
+        rect = new
+        LogStore.shared.log("[portrait-deck] \(new.map { "deck=\($0)" } ?? "off")")
     }
 }
 

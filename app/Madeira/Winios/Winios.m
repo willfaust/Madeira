@@ -1213,6 +1213,21 @@ void winios_set_compositor_frame(double x, double y, double w, double h) {
     });
 }
 
+/* FoldDeck.swift GameMirror: a desktop (Madeira Dock) session draws in
+ * g_compositor_view, a window subview beside the game view, so the mirror copies
+ * that view, cropped to the desktop it draws (g_desk_bg's frame, in the view's
+ * points). NULL when there is none, it is hidden, or it is the game-mode overlay
+ * (MetalHostView draws the game then). Main thread. */
+void *winios_compositor_mirror_source(double *x, double *y, double *w, double *h) {
+    if (!g_compositor_view || g_comp_game || g_compositor_view.hidden || !g_desk_bg) return NULL;
+    CGRect r = g_desk_bg.frame;
+    if (x) *x = r.origin.x;
+    if (y) *y = r.origin.y;
+    if (w) *w = r.size.width;
+    if (h) *h = r.size.height;
+    return (__bridge void *)g_compositor_view;
+}
+
 /* Library front end (Library.swift): a desktop session's compositor view sits
  * on the app window above the library and keeps showing the last frame after
  * the session ended, so the library hides it then and shows it again for the
@@ -1431,11 +1446,11 @@ static void winios_ensure_compositor(void) {
     g_compositor_view = [[UIView alloc] initWithFrame:win.bounds];
     g_compositor_view.userInteractionEnabled = NO;  /* touches fall through */
     g_compositor_view.clipsToBounds = YES;
-    /* letterbox area: black, like the rest of a session's screen (the game
-     * view's host and the library's session view are black); an 8 % grey
+    /* letterbox area: clear, so the library's session view shows there (black,
+     * or the game's glow in portrait, ContentView sessionBody); an 8 % grey
      * showed as grey bands around a fitted desktop. desktop area: classic
      * teal (until explorer's own background paint works) */
-    g_compositor_view.backgroundColor = UIColor.blackColor;
+    g_compositor_view.backgroundColor = UIColor.clearColor;
     g_desk_bg = [CALayer layer];
     g_desk_bg.backgroundColor = [UIColor colorWithRed:0.0 green:0.502 blue:0.502 alpha:1.0].CGColor;
     [g_compositor_view.layer addSublayer:g_desk_bg];

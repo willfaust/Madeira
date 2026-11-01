@@ -3,36 +3,35 @@
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 
 import GameController
+import Network
 import SwiftUI
 import UIKit
 
 // The iPhone Duo's deck (docs/DUO.md). With the Duo folded like a laptop
 // (DeviceFold.swift) and touch controls hidden or a controller connected, the flat
-// half shows a copy of the game, which can be turned off, and the few things a
-// controller has no button for: going home, the keyboard and touch controls (the
-// menu button of LibraryHUD, on the deck as well, opens the game menu). Home asks
-// on the deck itself before quitting: a system alert would sit across the fold.
-// Folded, the deck's controls are drawn as keycaps (FoldKeyFace).
+// half shows the few things a controller has no button for: going home, the
+// keyboard and touch controls (the menu button of LibraryHUD, on the deck as well,
+// opens the game menu), over the game's blurred glow (FoldDeckBackground), which
+// can be turned off. Home asks on the deck itself before quitting: a system alert
+// would sit across the fold. Folded, the deck's controls are drawn as keycaps
+// (FoldKeyFace), and the status bar's time, network and battery sit at its top
+// (DeckStatusBar) in place of the system's, over the game.
 
 struct FoldDeck: View {
     @ObservedObject private var pad = PadStickMouse.shared
     @ObservedObject private var controls = TouchControlsModel.shared
-    @AppStorage("madeiraFoldMirror") private var mirror = true
+    @AppStorage(FoldDeckBackground.glowKey) private var mirror = true
     /// Home was pressed: the deck asks before quitting the game.
     @State private var confirmingHome = false
 
     var body: some View {
         VStack(spacing: 10) {
-            if mirror && GameMirror.available {
-                GameMirror()
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay { if confirmingHome { homeQuestion.background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10)) } }
-                    .allowsHitTesting(false)
-            } else {
-                Spacer(minLength: 0)
-                if confirmingHome { homeQuestion } else { status }
-                Spacer(minLength: 0)
-            }
+            DeckStatusBar()
+            Spacer(minLength: 0)
+            Group { if confirmingHome { homeQuestion } else { status } }
+                .padding(16)
+                .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+            Spacer(minLength: 0)
             buttons
         }
         .foregroundStyle(.white)
@@ -60,8 +59,6 @@ struct FoldDeck: View {
                 .multilineTextAlignment(.center)
             Text("Unsaved progress will be lost.").font(.subheadline).foregroundStyle(.secondary)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var buttons: some View {
@@ -169,8 +166,60 @@ struct FoldKeyButtonStyle: ButtonStyle {
     }
 }
 
-/// The small key at the top of the deck that shows or hides the copy of the game under
-/// the touch controls (the same setting as FoldDeck's Mirror button).
+/// The status bar's time, network and battery, at the top of the deck while folded. The
+/// system's own sits across the top of the game, and is hidden then (TouchControlsHost).
+/// Wi-Fi strength has no public API, so the Wi-Fi mark is always full.
+struct DeckStatusBar: View {
+    private static let monitor: NWPathMonitor = {
+        let m = NWPathMonitor()
+        m.start(queue: DispatchQueue(label: "madeira.deck-status.path"))
+        return m
+    }()
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 10)) { context in
+            let battery = Self.battery()
+            HStack(spacing: 5) {
+                Text(context.date, format: .dateTime.hour(.defaultDigits(amPM: .omitted)).minute())
+                    .monospacedDigit()
+                Image(systemName: Self.networkSymbol())
+                Image(systemName: battery.symbol).foregroundStyle(battery.tint)
+                if let percent = battery.percent { Text("\(percent)%").monospacedDigit() }
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.9))
+            .shadow(color: .black.opacity(0.5), radius: 2)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private static func networkSymbol() -> String {
+        let path = monitor.currentPath
+        guard path.status == .satisfied else { return "wifi.slash" }
+        // A VPN (LocalDevVPN, for JIT) is the path's first interface while it runs; Wi-Fi is under it.
+        if path.usesInterfaceType(.wifi) || path.availableInterfaces.contains(where: { $0.type == .wifi }) { return "wifi" }
+        return path.usesInterfaceType(.cellular) ? "cellularbars" : "network"
+    }
+
+    private static func battery() -> (symbol: String, percent: Int?, tint: Color) {
+        let device = UIDevice.current
+        // The performance overlay switches monitoring off when it closes (LibraryHUD).
+        if !device.isBatteryMonitoringEnabled { device.isBatteryMonitoringEnabled = true }
+        let charging = device.batteryState == .charging || device.batteryState == .full
+        guard device.batteryLevel >= 0 else { return ("battery.100percent", nil, .white) }
+        let percent = Int((device.batteryLevel * 100).rounded())
+        let symbol = charging ? "battery.100percent.bolt"
+            : percent > 87 ? "battery.100percent" : percent > 62 ? "battery.75percent"
+            : percent > 37 ? "battery.50percent" : percent > 12 ? "battery.25percent" : "battery.0percent"
+        let tint: Color = ProcessInfo.processInfo.isLowPowerModeEnabled ? .yellow
+            : percent <= 20 && !charging ? .red : .white
+        return (symbol, percent, tint)
+    }
+}
+
+/// The small key at the top of the deck that turns the game's glow under the touch
+/// controls off and on (the same setting as FoldDeck's Mirror button).
 struct FoldMirrorKey: View {
     @Binding var on: Bool
 
@@ -193,9 +242,11 @@ struct FoldMirrorKey: View {
 /// A live copy of the game. The game's Metal layer can have only one parent, and it
 /// must stay a window-level view for its presents to reach the screen
 /// (MetalHostView), so the copy is a portal: UIKit's _UIPortalView draws the same
-/// layer a second time, scaled to fit here, without touching the game. Without
-/// that class the deck shows the controller's status instead.
+/// layer a second time, scaled to fit here (or with `fill`, to cover it, cropped),
+/// without touching the game. Without that class the deck is plain black.
 struct GameMirror: UIViewRepresentable {
+    var fill = false
+
     private static let portalClass = NSClassFromString("_UIPortalView") as? UIView.Type
     static var available: Bool {
         portalClass?.instancesRespond(to: NSSelectorFromString("setSourceView:")) == true
@@ -203,6 +254,10 @@ struct GameMirror: UIViewRepresentable {
 
     final class Mirror: UIView {
         private var portal: UIView?
+        private weak var source: UIView?
+        private var sourceRect = CGRect.zero   // the part of `source` the game takes
+        private var timer: Timer?
+        var fill = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -211,7 +266,6 @@ struct GameMirror: UIViewRepresentable {
             clipsToBounds = true
             guard GameMirror.available, let portalClass = GameMirror.portalClass else { return }
             let portal = portalClass.init(frame: .zero)
-            portal.setValue(MetalHostView.shared, forKey: "sourceView")
             for (key, value) in ["hidesSourceView": false, "matchesPosition": false,
                                  "matchesTransform": false, "matchesAlpha": false, "allowsHitTesting": false]
             where portal.responds(to: NSSelectorFromString("set\(key.prefix(1).uppercased())\(key.dropFirst()):")) {
@@ -220,23 +274,67 @@ struct GameMirror: UIViewRepresentable {
             portal.isUserInteractionEnabled = false
             addSubview(portal)
             self.portal = portal
+            _ = pickSource()
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+        /// The game is drawn by MetalHostView, or in a Madeira Dock (desktop) session by
+        /// Winios's compositor view beside it: copying MetalHostView there showed black.
+        /// The portal copies whichever is drawing, cropped to the part the game takes.
+        /// Returns true when that changed.
+        private func pickSource() -> Bool {
+            var x = 0.0, y = 0.0, w = 0.0, h = 0.0
+            let view: UIView, rect: CGRect
+            if let ref = winios_compositor_mirror_source(&x, &y, &w, &h) {
+                view = Unmanaged<UIView>.fromOpaque(UnsafeRawPointer(ref)).takeUnretainedValue()
+                rect = CGRect(x: x, y: y, width: w, height: h)
+            } else {
+                view = MetalHostView.shared
+                rect = view.bounds
+            }
+            guard view !== source || rect != sourceRect else { return false }
+            if view !== source { portal?.setValue(view, forKey: "sourceView") }
+            source = view
+            sourceRect = rect
+            LogStore.shared.log("[fold] mirror source=\(type(of: view)) game=\(Int(rect.width))x\(Int(rect.height)) at \(Int(rect.minX)),\(Int(rect.minY))")
+            return true
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            timer?.invalidate(); timer = nil
+            guard window != nil, portal != nil else { return }
+            // A session's compositor comes and goes after this view exists.
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.pickSource() else { return }
+                    self.setNeedsLayout()
+                }
+            }
+        }
+
         override func layoutSubviews() {
             super.layoutSubviews()
-            guard let portal else { return }
-            // The game's own size, fitted into the deck at its aspect ratio.
-            let source = MetalHostView.shared.bounds.size
-            guard source.width > 1, source.height > 1, bounds.width > 1, bounds.height > 1 else { return }
-            let scale = min(bounds.width / source.width, bounds.height / source.height)
+            _ = pickSource()
+            guard let portal, let source else { return }
+            // The game's part of the source, fitted into this view (or covering it) at
+            // its aspect ratio, its centre on this view's centre.
+            let full = source.bounds.size
+            let crop = sourceRect.width > 1 && sourceRect.height > 1 ? sourceRect : CGRect(origin: .zero, size: full)
+            guard full.width > 1, full.height > 1, bounds.width > 1, bounds.height > 1 else { return }
+            let sx = bounds.width / crop.width, sy = bounds.height / crop.height
+            let scale = fill ? max(sx, sy) : min(sx, sy)
             portal.transform = .identity
-            portal.bounds = CGRect(origin: .zero, size: source)
+            portal.bounds = CGRect(origin: .zero, size: full)
             portal.transform = CGAffineTransform(scaleX: scale, y: scale)
-            portal.center = CGPoint(x: bounds.midX, y: bounds.midY)
+            portal.center = CGPoint(x: bounds.midX + (full.width / 2 - crop.midX) * scale,
+                                    y: bounds.midY + (full.height / 2 - crop.midY) * scale)
         }
     }
 
     func makeUIView(context: Context) -> Mirror { Mirror(frame: .zero) }
-    func updateUIView(_ view: Mirror, context: Context) { view.setNeedsLayout() }
+    func updateUIView(_ view: Mirror, context: Context) {
+        view.fill = fill
+        view.setNeedsLayout()
+    }
 }
