@@ -556,11 +556,26 @@ final class GamepadInput: @unchecked Sendable {
     }
 }
 
-/// iOS 18 otherwise routes stick input into UIKit/SwiftUI focus navigation.
+/// iOS 18 otherwise routes stick input into UIKit/SwiftUI focus navigation. The
+/// game claims the pad; while the library owns it (no session, or the in-game menu
+/// open: LibraryController), the claim is lifted so that navigation reaches the
+/// app's own controls. Off unless MADEIRA_CONTROLLER_UI=1: not yet confirmed on iPhone.
+/// Log tag: [controller-ui] (who has the pad, and where iOS moves the focus).
 struct ClaimGamepadEvents: ViewModifier {
+    @ObservedObject private var library = LibraryController.shared
+    private static let appNavigation = MadeiraConfig.get("env.MADEIRA_CONTROLLER_UI") == "1"
+    private static let focusLog = NotificationCenter.default.addObserver(
+        forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main) { note in
+        let context = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext
+        let item = context?.nextFocusedItem.map { String(describing: type(of: $0)) } ?? "none"
+        LogStore.shared.log("[controller-ui] focus \(item)")
+    }
+
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *), GamepadInput.enabled {
-            content.handlesGameControllerEvents(matching: .gamepad)
+            let _ = Self.appNavigation ? Self.focusLog : nil
+            let claimed: GCUIEventTypes = Self.appNavigation && library.libraryOwnsPad ? [] : .gamepad
+            content.handlesGameControllerEvents(matching: claimed)
         } else { content }
     }
 }
