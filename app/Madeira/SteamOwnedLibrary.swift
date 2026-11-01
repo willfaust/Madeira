@@ -1182,7 +1182,10 @@ final class SteamOwnedLibrary: ObservableObject {
         let appID = queue.removeFirst()
         downloads[appID]?.state = .active
         SteamDownloadBackground.shared.downloadStarted(appID: appID, name: game(appID)?.name ?? "Steam game")
-        let task = Task { @MainActor [weak self] in
+        // Utility priority: the chunk tasks inherit it, so decrypting and decompressing up
+        // to eight chunks at once yields the CPU to the UI instead of competing with
+        // scrolling at the app's own priority.
+        let task = Task(priority: .utility) { @MainActor [weak self] in
             guard let self else { return }
             await self.run(appID)
         }
@@ -1191,6 +1194,11 @@ final class SteamOwnedLibrary: ObservableObject {
 
     private func run(_ appID: Int) async {
         var outcome = SteamDownloadBackground.Outcome.paused
+        // Each change of `downloads` redraws the library's Steam section, every game in
+        // it; its percentage changes once a second, not at every report (4 a second). A new
+        // phase shows at once.
+        var shown = Date.distantPast
+        var shownPhase = ""
         do {
             // The chosen drive is unplugged: fail rather than fill this device.
             let library = library(for: appID)
@@ -1211,8 +1219,13 @@ final class SteamOwnedLibrary: ObservableObject {
             SteamLog.event("[steam-depot] install app=\(appID) library=\(library)")
             let folder = try await downloader.install(info, steamApps: steamApps,
                                                       ownedDepots: { [weak self] in try? await self?.fetcher.ownedDepotIDs() }) { [weak self] progress in
-                self?.downloads[appID]?.progress = progress
                 SteamDownloadBackground.shared.progress(progress)
+                let now = Date()
+                let phase = "\(progress.phase)"
+                guard progress.phase != .downloading || phase != shownPhase
+                        || now.timeIntervalSince(shown) >= 1 else { return }
+                shown = now; shownPhase = phase
+                self?.downloads[appID]?.progress = progress
             }
             downloads[appID] = nil
             // A new library on a drive is listed for Dock and Valve's client.
