@@ -169,6 +169,8 @@ int ios_thread_process_exit_ready(void *owner)
 {
     struct ios_thread_group *group;
     int ready = 0;
+    unsigned remaining = 0;
+    int known = 0, reclaimed = 0;
     ios_thread_retire_current();
     pthread_mutex_lock(&ios_thread_group_mutex);
     if ((group = ios_thread_group_locked(owner)))
@@ -176,8 +178,21 @@ int ios_thread_process_exit_ready(void *owner)
         group->exiting = 1;
         ready = !group->count && !group->reclaimed;
         if (ready) group->reclaimed = 1;
+        remaining = group->count;
+        reclaimed = group->reclaimed;
+        known = 1;
     }
     pthread_mutex_unlock(&ios_thread_group_mutex);
+    {
+        static unsigned reports;
+        if (__atomic_fetch_add(&reports, 1, __ATOMIC_RELAXED) < 32)
+        {
+            int saved_errno = errno;
+            dprintf(2, "[process-retire-v1] owner=%p known=%u native-threads=%u ready=%u reclaimed=%u\n",
+                    owner, known, remaining, ready, reclaimed);
+            errno = saved_errno;
+        }
+    }
     return ready;
 }
 
@@ -1942,7 +1957,10 @@ static NTSTATUS update_attr_list( PS_ATTRIBUTE_LIST *attr, HANDLE thread, const 
         else if (attr->Attributes[i].Attribute == PS_ATTRIBUTE_GROUP_AFFINITY)
         {
             GROUP_AFFINITY *aff = attr->Attributes[i].ValuePtr;
-            status = NtSetInformationThread( thread, ThreadGroupInformation, aff, sizeof(*aff) );
+            /* Native input is always the native layout. In particular, never
+             * read a 12-byte WoW64 input or a malformed attribute as 16 bytes. */
+            if (attr->Attributes[i].Size != sizeof(*aff)) status = STATUS_INVALID_PARAMETER;
+            else status = NtSetInformationThread( thread, ThreadGroupInformation, aff, sizeof(*aff) );
             if (status) break;
         }
     }
@@ -2502,6 +2520,13 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         }
     }
 #endif
+    /* Independent of debug-string logging, before a debugger can suspend the
+     * throwing thread. The observer never changes the exception or context. */
+    if (first_chance)
+    {
+        extern void ios_trace_first_cxx(const EXCEPTION_RECORD *);
+        ios_trace_first_cxx(rec);
+    }
     status = send_debug_event( rec, context, first_chance, !(is_win64 || is_wow64() || is_old_wow64()) );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)

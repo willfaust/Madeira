@@ -178,7 +178,8 @@ static void ios_g32_callsite( const struct ios_g32_origin *g, const char *tag, u
 {
     const struct ios_g32_module *m=ios_g32_find(g,p);
     uint32_t nt;uint16_t sections,opt;
-    if(!m||strcmp(m->name,"libcef.dll")||!ios_g32_pe(g,m,&nt)||
+    if(!m||(strcmp(m->name,"libcef.dll")&&strcmp(m->name,"vk_swiftshader.dll")&&
+            strcmp(m->name,"vcruntime140.dll")&&strcmp(m->name,"msvcp140.dll"))||!ios_g32_pe(g,m,&nt)||
        !ios_g32_rva(g,m,nt+6,&sections,2)||sections>96||
        !ios_g32_rva(g,m,nt+20,&opt,2)||opt>4096)return;
     for(unsigned i=0;i<sections;i++)
@@ -219,7 +220,7 @@ static void ios_g32_report( const struct ios_g32_origin *g, const char *tag, uin
         uint32_t row[2];
         if((bp&3)||bp<g->esp||(uint64_t)bp+8>g->high||!ios_g32_guest(g,bp,row,8))break;
         ios_g32_address(g,tag,"ebp-return",i,row[1]);
-        if(!strcmp(tag,"cef-assert")||!strcmp(tag,"breakpoint")||!strcmp(tag,"breakpoint-terminate"))
+        if(!strcmp(tag,"cef-assert")||!strcmp(tag,"breakpoint")||!strcmp(tag,"breakpoint-terminate")||!strcmp(tag,"cpp-throw"))
             ios_g32_callsite(g,tag,i,row[1]);
         if(row[0]<=bp||row[0]-bp>0x100000)break;bp=row[0];
     }

@@ -2468,6 +2468,33 @@ static int ios_g32_read( uint64_t addr, void *out, size_t size )
                                    (mach_vm_address_t)(uintptr_t)out, &got ) == KERN_SUCCESS && got == size;
 }
 #include "guest32_origin.h"
+#include "guest32_cxx.h"
+#include "cef_atexit_context.h"
+
+void ios_trace_first_cxx(const EXCEPTION_RECORD *rec)
+{
+    static unsigned reports;
+    TEB *teb=NtCurrentTeb();
+    uint64_t fex=0,frame=0,window=ios_wow_base(),params[3]={0};
+    struct ios_g32_origin origin;
+    int saved_errno=errno;
+    DWORD error=teb?teb->LastErrorValue:0;
+    if(rec->ExceptionCode!=0xe06d7363 || !teb || !window ||
+       !ios_g32_read((uintptr_t)teb+offsetof(TEB,TlsSlots)+14*sizeof(void*),&fex,8)||!fex||
+       !ios_g32_read(fex,&frame,8)||!ios_g32_capture(&origin,(uintptr_t)teb,window,frame))goto done;
+    unsigned m;
+    for(m=0;m<origin.count;m++)if(!strcmp(origin.modules[m].name,"libcef.dll"))break;
+    if(m==origin.count || __atomic_fetch_add(&reports,1,__ATOMIC_RELAXED)>=8)goto done;
+    for(unsigned i=0;i<3 && i<rec->NumberParameters;i++)params[i]=rec->ExceptionInformation[i];
+    dprintf(2,"[guest32-cxx-first-v1] pid=%04x tid=%04x stage=before-debug-dispatch\n",
+            (unsigned)(ULONG_PTR)teb->ClientId.UniqueProcess,(unsigned)(ULONG_PTR)teb->ClientId.UniqueThread);
+    ios_g32_cxx_report(&origin,rec->ExceptionFlags,(uintptr_t)rec->ExceptionAddress,params,rec->NumberParameters);
+    uint32_t target=0;ios_g32_cxx_pointer(&origin,(uintptr_t)rec->ExceptionAddress,&target);
+    ios_g32_report(&origin,"cpp-throw",target);
+done:
+    if(teb)teb->LastErrorValue=error;
+    errno=saved_errno;
+}
 
 void ios_guest32_trace_current( const char *tag, const void *target )
 {
@@ -2485,6 +2512,7 @@ void ios_guest32_trace_current( const char *tag, const void *target )
         dprintf(2,"[guest32-event] tag=%s pid=%04x tid=%04x\n",tag,
                 (unsigned)(ULONG_PTR)teb->ClientId.UniqueProcess,(unsigned)(ULONG_PTR)teb->ClientId.UniqueThread);
         ios_g32_report(&origin,tag,a>=window && a-window<=UINT32_MAX ? (uint32_t)(a-window) : 0);
+        if(!strcmp(tag,"cef-assert"))ios_cef_atexit_report(&origin);
     }
     else dprintf(2,"[guest32-origin] tag=%s saved context unavailable\n",tag);
 done:

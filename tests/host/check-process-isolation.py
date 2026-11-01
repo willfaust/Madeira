@@ -57,6 +57,7 @@ common = r'''
 #include <unistd.h>
 #include <sys/mman.h>
 #include <setjmp.h>
+#include <errno.h>
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define ERR(...) ((void)0)
 typedef uintptr_t ULONG_PTR;
@@ -269,7 +270,9 @@ int main(void) {
     retire(&b);
     assert(!free_calls && !exit_calls); /* old global prev_teb dereferenced dead here */
     assert(ios_thread_groups[0].count==2 && ios_thread_groups[1].count==1);
+    errno=EINTR;
     assert(!ios_thread_process_exit_ready(b.Peb)); /* other logical thread is still live */
+    assert(errno==EINTR); /* observation cannot alter the caller's error state */
     assert(ios_thread_count_add(b.Peb,1)<0);
     ios_retired_thread_owner=NULL; /* the remaining B thread */
     assert(ios_thread_process_exit_ready(b.Peb));

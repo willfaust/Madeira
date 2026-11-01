@@ -876,6 +876,44 @@ done:
  * resuming in between. Snapshot-only callers leave it NULL. */
 struct thread *ios_pending_persistent_hold;
 
+/* Trace the selected guest-machine view, never another member of the context
+ * union. Reading i386 eip/ebp as AMD64 rip concatenates two valid registers
+ * and falsely reports corruption. This observer does not modify either view. */
+static void ios_trace_captured_context( const struct thread *thread,
+                                       const struct context_data *native,
+                                       const struct context_data *wow, int have_native )
+{
+    static unsigned int reports;
+    unsigned int machine = wow ? wow->machine : 0, flags = wow ? wow->flags : 0;
+    uint64_t pc = 0, sp = 0;
+    const char *view = "unavailable";
+    int saved_errno = errno;
+
+    if (reports++ >= 48) return;
+    if (wow && (flags & SERVER_CTX_CONTROL))
+    {
+        if (machine == IMAGE_FILE_MACHINE_I386)
+        {
+            pc = wow->ctl.i386_regs.eip;
+            sp = wow->ctl.i386_regs.esp;
+            view = "i386";
+        }
+        else if (machine == IMAGE_FILE_MACHINE_AMD64)
+        {
+            pc = wow->ctl.x86_64_regs.rip;
+            sp = wow->ctl.x86_64_regs.rsp;
+            view = "amd64";
+        }
+    }
+    fprintf( stderr, "[srv-getctx-v2] #%u tid=%04x teb=%p native_pc=%p native_sp=%p "
+                     "guest-machine=%04x guest-flags=%08x guest-view=%s guest-pc=%p guest-sp=%p have_native=%d\n",
+             reports, thread->id, (void *)(uintptr_t)thread->teb,
+             (void *)(uintptr_t)(have_native && native ? native->ctl.arm64_regs.pc : 0),
+             (void *)(uintptr_t)(have_native && native ? native->ctl.arm64_regs.sp : 0),
+             machine, flags, view, (void *)(uintptr_t)pc, (void *)(uintptr_t)sp, have_native );
+    errno = saved_errno;
+}
+
 int ios_fill_thread_context( struct thread *thread,
                              struct context_data *native,
                              struct context_data *wow )
@@ -1031,34 +1069,7 @@ int ios_fill_thread_context( struct thread *thread,
         }
     }
 
-    /* ml715: BOTH VIEWS OF THE SAME THREAD, SIDE BY SIDE.
-     *
-     * We capture a native ARM64 context AND the guest x86-64 context out of
-     * TEB->ChpeV2CpuAreaInfo->ContextAmd64 -- but the ARM64EC NtGetContextThread wrapper
-     * always asks for the NATIVE one and runs it through context_arm_to_x64(), which maps
-     * Pc straight into Rip. For a translated thread parked in ordinary Mach-O code (e.g.
-     * libsystem_kernel __ulock_wait2) that hands the caller a "RIP" that is a Mach-O
-     * address and ARM ABI registers reinterpreted as x64 ones -- while the saved AMD64
-     * view sitting right here holds the real guest RIP.
-     *
-     * That is the suspected Marvel Cosmic Invasion window blocker: Mono suspends a thread,
-     * cannot classify the context it gets back, resumes, and retries forever while holding
-     * the critical section its target needs. Pair this with the [ec-getctx] record on the
-     * ntdll side; correlate on tid/teb + native pc, NOT on line order, because the two
-     * counters live in different modules. Log-only, capped. */
-    {
-        static int n_ctx;
-        if (n_ctx++ < 48)
-            fprintf( stderr, "[srv-getctx] ml715 #%d tid=%04x teb=%p native_pc=%p native_sp=%p | "
-                     "saved_amd64 flags=%08x rip=%p rsp=%p | have_native=%d\n",
-                     n_ctx, thread->id, (void *)(uintptr_t)thread->teb,
-                     (void *)(uintptr_t)(have_native ? native->ctl.arm64_regs.pc : 0),
-                     (void *)(uintptr_t)(have_native ? native->ctl.arm64_regs.sp : 0),
-                     wow ? wow->flags : 0,
-                     (void *)(uintptr_t)(wow ? wow->ctl.x86_64_regs.rip : 0),
-                     (void *)(uintptr_t)(wow ? wow->ctl.x86_64_regs.rsp : 0),
-                     have_native );
-    }
+    ios_trace_captured_context( thread, native, wow, have_native );
 
     /* ml730: if this capture IS the first logical suspend, keep the halt we
      * already have instead of resuming and re-suspending -- that window is

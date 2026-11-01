@@ -6,6 +6,10 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 commands = [
+    ['python3', 'tests/host/check-cef-atexit-context.py'],
+    ['python3', 'tests/host/check-guest32-cxx.py'],
+    ['python3', 'tests/host/check-wow-context-trace.py'],
+    ['python3', 'tests/host/check-wow-affinity-attribute.py'],
     ['python3', 'tests/host/check-wow-query-zero.py'],
     ['python3', 'tests/host/check-wow-code-write.py'],
     ['python3', 'tests/host/check-wow-self-write.py'],

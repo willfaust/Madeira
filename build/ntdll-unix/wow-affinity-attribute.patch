@@ -1,0 +1,49 @@
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -199,10 +199,42 @@
+             ret->Attributes[i].ValuePtr = LongToHandle( attr32->Attributes[i].Value );
+             break;
+         case PS_ATTRIBUTE_GROUP_AFFINITY:
+-            /* Window boundary: an INPUT pointer to a GROUP_AFFINITY the 64-bit side
+-             * dereferences (ntdll's update_attr_list).  The struct has the same
+-             * layout for both word sizes, so only the pointer converts. */
+-            ret->Attributes[i].ValuePtr = guest_ptr32( attr32->Attributes[i].Value );
++            {
++                const GROUP_AFFINITY32 *info32 = guest_ptr32( attr32->Attributes[i].Value );
++                GROUP_AFFINITY *info = NULL;
++
++                /* KAFFINITY widens from 32 to 64 bits. Group/Reserved move
++                 * from offsets 4/6 to 8/10; a translated pointer is not a
++                 * native GROUP_AFFINITY. Preserve reserved fields so native
++                 * validation still rejects invalid requests. */
++                ret->Attributes[i].Size = 0;
++                if (attr32->Attributes[i].Size == sizeof(*info32))
++                {
++                    ret->Attributes[i].Size = sizeof(*info);
++                    if (info32)
++                    {
++                        info = Wow64AllocateTemp( sizeof(*info) );
++                        if (!info) RtlRaiseStatus( STATUS_NO_MEMORY );
++                        info->Mask = info32->Mask;
++                        info->Group = info32->Group;
++                        memcpy( info->Reserved, info32->Reserved, sizeof(info->Reserved) );
++                    }
++                }
++                ret->Attributes[i].ValuePtr = info;
++                {
++                    static LONG reports;
++                    if (InterlockedIncrement( &reports ) <= 16)
++                    {
++                        ULONG error = NtCurrentTeb()->LastErrorValue;
++                        ERR( "[wow-group-attribute-v1] pid=%04lx tid=%04lx source-size=%lu native-size=%Iu mask=%Iu group=%u reserved=%u,%u,%u\n",
++                             HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess),
++                             HandleToULong(NtCurrentTeb()->ClientId.UniqueThread), attr32->Attributes[i].Size,
++                             ret->Attributes[i].Size, info ? info->Mask : 0, info ? info->Group : 0,
++                             info ? info->Reserved[0] : 0, info ? info->Reserved[1] : 0, info ? info->Reserved[2] : 0 );
++                        NtCurrentTeb()->LastErrorValue = error;
++                    }
++                }
++            }
+             break;
+         case PS_ATTRIBUTE_CLIENT_ID:
+             ret->Attributes[i].Size     = sizeof(CLIENT_ID);
