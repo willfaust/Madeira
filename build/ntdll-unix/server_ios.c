@@ -5131,6 +5131,8 @@ void process_exit_wrapper( int status )
     extern int ios_thread_process_exit_ready(void *owner);
     extern void ios_retire_own_fixed_base_image(void *owner);
     void *caller_peb = ios_jit_current_peb();
+    extern void madeira_child_process_exited(void *, unsigned, int);
+    madeira_child_process_exited(caller_peb, (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess, status);
     int memory_ready = ios_thread_process_exit_ready(caller_peb);
     int i = ios_proc_socket_index();
     if (i >= 0)

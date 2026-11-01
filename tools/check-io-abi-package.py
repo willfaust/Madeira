@@ -23,6 +23,7 @@ def check(staged, app, ipa):
     assert (app / 'aarch64-windows/wow64.dll').read_bytes() == expected, 'Xcode packaged a stale WoW64 producer'
     native = (app / 'Madeira.debug.dylib').read_bytes()
     assert CONSUMER in native, 'native IOSB consumer missing from linked image'
+    assert b'[steam-handoff-v1]' in native and b'_madeira_child_server_exited' in native, 'native Steam restart consumer missing'
     assert b'[wow-thread-init-v1]' in expected, 'stale Wine CPU initialization consumer'
     assert b'[wow-break-deliver-v1]' in expected, 'stale Wine breakpoint diagnostics'
     assert b'MadeiraBTCpuWriteMemory' in expected, 'stale Wine native-write consumer'
@@ -40,6 +41,7 @@ def check(staged, app, ipa):
     guest = (staged.parent.parent / 'i386-windows/kernelbase.dll').read_bytes()
     assert struct.unpack_from('<H', guest, struct.unpack_from('<I', guest, 0x3c)[0] + 4)[0] == 0x14c
     assert b'[wpm-call-v1]' in guest, 'stale guest32 memory API producer'
+    assert b'[steam-arch-v1]' in guest, 'stale Steam architecture observation producer'
     assert (app / 'i386-windows/kernelbase.dll').read_bytes() == guest, 'Xcode packaged stale guest32 caller'
     with zipfile.ZipFile(ipa) as archive:
         assert archive.read('Payload/Madeira.app/aarch64-windows/wow64.dll') == expected, 'ZIP producer differs'

@@ -107,8 +107,15 @@ enum MadeiraDock {
 
     /// Installed games in the client's own library (`<client>/steamapps`) and the other
     /// libraries on C: that its `libraryfolders.vdf` lists. Read-only.
-    static func games(drive: URL) -> [DockGame] {
+    static func games(drive: URL, diagnostic: ((String) -> Void)? = nil) -> [DockGame] {
         let fm = FileManager.default
+        var ordinaryNotes = 0, cs2Notes = 0
+        func note(_ message: String, appID: Int? = nil) {
+            guard let diagnostic else { return }
+            if appID == 730 { guard cs2Notes < 8 else { return }; cs2Notes += 1 }
+            else { guard ordinaryNotes < 16 else { return }; ordinaryNotes += 1 }
+            diagnostic(message)
+        }
         let clientLibrary = SteamRuntimeFiles.relativeRoot + "/steamapps"
         var libraries = [clientLibrary]
         if let data = try? Data(contentsOf: drive.appendingPathComponent(clientLibrary + "/libraryfolders.vdf")),
@@ -131,22 +138,38 @@ enum MadeiraDock {
         // lends depots but has its own installed too (a base game whose depots its
         // expansions share) stays: the same test as the uninstall (SteamInstall.swift).
         var lent: [Int: Set<String>] = [:], installed: [Int: Set<String>] = [:]
-        for library in libraries.prefix(32) {
+        for (index, library) in libraries.prefix(32).enumerated() {
             let folder = drive.appendingPathComponent(library, isDirectory: true)
             let isExternal = external.contains { $0.caseInsensitiveCompare(library) == .orderedSame }
-            guard isExternal || folder.resolvingSymlinksInPath().path.hasPrefix(drive.resolvingSymlinksInPath().path + "/"),
-                  let names = try? fm.contentsOfDirectory(atPath: folder.path) else { continue }
+            guard isExternal || folder.resolvingSymlinksInPath().path.hasPrefix(drive.resolvingSymlinksInPath().path + "/") else {
+                note("library-index=\(index) scan=outside-owned-root"); continue
+            }
+            guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else {
+                note("library-index=\(index) scan=directory-unreadable"); continue
+            }
             for file in names.sorted().prefix(2000) where file.hasPrefix("appmanifest_") && file.hasSuffix(".acf") {
-                guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)) else { continue }
+                let fileID = Int(file.dropFirst(12).dropLast(4))
+                guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)) else {
+                    note("library-index=\(index) app=\(fileID ?? 0) manifest=unreadable", appID: fileID); continue
+                }
                 let held = depots(manifest: data)
                 lent.merge(held.lent) { $0.union($1) }
-                guard let game = game(manifest: data, library: library),
-                      !result.contains(where: { $0.id == game.id }) else { continue }
+                guard let game = game(manifest: data, library: library) else {
+                    note("library-index=\(index) app=\(fileID ?? 0) manifest=invalid", appID: fileID); continue
+                }
+                guard !result.contains(where: { $0.id == game.id }) else {
+                    note("library-index=\(index) app=\(game.id) manifest=duplicate-id", appID: game.id); continue
+                }
                 installed[game.id] = held.installed
                 result.append(game)
+                note("library-index=\(index) app=\(game.id) manifest=accepted ready=\(game.installed)", appID: game.id)
             }
         }
-        result.removeAll { game in lent[game.id].map { installed[game.id, default: []].isSubset(of: $0) } ?? false }
+        result.removeAll { game in
+            let sharedOnly = lent[game.id].map { installed[game.id, default: []].isSubset(of: $0) } ?? false
+            if sharedOnly { note("app=\(game.id) scan=shared-depot-only-filter", appID: game.id) }
+            return sharedOnly
+        }
         return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 

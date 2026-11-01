@@ -1,0 +1,197 @@
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -201,6 +201,49 @@
+ }
+ 
+ 
++/* Read-only Steam architecture observation. No version, architecture or
++ * updater decisions are changed; no extra Windows query is issued. */
++static BOOL steam_arch_info_enabled( unsigned int slot, ULONG *saved_error )
++{
++    static LONG reports[2];
++    TEB *teb = NtCurrentTeb();
++    const UNICODE_STRING *image;
++    static const char wanted[] = "steam.exe";
++    unsigned int count, begin, i;
++    if (!teb || !teb->Peb || !teb->Peb->ProcessParameters) return FALSE;
++    image = &teb->Peb->ProcessParameters->ImagePathName;
++    if (!image->Buffer || (image->Length & 1)) return FALSE;
++    count = image->Length / sizeof(WCHAR);
++    begin = count;
++    while (begin && image->Buffer[begin - 1] != 0x5c && image->Buffer[begin - 1] != '/') --begin;
++    if (count - begin != sizeof(wanted) - 1) return FALSE;
++    for (i = 0; i < sizeof(wanted) - 1; i++)
++    {
++        WCHAR c = image->Buffer[begin + i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (c != wanted[i]) return FALSE;
++    }
++    if (InterlockedIncrement( &reports[slot] ) > 8) return FALSE;
++    *saved_error = teb->LastErrorValue;
++    return TRUE;
++}
++
++static void steam_arch_trace_info( const char *api, unsigned int slot, const SYSTEM_INFO *info,
++                                    NTSTATUS status, USHORT process_machine, USHORT native,
++                                    NTSTATUS machine_status, int reported_arch, const void *caller )
++{
++    ULONG error;
++    TEB *teb = NtCurrentTeb();
++    if (!steam_arch_info_enabled( slot, &error )) return;
++    ERR( "[steam-arch-v1] api=%s pid=%04lx tid=%04lx pointer-bits=%u caller=%p wow64=%u "
++         "query-status=%08lx info-valid=%u arch=%d page=%lu cpus=%lu machine-queried=%u machine-status=%08lx process-machine=%04x native-machine=%04x\n",
++         api, (ULONG)(ULONG_PTR)teb->ClientId.UniqueProcess, (ULONG)(ULONG_PTR)teb->ClientId.UniqueThread,
++         (unsigned int)(8 * sizeof(void *)), caller, !!is_wow64, status, !!info,
++         info ? info->wProcessorArchitecture : reported_arch, info ? info->dwPageSize : 0,
++         info ? info->dwNumberOfProcessors : 0, slot == 1, machine_status, process_machine, native );
++    teb->LastErrorValue = error;
++}
++
+ /***********************************************************************
+  *          GetNativeSystemInfo   (kernelbase.@)
+  */
+@@ -208,25 +251,38 @@
+ {
+     SYSTEM_BASIC_INFORMATION basic_info;
+     SYSTEM_CPU_INFORMATION cpu_info;
++    NTSTATUS basic_status, cpu_status = STATUS_SUCCESS;
+     USHORT current_machine, native_machine;
+ 
+-    RtlWow64GetProcessMachines( 0, &current_machine, &native_machine );
++    NTSTATUS machine_status = RtlWow64GetProcessMachines( 0, &current_machine, &native_machine );
+ 
+     if (!is_wow64 || native_machine != IMAGE_FILE_MACHINE_AMD64)
+     {
+         GetSystemInfo( si );
+         if (is_wow64 && native_machine != IMAGE_FILE_MACHINE_AMD64)
+             si->wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
++        steam_arch_trace_info( "GetNativeSystemInfo", 1, NULL, machine_status,
++                               machine_status ? 0 : current_machine, machine_status ? 0 : native_machine,
++                               machine_status, !machine_status && is_wow64 && native_machine != IMAGE_FILE_MACHINE_AMD64 ? PROCESSOR_ARCHITECTURE_AMD64 : -1,
++                               __builtin_return_address(0) );
+         return;
+     }
+ 
+-    if (!set_ntstatus( RtlGetNativeSystemInformation( SystemBasicInformation,
++    if (!set_ntstatus( basic_status = RtlGetNativeSystemInformation( SystemBasicInformation,
+                                                       &basic_info, sizeof(basic_info), NULL )) ||
+-        !set_ntstatus( RtlGetNativeSystemInformation( SystemCpuInformation,
++        !set_ntstatus( cpu_status = RtlGetNativeSystemInformation( SystemCpuInformation,
+                                                       &cpu_info, sizeof(cpu_info), NULL )))
++    {
++        steam_arch_trace_info( "GetNativeSystemInfo", 1, NULL, basic_status ? basic_status : cpu_status,
++                               machine_status ? 0 : current_machine, machine_status ? 0 : native_machine,
++                               machine_status, -1, __builtin_return_address(0) );
+         return;
++    }
+ 
+     fill_system_info( si, &basic_info, &cpu_info );
++    steam_arch_trace_info( "GetNativeSystemInfo", 1, si, STATUS_SUCCESS,
++                           machine_status ? 0 : current_machine, machine_status ? 0 : native_machine,
++                           machine_status, -1, __builtin_return_address(0) );
+ }
+ 
+ 
+@@ -237,14 +293,21 @@
+ {
+     SYSTEM_BASIC_INFORMATION basic_info;
+     SYSTEM_CPU_INFORMATION cpu_info;
+-
+-    if (!set_ntstatus( NtQuerySystemInformation( SystemBasicInformation,
++    NTSTATUS basic_status, cpu_status = STATUS_SUCCESS;
++
++    if (!set_ntstatus( basic_status = NtQuerySystemInformation( SystemBasicInformation,
+                                                  &basic_info, sizeof(basic_info), NULL )) ||
+-        !set_ntstatus( NtQuerySystemInformation( SystemCpuInformation,
++        !set_ntstatus( cpu_status = NtQuerySystemInformation( SystemCpuInformation,
+                                                  &cpu_info, sizeof(cpu_info), NULL )))
++    {
++        steam_arch_trace_info( "GetSystemInfo", 0, NULL, basic_status ? basic_status : cpu_status,
++                               0, 0, STATUS_NOT_IMPLEMENTED, -1, __builtin_return_address(0) );
+         return;
++    }
+ 
+     fill_system_info( si, &basic_info, &cpu_info );
++    steam_arch_trace_info( "GetSystemInfo", 0, si, STATUS_SUCCESS, 0, 0,
++                           STATUS_NOT_IMPLEMENTED, -1, __builtin_return_address(0) );
+ }
+ 
+ 
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -1016,12 +1016,58 @@
+ }
+ 
+ 
++/* Read-only Steam architecture observation. No version, architecture or
++ * updater decisions are changed; no extra Windows query is issued. */
++static BOOL steam_arch_process_enabled( unsigned int slot, ULONG *saved_error )
++{
++    static LONG reports[2];
++    TEB *teb = NtCurrentTeb();
++    const UNICODE_STRING *image;
++    static const char wanted[] = "steam.exe";
++    unsigned int count, begin, i;
++    if (!teb || !teb->Peb || !teb->Peb->ProcessParameters) return FALSE;
++    image = &teb->Peb->ProcessParameters->ImagePathName;
++    if (!image->Buffer || (image->Length & 1)) return FALSE;
++    count = image->Length / sizeof(WCHAR);
++    begin = count;
++    while (begin && image->Buffer[begin - 1] != 0x5c && image->Buffer[begin - 1] != '/') --begin;
++    if (count - begin != sizeof(wanted) - 1) return FALSE;
++    for (i = 0; i < sizeof(wanted) - 1; i++)
++    {
++        WCHAR c = image->Buffer[begin + i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (c != wanted[i]) return FALSE;
++    }
++    if (InterlockedIncrement( &reports[slot] ) > 8) return FALSE;
++    *saved_error = teb->LastErrorValue;
++    return TRUE;
++}
++
++static void steam_arch_trace_process( const char *api, unsigned int slot, HANDLE process,
++                                       NTSTATUS status, USHORT machine, USHORT native,
++                                       int wow64, const void *caller )
++{
++    ULONG error;
++    TEB *teb = NtCurrentTeb();
++    if (!steam_arch_process_enabled( slot, &error )) return;
++    ERR( "[steam-arch-v1] api=%s pid=%04lx tid=%04lx pointer-bits=%u caller=%p target=%p "
++         "status=%08lx process-machine=%04x native-machine=%04x wow64=%d\n",
++         api, (ULONG)(ULONG_PTR)teb->ClientId.UniqueProcess, (ULONG)(ULONG_PTR)teb->ClientId.UniqueThread,
++         (unsigned int)(8 * sizeof(void *)), caller, process, status, machine, native, wow64 );
++    teb->LastErrorValue = error;
++}
++
+ /**********************************************************************
+  *           IsWow64Process2   (kernelbase.@)
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH IsWow64Process2( HANDLE process, USHORT *machine, USHORT *native_machine )
+ {
+-    return set_ntstatus( RtlWow64GetProcessMachines( process, machine, native_machine ));
++    NTSTATUS status = RtlWow64GetProcessMachines( process, machine, native_machine );
++    BOOL result = set_ntstatus( status );
++    steam_arch_trace_process( "IsWow64Process2", 1, process, status,
++                              !status && machine ? *machine : 0, !status && native_machine ? *native_machine : 0,
++                              -1, __builtin_return_address(0) );
++    return result;
+ }
+ 
+ 
+@@ -1032,10 +1078,14 @@
+ {
+     ULONG_PTR pbi;
+     NTSTATUS status;
++    BOOL result;
+ 
+     status = NtQueryInformationProcess( process, ProcessWow64Information, &pbi, sizeof(pbi), NULL );
+     if (!status) *wow64 = !!pbi;
+-    return set_ntstatus( status );
++    result = set_ntstatus( status );
++    steam_arch_trace_process( "IsWow64Process", 0, process, status, 0, 0,
++                              !status ? !!pbi : -1, __builtin_return_address(0) );
++    return result;
+ }
+ 
+ /*********************************************************************

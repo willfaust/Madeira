@@ -368,6 +368,9 @@ enum SteamDirectStart {
     /// written): scan again once it ends.
     private var rescan = false
     private var lastCount = -1
+    private var inventoryFingerprint = ""
+    private var inventoryLogLines = 0
+    private var rememberedCS2: DockGame?
 
     /// The last scan's result, kept so the next launch's first page already has the installed games (their pills, sizes
     /// and update badges) and the scan only confirms it.
@@ -387,8 +390,12 @@ enum SteamDirectStart {
         guard !scanning else { rescan = true; return }
         scanning = true
         let drive = MadeiraDock.drive
+        let previous = games, remembered = rememberedCS2
         Task.detached(priority: .utility) {
-            let found = MadeiraDock.games(drive: drive)
+            var scanNotes: [String] = []
+            let found = MadeiraDock.games(drive: drive, diagnostic: { scanNotes.append($0) })
+            let observation = SteamInstalledInventory.observe(drive: drive, previous: previous, current: found, rememberedCS2: remembered)
+            let recordedNotes = scanNotes
             var builds: [Int: Int] = [:], languages: [Int: String] = [:], depots: [Int: Set<Int>] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
                 let steamApps = drive.appendingPathComponent(game.library, isDirectory: true)
@@ -403,6 +410,19 @@ enum SteamDirectStart {
                 self.scanning = false
                 let again = self.rescan
                 self.rescan = false
+                let inventoryChanged = self.games != found || self.inventoryFingerprint != observation.fingerprint
+                if inventoryChanged {
+                    let identityChanged = Set(previous.map(\.id)) != Set(found.map(\.id))
+                    let limit = identityChanged ? 192 : 96
+                    for item in observation.lines where self.inventoryLogLines < limit {
+                        LogStore.shared.log("[steam-inventory-v1] \(item)"); self.inventoryLogLines += 1
+                    }
+                    for item in recordedNotes where self.inventoryLogLines < limit {
+                        LogStore.shared.log("[steam-inventory-scan-v1] \(item)"); self.inventoryLogLines += 1
+                    }
+                }
+                self.inventoryFingerprint = observation.fingerprint
+                if let cs2 = found.first(where: { $0.id == 730 }) { self.rememberedCS2 = cs2 }
                 if self.games != found { self.games = found }
                 if self.builds != recorded { self.builds = recorded }
                 if LibraryGridArm.enabled {

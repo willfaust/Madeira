@@ -48,6 +48,10 @@ compile_one() {
     fi
 }
 
+# Stage the process-death observer from the pinned source. Always replace its
+# object, including when the rest of the base archive is cached.
+python3 "$BUILD_DIR/stage-steam-lifecycle.py" "$WINE_SRC/server/process.c" "$OBJ_DIR/process_lifecycle.c"
+
 # Patched files: name:source_file:replaces_in_archive
 PATCHED_FILES=(
     "wine_log_ios:wine_log_ios.c:wine_log_ios.o"
@@ -72,7 +76,7 @@ PATCHED_FILES=(
     "handle:$WINE_SRC/server/handle.c:handle.o"
     # ml575: async.c carries the free_async_queue UAF fix.
     "async:$WINE_SRC/server/async.c:async.o"
-    "process_ios:$WINE_SRC/server/process.c:process.o"
+    "process_ios:$OBJ_DIR/process_lifecycle.c:process.o"
     # Files needing rebuild only because the -Dws_* renames must apply
     # to both definers and callers — fixes 10 symbol collisions with win32u.
     "window:$BUILD_DIR/window_ios.c:window.o"
@@ -168,6 +172,17 @@ case "${1:-all}" in
         exit 1
         ;;
 esac
+
+# A cached archive must not silently omit the last-Windows-thread callback.
+# On Darwin nm -m identifies a weak undefined import; a strong definition in
+# process.o would incorrectly give the server its own independent registry.
+if ! xcrun nm -m "$OBJ_DIR/process_ios.o" | awk '
+    /_madeira_child_server_exited/ && /undefined/ && /weak/ { found = 1 }
+    END { exit !found }
+'; then
+    echo "ERROR: staged wineserver process.o lacks the weak native Steam lifecycle callback; rebuild all sources"
+    exit 1
+fi
 
 echo ""
 echo "=== Updating libwineserver.a ==="

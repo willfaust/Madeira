@@ -53,6 +53,7 @@
 		A100060D /* SwiftSteam/Library/SteamLibraryFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200060D /* SteamLibraryFetcher.swift */; };
 		A1000522 /* SteamKeyValues.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000522 /* SteamKeyValues.swift */; };
 		A10007D1 /* SteamLibraryDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007D1 /* SteamLibraryDiagnostics.swift */; };
+		A10007E4 /* SteamInstalledInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007E4 /* SteamInstalledInventory.swift */; };
 		A1000523 /* SteamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000523 /* SteamRuntime.swift */; };
 		A1000524 /* DockInstallers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000524 /* DockInstallers.swift */; };
 		A1000542 /* DockStartProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000542 /* DockStartProgram.swift */; };
@@ -270,6 +271,7 @@
 		A200060D /* SteamLibraryFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Library/SteamLibraryFetcher.swift"; sourceTree = "<group>"; };
 		A2000522 /* SteamKeyValues.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamKeyValues.swift"; sourceTree = "<group>"; };
 		A20007D1 /* SteamLibraryDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamLibraryDiagnostics.swift"; sourceTree = "<group>"; };
+		A20007E4 /* SteamInstalledInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstalledInventory.swift"; sourceTree = "<group>"; };
 		A2000523 /* SteamRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamRuntime.swift"; sourceTree = "<group>"; };
 		A2000524 /* DockInstallers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockInstallers.swift"; sourceTree = "<group>"; };
 		A2000542 /* DockStartProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockStartProgram.swift"; sourceTree = "<group>"; };
@@ -534,6 +536,7 @@
 				A2000522 /* SteamKeyValues.swift */,
 				A2000523 /* SteamRuntime.swift */,
 				A20007D1 /* SteamLibraryDiagnostics.swift */,
+				A20007E4 /* SteamInstalledInventory.swift */,
 				A2000524 /* DockInstallers.swift */,
 				A2000542 /* DockStartProgram.swift */,
 				A2000913 /* DockReset.swift */,
@@ -909,6 +912,7 @@
 				A1000522 /* SteamKeyValues.swift in Sources */,
 				A1000523 /* SteamRuntime.swift in Sources */,
 				A10007D1 /* SteamLibraryDiagnostics.swift in Sources */,
+				A10007E4 /* SteamInstalledInventory.swift in Sources */,
 				A1000524 /* DockInstallers.swift in Sources */,
 				A1000542 /* DockStartProgram.swift in Sources */,
 				A1000913 /* DockReset.swift in Sources */,

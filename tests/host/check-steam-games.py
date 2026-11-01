@@ -54,7 +54,7 @@ content_view = (app / 'ContentView.swift').read_text()
 require('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,\n'
         '                                      part: .installed, open: { selected = $0 })' in library,
         "Library: the Steam section is in the library and opens the library's Game details page")
-require('MadeiraDock.games(drive: drive)' in games and 'let drive = MadeiraDock.drive' in games,
+require('MadeiraDock.games(drive: drive, diagnostic:' in games and 'let drive = MadeiraDock.drive' in games,
         "the section lists exactly what Dock's own discovery finds")
 # Game details: a Steam game is a library entry (its per-game settings) with a Steam section.
 require('open(LibraryModel.shared.steamEntry(installed, title: item.name))' in games,

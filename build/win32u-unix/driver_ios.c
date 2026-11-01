@@ -122,6 +122,7 @@ static BOOL winios_drv_set_cursor_pos( INT x, INT y )
     return TRUE;
 }
 
+static void ios_steam_handoff_foreground(void);
 static void ios_foreground_if_none( const char *why );   /* madeira-bcd, MADEIRA_INPUT_FOREGROUND, below */
 
 /* C bridge for Winios.m to inject mouse input without pulling in Wine
@@ -834,6 +835,7 @@ static void ios_apply_fullscreen_foreground(void)
 static BOOL winios_drv_process_events( DWORD mask )
 {
     if (ios_show_foreground) ios_apply_fullscreen_foreground();
+    ios_steam_handoff_foreground();
     ios_foreground_if_none( "a message poll" );
     return winios_pProcessEvents ? winios_pProcessEvents( mask ) : FALSE;
 }
@@ -3002,6 +3004,73 @@ static HWND ios_main_window( DWORD pid )
     }
     free( list );
     return best;
+}
+
+/* A native Steam restart is a window-manager handoff, not a request to show
+ * internal CEF/helper windows. Run on the visible window's own Wine thread;
+ * preserve unrelated foreground processes and explicit no-activate styles. */
+static void ios_steam_handoff_foreground(void)
+{
+    extern unsigned long long madeira_steam_focus_epoch(unsigned);
+    extern int madeira_steam_focus_can_replace(unsigned);
+    extern void madeira_steam_focus_completed(unsigned,unsigned long long);
+    static unsigned reports;
+    DWORD pid = GetCurrentProcessId(), foreground_pid = 0;
+    unsigned long long epoch = madeira_steam_focus_epoch(pid);
+    HWND hwnd = 0, foreground, *windows;
+    LONGLONG best_area = 0;
+    unsigned i;
+    UINT dpi;
+    BOOL ok;
+    if (!epoch) return;
+    foreground = NtUserGetForegroundWindow();
+    if (foreground) get_window_thread(foreground,&foreground_pid);
+    if (foreground_pid && madeira_steam_focus_epoch(foreground_pid) == epoch)
+    {
+        /* Windows already activated the new client or its browser window. */
+        DWORD style = get_window_long(foreground,GWL_STYLE);
+        DWORD extended = get_window_long(foreground,GWL_EXSTYLE);
+        if ((style & WS_VISIBLE) && !(style & (WS_CHILD | WS_MINIMIZE | WS_DISABLED)) &&
+            !(extended & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) && is_window_visible(foreground) &&
+            NtUserGetAncestor(foreground,GA_PARENT) == get_desktop_window())
+        {
+            if (foreground_pid == pid && get_window_thread(foreground,NULL) == GetCurrentThreadId())
+                winios_click_focus(foreground,"Steam restart");
+            madeira_steam_focus_completed(foreground_pid,epoch);
+            return;
+        }
+    }
+    if (!madeira_steam_focus_can_replace(foreground_pid)) return;
+    /* Select only eligible windows before comparing size; a large hidden or
+     * no-activate helper must not mask the actual client window. */
+    if (!(windows = list_window_children(0))) return;
+    dpi = get_thread_dpi();
+    for (i = 0; windows[i]; i++)
+    {
+        DWORD owner = 0, thread = get_window_thread(windows[i],&owner);
+        DWORD style = get_window_long(windows[i],GWL_STYLE);
+        DWORD extended = get_window_long(windows[i],GWL_EXSTYLE);
+        LONGLONG area;
+        RECT r;
+        if (!thread || owner != pid || thread != GetCurrentThreadId() || !(style & WS_VISIBLE) ||
+            (style & (WS_CHILD | WS_MINIMIZE | WS_DISABLED)) ||
+            (extended & (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) || !is_window_visible(windows[i]) ||
+            NtUserGetAncestor(windows[i],GA_PARENT) != get_desktop_window() ||
+            !get_window_rect(windows[i],&r,dpi) || r.right-r.left < 320 || r.bottom-r.top < 200) continue;
+        area = (LONGLONG)(r.right-r.left)*(r.bottom-r.top);
+        if (area > best_area) { best_area = area; hwnd = windows[i]; }
+    }
+    free(windows);
+    if (!hwnd) return;
+    ok = set_foreground_window(hwnd,FALSE,TRUE);
+    if (ok)
+    {
+        winios_click_focus(hwnd,"Steam restart");
+        madeira_steam_focus_completed(pid,epoch);
+    }
+    if (__atomic_fetch_add(&reports,1,__ATOMIC_RELAXED) < 16)
+        dprintf(2,"[steam-handoff-v1] focus pid=%04x hwnd=%p previous=%p epoch=%llu ok=%u visible=1\n",
+                (unsigned)pid,hwnd,foreground,epoch,ok);
 }
 
 /* madeira-bcd: NOBODY IN FRONT (opt-in, MADEIRA_INPUT_FOREGROUND=1). Horizon

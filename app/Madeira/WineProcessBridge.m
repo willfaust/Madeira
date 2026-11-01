@@ -1288,6 +1288,34 @@ static int madeira_split_launch_args(const char *input, char *storage, size_t st
     return (int)argc;
 }
 
+/* The root Wine process may have completed an official Steam restart.
+ * Query only generation-owned steam.exe successors; CEF/crashpad/services
+ * never keep this session open. This C-only wait must not touch the dead
+ * root's TEB or switch the bridge thread into another process's context. */
+static int madeira_wait_steam_handoff(int initial_status) {
+    extern int madeira_live_steam_successors(unsigned *leader);
+    extern int madeira_steam_final_status(int fallback);
+    unsigned leader = 0, previous = 0, ticks = 0, reports = 0;
+    int count = madeira_live_steam_successors(&leader);
+    if (!count) return initial_status;
+    dprintf(STDERR_FILENO, "[steam-handoff-v1] root-exit=%08x successors=%d leader=%04x action=keep-session\n",
+            (unsigned)initial_status, count, leader);
+    while (wineserver_is_running() && (count = madeira_live_steam_successors(&leader)) > 0) {
+        if (leader != previous) {
+            if (reports++ < 24)
+                dprintf(STDERR_FILENO, "[steam-handoff-v1] owner=%04x successors=%d session-ui=retained jit=retained\n", leader, count);
+            previous = leader;
+        }
+        usleep(200 * 1000);
+        if ((++ticks % 300) == 0 && ticks <= 9600)
+            dprintf(STDERR_FILENO, "[steam-handoff-v1] still-running owner=%04x successors=%d seconds=%u\n", leader, count, ticks / 5);
+    }
+    int status = madeira_steam_final_status(initial_status);
+    dprintf(STDERR_FILENO, "[steam-handoff-v1] ended status=%08x seconds=%u server-running=%d\n",
+            (unsigned)status, ticks / 5, wineserver_is_running());
+    return status;
+}
+
 static void *wine_process_thread(void *arg) {
     @autoreleasepool {
         /* Perf: the guest main thread runs ON this pthread. Promote to
@@ -2462,6 +2490,10 @@ static void *wine_process_thread(void *arg) {
         ios_main_image_steam = madeira_is_steam_client_image(getenv("MADEIRA_EXE"));
         madeira_publish_host_probe();   /* both FEX modules read it (A12/A13: FlagM, FlagM2) */
 
+        extern void madeira_child_session_begin(int native_steam, int root_steam);
+        extern void madeira_steam_main_returned(int status);
+        const int steam_session = native_steam || steam_client;
+        madeira_child_session_begin(steam_session, steam_client);
         if (setjmp(wine_ios_exit_jmpbuf) == 0) {
             __wine_main(argc, argv);
             dprintf(STDERR_FILENO, "[WineProc] __wine_main returned normally\n");
@@ -2469,12 +2501,13 @@ static void *wine_process_thread(void *arg) {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
         }
 
-        /* wine_ios_exit_code is _Thread_local, so copy it somewhere the app
-         * thread can read. RELEASE so a reader that sees g_wine_running == 0
-         * is guaranteed to see this value too -- volatile alone does not order
-         * these on arm64. */
-        __atomic_store_n(&g_wine_exit_code, (int)wine_ios_exit_code,
-                         __ATOMIC_RELEASE); /* madeira-exit-code */
+        madeira_steam_main_returned((int)wine_ios_exit_code);
+        int session_status = steam_session ? madeira_wait_steam_handoff((int)wine_ios_exit_code)
+                                           : (int)wine_ios_exit_code;
+        /* The final client, rather than its restart predecessor's 42, supplies
+         * the session result. Genuine failure statuses remain reportable. */
+        wine_launched_process_did_exit(session_status);
+        __atomic_store_n(&g_wine_exit_code, session_status, __ATOMIC_RELEASE);
 
         /* A launcher stub that starts the game and exits at once (GTA V
          * Enhanced: PlayGTAV.exe -> GTA5_Enhanced.exe) must not end the
@@ -2484,8 +2517,9 @@ static void *wine_process_thread(void *arg) {
          * no such child is left (process_ios.c, madeira_live_game_children).
          * A game that exits normally long after starting its helpers is not
          * affected. Opt-in, MADEIRA_WAIT_CHILDREN=1 (madeira.cfg, or a game's
-         * own config): a child that ends from a worker thread never releases its
-         * slot (process_ios.c), and the session would then wait forever. */
+         * own config). Windows process death retires the registry record even
+         * when its native bootstrap pthread has not returned. Native Steam's
+         * narrower successor wait above is automatic and excludes helpers. */
         {
             extern int madeira_live_game_children(char *buf, int len, double max_age);
             const char *wc = getenv("MADEIRA_WAIT_CHILDREN");
@@ -2500,13 +2534,13 @@ static void *wine_process_thread(void *arg) {
                         "it started still run (%s) -- a launcher started the game; the session goes on until "
                         "they exit (MADEIRA_WAIT_CHILDREN=1)\n", n, names);
                 unsigned ticks = 0;
-                while ((n = madeira_live_game_children(names, sizeof names, -1.0)) > 0) {
+                while (wineserver_is_running() && (n = madeira_live_game_children(names, sizeof names, -1.0)) > 0) {
                     usleep(200 * 1000);
                     if ((++ticks % 300) == 0)
                         dprintf(STDERR_FILENO, "[WineProc] still running: %d child process(es) (%s), %u s\n",
                                 n, names, ticks / 5);
                 }
-                dprintf(STDERR_FILENO, "[WineProc] the last child process exited after %u s\n", ticks / 5);
+                dprintf(STDERR_FILENO, "[WineProc] child wait ended after %u s server-running=%d\n", ticks / 5, wineserver_is_running());
             }
         }
 

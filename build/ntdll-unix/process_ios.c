@@ -421,102 +421,17 @@ extern _Thread_local volatile int wine_ios_exit_code;
 extern _Thread_local pthread_t wine_ios_main_thread;
 extern _Thread_local int wine_ios_exit_initialized;
 
+#include "steam_handoff.h"
+
 struct ios_child_args {
     int socketfd;
     int unixdir;
     char **argv;
     int argc;
     struct pe_image_info pe_info;
-    int slot;   /* ios_child_slots index, -1 = none */
+    struct ios_child_token slot;
 };
 
-
-/* Pseudo-process children that are still running. A launcher stub that
- * starts the game and exits at once (GTA V Enhanced: PlayGTAV.exe starts
- * GTA5_Enhanced.exe and exits ~1 s later) ended the whole session: the main
- * process's exit stops the wineserver, and the game died loading.
- * WineProcessBridge asks madeira_live_game_children() after the main process
- * exits and keeps the session while such a child runs. Crash reporters and
- * helpers (crs-handler, crashpad, *helper*, *report*) do not count: they live
- * as long as the game and used to end with it. */
-#define IOS_CHILD_SLOTS 32
-static pthread_mutex_t ios_child_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct { char name[64]; double started; int used; } ios_child_slots[IOS_CHILD_SLOTS];
-
-static double ios_child_now(void)
-{
-    struct timespec ts;
-    clock_gettime( CLOCK_MONOTONIC, &ts );
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-static int ios_child_is_helper( const char *name )
-{
-    static const char *const parts[] = { "crash", "crs-handler", "handler", "report", "helper" };
-    unsigned i;
-    for (i = 0; i < ARRAY_SIZE(parts); i++) if (strstr( name, parts[i] )) return 1;
-    return 0;
-}
-
-static int ios_child_slot_take( const UNICODE_STRING *image )
-{
-    char name[64];
-    unsigned i, n = 0, start = 0, len = image->Length / sizeof(WCHAR);
-    int slot = -1;
-
-    for (i = 0; i < len; i++) if (image->Buffer[i] == '\\' || image->Buffer[i] == '/') start = i + 1;
-    for (i = start; i < len && n < sizeof(name) - 1; i++)
-    {
-        WCHAR c = image->Buffer[i];
-        name[n++] = (c >= 'A' && c <= 'Z') ? c + 32 : (c >= 32 && c < 127) ? c : '?';
-    }
-    if (!n) name[n++] = '?';
-    name[n] = 0;
-    pthread_mutex_lock( &ios_child_lock );
-    for (i = 0; i < IOS_CHILD_SLOTS; i++)
-    {
-        if (ios_child_slots[i].used) continue;
-        ios_child_slots[i].used = 1;
-        ios_child_slots[i].started = ios_child_now();
-        memcpy( ios_child_slots[i].name, name, n + 1 );
-        slot = i;
-        break;
-    }
-    pthread_mutex_unlock( &ios_child_lock );
-    return slot;
-}
-
-static void ios_child_slot_release( int slot )
-{
-    if (slot < 0 || slot >= IOS_CHILD_SLOTS) return;
-    pthread_mutex_lock( &ios_child_lock );
-    ios_child_slots[slot].used = 0;
-    pthread_mutex_unlock( &ios_child_lock );
-}
-
-/* Children still running that are not helpers, started at most max_age
- * seconds ago (max_age < 0: any age); their names go to buf. Called by
- * WineProcessBridge.m (same binary). */
-int madeira_live_game_children( char *buf, int len, double max_age )
-{
-    double now = ios_child_now();
-    int count = 0, used = 0;
-    unsigned i;
-
-    if (buf && len > 0) buf[0] = 0;
-    pthread_mutex_lock( &ios_child_lock );
-    for (i = 0; i < IOS_CHILD_SLOTS; i++)
-    {
-        if (!ios_child_slots[i].used || ios_child_is_helper( ios_child_slots[i].name )) continue;
-        if (max_age >= 0 && now - ios_child_slots[i].started > max_age) continue;
-        count++;
-        if (buf && len - used > 1)
-            used += snprintf( buf + used, len - used, "%s%s", used ? " " : "", ios_child_slots[i].name );
-        if (used >= len) used = len - 1;
-    }
-    pthread_mutex_unlock( &ios_child_lock );
-    return count;
-}
 
 /* the machine of the child's main image, published to
  * wine_ios_child_main so it can reserve the child's [B, B+4G) guest window
@@ -536,6 +451,7 @@ _Thread_local const char *ios_child_boot_stage = "not started";
 static void *ios_child_thread_entry( void *arg )
 {
     struct ios_child_args *args = arg;
+    ios_current_child = args->slot;
 
     /* An IL-only .NET image without 32BITREQUIRED runs as a native process: the
      * server and exec_wineloader both promote it, so it must not get a guest
@@ -631,7 +547,7 @@ static void *ios_child_thread_entry( void *arg )
 #endif
 
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+                               int unixdir, char *winedebug, const struct pe_image_info *pe_info, unsigned child_pid )
 {
 #ifdef WINE_IOS
     /* iOS: create a thread instead of fork+exec */
@@ -660,7 +576,15 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     args->argv = argv;
     args->argc = argc;
     args->pe_info = *pe_info;
-    args->slot = ios_child_slot_take( &params->ImagePathName );
+    {
+        extern void *ios_session_peb_get(void);
+        TEB *creator = NtCurrentTeb();
+        args->slot = ios_child_slot_take( &params->ImagePathName, child_pid,
+            creator ? (unsigned)(ULONG_PTR)creator->ClientId.UniqueProcess : 0,
+            creator ? creator->Peb : NULL, ios_session_peb_get(),
+            creator && creator->Peb && creator->Peb->ProcessParameters ?
+                &creator->Peb->ProcessParameters->ImagePathName : NULL );
+    }
 
     if (winedebug) putenv( winedebug );
 
@@ -2341,7 +2265,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* create the child process */
 
-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
+    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info, HandleToULong(id.UniqueProcess) ))) goto done;
 
     close( socketfd[0] );
     socketfd[0] = -1;

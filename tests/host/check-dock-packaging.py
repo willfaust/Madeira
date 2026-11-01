@@ -35,14 +35,14 @@ with tempfile.TemporaryDirectory() as temp:
     (t/'app/Madeira/aarch64-windows/xtajit.dll').write_bytes(cpu)
     guest = bytearray(wow)
     struct.pack_into('<H',guest,0x84,0x14c)
-    guest.extend(b'[wpm-call-v1]')
+    guest.extend(b'[wpm-call-v1][steam-arch-v1]')
     (t/'app/Madeira/i386-windows/kernelbase.dll').write_bytes(guest)
     (t/'tools').mkdir()
     (t/'tools/check-io-abi-package.py').write_text((root/'tools/check-io-abi-package.py').read_text())
     bodies = {
       'xcodebuild': '''mkdir -p "$TEST_APP/arm64ec-windows" "$TEST_APP/i386-windows" "$TEST_APP/x86_64-vcruntime" "$TEST_APP/aarch64-windows"
 cp "$ROOT/app/Madeira/aarch64-windows/wow64.dll" "$ROOT/app/Madeira/aarch64-windows/xtajit.dll" "$TEST_APP/aarch64-windows/"
-printf '[io-abi] v2 native-owned IOSB scopes active[wow-write][guest32-symbols][guest32-cxx-first-v1][cef-atexit-v1]' > "$TEST_APP/Madeira.debug.dylib"
+printf '[io-abi] v2 native-owned IOSB scopes active[wow-write][guest32-symbols][guest32-cxx-first-v1][cef-atexit-v1][steam-handoff-v1]_madeira_child_server_exited' > "$TEST_APP/Madeira.debug.dylib"
 cp "$ROOT/app/Madeira/i386-windows/kernelbase.dll" "$TEST_APP/i386-windows/"
 printf fixture > "$TEST_APP/Madeira"
 printf fixture > "$TEST_APP/prefix-template.tar.gz"

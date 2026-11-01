@@ -4051,6 +4051,10 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
         /* Register with wineserver using the child's socketfd */
         CHILD_STAGE( "server_init_process_child" );
         startup_info_size = server_init_process_child( child_fd_socket );
+        {
+            extern void madeira_child_process_started(void *, unsigned);
+            madeira_child_process_started(child_peb, (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess);
+        }
 
         /* init_startup_info — reads startup info from wineserver, loads the
          * child's PE. It OVERWRITES the main_image_info global with the

@@ -38,5 +38,6 @@ data = Path(sys.argv[1]).read_bytes()
 pe = struct.unpack_from('<I', data, 0x3c)[0]
 assert struct.unpack_from('<H', data, pe + 4)[0] == 0x14c
 assert b'[wpm-call-v1]' in data, 'stale guest32 WriteProcessMemory diagnostics'
+assert b'[steam-arch-v1]' in data, 'stale Steam architecture observation producer'
 print('PASS rebuilt i386 WriteProcessMemory caller includes bounded query/result diagnostics')
 PY
