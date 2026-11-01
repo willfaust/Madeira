@@ -738,7 +738,7 @@ OVERLAY = {
                         "([phys-map], slot and window inventory) run every ~10 min instead of every minute, its zone "
                         "check and allocation probe every minute instead of every 2 s; mprotect_exec's per-call ERR "
                         "line is kept for the first 200 calls, then every 1000th. [xp], [xp-t], [xp-api] and "
-                        "[sync-census] keep their rates. Off (default): every diagnostic as before. Read at session start."},
+                        "[sync-census] keep their rates. A library game turns it on unless madeira.cfg sets it (LibraryEntry.applyEnvironment); 0 there, or in the game’s own config, keeps every diagnostic as before. Read at session start."},
     # madeira-bcd: the runtime's native helper threads at utility QoS (build/ntdll-unix/thread_ios.c).
     "env.MADEIRA_ECO_NATIVE": {"category": "Wine core (ntdll)", "title": "Runtime helper threads on efficiency cores",
                 "kind": "bool", "default": "0",

@@ -1689,6 +1689,7 @@ static void *wine_process_thread(void *arg) {
                     "MADEIRA_FEX_AVX",           /* ml1184: the game's "AVX and AVX2" */
                     "MADEIRA_FRAMEGEN",          /* ml1184: the game's "Frame generation" */
                     "DXMT_ENABLE_NVEXT", "DXMT_WSI_MONITOR_IDENTITY", "DXMT_WSI_MODE_TABLE",   /* the game's "Report an NVIDIA GPU" */
+                    "MADEIRA_LEAN_DIAG",         /* a library game's default, set only when madeira.cfg has none */
                 };
                 enum { per_launch_count = sizeof(per_launch) / sizeof(per_launch[0]) };
                 BOOL game_set[per_launch_count];
@@ -2487,6 +2488,7 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_CPU_COUNT"); unsetenv("DXMT_D9_ANISO_LIMIT");
         unsetenv("FEX_X87REDUCEDPRECISION");   /* ml1184 */
         unsetenv("MADEIRA_DINPUT_PAD");        /* ml1240 */
+        unsetenv("MADEIRA_LEAN_DIAG");         /* a library game's default (LibraryEntry.applyEnvironment) */
         unsetenv("MADEIRA_DESKTOP");           /* each launch chooses its own presentation mode */
         unsetenv("MADEIRA_DIRECT_WINDOW_SIZE"); /* a game's opt-in must not resize the next game */
         /* madeira-bcd: Horizon Zero Dawn's per-game switches must not reach a later game

@@ -3132,7 +3132,9 @@ static void ios_thread_sampler_main(void)
         for (tick = 0; tick < 200; tick++)   /* ml1288: the stuck-store check every 100 ms between bursts */
         {
             usleep( 100000 );
-            if (stuck_check && !ios_lean_diag) ios_stuck_store_check();
+            /* Lean diagnostics leave this on: it fixes stores stuck across a 16 KB page
+             * (Ori, ml1292), and suspends only a thread that looks stuck. */
+            if (stuck_check) ios_stuck_store_check();
         }
         if (!ios_lean_diag) {
         for (b = 0; b < 4; b++) { ios_thread_sampler_pass(b); usleep(250000); }
