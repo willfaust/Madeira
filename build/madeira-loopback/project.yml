@@ -1,0 +1,20 @@
+# Madeira's loopback VPN extension (LoopbackTunnel.swift), built on its own and embedded in
+# Madeira.app/PlugIns by build.sh's caller, as MoltenVK is: Madeira.xcodeproj stays as it is.
+name: MadeiraLoopback
+options:
+  deploymentTarget:
+    iOS: "26.0"
+targets:
+  MadeiraLoopback:
+    type: app-extension
+    platform: iOS
+    sources:
+      - LoopbackTunnel.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.willfaust.madeora.Loopback
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
