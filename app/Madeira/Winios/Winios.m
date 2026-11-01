@@ -1482,9 +1482,14 @@ static void winios_ensure_compositor(void) {
     }
     /* Wedged-thread triage: sample every thread's stack every 20s from
      * an app-side timer — keeps firing even when all wine threads are
-     * stuck (unlike the tree dump, which rides wine's event drain). */
+     * stuck (unlike the tree dump, which rides wine's event drain).
+     * MADEIRA_LEAN_DIAG (a library game's default, LibraryEntry.applyEnvironment)
+     * leaves it out: reading each of ~80 threads' state stops it, and the dump's
+     * ~1200 lines every 20 s hitched DOOM Eternal. A stalled main thread still
+     * dumps every stack ([main-stall]). */
+    const char *lean = getenv("MADEIRA_LEAN_DIAG");
     static dispatch_source_t stack_timer;
-    if (!stack_timer) {
+    if (!stack_timer && !(lean && *lean && strcmp(lean, "0") != 0)) {
         stack_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(stack_timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC),

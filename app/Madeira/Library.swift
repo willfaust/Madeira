@@ -598,6 +598,13 @@ struct LibraryEntry: Codable, Identifiable {
             if let sem = semaphoreFastPath { setenv("MADEIRA_FASTSYNC_SEM", sem ? "1" : "0", 1) }
             else { unsetenv("MADEIRA_FASTSYNC_SEM") }
         }
+        // Lean diagnostics unless madeira.cfg says otherwise (this game's own line, applied
+        // below, still wins): every 20 s the samplers that stop each of the game's threads
+        // ([thread-sample] bursts, the RIP profile, Winios's stack dump) and their logging
+        // hitched DOOM Eternal on the iPhone Duo (2026-10-29). env.MADEIRA_LEAN_DIAG = 0
+        // brings them back.
+        if MadeiraConfig.get("env.MADEIRA_LEAN_DIAG") == nil,
+           ProcessInfo.processInfo.environment["MADEIRA_LEAN_DIAG"] == nil { setenv("MADEIRA_LEAN_DIAG", "1", 1) }
         madeira_set_vsync_locked(effectiveFPSMode)
         // This game's own lines; a launch without any unsets the previous game's.
         do {
