@@ -14,6 +14,10 @@ patches change MoltenVK code and are offered under its licence (Apache-2.0).
   them. Metal has none of those subgroup stages; this only reports them, as the community
   workaround in KhronosGroup/MoltenVK#2818 does. The variable is read once per process,
   and Zink shares the library, so it belongs in the game's own config.
+- `0002-idtech7-double-as-float.patch`: with `MADEIRA_MVK_IDTECH=1`, generated MSL that
+  names `double` (to `double4`) is compiled with `float` in its place. Metal has no
+  double, and a DOOM Eternal compute shader that rounds with it failed to build, so its
+  pass was missing from every frame.
 
 The patches were made against MoltenVK 1.4.3 (`5189f8d`), with which DOOM Eternal ran
 at 55-60 fps on an iPhone Duo and an M4 iPad. They also apply cleanly, in order, to the

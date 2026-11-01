@@ -1,0 +1,45 @@
+MoltenVK: compile double as float, with MADEIRA_MVK_IDTECH=1
+
+Metal has no double. One of DOOM Eternal's compute shaders uses it to round to
+N decimal places (double(floor(powr(10.0, ...) + 0.5))), so that pipeline failed
+to build and its pass was missing from every frame. With MADEIRA_MVK_IDTECH=1,
+generated MSL that names double, double2, double3 or double4 is compiled with
+float in their place, which that arithmetic does not need. MoltenVK logs one
+[mvk-info] line each time it does so.
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+index 3aa44a4..afabd17 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -554,6 +554,22 @@ static uint32_t getWorkgroupDimensionSize(const SPIRVWorkgroupSizeDimension& wgD
+ #pragma mark -
+ #pragma mark MVKShaderLibraryCompiler
+ 
++// Madeira (MADEIRA_MVK_IDTECH=1): Metal has no double, and one of DOOM Eternal's
++// compute shaders uses it to round to N decimal places
++// (double(floor(powr(10.0, ...) + 0.5))), so that pipeline failed to build and its
++// pass was missing from every frame. Such a shader is compiled with float in place
++// of double, which that arithmetic does not need.
++static NSString* mvkMadeiraDemoteDoubles(NSString* src) {
++	static const bool on = [] { const char* v = getenv("MADEIRA_MVK_IDTECH"); return v && v[0] == '1'; }();
++	if ( !on || [src rangeOfString: @"double"].location == NSNotFound ) { return src; }
++	static NSRegularExpression* re = [[NSRegularExpression alloc] initWithPattern: @"\\bdouble([234]?)\\b"
++																		  options: 0 error: nil];
++	NSString* out = [re stringByReplacingMatchesInString: src options: 0 range: NSMakeRange(0, src.length)
++											 withTemplate: @"float$1"];
++	if ( ![out isEqualToString: src] ) { fprintf(stderr, "[mvk-info] Madeira: a shader is compiled with float in place of double (Metal has no double).\n"); }
++	return out;
++}
++
+ id<MTLLibrary> MVKShaderLibraryCompiler::newMTLLibrary(NSString* mslSourceCode,
+ 													   const SPIRVToMSLConversionResultInfo& shaderConversionResults,
+ 													   const vector<pair<MSLSpecializationMacroInfo, MVKShaderMacroValue>>& specializationMacroDef) {
+@@ -579,7 +595,7 @@ static uint32_t getWorkgroupDimensionSize(const SPIRVWorkgroupSizeDimension& wgD
+ 				}
+ 				logCompilation(mtlCompileOptions);
+ 
+-				[mtlDev newLibraryWithSource: mslSourceCode
++				[mtlDev newLibraryWithSource: mvkMadeiraDemoteDoubles(mslSourceCode)
+ 									options: mtlCompileOptions
+ 						completionHandler: ^(id<MTLLibrary> mtlLib, NSError* error) {
+ 							bool isLate = compileComplete(mtlLib, error);
