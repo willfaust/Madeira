@@ -844,6 +844,7 @@ void winios_pWindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data, void *hwnd);
 extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
 extern void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift);
+extern void winios_drv_post_close(void);
 extern void winios_dump_window_tree(void);
 extern void ios_dump_all_thread_stacks(void);
 extern int winios_drv_size_game_window(void *hwnd, int width, int height);
@@ -866,6 +867,7 @@ static void winios_request_game_size(void *hwnd, int cw, int ch) {
 #define WINIOS_EV_MOUSE 0
 #define WINIOS_EV_KEY   1
 #define WINIOS_EV_TEXT  2
+#define WINIOS_EV_CLOSE 3
 #define KEYEVENTF_KEYUP 0x0002
 typedef struct {
     unsigned int type;       /* WINIOS_EV_MOUSE / WINIOS_EV_KEY */
@@ -962,6 +964,13 @@ void winios_post_key(int vk, int down) {
     winios_q_push_ev(WINIOS_EV_KEY, vk, 0, down ? 0 : KEYEVENTF_KEYUP, 0);
 }
 
+/* Quit game: WM_CLOSE to the front window (winios_drv_post_close), queued with
+ * the input so a Wine thread posts it. */
+void winios_post_close(void) {
+    fprintf(stderr, "[winios] post_close\n"); fflush(stderr);
+    winios_q_push_ev(WINIOS_EV_CLOSE, 0, 0, 0, 0);
+}
+
 /* Serial, nonblocking consumer: keys remain FIFO even with several Wine
  * threads polling at once. Only the queue owner injects into wineserver. */
 static BOOL winios_drain_input(void) {
@@ -996,6 +1005,8 @@ static BOOL winios_drain_input(void) {
         }
         if (e.type == WINIOS_EV_KEY)
             winios_drv_post_key((unsigned short)e.x, e.flags);
+        else if (e.type == WINIOS_EV_CLOSE)
+            winios_drv_post_close();
         else
             winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
         drained = TRUE;

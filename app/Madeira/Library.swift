@@ -1501,6 +1501,13 @@ final class LibraryModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             winios_post_key(0x73, 0); winios_post_key(0x12, 0)
         }
+        // A game that reads its keyboard as raw input without legacy messages never
+        // turns Alt+F4 into a close (DOOM Eternal): a second later its window is also
+        // sent WM_CLOSE, as its title bar's close button would.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.quitRequested, self.current != nil else { return }
+            winios_post_close()
+        }
         sessionMessage = "Close requested. Confirm any in-game exit dialog."
         menu = false
         fputs("[frontend] graceful close requested\n", stderr)

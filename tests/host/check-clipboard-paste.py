@@ -89,6 +89,7 @@ static int send_hardware_message(void *window, int flags, const INPUT *input, in
 }
 '''+text_driver+queue+r'''
 static void winios_drv_post_key(unsigned short vk, unsigned int flags) { winios_text_key(vk, flags); }
+static void winios_drv_post_close(void) {}
 static void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int data, void *hwnd) {}
 '''+drain_input+r'''
 static void drain(void) {

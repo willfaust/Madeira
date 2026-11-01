@@ -248,6 +248,31 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
     }
 }
 
+/* Quit game (Library.swift requestQuit) also asks the front window to close.
+ * Alt+F4 becomes a close only through WM_SYSKEYDOWN, and a game that reads its
+ * keyboard as raw input with RIDEV_NOLEGACY | RIDEV_NOHOTKEYS gets neither:
+ * DOOM Eternal (flags 0x230) never saw Quit game and kept running. WM_CLOSE goes
+ * to the foreground window, as its title bar's close button would send it. A
+ * game that answered Alt+F4 with its own exit dialog has that dialog in front
+ * (an owned window), or its window disabled under a modal one: it is left to
+ * the user. The desktop window is never closed. */
+void winios_drv_post_close(void)
+{
+    HWND hwnd = NtUserGetForegroundWindow();
+    DWORD style = hwnd ? get_window_long( hwnd, GWL_STYLE ) : 0;
+    BOOL ok = FALSE;
+
+    if (!hwnd || !NtUserGetAncestor( hwnd, GA_PARENT ))
+        dprintf(2, "[winios] quit: no foreground window to close\n");
+    else if (get_window_relative( hwnd, GW_OWNER ) || (style & WS_DISABLED) || !(style & WS_VISIBLE))
+        dprintf(2, "[winios] quit: %p is a dialog or disabled; the game answered the close\n", hwnd);
+    else
+    {
+        ok = NtUserPostMessage( hwnd, WM_CLOSE, 0, 0 );
+        dprintf(2, "[winios] quit: WM_CLOSE to the foreground window %p -> %d\n", hwnd, ok);
+    }
+}
+
 /* Same key input as the hardware bridge, without logging pasted text. */
 static void winios_text_key(unsigned short vk, unsigned int flags)
 {
