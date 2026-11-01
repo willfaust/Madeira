@@ -2558,6 +2558,25 @@ struct ContentView: View {
         // A Steam game starts through Madeira Dock with its own launch profile (SteamGames.swift),
         // unless its Game details page chose "The game": then its own program starts below, like
         // any library game (SteamDirectStart).
+        if let appID = entry.steamAppID, entry.steamStart == NativeSteamPlay.mode {
+            guard wine_process_is_running() == 0, wineserver_is_running() == 0, library.current == nil else {
+                library.error = "Close the running Wine session before starting through the Steam client."; return
+            }
+            guard let game = MadeiraDock.games(drive: MadeiraDock.drive).first(where: { $0.id == appID && $0.installed }) else {
+                library.error = "Steam's appmanifest does not list this game as ready."; return
+            }
+            do {
+                var launch = entry
+                launch.relativePath = try NativeSteamPlay.prepare(game, drive: MadeiraDock.drive)
+                launch.steamAppID = nil; launch.steamStart = nil; launch.arguments = ""; launch.desktop = false
+                launch.workingDirectory = "C:\\"
+                LogStore.shared.log("[native-steam-play-v1] app=\(appID) manifest=ready install-directory=present mechanism=steam-applaunch")
+                guard jitReadyForLaunch(inLibrary: true, entry: entry.id, then: { launchLibraryEntry(entry) }) else { return }
+                // The generated command is transient, never the saved game entry.
+                startLibraryEntry(launch, remember: false, preferences: entry)
+            } catch { library.error = error.localizedDescription }
+            return
+        }
         if let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
             guard let game = MadeiraDock.games(drive: MadeiraDock.drive).first(where: { $0.id == appID }) else {
                 library.error = "Steam no longer lists this game as installed. Refresh the library and try again."; return
@@ -2595,7 +2614,7 @@ struct ContentView: View {
     /// The rest of Play, with JIT on: checks the entry's launch profile and starts it.
     /// An Epic game first gets Epic's sign-in arguments with a fresh one-use code
     /// (EpicLibrary.launchArguments), for this launch only.
-    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false) {
+    private func startLibraryEntry(_ entry: LibraryEntry, epicReady: Bool = false, remember: Bool = true, preferences: LibraryEntry? = nil) {
         guard !EpicCloud.shared.isBusy else {
             library.error = "Wait for Epic Cloud save sync to finish before starting a game."
             return
@@ -2627,16 +2646,17 @@ struct ContentView: View {
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
+        let effectiveProfile = preferences ?? entry
         // madeira-bcd: the game's own options (LibraryBCD.swift).
-        BCDLaunch.applyLibrary(entry)
-        exportBCDDesktopProfile(entry)
+        BCDLaunch.applyLibrary(effectiveProfile)
+        exportBCDDesktopProfile(effectiveProfile)
         // This run's log under the program's name too (Documents/logs). A Steam game started
         // through Madeira Dock above gets its own from ntdll, once Valve's client starts it.
         let program = entry.desktop == true ? "explorer.exe"
             : entry.launchWindowsPath.split(separator: "\\").last.map(String.init) ?? entry.launchWindowsPath
         LogStore.shared.startSessionLog(program: program)
-        library.begin(entry)
-        runWineFullSequence(profile: entry)
+        library.begin(entry, remember: remember)
+        runWineFullSequence(profile: effectiveProfile)
     }
 
     /// madeira-bcd: LibraryPrefs' AVX, NVIDIA and Wine C++ runtime switches for a
@@ -3616,7 +3636,7 @@ struct ContentView: View {
         "C:\\windows\\system32\\madeira-steam-service.exe" "\(winDir)"\r
         if not "%errorlevel%"=="0" exit /b %errorlevel%\r
         cd /d "\(winDir)"\r
-        "\(winDir)\\steam.exe" -no-cef-sandbox -cef-disable-gpu -console -nocrashmonitor -cef-disable-features=SegmentationPlatform,OptimizationTargetPrediction,OptimizationHints\r
+        "\(winDir)\\steam.exe" \(NativeSteamPlay.clientArguments)\r
         """
 
         let batPath = "\(prefix)/drive_c/steam-launch.bat"
@@ -3698,6 +3718,11 @@ struct ContentView: View {
         let winePrefixPath = documentsPath.appendingPathComponent("wine").path
 
         // Call synchronously — caller already waited for wineserver to be ready
+        let image = (getenv("MADEIRA_EXE").map { String(cString: $0) } ?? "").lowercased()
+        let arguments = (getenv("MADEIRA_ARGS").map { String(cString: $0) } ?? "").lowercased()
+        if image.contains("steam.exe") || arguments.contains("steam-launch.bat") || arguments.contains("madeira-native-steam.cmd") {
+            SteamLibraryDiagnostics.shared.start()
+        }
         let result = wine_process_start(winePrefixPath)
         if result == 0 {
             logStore.log("Wine process thread launched", level: .success)

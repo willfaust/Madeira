@@ -328,3 +328,37 @@ actor SteamRuntimeInstaller {
     private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 }
 #endif
+
+// An explicit alternative to Dock: ask the real Windows client to launch an
+// installed App ID. Steam retains authentication, licensing and game startup.
+enum NativeSteamPlay {
+    static let mode = "client"
+    static let script = "madeira-native-steam.cmd"
+    static let clientArguments = "-no-cef-sandbox -cef-disable-gpu -console -nocrashmonitor -cef-disable-features=SegmentationPlatform,OptimizationTargetPrediction,OptimizationHints"
+    static func prepare(_ game: DockGame, drive: URL) throws -> String {
+        let fm = FileManager.default
+        guard MadeiraDock.validAppID(game.id), game.installed,
+              !game.library.split(separator: "/").contains(".."), MadeiraDock.validFolderName(game.installDir) else {
+            throw DockError.message("Steam's install record is not ready for this game.")
+        }
+        let manifest = drive.appendingPathComponent(game.library).appendingPathComponent("appmanifest_\(game.id).acf")
+        guard let data = try? Data(contentsOf: manifest),
+              let recorded = MadeiraDock.game(manifest: data, library: game.library), recorded.id == game.id,
+              recorded.installed, recorded.installDir == game.installDir else {
+            throw DockError.message("The game's Steam appmanifest is missing or inconsistent. Its files were kept.")
+        }
+        let folder = drive.appendingPathComponent(game.library).appendingPathComponent("common").appendingPathComponent(game.installDir)
+        var directory: ObjCBool = false
+        guard fm.fileExists(atPath: folder.path, isDirectory: &directory), directory.boolValue else {
+            throw DockError.message("The folder named by Steam's appmanifest is unavailable.")
+        }
+        let roots = ["Program Files (x86)/Steam", "Program Files/Steam"]
+        guard let root = roots.first(where: { fm.fileExists(atPath: drive.appendingPathComponent($0).appendingPathComponent("steam.exe").path) }) else {
+            throw DockError.message("The Windows Steam client is not installed in this prefix.")
+        }
+        let windows = "C:\\" + root.replacingOccurrences(of: "/", with: "\\")
+        let body = "@echo off\r\n\"C:\\windows\\system32\\madeira-steam-service.exe\" \"\(windows)\"\r\nif not \"%errorlevel%\"==\"0\" exit /b %errorlevel%\r\ncd /d \"\(windows)\"\r\n\"\(windows)\\steam.exe\" \(clientArguments) -applaunch \(game.id)\r\n"
+        try body.write(to: drive.appendingPathComponent(script), atomically: true, encoding: .utf8)
+        return script
+    }
+}

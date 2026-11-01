@@ -3483,7 +3483,9 @@ struct LibraryDetail: View {
                 error = "This game's update has not finished. Resume it and wait for it to complete before playing."; return
             }
             let installed = SteamGamesModel.shared.games.first { $0.id == appID }?.installed ?? false
-            if entry.startsSteamGameDirectly {
+            if entry.steamStart == NativeSteamPlay.mode {
+                if !installed { error = "Steam's appmanifest does not list this game as ready."; return }
+            } else if entry.startsSteamGameDirectly {
                 if let blocker = SteamDirectStart.blocker(installed: installed, program: entry.steamProgram) { error = blocker; return }
             } else if let blocker = SteamGamesRules.blocker(installed: installed, client: MadeiraDock.clientInstalled, signedIn: SteamSignIn.isSignedIn) {
                 error = blocker; return
@@ -3555,7 +3557,7 @@ struct LibraryDetail: View {
         case .display: return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
         case .controls: return entry.controllerMode == "keys" ? "Keyboard and mouse" : entry.controllerMode == "dinput" ? "XInput and DirectInput" : nil
         case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? "Wine desktop" : "Directly") : nil
-        case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
+        case .steam: return entry.startsSteamGameDirectly ? "The game" : (entry.steamStart == NativeSteamPlay.mode ? "Steam client" : "Madeira Dock")
         case .advanced: return Self.configSummary(bcd.configText)   // madeira-bcd: the game's own config file
         case .iniFiles:
             let count = GameIniFiles.files(entry.windowsPath).count

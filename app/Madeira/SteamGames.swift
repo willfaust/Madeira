@@ -1278,8 +1278,9 @@ struct SteamEntrySection: View {
         let downloads = SteamOwnedLibrary.enabled && managed
         let direct = entry.startsSteamGameDirectly
         Section {
-            Picker("Start with", selection: Binding(get: { direct ? SteamDirectStart.mode : "dock" }, set: { choose($0) })) {
+            Picker("Start with", selection: Binding(get: { direct ? SteamDirectStart.mode : (entry.steamStart == NativeSteamPlay.mode ? NativeSteamPlay.mode : "dock") }, set: { choose($0) })) {
                 Text("Madeira Dock").tag("dock")
+                Text("Steam client").tag(NativeSteamPlay.mode)
                 Text("The game").tag(SteamDirectStart.mode)
             }
             if direct {
@@ -1302,6 +1303,9 @@ struct SteamEntrySection: View {
                         }
                     }
                 }
+            } else if entry.steamStart == NativeSteamPlay.mode {
+                Text("Starts the installed Windows Steam client with this App ID. Uses its saved sign-in; Steam handles ownership and launch. Close the current Wine session first.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 if !dock.clientInstalled {
                     Text("Needs Valve's client: Settings › Steam › Madeira Dock.")
@@ -1415,10 +1419,10 @@ struct SteamEntrySection: View {
 
     /// Start with: Madeira Dock (stored as no choice, the default) or The game.
     private func choose(_ mode: String) {
-        let next: String? = mode == SteamDirectStart.mode ? mode : nil
+        let next: String? = [SteamDirectStart.mode, NativeSteamPlay.mode].contains(mode) ? mode : nil
         guard next != entry.steamStart else { return }
         entry.steamStart = next
-        LogStore.shared.log("[steam-start] app=\(entry.steamAppID ?? 0) mode=\(next == nil ? "dock" : "game")")
+        LogStore.shared.log("[steam-start] app=\(entry.steamAppID ?? 0) mode=\(next ?? "dock")")
     }
 
     /// The Program picker's choice; it is kept over Steam's launch configuration.

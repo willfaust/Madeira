@@ -1956,6 +1956,19 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                 const char *jl = getenv( "MADEIRA_JITLESS" );
                 int jitless_on = !(jl && jl[0] == '0');
                 const char *sp = jitless_on ? sp_jitless : sp_jit;
+                /* On-device Library observer, chosen by the app before this
+                 * session. Bind CEF's supported inspector to loopback only.
+                 * No request interception, certificate or authentication flags. */
+                char library_sp[512];
+                const char *debug_port = getenv("MADEIRA_STEAM_CDP_PORT");
+                char *port_end = NULL;
+                unsigned long port = debug_port ? strtoul(debug_port,&port_end,10) : 0;
+                if (debug_port && port_end != debug_port && !*port_end && port >= 1024 && port <= 65535)
+                {
+                    snprintf(library_sp,sizeof(library_sp),"%s --remote-debugging-address=127.0.0.1 --remote-debugging-port=%lu",sp,port);
+                    sp=library_sp;
+                    dprintf(2,"[steam-library-v1] CEF observer loopback-only port=%lu\n",port);
+                }
                 dprintf( 2, "[steam-cef] request role=browser policy=compat mode=single-process v8=%s logging=default-file\n",
                          jitless_on ? "jitless" : "jit" );
                 dprintf(2, "[proc-gate] V8 %s (MADEIRA_JITLESS=%s) rev=ml526\n",
