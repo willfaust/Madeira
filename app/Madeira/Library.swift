@@ -2201,6 +2201,96 @@ struct AmbientRays: View {
 /// those masks, a slight hue drift and the rays' sway move, at 30 frames a second.
 /// Dark appearance adds the light (plusLighter), as light does on a dark wall; light
 /// appearance tints more softly. Reduce Motion holds it still.
+/// The library holds its moving light still while it scrolls and while the iPhone is
+/// hot (thermal state serious or worse): every visible card's glow is three layers of
+/// blurred artwork redrawn 30 times a second (AmbientGlow), which on a large screen, or
+/// with the GPU throttled, left too little for scrolling. Each scroll is timed and
+/// logged: [ui-scroll] frames, frames over 25 ms, the slowest, and whether a Steam
+/// download ran and how hot the iPhone was.
+@MainActor
+final class LibraryMotion: NSObject, ObservableObject {
+    static let shared = LibraryMotion()
+    /// The cards' light holds still.
+    @Published private(set) var still = false
+    private var scrolling = false
+    private var hot = false
+    private var thermal: NSObjectProtocol?
+    private var link: CADisplayLink?
+    private var began: CFTimeInterval = 0, last: CFTimeInterval = 0, worst: CFTimeInterval = 0
+    private var frames = 0, slow = 0
+
+    private override init() {
+        super.init()
+        hot = Self.isHot
+        still = hot
+        thermal = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification,
+                                                         object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hot = Self.isHot
+                self.update()
+            }
+        }
+    }
+
+    private static var isHot: Bool {
+        ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+    }
+
+    /// The library's scroll view started or stopped moving (LibraryScrollTracking).
+    func scrolling(_ now: Bool) {
+        guard now != scrolling else { return }
+        scrolling = now
+        update()
+        if now { measure() } else { report() }
+    }
+
+    private func update() {
+        let now = scrolling || hot
+        if now != still { still = now }
+    }
+
+    private func measure() {
+        link?.invalidate()
+        frames = 0; slow = 0; worst = 0; last = 0; began = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = link.timestamp
+        if last > 0 {
+            let gap = now - last
+            frames += 1
+            if gap > 0.025 { slow += 1 }
+            worst = max(worst, gap)
+        }
+        last = now
+    }
+
+    private func report() {
+        link?.invalidate(); link = nil
+        guard frames > 0 else { return }
+        let downloading = SteamOwnedLibrary.shared.downloads.values.contains { $0.state == .active }
+        LogStore.shared.log(String(format: "[ui-scroll] %.1f s frames=%d over-25ms=%d worst=%.0f ms downloading=%d thermal=%d",
+                                   CACurrentMediaTime() - began, frames, slow, worst * 1000,
+                                   downloading ? 1 : 0, ProcessInfo.processInfo.thermalState.rawValue))
+    }
+}
+
+/// Tells LibraryMotion when the library scrolls.
+struct LibraryScrollTracking: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, phase in LibraryMotion.shared.scrolling(phase.isScrolling) }
+                .onDisappear { LibraryMotion.shared.scrolling(false) }
+        } else {
+            content
+        }
+    }
+}
+
 struct AmbientGlow: View {
     let image: Image
     let size: CGSize
@@ -2213,6 +2303,7 @@ struct AmbientGlow: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var settings = AmbientGlowSettings.shared
+    @ObservedObject private var motion = LibraryMotion.shared
 
     private func layer(_ angle: Double, _ mirror: Bool, frame: CGSize) -> some View {
         func art() -> some View {
@@ -2253,7 +2344,7 @@ struct AmbientGlow: View {
         // A game that is not installed throws a fainter, less vivid light.
         let strength = (dark ? 0.92 : 0.8) * (dimmed ? 0.3 : 1)
         let plain = layer(0, false, frame: frame), turned = layer(180, false, frame: frame), mirrored = layer(0, true, frame: frame)
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || motion.still)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let f = movie.frame(at: reduceMotion ? 0 : t)
             ZStack {
@@ -3203,6 +3294,7 @@ struct LibraryView: View {
             .padding(16).frame(maxWidth: 1100).frame(maxWidth: .infinity)
         }
         .refreshable { await SteamGamesSection.refresh() }
+        .modifier(LibraryScrollTracking())   // the cards' light holds still while scrolling
         .onReceive(controller.commands) { command in
             guard tab == 0, selected == nil, !browser, !onboarding.presented, !LibrarySteamFocus.shared.sheetOpen else { return }
             // Desktop, then the Steam section's games and the games you added in the page's
