@@ -12,7 +12,7 @@ code=r'''
 #include <stdarg.h>
 static unsigned char image[0xb42a000];static unsigned reads;static int denied;
 static const uint32_t base=0x10000000;static const uint64_t window=0x500000000ULL;
-static int ios_g32_read(uint64_t a,void* p,size_t n){reads++;if(denied||a<window+base||a-window-base>sizeof(image)||n>sizeof(image)-(a-window-base))return 0;memcpy(p,image+a-window-base,n);return 1;}
+static int ios_g32_read(uint64_t a,void* p,size_t n){reads++;if(denied||a<window+base||a-window-base>sizeof(image)||n>sizeof(image)-(a-window-base))return 0;memcpy(p,image+(a-window-base),n);return 1;}
 static char output[4096];static int capture(int fd,const char* fmt,...){assert(fd==2);va_list ap;va_start(ap,fmt);int n=vsnprintf(output,sizeof(output),fmt,ap);va_end(ap);return n;}
 #define dprintf capture
 #include "guest32_origin.h"
