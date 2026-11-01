@@ -258,7 +258,8 @@ private extension CGRect {
 /// The deck under the game: black, with the game reflected in it as in a glossy
 /// table, the way Netflix lights the lower screen of a folded Duo: flipped about the
 /// fold so the game's lower edge meets it, blurred until only its colours are left,
-/// dimming down the deck but never to black (GameMirror, filling the deck). Without
+/// and dimmed evenly so the keys on it stay the brightest thing there, dimming a
+/// little further down the deck but never to black (GameMirror, filling it). Without
 /// `edge` the same copy glows unflipped behind the game: in the bars beside it above
 /// the fold, and behind the game's band upright and unfolded. The Mirror key turns it
 /// off (`madeiraFoldGlow`). A soft shadow at the fold keeps the controls reading as
@@ -267,8 +268,12 @@ struct FoldDeckBackground: View {
     /// On by default; a key of its own, so the sharp copy's old off switch does not carry over.
     static let glowKey = "madeiraFoldGlow"
     @AppStorage(glowKey) private var mirror = true
-    /// The shade along the top, under the hinge (off for the portrait backdrop).
+    /// The copy flipped about the top edge, as a reflection (off for the backdrop behind
+    /// the game).
     var edge = true
+    /// The shade along the top, under the hinge: only folded.
+    var hinge = true
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     /// The copy is drawn at 1/shrink of the size, blurred there and scaled up: a live
     /// full-size copy blurred every game frame cost the game GPU time.
@@ -278,20 +283,20 @@ struct FoldDeckBackground: View {
         GeometryReader { geo in
             ZStack(alignment: .top) {
                 Color.black
-                if mirror && GameMirror.available && geo.size.width > 1 && geo.size.height > 1 {
-                    // 5 here is 40 points at full size: only the colours are left. Build
-                    // 20's 2.5 kept the game's shapes.
-                    GameMirror(fill: true)
+                if mirror && !reduceTransparency && GameMirror.available && geo.size.width > 1 && geo.size.height > 1 {
+                    // 7 here is 56 points at full size: only the colours are left. 2.5
+                    // kept the game's shapes.
+                    GameMirror(fill: true, bottom: edge)
                         .frame(width: geo.size.width / Self.shrink, height: geo.size.height / Self.shrink)
-                        .blur(radius: edge ? 5 : 7, opaque: true)
-                        .saturation(1.4)
+                        .blur(radius: 7, opaque: true)
+                        .saturation(1.2)
                         .scaleEffect(x: Self.shrink, y: edge ? -Self.shrink : Self.shrink)
                         .frame(width: geo.size.width, height: geo.size.height)
-                        .mask(LinearGradient(colors: edge ? [.white, .white.opacity(0.8), .white.opacity(0.35)] : [.white, .white],
+                        .mask(LinearGradient(colors: edge ? [.white.opacity(0.62), .white.opacity(0.5), .white.opacity(0.4)] : [.white, .white],
                                              startPoint: .top, endPoint: .bottom))
-                        .opacity(edge ? 0.95 : 0.8)
+                        .opacity(edge ? 1 : 0.8)
                 }
-                if edge {
+                if edge && hinge {
                     LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
                         .frame(height: 18)
                 }

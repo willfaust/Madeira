@@ -2,6 +2,7 @@
 // Copyright 2026 Julian Scanlan
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 
+import Combine
 import GameController
 import Network
 import SwiftUI
@@ -9,95 +10,212 @@ import UIKit
 
 // The iPhone Duo's deck (docs/DUO.md). With the Duo folded like a laptop
 // (DeviceFold.swift) and touch controls hidden or a controller connected, the flat
-// half shows the few things a controller has no button for: going home, the
-// keyboard and touch controls (the menu button of LibraryHUD, on the deck as well,
-// opens the game menu), over the game's blurred glow (FoldDeckBackground), which
-// can be turned off. Home asks on the deck itself before quitting: a system alert
-// would sit across the fold. Folded, the deck's controls are drawn as keycaps
-// (FoldKeyFace), and the status bar's time, network and battery sit at its top
-// (DeckStatusBar) in place of the system's, over the game.
+// half is laid out as Netflix lays out its Duo player: over the game's blurred glow
+// (FoldDeckBackground), a row with Home, the game now playing and the glow's key;
+// three large keys, Keyboard, the session menu and Touch controls (Aspect with a
+// controller); and a row of small ones for the settings changed most in play. Home
+// asks on the deck itself before quitting: a system alert would sit across the fold.
+// The deck's controls are drawn as keycaps (FoldKeyFace), and the status bar's time,
+// network and battery sit at its top (DeckStatusBar) in place of the system's, over
+// the game. The deck's Menu key stands in for the floating menu button (FoldDeckState).
+
+/// FoldDeck is on screen: LibraryHUD leaves out its floating menu button, which the
+/// deck's own Menu key replaces and which would sit on the deck's Home key.
+final class FoldDeckState: ObservableObject {
+    static let shared = FoldDeckState()
+    @Published var shown = false
+}
 
 struct FoldDeck: View {
     @ObservedObject private var pad = PadStickMouse.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    @ObservedObject private var library = LibraryModel.shared
+    @ObservedObject private var dockStart = DockStartScreen.shared
     @AppStorage(FoldDeckBackground.glowKey) private var mirror = true
     /// Home was pressed: the deck asks before quitting the game.
     @State private var confirmingHome = false
+    @State private var eco = madeira_get_eco() != 0
+    /// The in-game menu's Aspect & scaling picker is shown (MADEIRA_SESSION_TOOLS).
+    private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
+    /// Eco can change under the deck (the in-game menu, the power governor).
+    private let ticks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(spacing: 10) {
-            DeckStatusBar()
-            Spacer(minLength: 0)
-            Group { if confirmingHome { homeQuestion } else { status } }
-                .padding(16)
-                .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
-            Spacer(minLength: 0)
-            buttons
+            HStack(spacing: 12) {
+                DeckStatusBar()
+                // The performance overlay, here rather than floating over the keys.
+                if library.performance { LibraryMetrics().allowsHitTesting(false) }
+            }
+            HStack(spacing: 10) {
+                key("house", "Home", style: .square) { confirmingHome = true }
+                nowPlaying
+                if GameMirror.available && !reduceTransparency {
+                    key(mirror ? "sparkles.rectangle.stack.fill" : "sparkles.rectangle.stack", "Glow",
+                        style: .square, on: mirror) { mirror.toggle() }
+                }
+            }
+            .frame(height: 56)
+            GeometryReader { geo in
+                // Netflix's proportions: the middle key is the widest.
+                let side = (geo.size.width - 20) * 0.29
+                HStack(spacing: 10) {
+                    if confirmingHome {
+                        key("play.fill", "Keep playing", style: .large) { confirmingHome = false }
+                            .frame(width: side)
+                        homeQuestion.frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 16))
+                        key("house.fill", "Quit game", style: .large, tint: .red) {
+                            confirmingHome = false
+                            library.requestQuit()
+                        }
+                        .frame(width: side)
+                    } else {
+                        key("keyboard", "Keyboard", style: .large) { LibraryKeyboard.show() }
+                            .frame(width: side)
+                        key("line.3.horizontal", "Menu", style: .large) { library.showMenu() }
+                        Group {
+                            switch thirdKey {
+                            case .touch: key("hand.tap", "Touch controls", style: .large) { controls.visible = true }
+                            case .aspect: aspectKey(style: .large)
+                            case .performance: performanceKey(style: .large)
+                            }
+                        }
+                        .frame(width: side)
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                if thirdKey != .aspect && sessionTools { aspectKey(style: .small) }
+                if thirdKey != .performance { performanceKey(style: .small) }
+                key("leaf", "Eco", on: eco) {
+                    eco = madeira_get_eco() == 0   // from what it is now, not what the key last saw
+                    madeira_set_eco(eco ? 1 : 0)
+                }
+            }
+            .frame(height: 48)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .foldKeys()
+        .dynamicTypeSize(...DynamicTypeSize.xLarge)   // the rows are sized for the deck
+        .onAppear { FoldDeckState.shared.shown = true; eco = madeira_get_eco() != 0 }
+        .onReceive(ticks) { _ in eco = madeira_get_eco() != 0 }
+        .onDisappear { FoldDeckState.shared.shown = false }
     }
 
-    private var status: some View {
-        HStack(spacing: 12) {
-            Image(systemName: pad.controllerConnected ? "gamecontroller.fill" : "gamecontroller")
-                .font(.system(size: 28))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(GCController.current?.vendorName ?? (pad.controllerConnected ? "Controller" : "No controller"))
-                    .font(.headline)
-                Text("Playing on the upper screen").font(.subheadline).foregroundStyle(.secondary)
+    /// The game now playing, as Netflix shows the title: its artwork, its name and the
+    /// controller, opening the session menu.
+    private var nowPlaying: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            library.showMenu()
+        } label: {
+            HStack(spacing: 10) {
+                cover.frame(width: 28, height: 40).clipShape(RoundedRectangle(cornerRadius: 5))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(library.activeEntry?.title ?? "Game").font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Text(pad.controllerConnected ? GCController.current?.vendorName ?? "Controller" : "Playing on the upper screen")
+                        .font(.caption).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.6))
             }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .glassFace(GlassShape(cornerRadius: 14))
+        }
+        .buttonStyle(FoldKeyButtonStyle())
+        .accessibilityLabel("\(library.activeEntry?.title ?? "Game"), session menu")
+    }
+
+    /// The artwork the starting screen showed: Steam's by App ID for a Dock start or a
+    /// Steam game without its own cover, else the library's.
+    @ViewBuilder private var cover: some View {
+        if let entry = library.activeEntry {
+            if let appID = dockStart.appID ?? (entry.coverFile == nil ? entry.steamAppID : nil) {
+                SteamGameArtwork(appID: appID)
+            } else {
+                LibraryArtwork(entry: entry)
+            }
+        } else {
+            Color.white.opacity(0.1)
         }
     }
 
     private var homeQuestion: some View {
         VStack(spacing: 4) {
-            Text("Quit \(LibraryModel.shared.activeEntry?.title ?? "the game") and go back to the library?")
+            Text("Quit \(library.activeEntry?.title ?? "the game") and go back to the library?")
                 .font(.headline)
                 .multilineTextAlignment(.center)
-            Text("Unsaved progress will be lost.").font(.subheadline).foregroundStyle(.secondary)
+            Text("Unsaved progress will be lost.").font(.subheadline).foregroundStyle(.white.opacity(0.65))
+        }
+        .padding(12)
+    }
+
+    /// The third large key: Touch controls without a controller. With one, the controls
+    /// would not show on the deck anyway, so Aspect & scaling takes the place, where the
+    /// in-game menu offers it (MADEIRA_SESSION_TOOLS), else the performance overlay.
+    private enum ThirdKey { case touch, aspect, performance }
+    private var thirdKey: ThirdKey {
+        !pad.controllerConnected ? .touch : sessionTools ? .aspect : .performance
+    }
+
+    /// Aspect & scaling, one tap to the next mode.
+    private func aspectKey(style: KeyStyle) -> some View {
+        let modes = DisplayMode.allCases
+        return key(library.displayMode.symbol, library.displayMode.label, style: style,
+                   accessibility: "Aspect & scaling") {
+            let i = modes.firstIndex(of: library.displayMode) ?? 0
+            library.displayMode = modes[(i + 1) % modes.count]
         }
     }
 
-    private var buttons: some View {
-        HStack(spacing: 10) {
-            if confirmingHome {
-                button("play.fill", "Keep playing", width: 132) { confirmingHome = false }
-                button("house.fill", "Quit game", width: 132, tint: .red) {
-                    confirmingHome = false
-                    LibraryModel.shared.requestQuit()
-                }
-            } else {
-                button("house", "Home") { confirmingHome = true }
-                button("keyboard", "Keyboard") { LibraryKeyboard.show() }
-                if !pad.controllerConnected {
-                    button("hand.tap", "Touch") { controls.visible = true }
-                }
-                if GameMirror.available {
-                    button(mirror ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle", "Mirror") { mirror.toggle() }
-                }
-            }
-        }
+    private func performanceKey(style: KeyStyle) -> some View {
+        key("speedometer", "Performance", style: style, on: library.performance) { library.performance.toggle() }
     }
 
-    private func button(_ symbol: String, _ label: String, width: CGFloat = 68, tint: Color? = nil,
-                        _ action: @escaping () -> Void) -> some View {
+    enum KeyStyle { case square, large, small }
+
+    /// A keycap: `square` is a glyph alone (its label read by VoiceOver), `large` a glyph
+    /// over its label, `small` the two side by side. `on` lights a key that toggles.
+    /// `accessibility`: VoiceOver's name when `label` is the key's value (Aspect's mode).
+    private func key(_ symbol: String, _ label: String, style: KeyStyle = .small, on: Bool = false,
+                     tint: Color? = nil, accessibility: String? = nil, _ action: @escaping () -> Void) -> some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             action()
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 16))
-                Text(label).font(.caption2)
+            Group {
+                switch style {
+                case .square:
+                    Image(systemName: symbol).font(.system(size: 18, weight: .semibold))
+                        .frame(width: 56)
+                case .large:
+                    VStack(spacing: 6) {
+                        Image(systemName: symbol).font(.system(size: 26, weight: .semibold))
+                        Text(label).font(.footnote.weight(.medium)).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity)
+                case .small:
+                    HStack(spacing: 6) {
+                        Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+                        Text(label).font(.footnote.weight(.medium)).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
             }
+            .frame(maxHeight: .infinity)
             .foregroundStyle(tint ?? .white)
-            .frame(width: width, height: 46)
-            .background(GlassShape())
+            .glassFace(GlassShape(cornerRadius: style == .large ? 18 : 14,
+                                  tint: on ? Color.accentColor.opacity(0.55) : nil))
         }
         .buttonStyle(FoldKeyButtonStyle())
-        .accessibilityLabel(label)
+        .accessibilityLabel(accessibility ?? label)
+        .accessibilityValue(accessibility == nil ? "" : label)
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
@@ -144,8 +262,8 @@ struct FoldKeyFace: View {
             shape.fill(Color(white: 0.05))
                 .offset(y: travel)
             ZStack {
-                shape.fill(LinearGradient(colors: pressed ? [Color(white: 0.17), Color(white: 0.23)]
-                                                          : [Color(white: 0.32), Color(white: 0.16)],
+                shape.fill(LinearGradient(colors: pressed ? [Color(white: 0.14), Color(white: 0.19)]
+                                                          : [Color(white: 0.26), Color(white: 0.13)],
                                           startPoint: .top, endPoint: .bottom))
                 if let tint { shape.fill(tint.opacity(pressed ? 0.45 : 0.6)) }
                 shape.fill(LinearGradient(colors: [.white.opacity(pressed ? 0.04 : 0.16), .clear],
@@ -222,20 +340,26 @@ struct DeckStatusBar: View {
 /// controls off and on (the same setting as FoldDeck's Mirror button).
 struct FoldMirrorKey: View {
     @Binding var on: Bool
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
+        if !reduceTransparency { button }
+    }
+
+    private var button: some View {
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             on.toggle()
         } label: {
-            Image(systemName: on ? "rectangle.on.rectangle.slash" : "rectangle.on.rectangle")
+            Image(systemName: on ? "sparkles.rectangle.stack.fill" : "sparkles.rectangle.stack")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(width: 44, height: 28)
                 .background(GlassShape(cornerRadius: 9))
         }
         .buttonStyle(FoldKeyButtonStyle())
-        .accessibilityLabel(on ? "Hide the game on this screen" : "Show the game on this screen")
+        .accessibilityLabel("Glow")
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
@@ -244,8 +368,11 @@ struct FoldMirrorKey: View {
 /// (MetalHostView), so the copy is a portal: UIKit's _UIPortalView draws the same
 /// layer a second time, scaled to fit here (or with `fill`, to cover it, cropped),
 /// without touching the game. Without that class the deck is plain black.
+/// `bottom` keeps the game's lower edge on this view's lower edge rather than
+/// centring it, for the deck's reflection: flipped, that edge meets the fold.
 struct GameMirror: UIViewRepresentable {
     var fill = false
+    var bottom = false
 
     private static let portalClass = NSClassFromString("_UIPortalView") as? UIView.Type
     static var available: Bool {
@@ -258,6 +385,7 @@ struct GameMirror: UIViewRepresentable {
         private var sourceRect = CGRect.zero   // the part of `source` the game takes
         private var timer: Timer?
         var fill = false
+        var bottom = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -318,7 +446,8 @@ struct GameMirror: UIViewRepresentable {
             _ = pickSource()
             guard let portal, let source else { return }
             // The game's part of the source, fitted into this view (or covering it) at
-            // its aspect ratio, its centre on this view's centre.
+            // its aspect ratio, its centre on this view's centre (or, with `bottom`, its
+            // lower edge on this view's).
             let full = source.bounds.size
             let crop = sourceRect.width > 1 && sourceRect.height > 1 ? sourceRect : CGRect(origin: .zero, size: full)
             guard full.width > 1, full.height > 1, bounds.width > 1, bounds.height > 1 else { return }
@@ -328,13 +457,15 @@ struct GameMirror: UIViewRepresentable {
             portal.bounds = CGRect(origin: .zero, size: full)
             portal.transform = CGAffineTransform(scaleX: scale, y: scale)
             portal.center = CGPoint(x: bounds.midX + (full.width / 2 - crop.midX) * scale,
-                                    y: bounds.midY + (full.height / 2 - crop.midY) * scale)
+                                    y: bottom ? bounds.maxY - (crop.maxY - full.height / 2) * scale
+                                              : bounds.midY + (full.height / 2 - crop.midY) * scale)
         }
     }
 
     func makeUIView(context: Context) -> Mirror { Mirror(frame: .zero) }
     func updateUIView(_ view: Mirror, context: Context) {
         view.fill = fill
+        view.bottom = bottom
         view.setNeedsLayout()
     }
 }
