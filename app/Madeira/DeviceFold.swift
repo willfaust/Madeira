@@ -70,6 +70,16 @@ final class DeviceFold: ObservableObject {
         regions = reading
         LogStore.shared.log("[fold] window \(reading)")
     }
+
+    /// A portrait window with the fold across it: the Duo held open (or bent) upright.
+    /// The library's title sits close to the screen's left edge there and moves in a
+    /// little (LibraryTitleText).
+    @Published private(set) var portraitFold = false
+
+    fileprivate func note(portraitFold now: Bool) {
+        guard now != portraitFold else { return }
+        portraitFold = now
+    }
 }
 
 /// Folded or not, from the hinge angle. The flattest angle seen stands for open (it
@@ -138,10 +148,16 @@ private struct DeviceFoldReader: ViewModifier {
                     GeometryReader { proxy in
                         let layout = proxy.foldLayout(folded: folded, generation: generation)
                         let regions = proxy.foldRegions(generation: generation)
+                        let portraitFold = proxy.portraitFold(generation: generation)
                         Color.clear
-                            .onAppear { DeviceFold.shared.update(layout); DeviceFold.shared.note(regions: regions) }
+                            .onAppear {
+                                DeviceFold.shared.update(layout)
+                                DeviceFold.shared.note(regions: regions)
+                                DeviceFold.shared.note(portraitFold: portraitFold)
+                            }
                             .onChange(of: layout) { _, new in DeviceFold.shared.update(new) }
                             .onChange(of: regions) { _, new in DeviceFold.shared.note(regions: new) }
+                            .onChange(of: portraitFold) { _, new in DeviceFold.shared.note(portraitFold: new) }
                     }
                     .ignoresSafeArea()
                 )
@@ -214,6 +230,12 @@ private extension GeometryProxy {
         return DeviceFold.Layout(top: top, fold: fold, deck: deck)
     }
 
+    /// A portrait window with a division across it (DeviceFold.portraitFold).
+    func portraitFold(generation _: Int) -> Bool {
+        size.height > size.width && reservedRegions(kind: .division, options: .includeInactive)
+            .contains { $0.frame.width > $0.frame.height }
+    }
+
     /// "951x669 divisions=[476,0 19x669 inactive]": the window and every division,
     /// for the log (DeviceFold.note(regions:)).
     func foldRegions(generation _: Int) -> String {
@@ -233,15 +255,50 @@ private extension CGRect {
     }
 }
 
-/// The deck under the game: a dark surface with a soft shadow at the fold, so the
-/// controls read as lying on a table.
+/// The deck under the game: black, with the game reflected in it as in a glossy
+/// table, the way Netflix lights the lower screen of a folded Duo: flipped about the
+/// fold so the game's lower edge meets it, blurred until only its colours are left,
+/// dimming down the deck but never to black (GameMirror, filling the deck). Without
+/// `edge` the same copy glows unflipped behind the game: in the bars beside it above
+/// the fold, and behind the game's band upright and unfolded. The Mirror key turns it
+/// off (`madeiraFoldGlow`). A soft shadow at the fold keeps the controls reading as
+/// lying on a table.
 struct FoldDeckBackground: View {
+    /// On by default; a key of its own, so the sharp copy's old off switch does not carry over.
+    static let glowKey = "madeiraFoldGlow"
+    @AppStorage(glowKey) private var mirror = true
+    /// The shade along the top, under the hinge (off for the portrait backdrop).
+    var edge = true
+
+    /// The copy is drawn at 1/shrink of the size, blurred there and scaled up: a live
+    /// full-size copy blurred every game frame cost the game GPU time.
+    private static let shrink: CGFloat = 8
+
     var body: some View {
-        ZStack(alignment: .top) {
-            LinearGradient(colors: [Color(white: 0.09), Color(white: 0.04)], startPoint: .top, endPoint: .bottom)
-            LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 18)
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                Color.black
+                if mirror && GameMirror.available && geo.size.width > 1 && geo.size.height > 1 {
+                    // 5 here is 40 points at full size: only the colours are left. Build
+                    // 20's 2.5 kept the game's shapes.
+                    GameMirror(fill: true)
+                        .frame(width: geo.size.width / Self.shrink, height: geo.size.height / Self.shrink)
+                        .blur(radius: edge ? 5 : 7, opaque: true)
+                        .saturation(1.4)
+                        .scaleEffect(x: Self.shrink, y: edge ? -Self.shrink : Self.shrink)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .mask(LinearGradient(colors: edge ? [.white, .white.opacity(0.8), .white.opacity(0.35)] : [.white, .white],
+                                             startPoint: .top, endPoint: .bottom))
+                        .opacity(edge ? 0.95 : 0.8)
+                }
+                if edge {
+                    LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 18)
+                }
+            }
         }
+        .clipped()
         .allowsHitTesting(false)
+        .onAppear { LogStore.shared.log("[fold] deck glow=\(mirror ? 1 : 0) portal=\(GameMirror.available ? 1 : 0)") }
     }
 }

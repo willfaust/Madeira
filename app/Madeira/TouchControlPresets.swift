@@ -472,6 +472,34 @@ final class ControlPresetsModel: ObservableObject {
         log("loaded layout=\(ControlPresetStore.isBuiltIn(p.id) ? "xbox" : "custom") controls=\(controls.count) reason=\(reason)")
     }
 
+    /// The built-in layout on screen, untouched (an edit makes it the user's own, see
+    /// editingEnded), laid out again for `screen`: the same controls, ids and all, moved
+    /// and sized to where the built-in puts them there. Laid out for the whole screen,
+    /// its buttons ran into each other on the Duo's narrower deck (DeviceFold.swift,
+    /// PortraitDeck). Nothing changes when they are already there.
+    func relay(screen: ControlPresetScreen) {
+        let m = TouchControlsModel.shared
+        guard m.layoutID == ControlPresetLayout.xboxID, !m.controls.isEmpty,
+              let p = store.preset(ControlPresetLayout.xboxID) else { return }
+        var placed: [String: TouchControl] = [:]
+        for c in ControlPresetStore.layout(of: p, screen: screen) {
+            if let name = c.action.padName { placed[name] = c }
+        }
+        var changed = false
+        let controls = m.controls.map { c -> TouchControl in
+            guard let name = c.action.padName, let to = placed[name],
+                  abs(to.nx - c.nx) > 0.001 || abs(to.ny - c.ny) > 0.001 || abs(to.scale - c.scale) > 0.001
+            else { return c }
+            var c = c
+            c.nx = to.nx; c.ny = to.ny; c.scale = to.scale
+            changed = true
+            return c
+        }
+        guard changed else { return }
+        m.controls = controls
+        log("relaid the built-in for \(Int(screen.width))x\(Int(screen.height))")
+    }
+
     /// Keep the unsaved on-screen controls as the next "Custom Layout N".
     @discardableResult func keepCurrent() -> Bool {
         guard !readOnly else { return false }

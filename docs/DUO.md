@@ -49,35 +49,51 @@ Log tag: `[fold]`. These are logged when they change:
 `sessionBody` frames the game view (`MadeiraMetalView`) to the upper half. The
 surface layout (`GameSurfaceLayout`, see `GuestDisplay.swift`) then fits the
 game into that half with the entry's display mode, and touch mapping follows
-the same rect. Touches there go to the game as before.
+the same rect. Touches there go to the game as before. The game's glow (below)
+fills the bars beside it.
+
+The system status bar would sit across the top of the game, so it is hidden while
+folded, and its time, network and battery are drawn at the top of the deck
+instead (`DeckStatusBar`, `FoldDeck.swift`). The controls window covers the
+whole screen above the game's window, so iOS takes the status bar from it
+(`ControlsHostingController`, `TouchControlsHost.hidesStatusBar`).
+`[fold] status bar on the deck=…` is logged when that changes. Wi-Fi strength
+has no public API, so the Wi-Fi mark is always full.
 
 ## The deck
 
 The controls window (`ControlsWindow`) owns the whole deck while folded. The deck
-has no game under it, so no touch there becomes a mouse event. Its contents:
+has no game under it, so no touch there becomes a mouse event.
 
-- **Touch controls.** The entry's layout is drawn in the deck at the same
-  relative positions it has in landscape. A user with no layout yet gets the
-  built-in one laid out for the deck. Gesture zones scale to the deck too.
-  Under them the deck shows the game as well, dimmed so the controls stay
-  readable, the way a video app does on a folded Duo. A small key at the top
-  of the deck turns that copy off and on.
+The deck is black, with the game glowing through it: a copy of the game covering
+the deck, flipped at the fold like a reflection, blurred until only its colours
+are left, and dimming down the deck but never to black, the way Netflix lights
+the lower screen of a folded Duo (`FoldDeckBackground`, `DeviceFold.swift`). Its
+contents sit on top:
+
+- **Touch controls.** The built-in controller layout, while it is untouched, is
+  laid out again for the deck, and again for the whole screen when the Duo
+  opens (`ControlPresetsModel.relay`), so it keeps its spacing on the smaller
+  deck. A layout of the user's own is drawn at the same relative positions it
+  has in landscape, shrunk until no two controls overlap (`[fold] deck controls
+  fit=…`). Gesture zones scale to the deck too. At the top centre, the status
+  bar sits beside a small key that turns the glow off and on.
 - **The menu button and the in-game menu** (`LibraryHUD`) stay on the deck, so
   Done, Keyboard, Edit controls and Quit game are within reach without leaning
   over the fold. The starting screen still covers the whole window.
 - **With a controller** (or with touch controls hidden), the deck shows
-  `FoldDeck` instead of the controls. It has a live copy of the game, scaled to
-  fit, above four buttons:
+  `FoldDeck` instead of the controls: the controller's name over the glow, above
+  four buttons:
   - Home quits the game and goes back to the library, the in-game menu's Quit
-    game. It asks first, on the deck itself: the copy of the game dims under the
-    question and the buttons become Keep playing and Quit game. A system alert
+    game. It asks first, on the deck itself: the question takes the controller's
+    place and the buttons become Keep playing and Quit game. A system alert
     would sit across the fold, half out of reach. The in-game menu is the menu
     button's, already on the deck;
   - Keyboard shows the keyboard;
   - Touch brings the touch controls back (offered while no controller is
     connected);
-  - Mirror turns the copy off. It's the same setting as the key above the
-    touch controls (`madeiraFoldMirror` in the app's preferences).
+  - Mirror turns the glow off. It's the same setting as the key above the
+    touch controls (`madeiraFoldGlow` in the app's preferences).
 
 Folded, the deck lies on the table like a keyboard, so its controls are drawn as
 physical keys rather than glass. That covers the touch controls, `FoldDeck`'s
@@ -89,12 +105,24 @@ buttons and the mirror key:
 `glassFace` (`ContentView.swift`) draws the keycap (`FoldKeyFace`) wherever a view
 is marked `.foldKeys()`. Outside the folded deck nothing changes.
 
-The copy is a portal. UIKit's `_UIPortalView` draws the game's Metal layer a
-second time. The layer itself cannot move: it has one parent, and it must stay a
-window-level view for its presents to reach the screen (`MetalHostView`). The
-copy costs one more composite of the game per frame and nothing in the game. If
-the class is missing on some future system, the deck shows the controller's
-name instead, and the Mirror button is not offered.
+The copy is a portal (`GameMirror`). UIKit's `_UIPortalView` draws the game's
+Metal layer a second time, and SwiftUI's blur softens it. The layer itself cannot
+move: it has one parent, and it must stay a window-level view for its presents
+to reach the screen (`MetalHostView`). The glow costs one more composite and a
+blur of the game per frame, and nothing in the game. If the class is missing on
+some future system, the deck stays plain black, and the Mirror button is not
+offered. `[fold] deck glow=… portal=…` is logged when the deck appears.
+
+A Madeira Dock session draws the game in the desktop compositor's view
+(`Winios.m`), beside `MetalHostView` rather than in it, so there the portal copies
+that view, cropped to the desktop (`winios_compositor_mirror_source`). The mirror
+checks once a second which of the two is drawing, and logs `[fold] mirror
+source=…` when that changes. The compositor's letterbox is clear, so the glow
+shows around the desktop too.
+
+Held open or bent upright, with the fold across a portrait window, the library's
+large title moves 12 points in from the screen's left edge
+(`DeviceFold.portraitFold`, `LibraryTitleText`).
 
 ## Portrait with a controller
 
@@ -109,12 +137,29 @@ The code is `app/Madeira/PortraitPin.swift`. `MetalBackedView` lays the game out
 in the band at the pinned edge instead of its whole bounds, so the presented
 layer, the desktop compositor and touch mapping all follow the same rect. A
 touch that starts in the empty space while a pin can apply belongs to the swipe
-and never reaches the game. Without a controller, in landscape, folded, or when
-the game fills the height, nothing changes, and touches in the empty space reach
-the game as before. Connecting or disconnecting a controller lays the game out
-again.
+and never reaches the game. Without a controller (but see touch controls below),
+in landscape, folded, or when the game fills the height, nothing changes, and
+touches in the empty space reach the game as before. Connecting or disconnecting
+a controller lays the game out again.
 
 Log tag: `[portrait-pin]`.
+
+## Portrait with touch controls
+
+This part applies to every iPhone. Held upright without a controller, touch
+controls used to lie over the game in the middle band, their landscape layout
+squeezed into the narrow window until the buttons ran into each other. Now, while
+touch controls are on screen, the game moves to the top (as if pinned there), and
+the space below it becomes a deck like the folded Duo's (`PortraitDeck`,
+`PortraitPin.swift`):
+- the controls, the menu button and the in-game menu are drawn there, and the
+  controls window takes every touch in it;
+- the built-in layout is laid out again for it, as on the fold;
+- the game's reflection fills it, and its glow fills the space around the game.
+
+Hiding touch controls, connecting a controller, or a game that fills the height
+puts things back as before. A space of less than 160 points is not used. Log tag:
+`[portrait-deck]`.
 
 ## Switching games
 

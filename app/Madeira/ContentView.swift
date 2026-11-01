@@ -261,6 +261,8 @@ final class MetalBackedView: UIView {
         } else {
             MetalHostView.shared.frame = frame
         }
+        // Upright with touch controls, they take the space below the game (PortraitPin.swift).
+        PortraitDeck.shared.update(game: frame, in: w.bounds, applies: PortraitDeck.applies(in: bounds))
         // The desktop compositor lays the guest display out in the same rect,
         // so Aspect / Fill / Stretch / Fit apply to desktop sessions as well.
         winios_set_desktop_rect(r.minX - bounds.minX, r.minY - bounds.minY, r.width, r.height, 1)
@@ -1317,6 +1319,7 @@ struct ContentView: View {
     /// full-screen `sessionBody`.
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var deviceFold = DeviceFold.shared
+    @ObservedObject private var portraitDeck = PortraitDeck.shared
     /// "Use New Interface" (actionButtons) applies at the next start.
     @State private var showFrontendRestart = false
 
@@ -1469,11 +1472,21 @@ struct ContentView: View {
         ZStack(alignment: .topLeading) {
             Color.black
             // Folded like a laptop (DeviceFold.swift): the game keeps the upright
-            // half and the flat half is the deck the controls window draws on.
-            if let fold = deviceFold.layout {
+            // half and the flat half is the deck the controls window draws on. The
+            // game's glow fills the bars beside it as well as the deck. Upright with
+            // touch controls, the space below the game is a deck too (PortraitDeck).
+            if let deck = deviceFold.layout?.deck ?? (library.current != nil ? portraitDeck.rect : nil) {
+                FoldDeckBackground(edge: false)
+                    .frame(width: deck.width, height: deviceFold.layout?.top.height ?? deck.minY)
                 FoldDeckBackground()
-                    .frame(width: fold.deck.width, height: fold.deck.height)
-                    .offset(x: fold.deck.minX, y: fold.deck.minY)
+                    .frame(width: deck.width, height: deck.height)
+                    .offset(x: deck.minX, y: deck.minY)
+            } else {
+                // Upright and unfolded, the game takes a band of the screen; the same
+                // glow fills the rest, behind it.
+                GeometryReader { geo in
+                    if geo.size.height > geo.size.width { FoldDeckBackground(edge: false) }
+                }
             }
             MadeiraMetalView()
                 .frame(width: deviceFold.layout?.top.width, height: deviceFold.layout?.top.height)
@@ -4075,11 +4088,34 @@ final class TouchControlsModel: ObservableObject {
     /// pinch `scale`. A library entry keeps its own (Control size) and sets it
     /// for its session; transient, so the developer interface stays at 1.
     @Published var sizeScale: Double = 1.0
+    /// On the folded Duo's deck, a layout made for the full screen is shrunk until no
+    /// two controls overlap (fit(_:in:)); 1 everywhere else. Transient.
+    @Published var fitScale: Double = 1.0
 
     /// A control's drawn diameter. The view, the hit test and the mapping
     /// panel's placement all use it, so the touch region and the pixels agree.
     static func diameter(_ c: TouchControl) -> CGFloat {
-        baseDiameter * CGFloat(c.scale) * CGFloat(shared.sizeScale)
+        baseDiameter * CGFloat(c.scale) * CGFloat(shared.sizeScale) * CGFloat(shared.fitScale)
+    }
+
+    /// The largest uniform scale, 0.62...1, at which `controls`, centred at their
+    /// normalised positions in `area`, keep `gap` points apart. The deck of a Duo
+    /// open in portrait is a third narrower than landscape, and the Xbox layout's
+    /// shoulder, face and d-pad buttons ran into each other there.
+    static func fit(_ controls: [TouchControl], in area: CGSize, gap: CGFloat = 6) -> Double {
+        guard area.width > 1, area.height > 1, controls.count > 1 else { return 1 }
+        let sizes = controls.map { $0.action.controlSize(diameter: baseDiameter * CGFloat($0.scale) * CGFloat(shared.sizeScale)) }
+        var scale: CGFloat = 1
+        for i in controls.indices {
+            for j in controls.indices where j > i {
+                let dx = abs(CGFloat(controls[i].nx - controls[j].nx)) * area.width
+                let dy = abs(CGFloat(controls[i].ny - controls[j].ny)) * area.height
+                let w = (sizes[i].width + sizes[j].width) / 2, h = (sizes[i].height + sizes[j].height) / 2
+                // A pair stops overlapping once it clears on either axis.
+                scale = min(scale, max((dx - gap) / w, (dy - gap) / h))
+            }
+        }
+        return Double(max(0.62, min(1, scale)))
     }
     /// The drawn frame: the diameter for round controls, the pad button's own
     /// shape otherwise (ControlAction.controlSize).
@@ -4187,8 +4223,9 @@ final class ControlsWindow: UIWindow {
             if library.menu || library.launching { return super.hitTest(point, with: event) }
             // Folded like a laptop (DeviceFold.swift), the deck holds the HUD and the
             // controls and has no game under it, so all of it is this window's; the
-            // upright half is the game's.
-            if let deck = DeviceFold.shared.layout?.deck {
+            // upright half is the game's. The same goes for the space below the game
+            // upright with touch controls (PortraitDeck).
+            if let deck = DeviceFold.shared.layout?.deck ?? PortraitDeck.shared.rect {
                 return deck.contains(point) ? super.hitTest(point, with: event) : nil
             }
             if library.menuButtonRect.contains(point) ||
@@ -4223,7 +4260,7 @@ enum TouchControlsHost {
             w.windowLevel = .normal + 101
             w.backgroundColor = .clear
             w.isHidden = false        // deliberately never made key
-            let host = UIHostingController(rootView: TouchControlsOverlay())
+            let host = ControlsHostingController(rootView: TouchControlsOverlay())
             host.view.backgroundColor = .clear
             w.rootViewController = host
             PointerLock.register(host)
@@ -4233,6 +4270,22 @@ enum TouchControlsHost {
         fputs("[controls] ml644 overlay attached frame=\(window?.frame ?? .zero) " +
               "controls=\(TouchControlsModel.shared.controls.count)\n", stderr)
     }
+
+    /// Folded in a session, the status bar's time, Wi-Fi and battery move to the deck
+    /// (DeckStatusBar) and the system's own, across the top of the game, is hidden.
+    /// This window covers the whole screen above the game's, so iOS takes the status
+    /// bar from it: sessionBody's statusBarHidden never applied.
+    static var hidesStatusBar = false {
+        didSet {
+            guard hidesStatusBar != oldValue else { return }
+            window?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
+            LogStore.shared.log("[fold] status bar on the deck=\(hidesStatusBar ? 1 : 0)")
+        }
+    }
+}
+
+private final class ControlsHostingController: UIHostingController<TouchControlsOverlay> {
+    override var prefersStatusBarHidden: Bool { TouchControlsHost.hidesStatusBar }
 }
 
 struct TouchControlsOverlay: View {
@@ -4240,9 +4293,10 @@ struct TouchControlsOverlay: View {
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var zones = GestureZonesModel.shared
     @ObservedObject private var deviceFold = DeviceFold.shared
+    @ObservedObject private var portraitDeck = PortraitDeck.shared
     @ObservedObject private var pad = PadStickMouse.shared
     /// The copy of the game on the deck (FoldDeck.swift), under the touch controls too.
-    @AppStorage("madeiraFoldMirror") private var foldMirror = true
+    @AppStorage(FoldDeckBackground.glowKey) private var foldMirror = true
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4255,10 +4309,12 @@ struct TouchControlsOverlay: View {
             let landscape = geo.size.width > geo.size.height || session
             // Folded like a laptop (DeviceFold.swift), a library session's controls and
             // HUD live on the deck below the fold; with a controller, or touch controls
-            // hidden, the deck shows FoldDeck instead of the controls.
-            let deck = session ? deviceFold.layout?.deck : nil
+            // hidden, the deck shows FoldDeck instead of the controls. Upright with touch
+            // controls, they live in the same way below the game (PortraitDeck).
+            let fold = session ? deviceFold.layout?.deck : nil
+            let deck = self.deck
             let area = deck ?? CGRect(origin: .zero, size: geo.size)
-            let foldDeck = deck != nil && !m.editing && (!m.visible || pad.controllerConnected)
+            let foldDeck = fold != nil && !m.editing && (!m.visible || pad.controllerConnected)
             ZStack(alignment: .top) {
                 // The library between sessions (the window came up for a start that did not
                 // happen) draws nothing over the library's own screens.
@@ -4269,21 +4325,19 @@ struct TouchControlsOverlay: View {
                             .offset(x: deck.minX, y: deck.minY)
                     } else if (m.visible || m.editing) && !library.blocksGameplayTouch {
                         ZStack(alignment: .topLeading) {
-                            // Folded, the deck shows the game as well, under its controls, the
-                            // way a video app does on a folded Duo; dimmed so the keys read.
-                            if deck != nil, foldMirror, GameMirror.available, !m.editing {
-                                GameMirror()
-                                    .overlay(Color.black.opacity(0.35))
-                                    .frame(width: area.width, height: area.height)
-                                    .allowsHitTesting(false)
-                            }
+                            // Folded, the game glows through the deck under its controls
+                            // (FoldDeckBackground, in the main window below).
                             if GestureZonesModel.enabled {
                                 GestureZonesLayer(screen: area.size, editing: m.editing)
                             }
                             controls(area.size, session: session)
-                            if deck != nil, GameMirror.available, !m.editing {
-                                FoldMirrorKey(on: $foldMirror)
-                                    .position(x: area.width / 2, y: 24)
+                            // In the band a built-in layout leaves free at the top centre.
+                            if deck != nil, !m.editing {
+                                HStack(spacing: 12) {
+                                    if fold != nil { DeckStatusBar() }
+                                    if GameMirror.available { FoldMirrorKey(on: $foldMirror) }
+                                }
+                                .position(x: area.width / 2, y: 24)
                             }
                         }
                         .frame(width: area.width, height: area.height, alignment: .topLeading)
@@ -4311,14 +4365,25 @@ struct TouchControlsOverlay: View {
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
             .contentShape(Rectangle())
             .gesture(scalePinch, including: m.editing ? .all : .subviews)
-            .onAppear { applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
-            .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape) }
-            .onChange(of: deviceFold.layout) { _, _ in applyDefaultLayout(geo) }
-            .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape) }
-            .onChange(of: m.visible) { _, _ in configureGamepad(landscape: landscape) }
+            .onAppear {
+                applyDefaultLayout(geo); configureGamepad(landscape: landscape); refit()
+                TouchControlsHost.hidesStatusBar = fold != nil
+            }
+            .onChange(of: geo.size) { _, _ in applyDefaultLayout(geo); configureGamepad(landscape: landscape); refit() }
+            .onChange(of: deviceFold.layout) { _, _ in applyDefaultLayout(geo); refit() }
+            .onChange(of: portraitDeck.rect) { _, _ in applyDefaultLayout(geo); refit() }
+            .onChange(of: fold != nil) { _, folded in TouchControlsHost.hidesStatusBar = folded }
+            .onChange(of: m.controls) { _, _ in configureGamepad(landscape: landscape); refit() }
+            // Shown or hidden, upright the game moves to the top or back (PortraitDeck).
+            .onChange(of: m.controls.isEmpty) { _, _ in MetalBackedView.refreshDisplayMode(reason: PortraitPin.reason) }
+            .onChange(of: m.sizeScale) { _, _ in refit() }
+            .onChange(of: m.visible) { _, _ in
+                applyDefaultLayout(geo); configureGamepad(landscape: landscape)
+                MetalBackedView.refreshDisplayMode(reason: PortraitPin.reason)
+            }
             .onChange(of: zones.padZoneIDs) { _, _ in configureGamepad(landscape: landscape) }
             .onChange(of: m.selected) { _, new in if new != nil { zones.selected = nil } }
-            .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape) }
+            .onChange(of: m.editing) { _, _ in configureGamepad(landscape: landscape); refit() }
             .onChange(of: library.blocksGameplayTouch) { _, _ in configureGamepad(landscape: landscape) }
             .onDisappear { GamepadInput.shared.configureTouch(controls: []); TouchMouseGate.padOverlay = false }
         }
@@ -4362,16 +4427,52 @@ struct TouchControlsOverlay: View {
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
     /// layout on the first landscape overlay, laid out for this screen (never over an existing controls file).
+    /// Touch controls switched on in a game that has no controls at all get the same layout, kept as the
+    /// game's own: the switch alone drew nothing and connected no pad (DOOM Eternal, 2026-10-28).
+    /// The built-in layout, untouched, is laid out again for where it is drawn (the deck,
+    /// or the whole screen) each time that changes (ControlPresetsModel.relay). On the
+    /// deck a layout of the user's own shrinks until its controls stop overlapping
+    /// (TouchControlsModel.fitScale); everywhere else it is drawn as made.
+    private func refit() {
+        let deck = self.deck
+        if !m.editing {
+            ControlPresetsModel.shared.relay(screen: deck.map {
+                ControlPresetScreen(width: Double($0.width), height: Double($0.height))
+            } ?? ControlPresetsModel.currentScreen())
+        }
+        let fit = deck.map { TouchControlsModel.fit(m.controls, in: $0.size) } ?? 1
+        if m.fitScale != fit {
+            m.fitScale = fit
+            LogStore.shared.log(String(format: "[fold] deck controls fit=%.2f", fit))
+        }
+    }
+
+    /// Where a library session's controls are drawn instead of the whole window: the
+    /// folded Duo's deck, or upright with touch controls the space below the game.
+    private var deck: CGRect? {
+        guard library.current != nil || library.preparing != nil else { return nil }
+        return deviceFold.layout?.deck ?? portraitDeck.rect
+    }
+
     private func applyDefaultLayout(_ geo: GeometryProxy) {
         // Folded like a laptop, the controls are laid out for the deck.
-        let deck = library.current != nil ? deviceFold.layout?.deck : nil
+        let deck = library.current != nil ? self.deck : nil
         let size = deck?.size ?? geo.size
-        guard m.needsDefaultLayout, size.width > size.height else { return }
+        let empty = library.current != nil && m.visible && !m.editing && m.controls.isEmpty
+            && ControlPresetsModel.enabled
+        guard (m.needsDefaultLayout && size.width > size.height) || empty else { return }
         let i = deck == nil ? geo.safeAreaInsets : EdgeInsets()
-        ControlPresetsModel.shared.applyDefaultIfNeeded(screen: ControlPresetScreen(
+        let screen = ControlPresetScreen(
             width: Double(size.width), height: Double(size.height),
             left: Double(i.leading), right: Double(i.trailing),
-            top: Double(i.top), bottom: Double(i.bottom)))
+            top: Double(i.top), bottom: Double(i.bottom))
+        if m.needsDefaultLayout && size.width > size.height {
+            ControlPresetsModel.shared.applyDefaultIfNeeded(screen: screen)
+        }
+        if empty && m.controls.isEmpty {
+            ControlPresetsModel.shared.load(ControlPresetLayout.xboxID, screen: screen, reason: "touch-controls-empty")
+            library.saveCurrentProfile()
+        }
     }
 
     /// ml1970: while editing, a Done button ends the edit (keeping it in the

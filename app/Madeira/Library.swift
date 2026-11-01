@@ -1688,6 +1688,7 @@ struct LibraryLargeTitle: ToolbarContent {
 /// Symbol at the title's own size is nearly twice the height of its M.
 struct LibraryTitleText: View {
     @ObservedObject private var alignment = LibraryHeaderAlignment.shared
+    @ObservedObject private var fold = DeviceFold.shared
     @ObservedObject private var jitState = LibraryJITState.shared
     var body: some View {
         let jit = jitState.enabled
@@ -1702,7 +1703,7 @@ struct LibraryTitleText: View {
         }
         .font(.largeTitle.bold())
         .fixedSize()
-        .offset(x: alignment.shift)
+        .offset(x: alignment.shift + (fold.portraitFold ? 12 : 0))   // in from the open Duo's edge
         .background(LibraryTitleAnchor())   // after the offset: marks where the text is laid out
     }
 }
