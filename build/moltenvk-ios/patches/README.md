@@ -28,5 +28,6 @@ The patches were made against MoltenVK 1.4.3 (`5189f8d`), with which DOOM Eterna
 at 55-60 fps on an iPhone Duo and an M4 iPad. They also apply cleanly, in order, to the
 pinned v1.4.2 (`db66022`); a build from it has not been run.
 
-They are not in `vulkan = static` (`build/vulkan-ios`), which links the official
-v1.4.2 archive; a game that needs them uses `vulkan = moltenvk`.
+They are not in `vulkan = static` (`build/vulkan-ios`), which links the official v1.4.2
+archive or the cache-export build, whose script refuses any other source change; a game
+that needs them uses `vulkan = moltenvk` (`app/Madeira/vulkan/README.md`).
