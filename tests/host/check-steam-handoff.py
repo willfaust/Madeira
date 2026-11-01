@@ -332,3 +332,81 @@ assert '"process_ios:$OBJ_DIR/process_lifecycle.c:process.o"' in build
 assert '"process_ios.o:process.o"' in build
 assert not re.search(r'(write_text|open)\([^\n]*wine/server', (root / 'build/wineserver/stage-steam-lifecycle.py').read_text())
 print('PASS producer requires actual weak native lifecycle import before archive replacement; rejects stale/strong/wrong symbol fixtures')
+
+# A staged C file loses the original source-directory quote search. Execute
+# the actual producer's per-source flag selection, then preprocess the full
+# pinned process.c and its staged copy with those flags. This reproduces the
+# public/private security.h collision without an Apple SDK or generated Wine
+# config; the empty config is sufficient for platform-independent includes.
+with tempfile.TemporaryDirectory() as d:
+    work = Path(d)
+    (work / 'config.h').write_text('/* Header-resolution fixture; no platform feature overrides. */\n')
+    staged_source = work / 'process_lifecycle.c'
+    staged_source.write_text(staged)
+    arguments = work / 'arguments'
+    compile_source = function(build, 'compile_one() {')
+    selected = {}
+    for source in [staged_source, root / 'wine/server/process.c']:
+        script = '''CC_FLAGS=()
+xcrun() { printf '%s\\0' "$@" > "$CAPTURE"; }
+''' + compile_source + '\ncompile_one "$SOURCE" headers\n'
+        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                                env={'PATH': '/usr/bin:/bin', 'OBJ_DIR': str(work),
+                                     'WINE_SRC': str(root / 'wine'), 'CAPTURE': str(arguments), 'SOURCE': str(source)})
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        args = arguments.read_bytes().decode().rstrip('\0').split('\0')
+        assert args[:3] == ['-sdk', 'iphoneos', 'clang']
+        selected[source] = args[3:args.index('-c')]
+    private = str(root / 'wine/server')
+    assert selected[staged_source] == ['-iquote', private]
+    assert selected[root / 'wine/server/process.c'] == []  # no global lookup change
+
+    common = ['-D__WINESRC__', '-DWINE_IOS=1', '-I'+str(work), '-I'+str(root / 'wine/include'),
+              '-I'+str(root / 'wine/include/wine'), '-I'+str(root / 'build/wineserver'), '-I'+private]
+
+    def preprocess(source, flags):
+        result = subprocess.run(['cc', '-E', *common, *flags, str(source)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        headers = set()
+        for name in re.findall(r'^#\s+\d+\s+"([^"]+)"', result.stdout, re.M):
+            path = Path(name)
+            if path.suffix == '.h' and path.is_relative_to(root / 'wine'):
+                headers.add(path.resolve())
+        return headers
+
+    original_headers = preprocess(root / 'wine/server/process.c', [])
+    broken_headers = preprocess(staged_source, [])
+    fixed_headers = preprocess(staged_source, selected[staged_source])
+    public_security = root / 'wine/include/security.h'
+    private_security = root / 'wine/server/security.h'
+    assert private_security in original_headers and public_security not in original_headers
+    assert public_security in broken_headers and private_security not in broken_headers
+    assert fixed_headers == original_headers, (fixed_headers - original_headers, original_headers - fixed_headers)
+
+    # Compile the actual process.c quote-includes and representative uses
+    # from the failing CI lines: token API return types, SIDs and ACE layout.
+    includes = re.findall(r'^#include "([^\n]+)"$', original, re.M)
+    includes.remove('config.h')
+    probe = work / 'server_headers.c'
+    probe.write_text('''#include <assert.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+''' + ''.join(f'#include "{name}"\n' for name in includes) + '''
+void verify_process_security_types(void) {
+    struct token *token = token_create_admin(1, 0, 0, 0);
+    const struct sid *sids[] = { &domain_users_sid, &builtin_admins_sid };
+    struct ace ace = {0};
+    ace.mask = 1;
+    (void)token; (void)sids; (void)ace;
+}
+''')
+    checks = ['cc', '-std=c11', '-fsyntax-only', '-Werror=implicit-function-declaration', '-Werror=int-conversion', *common]
+    broken = subprocess.run([*checks, str(probe)], capture_output=True, text=True)
+    assert broken.returncode != 0 and 'domain_users_sid' in broken.stderr and 'builtin_admins_sid' in broken.stderr
+    assert 'token_create_admin' in broken.stderr and 'ace' in broken.stderr
+    fixed = subprocess.run([*checks, *selected[staged_source], str(probe)], capture_output=True, text=True)
+    assert fixed.returncode == 0, fixed.stderr
+print('PASS staged process preserves all original Wine headers; uncorrected security.h collision reproduces CI type errors; actual private token/SID/ACE declarations compile')

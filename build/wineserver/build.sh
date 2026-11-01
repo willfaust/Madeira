@@ -38,8 +38,15 @@ CC_FLAGS=(
 compile_one() {
     local src=$1
     local name=$2
+    local source_flags=()
+    if [ "$src" = "$OBJ_DIR/process_lifecycle.c" ]; then
+        # Staging changes the source directory searched by quoted includes.
+        # Preserve process.c's original private server headers (security.h in
+        # particular), without changing header lookup for other objects.
+        source_flags=(-iquote "$WINE_SRC/server")
+    fi
     echo -n "  $name... "
-    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/err-$name.txt"; then
+    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" "${source_flags[@]}" -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/err-$name.txt"; then
         echo "OK"
     else
         echo "FAILED (see $OBJ_DIR/err-$name.txt)"
