@@ -16,3 +16,25 @@ prefix: a program that probes for `vulkan-1.dll` must keep finding none by defau
 
 Without the vkd3d-proton DLLs the app still builds; `d3d12 = vkd3d` then logs that
 madeira-d3d12 stays.
+
+## DOOM Eternal
+
+DOOM Eternal (`DOOMEternalx64vk.exe`) runs on MoltenVK with these lines in its own config
+(Game details › This game's config). The same changes on an older Madeira tree ran it at
+55-60 fps on an iPhone Duo and an M4 iPad; this tree has not run it on a device yet.
+
+    vulkan = moltenvk
+    env.MADEIRA_MVK_IDTECH = 1
+
+- `gl/libMoltenVK.dylib` has to be built with `build/moltenvk-ios/patches`, which
+  `build/moltenvk-ios/build.sh` applies (see the README there). `vulkan = static` does
+  not have them.
+- `MADEIRA_MVK_IDTECH` changes what MoltenVK reports for the whole session, so it goes
+  in the game's config, not madeira.cfg.
+- Steam's launch entry, `launcher\idTechLauncher.exe`, embeds Chromium, and its
+  PartitionAlloc stops with int3: it asks for a reservation on a 32 GB or larger
+  boundary, which the app's address map cannot give (`build/ntdll-unix/virtual_ios.c`
+  places such pools only for SocialClubHelper.exe). Start `DOOMEternalx64vk.exe`
+  instead. The device runs replaced the launcher with a stand-in that starts
+  `..\DOOMEternalx64vk.exe` with the same arguments; choosing it under **Program**
+  (the game's Steam page, Start with: The game) should do the same, but was not tried.
