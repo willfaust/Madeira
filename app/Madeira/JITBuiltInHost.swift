@@ -80,7 +80,7 @@ enum MadeiraBuiltInJIT {
             return
         }
         guard let identifier = helperIdentifier else {
-            fail(2, "Madeira's JIT helper is missing from this installation. Reinstall Madeira, and keep its app extensions if your sideloader asks.")
+            fail(2, "Madeira's JIT helper is missing from this installation. Choose StikDebug in Settings → JIT, or reinstall Madeira and keep its app extensions if your sideloader asks.")
             return
         }
         if NSClassFromString("NSExtension") == nil {
@@ -94,7 +94,7 @@ enum MadeiraBuiltInJIT {
         let found: AnyObject
         do { found = try factory.extension(withIdentifier: identifier) }
         catch {
-            fail(2, "Madeira's JIT helper (\(identifier)) could not be found: \(error.localizedDescription) Reinstall Madeira.")
+            fail(2, "Madeira's JIT helper (\(identifier)) could not be found: \(error.localizedDescription) Choose StikDebug in Settings → JIT. If your sideloader removed the helper, reinstall Madeira and keep its app extensions.")
             return
         }
         guard let data = try? JSONEncoder().encode(request) else {
@@ -151,7 +151,7 @@ private final class HelperRequest {
             DispatchQueue.main.async { MainActor.assumeIsolated {
                 guard let self else { return }
                 guard let uuid else {
-                    self.end(.failure(Self.error(7, "Madeira's JIT helper did not start. Reinstall Madeira, and keep its app extensions if your sideloader asks.")))
+                    self.end(.failure(Self.error(7, "Madeira's JIT helper did not start. Choose StikDebug in Settings → JIT, or reinstall Madeira and keep its app extensions if your sideloader asks.")))
                     return
                 }
                 LogStore.shared.log("[jit-helper] \(self.operation): started \(identifier) as pid \(self.shim.pid(forRequestIdentifier: uuid))")
