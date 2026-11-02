@@ -136,7 +136,11 @@ mkdir -p "$B/dlls/stdole2.tlb"
 # unhandled c0000005 (the Rockstar Games Launcher in d2d1's DWriteCreateFactory
 # stub). A module is changed only when every DLL it delay-loads is in the farm
 # or built in this run; its Makefile.in is restored when the script ends.
-# UNDELAY=0 keeps the delay imports.
+# UNDELAY=0 keeps the delay imports. UNDELAY_KEEP names modules that keep
+# theirs while the rest are changed: ucrtbase and msvcrt delay-load advapi32
+# and user32, and as plain imports they close a cycle back to ucrtbase (via
+# winmm and msacm32), so msacm32's DllMain runs before the CRT's has set its
+# locale and every x64 process faults in ucrtbase at startup.
 undelayed=()
 backup="$(mktemp -d)"
 restore_makefiles() {
@@ -150,6 +154,7 @@ if [ "${UNDELAY:-1}" != 0 ]; then
     for m in "$@"; do
         mk="$R/wine/dlls/$m/Makefile.in"
         [ -f "$mk" ] || continue
+        case " ${UNDELAY_KEEP:-} " in *" $m "*) continue ;; esac
         delayed="$(sed -n 's/^DELAYIMPORTS[[:space:]]*=[[:space:]]*//p' "$mk")"
         [ -n "$delayed" ] && grep -q '^IMPORTS' "$mk" || continue
         ok=1
