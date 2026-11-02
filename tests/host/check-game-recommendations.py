@@ -74,7 +74,7 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
           'batman-arkham-city-goty', 'trails-in-the-sky-1st-chapter', 'subnautica-2', 'rdr1-steam', 'resident-evil-requiem', 'resident-evil-requiem-demo',
           'life-is-strange-remastered', 'life-is-strange-2', 'project-zomboid', 'spiderheck', 'rounds', 'plateup',
           'final-fantasy-tactics-ivalice-chronicles', 'jetboard-joust', 'dead-as-disco', 'tung', 'sekiro-shadows-die-twice', 'stardew-valley',
-          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2'}
+          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod'}
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
@@ -202,7 +202,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: seventy-six lists (twenty-six plus 50 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
+print('PASS: seventy-seven lists (twenty-six plus 51 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -800,10 +800,12 @@ check(id(steam + #"\Call of Duty Black Ops"#, 42710) == "none" && id(steam + #"\
       "the first Black Ops' multiplayer shares the folder and has no list")
 check(id(steam + #"\The Escapists 2"#, 641990) == "the-escapists-2" && id(steam + #"\The Escapists 2\TheEscapists2.exe"#) == "the-escapists-2",
       "The Escapists 2 by App ID, folder and program")
-check(R.steamTitles.count == 50 && R.all.count == 76, "50 merged titles, 76 lists")
+check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod"
+      && id(steam + #"\GarrysMod\hl2.exe"#) == "garrys-mod", "Garry's Mod by App ID, folder and program, both branches")
+check(R.steamTitles.count == 51 && R.all.count == 77, "51 merged titles, 77 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
-print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 50 merged Steam titles, others none")
+print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 51 merged Steam titles, others none")
 
 // The lists themselves.
 check(Set(R.all.map(\.id)).count == R.all.count, "ids are unique")

@@ -1420,6 +1420,8 @@ extension GameRecommendations {
                    programs: ["norestforthewicked.exe"], steamPrograms: [], list: noRestForTheWicked),
         SteamTitle(appIDs: [641990], folders: ["the escapists 2"],
                    programs: ["theescapists2.exe"], steamPrograms: [], list: escapists2),
+        SteamTitle(appIDs: [4000], folders: ["garrysmod"],
+                   programs: ["gmod.exe"], steamPrograms: [], list: garrysMod),
         SteamTitle(appIDs: [980610], folders: ["quaver"],
                    programs: ["quaver.exe"], steamPrograms: [], list: quaver),
         SteamTitle(appIDs: [239140], folders: ["dying light"],
@@ -1541,6 +1543,27 @@ extension GameRecommendations {
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         env.MADEIRA_WOW_RWX_PLAIN = 1
+        # The defaults this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: false, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// Garry's Mod (Steam App ID 4000). Device-tested on an iPhone 17 Pro Max (2026-10-31): multiplayer works on Steam's
+    /// x86-64 branch (64-bit gmod.exe, 60 FPS against 17-53 on the 32-bit default branch) with the launch option
+    /// -nochromium, since the Chromium menu's helpers don't start yet. The pool lines make room for the 64-bit
+    /// libcef.dll, as for Counter-Strike 2; pool-split is harmless and NOCOPY does nothing on the 32-bit branch.
+    static let garrysMod = GameRecommendation(
+        id: "garrys-mod", title: "Garry's Mod", version: 1,
+        config: """
+        # Madeira's recommended settings for Garry's Mod.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool = 896
+        pool-split = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
         # The defaults this list was tested with (upstream's differ).
         env.MADEIRA_FREE_DELAY_MS = 2000
         env.MADEIRA_CTX_CPU_AREA = 2
