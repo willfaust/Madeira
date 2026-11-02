@@ -115,19 +115,57 @@ for needle in ["FalloutNV.exe crashed: page fault on write access to 00000000 at
 assert(!faultedText.contains("Unhandled exception") && !faultedText.contains("fixme"))
 assert(!text.contains("Madeira closed:") && !text.contains("crashed:"))
 
+// Fatal startup failures can occur before Wine logs its target or starts a process.
+let poolFailed = LogSummary.facts(lines: [
+    "[12:00:00.000] [ERR] JIT pool allocation FAILED — not starting Wine.",
+])
+let poolFailedText = LogSummary.text(poolFailed, source: "test")
+assert(poolFailed.sawSession && poolFailedText.contains("The JIT pool could not be allocated, so Wine was not started."))
+assert(!poolFailedText.contains("Problems found: none"))
+let windowFailed = LogSummary.facts(lines: [
+    "[wow-window] session armed: a 32-bit process is expected",
+    "[wow-window] main-process reserve FAILED 0xc0000017 — a 32-bit main image cannot run without a guest window; terminating this process",
+])
+let windowFailedText = LogSummary.text(windowFailed, source: "test")
+assert(windowFailed.sawSession && windowFailedText.contains("A 32-bit program could not reserve its 4 GB guest-memory window."))
+assert(!windowFailedText.contains("Problems found: none") && !windowFailedText.contains("entitlement"))
+for refusal in [
+    "[wow-window] refused: map too small (ends at 0xfc0000000, MADEIRA_WOW_MIN_MAP_GB=64)",
+    "[wow-window] refused: map too small (6405 MB free VA; a window needs 4096 MB plus MADEIRA_WOW_MIN_FREE_GB=8 left over)",
+    "[wow-window] refused: map too small for another window (1 of at most 1 held; MADEIRA_WOW_SMALL_VA_SLOTS)",
+] {
+    let refused = LogSummary.facts(lines: [refusal])
+    assert(refused.sawSession && LogSummary.text(refused, source: "test").contains("could not reserve its 4 GB guest-memory window"))
+}
+// A rejected candidate slot is normal when a later slot works.
+let healthyWindow = LogSummary.facts(lines: [
+    "[WineProc] Target exe: C:\\Games\\game.exe",
+    "[wow-window] B=0x7100000000 REJECTED: the 4GB range is not free",
+    "[wow-window] B=0x7200000000: reserved exactly 4GB; guard BORROWED from the inaccessible neighbour",
+    "[wow-window] main-process window reserved (i386 main image)",
+])
+let healthyWindowText = LogSummary.text(healthyWindow, source: "test")
+assert(healthyWindowText.contains("Problems found: none") && !healthyWindowText.contains("could not reserve"))
+assert(!text.contains("could not be allocated") && !text.contains("could not reserve"))
+
 // A launch with no session leaves the last summary alone; a file is read across 1 MB chunks.
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let empty = dir.appendingPathComponent("empty.txt"), logFile = dir.appendingPathComponent("madeira-log.txt")
 try! "[10:00:00.000] [INFO] [build] v0.1.3 (4)\n".write(to: empty, atomically: true, encoding: .utf8)
 assert(!LogSummary.write(from: empty, source: "test"))
 assert(!FileManager.default.fileExists(atPath: dir.appendingPathComponent(LogSummary.fileName).path))
+let startup = dir.appendingPathComponent("startup.txt")
+try! "[12:00:00.000] [ERR] JIT pool allocation FAILED — not starting Wine.\n".write(to: startup, atomically: true, encoding: .utf8)
+assert(LogSummary.write(from: startup, source: "test"))
+let startupWritten = try! String(contentsOf: dir.appendingPathComponent(LogSummary.fileName), encoding: .utf8)
+assert(startupWritten.contains("The JIT pool could not be allocated, so Wine was not started."))
 let padding = String(repeating: "[xp] filler line that is not a marker\n", count: 40000)
 try! (padding + cs2 + "\n").write(to: logFile, atomically: true, encoding: .utf8)
 assert(LogSummary.facts(fromFileAt: logFile)!.processes.first?.exitCode == 1)
 assert(LogSummary.write(from: logFile, source: "madeira-log.txt (this session)"))
 let written = try! String(contentsOf: dir.appendingPathComponent(LogSummary.fileName), encoding: .utf8)
 assert(written.hasPrefix("=== Madeira session summary ===") && written.contains("v8.dll could not be loaded"))
-print("PASS: log summary finds the small JIT pool, the pool running out, out-of-memory and wrong-architecture DLLs, exit codes per program, Quit and Force close, and Madeira Dock's result")
+print("PASS: log summary finds fatal startup failures, the small JIT pool, the pool running out, out-of-memory and wrong-architecture DLLs, exit codes per program, Quit and Force close, and Madeira Dock's result")
 '''
 if not Path(SWIFTC).exists():
     if '--require-swift' in sys.argv: sys.exit('FAIL: Swift compiler unavailable')
