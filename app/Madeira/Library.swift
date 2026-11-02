@@ -2803,12 +2803,11 @@ struct LibraryBadges: View {
     @ViewBuilder private var size: some View {
         if let text = Self.sizeText(entry) { badge(text) }
     }
-    /// The format pills' texts, in order (also the zoomable grid's measured labels).
+    /// The format pills' texts, in order (also the zoomable grid's measured labels). No bitness or graphics API pills: both were
+    /// read from the program before it ran and were often wrong.
     static func formatTexts(_ entry: LibraryEntry, note: String?) -> [String] {
         var texts: [String] = []
-        if entry.bits == 32 || entry.bits == 64 { texts.append("\(entry.bits)-bit") }
         if entry.isBatch { texts.append("Batch") }   // ml1163
-        if let api = LibraryRendererBadge.compact(entry.graphicsAPI) { texts.append(LibraryRendererBadge.display(api)) }
         if let note { texts.append(note) }
         return texts
     }

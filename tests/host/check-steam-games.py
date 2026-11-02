@@ -91,7 +91,7 @@ require('if entry.desktop != true {\n            Section {\n                Text
 entries_start = library.index('private var entries: [LibraryEntry] {')
 require('$0.steamAppID == nil' in library[entries_start:library.index('var body: some View {', entries_start)],
         'Steam games are listed in the Steam section only, not also under Games')
-# A card's pills: an installed game shows a library game's (32-bit or 64-bit, graphics API, size), no
+# A card's pills: an installed game shows a library game's (its size), no
 # "Madeira Dock" or "Steam" pill; "Update" joins them; any other state keeps its own pill.
 cell = games[games.index('struct SteamGameCell: View {'):games.index('/// Progress, speed and the state of one download.')]
 require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ entry: LibraryEntry?) -> some View {' in cell and
@@ -103,10 +103,10 @@ require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ ent
         "layouts (dense list, list, grid); no Dock or Steam pill")
 badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibraryStatus: View {')]
 # The pills' texts are one rule (LibraryBadges.formatTexts, also the zoomable grid's measured labels).
-require(badges.index('texts.append("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
-        badges.index('if let note { texts.append(note) }') and
+# No bitness or graphics API pill: both were read from the program before it ran and were often wrong.
+require('entry.bits' not in badges and 'graphicsAPI' not in badges and 'if let note { texts.append(note) }' in badges and
         badges.index('ForEach(Self.formatTexts(entry, note: note)') < badges.index('private var size'),
-        'the pills in order: bits, graphics API, Update, then the size')
+        'the pills: no bitness or graphics API pill; Update, then the size')
 require('await library.refreshSteamMetadata(game, title: item.name)' in cell and 'if status.showsFormat, let game = item.installed' in cell,
         "an installed game's card reads its format through its library entry")
 steam_meta = library[library.index('    func refreshSteamMetadata('):]
