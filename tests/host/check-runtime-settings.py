@@ -49,7 +49,7 @@ def check(cond, what):
         failures.append(what)
 
 
-swift = config + '\n' + block(lib,'enum SyncEngine: String, CaseIterable, Identifiable') + r'''
+swift = config + '\nfunc L(_ text: String) -> String { text }   // Library.swift\'s lookup; English here\n' + block(lib,'enum SyncEngine: String, CaseIterable, Identifiable') + r'''
 var failed = 0
 func expect(_ cond: Bool, _ what: String) { print((cond ? "PASS: " : "FAIL: ") + what); if !cond { failed += 1 } }
 let docs = MadeiraConfig.documents!
@@ -128,7 +128,7 @@ check('return inproc == nil ? .fastsync : .wine' in engine, 'fastsync is the eng
 check('@State private var engine = SyncEngine.current' in settings and 'Picker("Sync engine"' in settings
       and 'SyncEngine.apply(choice)' in settings and 'ForEach(SyncEngine.allCases)' in settings,
       'Settings: the Sync engine picker writes through SyncEngine.apply')
-check(['Madsync', 'Fastsync (default)', 'Wine standard sync'] == re.findall(r'case \.\w+: return "([^"]+)"', engine),
+check(['Madsync', 'Fastsync (default)', 'Wine standard sync'] == re.findall(r'case \.\w+: return (?:L\()?"([^"]+)"', engine),
       'the picker offers Madsync, Fastsync (default) and Wine standard sync, in that order')
 check('"env.MADEIRA_FASTSYNC"' in settings.split('static let featuredKeys')[1].split(']')[0],
       'All settings leaves env.MADEIRA_FASTSYNC to the picker')
