@@ -23,6 +23,12 @@
    consumption (packet queue), keyframe seek + exact trim, stop, earliest-buffer mode, the
    MADEIRA_WG_VIDEO=0 path, unsupported video / audio codecs, compressed-output refusal, a backend
    that refuses to open, and the deduplicated, bounded log.
+4. Back-pressure, built again with small queue limits (soft 8 packets, hard 16, 400 ms): a slow
+   video reader and a fast audio reader on two threads lose no packet and get every picture; an
+   enabled video stream nobody reads holds the audio reader once, for 400 ms, and no longer; one
+   thread reading both streams (earliest-buffer mode) never waits for itself; disconnect wakes a
+   reader that waits. The same two-reader case built without back-pressure drops packets and
+   loses pictures.
 
 Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.5.tar.xz, the tracked
 source tarball),
@@ -1042,6 +1048,101 @@ static uint8_t *read_file( const char *path, size_t *size )
     return b;
 }
 
+/* ================= back-pressure, run with small queue limits ("bp") ================= */
+
+struct reader { struct mav_parser *p; int stream, delay_us, count; volatile int done; pthread_t thread; };
+
+static void *reader_thread( void *arg )
+{
+    struct reader *r = arg; struct mav_buffer b;
+    while (mav_get_buffer( r->p, r->stream, &b ) == MAV_OK)
+    {
+        mav_release_buffer( r->p, r->stream ); r->count++;
+        if (r->delay_us) usleep( r->delay_us );
+    }
+    r->done = 1;
+    return NULL;
+}
+
+static long ms_since( const struct timespec *t0 )
+{
+    struct timespec t1;
+    clock_gettime( CLOCK_MONOTONIC, &t1 );
+    return (t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+static int bp_open( struct mav_parser *p, struct source *s, const uint8_t *mp4, size_t size )
+{
+    struct mav_stream_info vi, ai;
+    src_start( s, p, mp4, size );
+    CHECK( mav_connect( p, size ) == MAV_OK && mav_stream_count( p ) == 2, "connect mp4" );
+    CHECK( mav_stream_info( p, 0, &vi ) == MAV_OK && mav_stream_info( p, 1, &ai ) == MAV_OK, "stream info" );
+    CHECK( mav_enable_video( p, 0, &vi.vnative ) == MAV_OK && mav_enable( p, 1, &ai.native ) == MAV_OK, "enable" );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek 0" );
+    return 0;
+}
+
+static int test_backpressure( const uint8_t *mp4, size_t size, int frames )
+{
+    struct mav_parser *p; struct source s; struct reader v, a; struct timespec t0; int waited;
+
+    /* 1. two threads, video slow: nothing dropped, every picture delivered */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    v = (struct reader){ p, 0, 3000 }; a = (struct reader){ p, 1, 0 };
+    pthread_create( &v.thread, NULL, reader_thread, &v );
+    pthread_create( &a.thread, NULL, reader_thread, &a );
+    pthread_join( a.thread, NULL ); pthread_join( v.thread, NULL );
+    printf( "BP1 %d %d\n", v.count, a.count );
+    CHECK( v.count == frames, "slow video reader: %d pictures of %d", v.count, frames );
+    CHECK( a.count > 0, "audio" );
+    src_stop( &s ); mav_destroy( p );
+
+    /* 2. video enabled and never read: the audio reader waits once, then reads to the end */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    a = (struct reader){ p, 1, 0 };
+    clock_gettime( CLOCK_MONOTONIC, &t0 );
+    reader_thread( &a );
+    CHECK( a.count > 0 && ms_since( &t0 ) < 3 * MAV_BACKPRESSURE_WAIT_MS, "audio alone finished in time (%ld ms)", ms_since( &t0 ) );
+    src_stop( &s ); mav_destroy( p );
+
+    /* 3. one thread, both streams (earliest-buffer mode): it never waits for itself */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    {
+        struct mav_buffer b; int n = 0;
+        clock_gettime( CLOCK_MONOTONIC, &t0 );
+        while (mav_get_buffer( p, -1, &b ) == MAV_OK) { mav_release_buffer( p, b.stream ); n += b.stream == 0; }
+        CHECK( n == frames && ms_since( &t0 ) < MAV_BACKPRESSURE_WAIT_MS, "earliest-buffer mode: %d pictures, %ld ms", n, ms_since( &t0 ) );
+    }
+    src_stop( &s ); mav_destroy( p );
+
+    /* 4. disconnect while a reader waits: it is woken, nothing is freed under it */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    a = (struct reader){ p, 1, 0 };
+    pthread_create( &a.thread, NULL, reader_thread, &a );
+    for (waited = 0; waited < 200; waited++)
+    {
+        unsigned int w;
+        pthread_mutex_lock( &p->lock ); w = p->bp_waiters; pthread_mutex_unlock( &p->lock );
+        if (w) break;
+        usleep( 1000 );
+    }
+    CHECK( waited < 200, "the audio reader waits for the unread video stream" );
+    clock_gettime( CLOCK_MONOTONIC, &t0 );
+    src_stop( &s );
+    pthread_join( a.thread, NULL );
+    CHECK( a.done && ms_since( &t0 ) < MAV_BACKPRESSURE_WAIT_MS, "disconnect woke the waiting reader (%ld ms)", ms_since( &t0 ) );
+    mav_destroy( p );
+    printf( "PASS: back-pressure (soft %d packets, hard %d): a slow video reader on its own thread gets all %d pictures; "
+            "an unread stream holds the other reader once (%d ms) and no longer; one thread reading both never waits; "
+            "disconnect wakes a waiting reader\n", MAV_QUEUE_SOFT_PACKETS, MAV_QUEUE_MAX_PACKETS, frames,
+            MAV_BACKPRESSURE_WAIT_MS );
+    return 0;
+}
+
 int main( int argc, char **argv )
 {
     size_t mp2_size, wsize, mp4_size; uint8_t *mp2, *wav, *mp4;
@@ -1061,6 +1162,16 @@ int main( int argc, char **argv )
         return 0;
     }
     mav_configure( 1, &stub_video, &stub_audio, MAV_PIX_NV12 );
+    if (argc > 1 && !strcmp( argv[1], "bp" ))
+    {
+        int r;
+        setvbuf( stdout, NULL, _IONBF, 0 );
+        mp4 = make_mp4( &mp4_size, AV_CODEC_ID_H264, A_AAC, frames, seconds );
+        if (!mp4) { printf( "FAIL: could not synthesise the mp4\n" ); return 1; }
+        r = test_backpressure( mp4, mp4_size, frames );
+        av_free( mp4 );
+        return r || failures;
+    }
     mp2 = make_mp2( &mp2_size, 44100, 3.0 );
     if (!mp2) { printf( "FAIL: no mp2 encoder in the host build\n" ); return 1; }
     if (test_wav()) return 1;
@@ -1100,10 +1211,14 @@ TAG = "[wg-parser] ml1990 "
 with tempfile.TemporaryDirectory() as t:
     c = Path(t) / "wgp.c"; c.write_text(harness)
     exe = Path(t) / "wgp"
-    subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=address,undefined",
-                    "-fno-sanitize-recover=undefined", "-I" + str(core.parent), "-I" + str(inc), str(c), "-o", str(exe),
-                    str(lib / "libavformat.a"), str(lib / "libavcodec.a"), str(lib / "libswresample.a"),
-                    str(lib / "libavutil.a"), "-lm", "-lpthread"], check=True)
+
+    def build(out, defines=()):
+        subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=address,undefined",
+                        "-fno-sanitize-recover=undefined", "-I" + str(core.parent), "-I" + str(inc), *defines, str(c),
+                        "-o", str(out), str(lib / "libavformat.a"), str(lib / "libavcodec.a"),
+                        str(lib / "libswresample.a"), str(lib / "libavutil.a"), "-lm", "-lpthread"], check=True)
+
+    build(exe)
     args = [str(exe)]
     if mp3:
         args += [mp3]
@@ -1145,4 +1260,29 @@ with tempfile.TemporaryDirectory() as t:
     print("PASS: %d [wg-parser] log lines (%d distinct); cap 63 distinct + notice; 20 identical lines -> 5 (#1,#2,#4,#8,#16); "
           "ASan/UBSan clean" % (len(lines), len(set(re.sub(r" \(repeat #\d+\)$", "", l) for l in lines))))
     for l in lines:
+        print("  " + l)
+
+    # ---------------------------------------------------------------- 4. back-pressure
+    bp, nobp = Path(t) / "wgp-bp", Path(t) / "wgp-nobp"
+    build(bp, ["-DMAV_QUEUE_SOFT_PACKETS=8", "-DMAV_QUEUE_SOFT_BYTES=65536", "-DMAV_QUEUE_MAX_PACKETS=16",
+               "-DMAV_BACKPRESSURE_WAIT_MS=400"])
+    out = subprocess.run([str(bp), "bp"], env=env, capture_output=True, text=True, timeout=300)
+    print(out.stdout.replace("BP1 ", "  (slow video, fast audio: pictures, audio buffers) "), end="")
+    assert out.returncode == 0, out.stdout + out.stderr[-4000:]
+    bp_lines = [l for l in out.stderr.splitlines() if l.startswith(TAG)]
+    # case 1 (two readers) drops nothing; case 2 (video never read) marks it unread once, then drops past the hard limit
+    first = out.stderr[:out.stderr.index("not read for")] if "not read for" in out.stderr else out.stderr
+    assert "dropping further packets" not in first, "a packet was dropped while both streams were read:\n" + first[-3000:]
+    assert sum("stream 0: not read for 400 ms while stream 1 reads ahead" in l for l in bp_lines) >= 1, bp_lines
+    assert "ERROR: AddressSanitizer" not in out.stderr and "runtime error" not in out.stderr, out.stderr[-4000:]
+    # the same two-reader case without back-pressure (the soft limit above the hard one) drops:
+    # the case it is for
+    build(nobp, ["-DMAV_QUEUE_SOFT_PACKETS=100000", "-DMAV_QUEUE_SOFT_BYTES=((size_t)1<<40)",
+                 "-DMAV_QUEUE_MAX_PACKETS=16", "-DMAV_BACKPRESSURE_WAIT_MS=400"])
+    out = subprocess.run([str(nobp), "bp"], env=env, capture_output=True, text=True, timeout=300)
+    assert "dropping further packets" in out.stderr and "FAIL test_backpressure" in out.stdout \
+        and "slow video reader" in out.stdout, out.stdout + out.stderr[-2000:]
+    print("PASS: without back-pressure the same slow-video case drops packets and loses pictures (%s)" %
+          re.search(r"slow video reader: \d+ pictures of \d+", out.stdout).group(0))
+    for l in bp_lines:
         print("  " + l)

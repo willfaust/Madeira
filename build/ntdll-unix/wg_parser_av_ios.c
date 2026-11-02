@@ -56,8 +56,11 @@
  *   - one demuxer, several consumers.  wg_parser.c runs a GStreamer thread
  *     that parks one buffer per stream; here decoding is LAZY, on the thread
  *     that asks for a buffer, and a packet read for a stream other than the
- *     one being served is queued for that stream (dropped if it is disabled;
- *     bounded, with the overflow logged).  One buffer per stream is
+ *     one being served is queued for that stream (dropped if it is disabled).
+ *     A queue another thread reads holds back the reader that fills it once
+ *     it passes a soft limit (mav_wait_drain), so a stream that falls behind
+ *     no longer loses packets; past the hard limit (an unread stream only)
+ *     the overflow is dropped and logged.  One buffer per stream is
  *     outstanding until release_buffer; S_FALSE at end of stream.
  *
  *   - video.  The native format reported by get_current_format is 4:2:0 NV12
@@ -102,6 +105,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
@@ -265,8 +269,26 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
  * rule releases (a stream without decode times, or a broken one). */
 #define MAV_REORDER_MAX 16
 /* Packets queued for a stream nobody is reading from yet. */
+#ifndef MAV_QUEUE_MAX_PACKETS   /* tests/host/check-wg-parser.py builds with small limits */
 #define MAV_QUEUE_MAX_PACKETS 16384
+#endif
+#ifndef MAV_QUEUE_MAX_BYTES
 #define MAV_QUEUE_MAX_BYTES ((size_t)64 << 20)
+#endif
+/* Back-pressure (mav_wait_drain).  A stream whose queue passes these, while
+ * another thread reads it, holds the reader that demuxes for it until it has
+ * drained to three quarters of them; the hard limits above then only apply to
+ * a stream nobody reads (MAV_BACKPRESSURE_WAIT_MS without a read).  A packet
+ * dropped from a video stream breaks every picture up to its next keyframe. */
+#ifndef MAV_QUEUE_SOFT_PACKETS
+#define MAV_QUEUE_SOFT_PACKETS 1024
+#endif
+#ifndef MAV_QUEUE_SOFT_BYTES
+#define MAV_QUEUE_SOFT_BYTES ((size_t)16 << 20)
+#endif
+#ifndef MAV_BACKPRESSURE_WAIT_MS
+#define MAV_BACKPRESSURE_WAIT_MS 5000
+#endif
 #define MAV_MAX_DIMENSION 8192
 
 #define MAV_MOV_NAME "mov,mp4,m4a,3gp,3g2,mj2"
@@ -385,6 +407,9 @@ struct mav_stream
     AVPacket **queue;
     unsigned int queue_head, queue_count, queue_cap;
     size_t queue_bytes;
+    pthread_t reader;           /* the thread that last asked for this stream's buffers */
+    int has_reader;
+    int unread;                 /* not read for MAV_BACKPRESSURE_WAIT_MS: queued without waiting */
 
     /* ---- the one outstanding output buffer ---- */
     uint8_t *buf;
@@ -431,6 +456,12 @@ struct mav_parser
 
     struct mav_stream *streams[MAV_MAX_STREAMS];
     unsigned int stream_count;
+
+    /* ---- back-pressure (lock) ---- */
+    pthread_cond_t drain_cond;  /* a queue shrank, a stream changed state, or closing */
+    unsigned int bp_waiters;    /* readers inside mav_wait_drain */
+    unsigned int generation;    /* bumped by seek: a waiter re-checks everything */
+    int closing;                /* disconnect: waiters leave, then the streams go */
 };
 
 /***********************************************************************
@@ -572,6 +603,7 @@ static struct mav_parser *mav_create( int output_compressed )
     pthread_cond_init( &p->read_cond, NULL );
     pthread_cond_init( &p->done_cond, NULL );
     pthread_mutex_init( &p->lock, NULL );
+    pthread_cond_init( &p->drain_cond, NULL );
     p->output_compressed = !!output_compressed;
     p->stop = -1;
     return p;
@@ -646,7 +678,14 @@ static void mav_disconnect( struct mav_parser *p )
      * take the decode lock, which that read may be holding. */
     mav_set_connected( p, 0 );
     pthread_mutex_lock( &p->lock );
+    /* A reader held by back-pressure sleeps without the lock: wake it, and
+     * free nothing until it has left mav_wait_drain.  It finishes its request
+     * under the lock, before this thread gets the lock back. */
+    p->closing = 1;
+    pthread_cond_broadcast( &p->drain_cond );
+    while (p->bp_waiters) pthread_cond_wait( &p->drain_cond, &p->lock );
     mav_teardown( p );
+    p->closing = 0;
     pthread_mutex_unlock( &p->lock );
 }
 
@@ -654,6 +693,7 @@ static void mav_destroy( struct mav_parser *p )
 {
     if (!p) return;
     mav_disconnect( p );
+    pthread_cond_destroy( &p->drain_cond );
     pthread_mutex_destroy( &p->lock );
     pthread_cond_destroy( &p->done_cond );
     pthread_cond_destroy( &p->read_cond );
@@ -1324,6 +1364,7 @@ static void mav_disable( struct mav_parser *p, unsigned int stream )
         s->has_buffer = 0;
         /* its queued packets will not be read */
         mav_queue_clear( s );
+        if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
     }
     pthread_mutex_unlock( &p->lock );
 }
@@ -1366,6 +1407,52 @@ static void mav_queue_push( struct mav_stream *s, AVPacket *pkt )
     s->queue_bytes += pkt->size;
 }
 
+static int mav_queue_over( const struct mav_stream *s, unsigned int num, unsigned int den )
+{
+    return s->queue_count > MAV_QUEUE_SOFT_PACKETS / den * num || s->queue_bytes > MAV_QUEUE_SOFT_BYTES / den * num;
+}
+
+/* Back-pressure.  `waiter` just queued a packet for
+ * `owner`, whose queue is past its soft limit while another thread reads it.
+ * Dropping would break the owner's pictures (or audio) up to its next
+ * keyframe, so the waiter sleeps -- WITHOUT the parser lock, which the owner's
+ * reader needs to drain its queue -- until that queue is back under three
+ * quarters of the limit.  The waiter holds no packet and no demuxer state
+ * while it sleeps; it re-checks its own queue when it wakes.  It also wakes on
+ * a seek (generation), a disable or end of the owner's stream, and disconnect
+ * (closing).  An owner not read for MAV_BACKPRESSURE_WAIT_MS is marked unread:
+ * its packets are queued again without waiting (and dropped past the hard
+ * limit, as before) until it is read. */
+static void mav_wait_drain( struct mav_parser *p, struct mav_stream *waiter, struct mav_stream *owner )
+{
+    unsigned int generation = p->generation;
+    struct timespec deadline;
+
+    clock_gettime( CLOCK_REALTIME, &deadline );
+    deadline.tv_sec += MAV_BACKPRESSURE_WAIT_MS / 1000;
+    deadline.tv_nsec += (long)(MAV_BACKPRESSURE_WAIT_MS % 1000) * 1000000;
+    if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000; }
+    p->bp_waiters++;
+    while (!p->closing && p->generation == generation && owner->enabled && !owner->eos && !owner->unread
+           && mav_queue_over( owner, 3, 4 ))
+    {
+        if (pthread_cond_timedwait( &p->drain_cond, &p->lock, &deadline ) == ETIMEDOUT)
+        {
+            if (!p->closing && p->generation == generation && owner->enabled && !owner->eos
+                && mav_queue_over( owner, 3, 4 ))
+            {
+                owner->unread = 1;
+                mav_log( "stream %u: not read for %d ms while stream %u reads ahead (%u packets, %zu bytes "
+                         "queued); queueing without waiting", owner->number, MAV_BACKPRESSURE_WAIT_MS,
+                         waiter->number, owner->queue_count, owner->queue_bytes );
+            }
+            break;
+        }
+    }
+    p->bp_waiters--;
+    if (p->closing) pthread_cond_broadcast( &p->drain_cond );   /* mav_disconnect waits for bp_waiters == 0 */
+}
+
 /* Moves the next packet of stream `s` into `dst`, reading (and queueing for
  * the other streams) as needed.  Returns 0 at the end of the data. */
 static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket *dst )
@@ -1373,21 +1460,24 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
     unsigned int i;
     int err;
 
-    if (s->queue_count)
-    {
-        AVPacket *q = s->queue[s->queue_head++];
-        s->queue_count--;
-        s->queue_bytes -= q->size;
-        if (!s->queue_count) s->queue_head = 0;
-        av_packet_move_ref( dst, q );
-        av_packet_free( &q );
-        return 1;
-    }
-    while (!p->demux_eof)
+    for (;;)
     {
         struct mav_stream *owner = NULL;
         AVPacket *copy;
 
+        if (s->queue_count)
+        {
+            AVPacket *q = s->queue[s->queue_head++];
+            s->queue_count--;
+            s->queue_bytes -= q->size;
+            if (!s->queue_count) s->queue_head = 0;
+            s->unread = 0;
+            av_packet_move_ref( dst, q );
+            av_packet_free( &q );
+            if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
+            return 1;
+        }
+        if (p->demux_eof || p->closing) return 0;
         if ((err = av_read_frame( p->fmt, p->read_pkt )) < 0)
         {
             if (err != AVERROR_EOF && err != AVERROR_EXIT && p->read_errors_logged < 3)
@@ -1396,12 +1486,13 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
                 mav_log( "read error %d at byte %llu; draining", err, (unsigned long long)p->pos );
             }
             p->demux_eof = 1;
-            break;
+            return 0;
         }
         for (i = 0; i < p->stream_count; i++)
             if (p->streams[i]->av_index == p->read_pkt->stream_index) owner = p->streams[i];
         if (owner == s)
         {
+            s->unread = 0;
             av_packet_move_ref( dst, p->read_pkt );
             return 1;
         }
@@ -1418,8 +1509,13 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
         }
         av_packet_move_ref( copy, p->read_pkt );
         mav_queue_push( owner, copy );
+        /* Only for an owner another thread reads: one thread serving both
+         * streams (the earliest-buffer mode, or a caller that alternates)
+         * would wait for itself. */
+        if (mav_queue_over( owner, 1, 1 ) && !owner->unread
+            && !(owner->has_reader && pthread_equal( owner->reader, pthread_self() )))
+            mav_wait_drain( p, s, owner );
     }
-    return 0;
 }
 
 /***********************************************************************
@@ -1998,20 +2094,39 @@ static int mav_get_buffer( struct mav_parser *p, int stream, struct mav_buffer *
     else if (stream >= 0)
     {
         if (!(s = mav_get_stream( p, stream ))) status = MAV_E_STATE;
-        else status = mav_stream_next( p, s );
+        else
+        {
+            s->reader = pthread_self();
+            s->has_reader = 1;
+            status = mav_stream_next( p, s );
+            /* disabled while this reader slept in mav_wait_drain */
+            if (status == MAV_OK && !s->enabled)
+            {
+                s->has_buffer = 0;
+                status = MAV_NO_BUFFER;
+            }
+        }
     }
     else
     {
-        /* wg_parser.c: the earliest buffer of all streams, by pts */
+        /* wg_parser.c: the earliest buffer of all streams, by pts.  This
+         * thread reads them all, so none waits for another (mav_wait_drain). */
+        for (i = 0; i < p->stream_count; i++)
+        {
+            p->streams[i]->reader = pthread_self();
+            p->streams[i]->has_reader = 1;
+        }
         for (i = 0; i < p->stream_count; i++)
         {
             struct mav_stream *c = p->streams[i];
-            if (mav_stream_next( p, c ) != MAV_OK) continue;
+            if (mav_stream_next( p, c ) != MAV_OK || !c->enabled) continue;
             if (!s || c->cur.pts < s->cur.pts) s = c;
         }
         status = s ? MAV_OK : MAV_NO_BUFFER;
     }
     if (status == MAV_OK) *buffer = s->cur;
+    /* a queue may have shrunk, or a stream ended: a waiter re-checks */
+    if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
     pthread_mutex_unlock( &p->lock );
     return status;
 }
@@ -2113,6 +2228,8 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
                 c->next_pts = target;
                 c->last_dts = c->last_vpts = INT64_MIN;
             }
+            p->generation++;
+            if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
         }
     }
     pthread_mutex_unlock( &p->lock );

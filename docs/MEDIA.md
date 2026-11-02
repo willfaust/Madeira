@@ -27,7 +27,7 @@ Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
 | File | What it is |
 |---|---|
 | `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and the `wg_transform` subset `wma_decoder.c` uses, on libavcodec: WMA v1/v2/Pro/Lossless and XMA1/2 only. Other transforms (AAC, H.264, WMV, resampler, colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
-| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov), MPEG audio / PCM decode through libavcodec + libswresample, a packet queue, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c` / `media_source.c` ask for. |
+| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov), MPEG audio / PCM decode through libavcodec + libswresample, a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c` / `media_source.c` ask for. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
 | `build/ffmpeg/build.sh` | FFmpeg 7.1.5, pinned by SHA-256, LGPL-only configuration. |
@@ -35,6 +35,19 @@ Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
 FFmpeg is built with no H.264, HEVC or AAC decoder or parser: those streams go
 to the platform decoders. See `THIRD-PARTY-NOTICES.md` for the exact component
 list and its licence.
+
+**One demuxer, several readers: back-pressure.** Each stream is read on its
+own thread by quartz and Media Foundation; a packet read for another stream
+is queued for it. A stream whose reader falls behind (a video decoded slower
+than real time) used to lose packets once its queue passed 16,384 packets or
+64 MB, which breaks every picture up to the next keyframe. Now, once a queue
+passes 1,024 packets or 16 MB while another thread reads that stream, the
+reader that demuxes for it waits (without the parser lock, which the other
+reader needs) until the queue has drained to three quarters of that. A stream
+that is not read for 5 s is marked unread and queued without waiting (dropped
+past the old hard limits, as before) until it is read again; one thread
+reading both streams (the earliest-buffer mode) never waits for itself; a
+seek, a disable or disconnect wakes a waiting reader.
 
 The PE half of winegstreamer is upstream's and unchanged. Wine's configure
 disables the module when GStreamer is missing, so a PE build tree has to be
@@ -66,7 +79,10 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]` cap).
   tables, wow64 thunks, kill switches, FFmpeg configuration and app link; then
   builds a host FFmpeg from the same tarball and runs the parser core under
   ASan/UBSan against MP3, MPEG layer II, WAV and synthetic MP4 (stub video and
-  AAC backends).
+  AAC backends); then, built with small queue limits, the back-pressure cases
+  (a slow video reader loses nothing, while the same build without
+  back-pressure drops pictures; an unread stream holds the other reader once;
+  one thread reading both never waits; disconnect wakes a waiting reader).
 - `tests/host/check-wma-decoder.py` (Linux or macOS, needs a configured
   Wine tree for the generated headers): compiles the production
   `winegstreamer_unixlib_ios.c` under ASan/UBSan against a host FFmpeg built
