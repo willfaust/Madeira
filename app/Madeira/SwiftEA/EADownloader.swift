@@ -479,8 +479,10 @@ final class EADownloader: @unchecked Sendable {
                     try inflater.write(data, last: remaining == 0)
                     if remaining == 0 { break }
                 }
-                if remaining > 0, headerDone, let headerLength {
+                if remaining > 0, let headerLength {
                     // The header was longer than guessed: the rest of the data in a second range.
+                    // When the header itself ran past the first range, no data was written yet
+                    // and this fetches all of it from just after the header.
                     let dataStart = start + Int64(headerLength) + (entry.compressedSize - remaining)
                     for try await chunk in client.stream(archive.url, range: dataStart..<dataStart + remaining) {
                         var data = Data(chunk)
