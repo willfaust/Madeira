@@ -4166,9 +4166,13 @@ struct LibraryDetail: View {
                 Text("Automatic").tag(0)
                 ForEach([1, 2, 4, 6], id: \.self) { Text("\($0)").tag($0) }
             }
-            Picker("D3D9 anisotropic filtering", selection: Binding(get: { entry.anisotropyLimit ?? 0 }, set: { entry.anisotropyLimit = $0 == 0 ? nil : $0 })) {
-                Text("Application default").tag(0)
-                ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
+            // Hidden: an old build's switch the D3D9 path no longer needs. A game that has a limit still exports it, and
+            // keeps the picker so it can go back to Application default.
+            if entry.anisotropyLimit != nil {
+                Picker("D3D9 anisotropic filtering", selection: Binding(get: { entry.anisotropyLimit ?? 0 }, set: { entry.anisotropyLimit = $0 == 0 ? nil : $0 })) {
+                    Text("Application default").tag(0)
+                    ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
+                }
             }
             // GPUCards.swift: a chosen card replaces the two NVIDIA switches below.
             Picker(selection: Binding(get: { bcd.gpuCard }, set: { id in bcd.gpuCard = id; LibraryPrefs.setGPUCard(id, for: entry.windowsPath) })) {

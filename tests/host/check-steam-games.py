@@ -81,10 +81,12 @@ for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for 
               '"Free space where the game is installed"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
-              '"Aspect & scaling"', '"Compatibility & performance"', '"Reduced-precision x87"', '"CPU cores reported"',
+              '"Aspect & scaling"', '"Compatibility & performance"', '"x87 precision"', '"CPU cores reported"',
               '"D3D9 anisotropic filtering"', '"On screen"', '"Performance overlay"', '"Live logs"', '"Touch controls"',
               '"Control opacity"', '"Control size"', '"Executable"', '"Game details"']:
     require(label in detail, f'Game details: {label}')
+require('if entry.anisotropyLimit != nil {\n                Picker("D3D9 anisotropic filtering"' in detail,
+        'Game details: D3D9 anisotropic filtering only for a game that already has a limit (to set it back)')
 # #461: every library entry but the Desktop has Launch arguments, Steam games too.
 require('if entry.desktop != true {\n            Section {\n                TextField("Launch arguments"' in detail,
         'Launch arguments for every entry but the Desktop, Steam games included (#461)')

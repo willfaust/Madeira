@@ -191,7 +191,8 @@ and check-frontend fails if a setting is hidden from it. A profile holds:
   other than the default exports `MADEIRA_CPU_COUNT` (wine) or
   `DXMT_D9_ANISO_LIMIT` (DXMT); the defaults export nothing. AVX above, frame
   generation below and the game's own config lines are the library's other
-  engine switches;
+  engine switches. The anisotropic filtering picker shows only for a game that
+  already has a limit, so it can be set back to Application default;
 - **Frame generation (experimental)**, off by default: exports
   `MADEIRA_FRAMEGEN=1`, and DXMT's present path (D3D11 and D3D12 alike) shows a
   MetalFX-interpolated frame between every two game frames; FPS limits do not
