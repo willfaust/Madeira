@@ -1418,6 +1418,8 @@ extension GameRecommendations {
                    programs: ["ffrs.exe"], steamPrograms: [], list: finalFantasyResonanceDemo),
         SteamTitle(appIDs: [1371980], folders: ["norestforthewicked"],
                    programs: ["norestforthewicked.exe"], steamPrograms: [], list: noRestForTheWicked),
+        SteamTitle(appIDs: [641990], folders: ["the escapists 2"],
+                   programs: ["theescapists2.exe"], steamPrograms: [], list: escapists2),
         SteamTitle(appIDs: [980610], folders: ["quaver"],
                    programs: ["quaver.exe"], steamPrograms: [], list: quaver),
         SteamTitle(appIDs: [239140], folders: ["dying light"],
@@ -1521,6 +1523,24 @@ extension GameRecommendations {
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         pool-split = 1
+        # The defaults this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        avx: false, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// The Escapists 2 (Steam App ID 641990). Device-tested on an iPhone 17 Pro Max (2026-10-30, "works perfect").
+    /// A 32-bit Unity game on its own old mono.dll: Mono's XCHG code patches at unaligned addresses faulted through
+    /// the JIT pool's alias, so its code memory stays plain read/write (MADEIRA_WOW_RWX_PLAIN).
+    static let escapists2 = GameRecommendation(
+        id: "the-escapists-2", title: "The Escapists 2", version: 1,
+        config: """
+        # Madeira's recommended settings for The Escapists 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_WOW_RWX_PLAIN = 1
         # The defaults this list was tested with (upstream's differ).
         env.MADEIRA_FREE_DELAY_MS = 2000
         env.MADEIRA_CTX_CPU_AREA = 2
