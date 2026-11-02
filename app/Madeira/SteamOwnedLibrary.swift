@@ -329,6 +329,7 @@ final class SteamOwnedLibrary: ObservableObject {
     private lazy var fetcher = SteamLibraryFetcher(session: session)
     private lazy var downloader = DepotDownloader(session: session)
     private var started = false
+    private var lastLibraryRefreshAttempt: Date?
     /// Which account the cached list belongs to: a SHA-256 of the account name,
     /// so the cache file holds no name.
     private var cachedAccount: String?
@@ -387,10 +388,22 @@ final class SteamOwnedLibrary: ObservableObject {
 
     private func refreshIfStale() {
         if Date().timeIntervalSince(libraryUpdated ?? .distantPast) > 6 * 3600 {
-            Task { await refreshLibrary(interactive: false) }
+            refreshAfterForeground()
         } else {
             Task { await refreshPlaytime() }   // playtime changes more often than the library
         }
+    }
+
+    /// An offline first load stays eligible when the app returns to the foreground.
+    /// Reserve the attempt before scheduling it, so repeated activation callbacks
+    /// cannot queue more requests while the first task is waiting to run.
+    func refreshAfterForeground() {
+        guard Self.enabled, signedIn, !refreshing, !inSession else { return }
+        let now = Date()
+        guard now.timeIntervalSince(libraryUpdated ?? .distantPast) > 6 * 3600,
+              now.timeIntervalSince(lastLibraryRefreshAttempt ?? .distantPast) >= 60 else { return }
+        lastLibraryRefreshAttempt = now
+        Task { await refreshLibrary(interactive: false) }
     }
 
     /// Sign-in was stored or removed (SteamSignIn.didChange).
@@ -437,6 +450,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// offline start does not raise an alert.
     func refreshLibrary(interactive: Bool = true) async {
         guard Self.enabled, signedIn, !refreshing, !inSession else { return }
+        lastLibraryRefreshAttempt = Date()
         refreshing = true
         defer { refreshing = false }
         do {

@@ -611,7 +611,10 @@ struct SteamGamesSection: View {
             if libraryEnabled { steam.start(); steam.reconcileSession() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.refresh(); if libraryEnabled { steam.reconcileSession() } }
+            if phase == .active {
+                model.refresh()
+                if libraryEnabled { steam.reconcileSession(); steam.refreshAfterForeground() }
+            }
         }
         .sheet(item: $selected) { selection in
             SteamGameSheet(appID: selection.id) { entry in
