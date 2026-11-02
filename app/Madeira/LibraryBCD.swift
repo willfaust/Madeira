@@ -114,13 +114,21 @@ enum BCDLaunch {
         return nil
     }
 
-    /// A Unity IL2CPP build keeps GameAssembly.dll next to its exe. A Steam entry's
-    /// path is its install folder; another entry's is the exe.
+    /// A Unity IL2CPP build keeps GameAssembly.dll next to its exe. A direct Steam
+    /// launch can select an exe below its install folder; Dock keeps the root check.
     static func isUnityIL2CPP(_ entry: LibraryEntry) -> Bool {
         guard let url = LibraryEntry.hostURL(ofWindowsPath: entry.windowsPath) else { return false }
         var isDir: ObjCBool = false
         let fm = FileManager.default
         let folder = fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue ? url : url.deletingLastPathComponent()
+        if let launched = LibraryEntry.hostURL(ofWindowsPath: entry.launchWindowsPath) {
+            let program = launched.resolvingSymlinksInPath().standardizedFileURL
+            let root = folder.resolvingSymlinksInPath().standardizedFileURL
+            if program.path.hasPrefix(root.path + "/"),
+               fm.fileExists(atPath: program.deletingLastPathComponent().appendingPathComponent("GameAssembly.dll").path) {
+                return true
+            }
+        }
         return fm.fileExists(atPath: folder.appendingPathComponent("GameAssembly.dll").path)
     }
 }
