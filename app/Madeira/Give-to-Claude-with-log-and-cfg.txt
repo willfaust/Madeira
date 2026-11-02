@@ -1,58 +1,59 @@
 MADEIRA HELP GUIDE FOR CLAUDE
 Give this file to Claude together with your log and your cfg.
-Updated 2026-11-01. Madeira copies this file into its Documents folder
-(Files > On My iPhone/iPad > Madeira) every time it starts.
+Updated 2026-11-02.
 
 ==========================================================================
 0. FOR THE PERSON
 ==========================================================================
-1. In Madeira, open the game, scroll to the bottom of Game details and
-   tap "Get Help from Claude" (or Settings > Diagnostics > Get Help from
-   Claude). Share everything it offers to a new Claude chat.
-   No button in your build? Open Files > Madeira and attach this file,
-   madeira-summary.txt, madeira-log.txt (or madeira-log.prev.txt if
-   Madeira crashed) and madeira.cfg. Then copy the game's config text from
-   Game details > Advanced > This game's config and paste it in the chat.
-2. Say which game, what you expected and what happened instead (black
-   screen, closes at the logo, stuck on "Loading Steam", slow...).
-3. Logs over about 30 MB may not upload. Then send madeira-summary.txt and
-   the last 2,000 lines of the log.
+Tap "Get Help from Claude" at the bottom of your game's page in Madeira,
+send everything to a new Claude chat, and say what went wrong. That's it.
 
 ==========================================================================
-1. FOR CLAUDE: HOW TO HELP
+1. FOR CLAUDE: READ THIS FIRST
 ==========================================================================
-- Madeira runs x86 Windows games on iPhone/iPad: Wine (Windows layer),
-  FEX (x86 to ARM translation, JIT), DXMT (Direct3D 9/10/11 to Metal),
-  madeira-d3d12 (Direct3D 12 to Metal), Madeira Dock (runs Valve's Steam
-  client headless so Steam games start with their DRM and Steamworks).
-- Read madeira-summary.txt first (programs started, how they ended, JIT
-  pool size, missing DLLs that matter, Dock result). Then search the log
-  for the tags in section 6.
-- Find the build: the log line "[build] ..." near the top. Several forks
-  ship Madeira IPAs (section 8). A fix listed here may not be in theirs.
-- Settings first. Prefer a cfg line or a Game details switch over "wait
-  for a new build". Change ONE thing per try and say what to look for in
-  the next log.
-- Two kinds of help. (a) Fixes the person can do now: cfg lines, Game
-  details switches, launch mode, Repair/Verify files, registry values.
-  (b) Fixes that need a change to Madeira's code. The person cannot
-  build Madeira, so never give them code to apply. When you conclude a
-  game needs a code change (or after 3 settings tries fail), write a
-  DEVELOPER HANDOFF (section 10) for them to send back to whoever made
-  their build. Say plainly which kind of fix each suggestion is.
-- Give cfg lines ready to paste, in a code block, and say exactly where
-  they go: "This game's config" (Game details > Advanced) for one game,
-  or madeira.cfg for every game. Keep the lines that are already there
-  unless one of them is the problem.
-- Check bitness before choosing memory lines (section 5). The library
-  shows a 32 or 64 pill on each game; the log names the exe.
-- Never suggest: deleting or reinstalling Madeira (the games, prefix and
-  saves live inside it and would be lost), stripping or cracking DRM,
-  Steamless, or editing Valve's files. Don't promise a game works; say
-  what you expect to see in the next log.
-- After a change to madeira.cfg, the person must close Madeira from the
-  app switcher and open it again (one Wine session per app run). A game's
-  own config applies at that game's next start.
+The person is NOT technical. They tapped one button and want their game
+to work. Everything after this section is reference for you, not for
+them. Never paste it, explain it, or use its words (JIT pool, FEX, Wine,
+DXMT, bitness, prefix, env lines) unless they ask.
+
+How to reply, every time:
+- Short. Under about 120 words. No headings, no tables, no theory.
+- First reply: one sentence saying what you think is wrong, in plain
+  words ("The game runs out of memory while it loads."). Then ONE fix.
+- A fix is numbered tap-by-tap steps in Madeira: which page, which
+  button, what to pick. If it needs config lines, give them in one code
+  block and say: "Open your game's page > Advanced > This game's config,
+  paste these lines at the end, tap Done, then play again."
+- End with: "Try it and tap Get Help from Claude again if it still
+  fails." Then wait for the new log.
+- One change per try. Never give a list of options to choose from.
+- Never ask them to read the log, find a file or type commands, unless
+  there is no other way.
+
+When settings can't fix it:
+- The cause is in Madeira's code, the game is known broken (section 7),
+  or 3 tries have failed. Then stop suggesting settings.
+- Tell them in one or two sentences: "This needs a fix inside Madeira.
+  I've written a note for the Madeira team; copy it and send it to
+  them." Then give the DEVELOPER HANDOFF from section 10, in one code
+  block they can copy. Never give the person code to change themselves.
+
+Never suggest: deleting or reinstalling Madeira (their games and saves
+are inside it and would be lost), cracking or removing DRM, or editing
+Steam's files. Don't promise it will work.
+
+How to work it out (for you):
+- Read madeira-summary.txt first, then search madeira-log.txt (or
+  madeira-log.prev.txt after a crash) for the tags in section 6. The
+  "[build] ..." line near the top says which build they have; several
+  forks exist (section 8), so a fix listed here may not be in theirs.
+- Check whether the game is 32- or 64-bit (the game file says "Bits")
+  before choosing memory lines (section 5).
+- Start from the closest working game in section 7. Keep the lines that
+  are already in their config unless one of them is the problem.
+- A madeira.cfg change only applies after closing Madeira from the app
+  switcher and opening it again; the game's own config applies at the
+  game's next start. Prefer the game's own config.
 
 ==========================================================================
 2. HOW SETTINGS WORK (three layers, later wins)
@@ -382,11 +383,10 @@ Everything here is described in our own words; check the person's
 ==========================================================================
 10. DEVELOPER HANDOFF (when a code fix is needed)
 ==========================================================================
-Write it as one block the person can copy, in plain words, with exact
-log lines. The developer reads it with no other context. Tell the person
-to send it, with the log and cfg files, to whoever gave them their build
-(for insertfloppy builds: Cameron; otherwise the fork's GitHub issues).
-Template:
+Write it as one block the person can copy, with exact log lines. The
+developer reads it with no other context. The person sends it back to
+the Madeira team (whoever gave them their build), with the files from
+Get Help from Claude. Template:
 
   MADEIRA HANDOFF
   Game: <title>, store <Steam/GOG/Epic/itch/EA>, App ID <id>
