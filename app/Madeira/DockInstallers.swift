@@ -46,10 +46,12 @@ enum SteamInstallScripts {
 
     /// The keys a run is recorded under. A 32-bit reader sees HKLM\Software through
     /// Wow6432Node in a 64-bit prefix; the plain key covers a 64-bit reader.
-    static func keys(_ run: SteamInstallRun) -> [String] {
-        let lower = run.key.lowercased()
-        guard run.hive == .machine, lower.hasPrefix("software\\"), !lower.hasPrefix("software\\wow6432node\\") else { return [run.key] }
-        return [run.key, "Software\\Wow6432Node\\" + run.key.dropFirst("software\\".count)]
+    static func keys(_ run: SteamInstallRun) -> [String] { keys(run.hive, run.key) }
+
+    static func keys(_ hive: SteamInstallRun.Hive, _ key: String) -> [String] {
+        let lower = key.lowercased()
+        guard hive == .machine, lower.hasPrefix("software\\"), !lower.hasPrefix("software\\wow6432node\\") else { return [key] }
+        return [key, "Software\\Wow6432Node\\" + key.dropFirst("software\\".count)]
     }
 
     /// Install scripts: .vdf files with a "Run Process" section in `folder` and up to
@@ -224,13 +226,22 @@ enum SteamInstallScripts {
     /// runs and writes the files it changed. Returns the total of values changed.
     private static func rewrite(_ runs: [SteamInstallRun], prefix: URL,
                                 _ change: ([SteamInstallRun], String) -> (String, Int)) throws -> Int {
+        try rewrite(hives: Set(runs.map(\.hive)), prefix: prefix) { hive, text in
+            change(runs.filter { $0.hive == hive }, text)
+        }
+    }
+
+    /// Applies `change` (new text, values changed) to the system.reg / user.reg of each
+    /// hive in `hives` and writes the files it changed, keeping a one-time .madeira-bak
+    /// copy. Returns the total of values changed.
+    static func rewrite(hives: Set<SteamInstallRun.Hive>, prefix: URL,
+                        _ change: (SteamInstallRun.Hive, String) -> (String, Int)) throws -> Int {
         var total = 0
         for (hive, file) in [(SteamInstallRun.Hive.machine, "system.reg"), (.user, "user.reg")] {
-            let selected = runs.filter { $0.hive == hive }
-            guard !selected.isEmpty else { continue }
+            guard hives.contains(hive) else { continue }
             let registry = prefix.appendingPathComponent(file)
             guard let contents = try? Data(contentsOf: registry), !contents.isEmpty else { continue }   // a prefix not seeded yet
-            let (updated, changed) = change(selected, String(decoding: contents, as: UTF8.self))
+            let (updated, changed) = change(hive, String(decoding: contents, as: UTF8.self))
             guard changed > 0 else { continue }
             let backup = registry.appendingPathExtension("madeira-bak")
             if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: registry, to: backup) }
@@ -244,6 +255,101 @@ enum SteamInstallScripts {
     private static func dword(_ line: String) -> UInt32? {
         guard let range = line.range(of: "=dword:", options: .caseInsensitive) else { return nil }
         return UInt32(line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines), radix: 16)
+    }
+}
+
+// MARK: - Registry values
+
+/// One registry value to put into a prefix. Store launchers use these to find their own
+/// install (EA app: HKLM\Software\Electronic Arts\EA Desktop "InstallSuccessful"), and
+/// games installed from a store read their folder from them.
+struct SteamInstallValue: Equatable, Sendable {
+    enum Content: Equatable, Sendable { case string(String), dword(UInt32) }
+    var hive: SteamInstallRun.Hive
+    var key: String      // under the hive
+    var name: String     // "" is the key's default value
+    var data: Content
+    var followsInstall: Bool   // a string made from the install folder: rewritten when it differs
+}
+
+/// Writing values into the prefix's .reg files, only while no session runs. A value the
+/// prefix already has stays as it is (a game or its launcher may have changed it), except
+/// a string that follows the install folder (`followsInstall`), which is rewritten.
+enum SteamInstallRegistry {
+    /// A Wine .reg line for the value.
+    static func line(_ value: SteamInstallValue) -> String {
+        let name = value.name.isEmpty ? "@" : "\"" + Self.text(value.name, quote: "\"") + "\""
+        switch value.data {
+        case .string(let string): return name + "=\"" + Self.text(string, quote: "\"") + "\""
+        case .dword(let number): return name + String(format: "=dword:%08x", number)
+        }
+    }
+
+    /// Text the way wineserver writes it (server/unicode.c, dump_strW): non-ASCII as \x
+    /// escapes of UTF-16 units, control characters as C or octal escapes, and a backslash
+    /// before \ and the quote characters.
+    static func text(_ string: String, quote: String) -> String {
+        let units = Array(string.utf16)
+        let escapes = Array(".......abtnvfr.............e....".utf8)
+        var out = ""
+        for (index, unit) in units.enumerated() {
+            let next = index + 1 < units.count ? units[index + 1] : nil
+            if unit > 127 {
+                let hexNext = next.map { $0 < 128 && Character(Unicode.Scalar(UInt8($0))).isHexDigit } ?? false
+                out += hexNext ? String(format: "\\x%04x", UInt32(unit)) : String(format: "\\x%x", UInt32(unit))
+            } else if unit < 32 {
+                if escapes[Int(unit)] != UInt8(ascii: ".") { out += "\\" + String(Character(Unicode.Scalar(escapes[Int(unit)]))) }
+                else if let next, next >= 48, next <= 55 { out += String(format: "\\%03o", UInt32(unit)) }
+                else { out += String(format: "\\%o", UInt32(unit)) }
+            } else {
+                let character = Character(Unicode.Scalar(UInt8(unit)))
+                if character == "\\" || quote.contains(character) { out += "\\" }
+                out.append(character)
+            }
+        }
+        return out
+    }
+
+    /// The .reg text with the values written (both registry views of HKLM\Software), and
+    /// how many lines changed. Missing values are added; a present one is replaced only
+    /// when it follows the install folder and differs.
+    static func write(_ values: [SteamInstallValue], in text: String, now: Int) -> (text: String, changed: Int) {
+        var lines = text.components(separatedBy: "\n")
+        var changed = 0
+        for value in values {
+            let wanted = Self.line(value)
+            let namePrefix = value.name.isEmpty ? "@=" : "\"" + Self.text(value.name, quote: "\"").lowercased() + "\"="
+            for key in SteamInstallScripts.keys(value.hive, value.key) {
+                let header = "[" + Self.text(key, quote: "[]") + "]"
+                if let start = lines.firstIndex(where: { $0.lowercased().hasPrefix(header.lowercased()) }) {
+                    var end = start + 1
+                    while end < lines.count, !lines[end].hasPrefix("[") { end += 1 }
+                    if let index = (start + 1..<end).first(where: { lines[$0].lowercased().hasPrefix(namePrefix) }) {
+                        guard value.followsInstall, lines[index] != wanted else { continue }
+                        lines[index] = wanted
+                    } else {
+                        var at = end
+                        while at > start + 1, lines[at - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { at -= 1 }
+                        lines.insert(wanted, at: at)
+                    }
+                } else {
+                    while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lines.removeLast() }
+                    lines += ["", header + " \(now)", wanted, ""]
+                }
+                changed += 1
+            }
+        }
+        return (lines.joined(separator: "\n"), changed)
+    }
+
+    /// Writes the values into the prefix's system.reg and user.reg. Returns the number of
+    /// lines changed. Only while no session runs.
+    @discardableResult
+    static func write(_ values: [SteamInstallValue], prefix: URL) throws -> Int {
+        let now = Int(Date().timeIntervalSince1970)
+        return try SteamInstallScripts.rewrite(hives: Set(values.map(\.hive)), prefix: prefix) { hive, text in
+            Self.write(values.filter { $0.hive == hive }, in: text, now: now)
+        }
     }
 }
 

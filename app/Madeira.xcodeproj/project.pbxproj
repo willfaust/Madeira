@@ -22,6 +22,13 @@
 		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; };
 		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
+		A1006B01 /* EALibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B01 /* EALibrary.swift */; };
+		A1006B02 /* EAGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B02 /* EAGames.swift */; };
+		A1006B03 /* SwiftEA/EAAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B03 /* EAAPI.swift */; };
+		A1006B04 /* SwiftEA/EAFormats.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B04 /* EAFormats.swift */; };
+		A1006B05 /* SwiftEA/EADownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B05 /* EADownloader.swift */; };
+		A1006B06 /* SwiftEA/EALicense.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B06 /* EALicense.swift */; };
+		A1006B07 /* SwiftEA/EAService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B07 /* EAService.swift */; };
 		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
 		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
 		A1009C03 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2009C03 /* Localizable.xcstrings */; };
@@ -280,6 +287,13 @@
 		A2007B31 /* itch_7z.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftItch/itch_7z.h"; sourceTree = "<group>"; };
 		A2007B04 /* ItchLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchLibrary.swift"; sourceTree = "<group>"; };
 		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
+		A2006B01 /* EALibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EALibrary.swift"; sourceTree = "<group>"; };
+		A2006B02 /* EAGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EAGames.swift"; sourceTree = "<group>"; };
+		A2006B03 /* EAAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAAPI.swift"; sourceTree = "<group>"; };
+		A2006B04 /* EAFormats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAFormats.swift"; sourceTree = "<group>"; };
+		A2006B05 /* EADownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EADownloader.swift"; sourceTree = "<group>"; };
+		A2006B06 /* EALicense.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EALicense.swift"; sourceTree = "<group>"; };
+		A2006B07 /* EAService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAService.swift"; sourceTree = "<group>"; };
 		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
 		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2009C03 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
@@ -585,6 +599,13 @@
 				A2007B31 /* itch_7z.h */,
 				A2007B04 /* ItchLibrary.swift */,
 				A2007B05 /* ItchGames.swift */,
+				A2006B01 /* EALibrary.swift */,
+				A2006B02 /* EAGames.swift */,
+				A2006B03 /* EAAPI.swift */,
+				A2006B04 /* EAFormats.swift */,
+				A2006B05 /* EADownloader.swift */,
+				A2006B06 /* EALicense.swift */,
+				A2006B07 /* EAService.swift */,
 				A2000900 /* LiquidMetal.metal */,
 				A2009C03 /* Localizable.xcstrings */,
 				A2000910 /* Assets.xcassets */,
@@ -1032,6 +1053,13 @@
 				A1007B30 /* SwiftItch/itch_7z.c in Sources */,
 				A1007B04 /* ItchLibrary.swift in Sources */,
 				A1007B05 /* ItchGames.swift in Sources */,
+				A1006B01 /* EALibrary.swift in Sources */,
+				A1006B02 /* EAGames.swift in Sources */,
+				A1006B03 /* SwiftEA/EAAPI.swift in Sources */,
+				A1006B04 /* SwiftEA/EAFormats.swift in Sources */,
+				A1006B05 /* SwiftEA/EADownloader.swift in Sources */,
+				A1006B06 /* SwiftEA/EALicense.swift in Sources */,
+				A1006B07 /* SwiftEA/EAService.swift in Sources */,
 				A1000900 /* LiquidMetal.metal in Sources */,
 				A1000902 /* GlassSkin.swift in Sources */,
 				A1000903 /* LiquidMetalSkin.metal in Sources */,
