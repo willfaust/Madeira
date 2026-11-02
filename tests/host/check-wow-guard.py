@@ -58,7 +58,9 @@ typedef struct { int protection, max_protection, shared; } vm_region_basic_info_
 static int ios_wow_spill_walk;
 static const ULONG_PTR host_page_size = 0x4000;
 struct ios_wow_window { ULONG_PTR base; unsigned dead, leaked, guard_owned; };
-struct ios_wow_placeholder { unsigned adopted, guard_owned; };
+struct ios_wow_placeholder { unsigned adopted, guard_owned, for_game; };
+static char ios_wow_hold_for[260];
+static int ios_wow_child_in_hold_folder(const char **image) { *image = "(unknown)"; return 1; }
 static struct ios_wow_window slot;
 static struct ios_wow_placeholder placeholder;
 static int have_slot, have_placeholder;

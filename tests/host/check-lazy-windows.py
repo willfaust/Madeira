@@ -127,6 +127,8 @@ static int fake_munmap( void *addr, size_t size ) {
     errno = EINVAL; return -1;
 }
 #define munmap fake_munmap
+/* process_ios.c: the booting child's image path (the held placeholders' folder rule) */
+const char *ios_child_image_path( void ) { return NULL; }
 static int reserved_areas;
 static void mmap_add_reserved_area( void *addr, size_t size ) { (void)addr; (void)size; reserved_areas++; }
 static void ios_va_describe_range( void *addr, ULONG_PTR len, char *buf, size_t n ) { (void)addr; (void)len; snprintf( buf, n, "-" ); }

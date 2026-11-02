@@ -10482,9 +10482,44 @@ struct ios_wow_placeholder
     ULONG_PTR base;          /* 4 GB-aligned slot base, 0 = unused entry */
     unsigned  guard_owned;   /* same meaning as ios_wow_window.guard_owned */
     unsigned  adopted;       /* a pseudo-process has taken this slot over */
+    unsigned  for_game;      /* held at session start for the game's folder (ios_wow_hold_for) */
 };
 static struct ios_wow_placeholder ios_wow_placeholders[IOS_WOW_MAX_WINDOWS];
 static unsigned ios_wow_placeholder_count;
+
+/* MADEIRA_WOW_HOLD_FOR: the Windows folder (lower case, backslashes, trailing
+ * backslash) whose 32-bit programs may adopt the placeholders held at session
+ * start; empty: any 32-bit program may. Set by the app for a Dock game with a
+ * 32-bit program of its own. The one held window used to go to the first
+ * 32-bit process of the session: once Valve's client service was registered
+ * in the prefix (a CEG game's session installs it), the client demand-started
+ * the 32-bit SteamService.exe seconds into every game session, the service
+ * took the window, and the game, a minute later, found no slot (device log
+ * 2026-11-02, 'guest-window-reserve' 0xc0000017). A program from elsewhere
+ * still gets any other free slot. */
+static char ios_wow_hold_for[260];
+
+/* 1 when this child's image is inside ios_wow_hold_for, or nothing says otherwise (no folder set, or a child the
+ * process table does not know). Case-insensitive, either slash, a \??\ or \\?\ prefix skipped. */
+static int ios_wow_child_in_hold_folder( const char **image_out )
+{
+    extern const char *ios_child_image_path( void );
+    const char *image = ios_child_image_path();
+    size_t i;
+
+    *image_out = image ? image : "(unknown)";
+    if (!ios_wow_hold_for[0] || !image) return 1;
+    if ((image[0] == '\\' && (image[1] == '?' || image[1] == '\\') && image[2] == '?' && image[3] == '\\')) image += 4;
+    for (i = 0; ios_wow_hold_for[i]; i++)
+    {
+        char c = image[i];
+        if (!c) return 0;
+        if (c == '/') c = '\\';
+        else if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != ios_wow_hold_for[i]) return 0;
+    }
+    return 1;
+}
 
 static struct ios_wow_placeholder *ios_wow_placeholder_find( ULONG_PTR base )
 {
@@ -11449,6 +11484,17 @@ static int ios_wow_window_try( ULONG_PTR base, unsigned *guard_owned )
                      (void *)base );
             return 0;
         }
+        if (ph->for_game)
+        {
+            const char *image;
+            if (!ios_wow_child_in_hold_folder( &image ))
+            {
+                dprintf( 2, "[wow-window] B=%p REJECTED: its placeholder is held for the game's folder %s and %s "
+                            "is outside it (env.MADEIRA_WOW_HOLD_FOR_GAME = 0 lets any 32-bit program take it)\n",
+                         (void *)base, ios_wow_hold_for, image );
+                return 0;
+            }
+        }
         ph->adopted = 1;
         *guard_owned = ph->guard_owned;
         dprintf( 2, "[wow-window] adopted placeholder B=%p..%p guard=%s\n",
@@ -11862,6 +11908,30 @@ static void ios_wow_session_start(void)
     ios_wow_session_arm();
     if (!ios_wow_map_allows_window()) return;
     ios_wow_reserve_placeholders( want );
+
+    /* the held placeholders go only to the game's own 32-bit programs (see ios_wow_hold_for) */
+    if (hold_n && !ios_main_image_i386 && ios_wow_env_ulong( "MADEIRA_WOW_PLACEHOLDERS", 0 ) != 1)
+    {
+        const char *folder = getenv( "MADEIRA_WOW_HOLD_FOR" );   /* Windows folder whose 32-bit programs alone may adopt the MADEIRA_WOW_HOLD_WINDOWS placeholders (the app sets the Dock game's folder); unset: any 32-bit program may */
+        size_t n = 0;
+        unsigned i;
+
+        if (!folder || !folder[0]) return;
+        if (folder[0] == '\\' && (folder[1] == '?' || folder[1] == '\\') && folder[2] == '?' && folder[3] == '\\') folder += 4;
+        for (; folder[n] && n < sizeof(ios_wow_hold_for) - 2; n++)
+        {
+            char c = folder[n];
+            ios_wow_hold_for[n] = c == '/' ? '\\' : (c >= 'A' && c <= 'Z') ? c + 32 : c;
+        }
+        if (folder[n]) { ios_wow_hold_for[0] = 0; return; }   /* too long to match reliably: share the window, as before */
+        if (n && ios_wow_hold_for[n - 1] != '\\') ios_wow_hold_for[n++] = '\\';
+        ios_wow_hold_for[n] = 0;
+        pthread_mutex_lock( &ios_wow_mutex );
+        for (i = 0; i < ios_wow_placeholder_count; i++) ios_wow_placeholders[i].for_game = 1;
+        pthread_mutex_unlock( &ios_wow_mutex );
+        dprintf( 2, "[wow-window] %u held placeholder%s reserved for 32-bit programs in %s\n",
+                 ios_wow_placeholder_count, ios_wow_placeholder_count == 1 ? "" : "s", ios_wow_hold_for );
+    }
 }
 /* ---- end of lazy-window policy ---- */
 
