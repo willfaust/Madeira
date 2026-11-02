@@ -30,6 +30,7 @@
       "build/wine-pe/**",
       "build/fex-arm64ec/**",
       "build/fex-wow64/**",
+      "build/fex-patches/**",
       "build/faultrep/**",
       "build/luajit-x64/**",
       "build/madeira-d3d12/build-pe.sh",

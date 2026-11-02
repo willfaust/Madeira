@@ -12,6 +12,8 @@ set -eu
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PATH="$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
 B="$R/FEX/build-arm64ec"
+# Madeira's own FEX changes (build/fex-patches/README.md).
+bash "$R/build/fex-patches/apply.sh"
 cmake -S "$R/FEX" -B "$B" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON -DCMAKE_DISABLE_FIND_PACKAGE_range-v3=ON \
     -DCMAKE_DISABLE_FIND_PACKAGE_unordered_dense=ON \

@@ -42,6 +42,7 @@
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
+#include <sys/sysctl.h>
 
 /* iOS-Madeira ml674: XZR/WZR AS A STORE SOURCE MUST READ ZERO.
  *
@@ -2368,6 +2369,68 @@ static int ios_mach_emulate_casp(uint32_t insn, uintptr_t rw_addr, uint64_t gpr[
         gpr[rs + 1] = c1;
     }
     return 1;
+}
+
+/* ml2190: a misaligned SWP that stays inside one 16-byte granule.
+ *
+ * The Escapists 2 (32-bit Unity, its own mono.dll) died at load: Mono rewrote
+ * the rel32 of a call in its own RWX code buffer with an x86 XCHG, FEX ran it as
+ * `swpal w4, w4, [x24]` (0xb8e48304) on 0x...0207 (3 mod 4), the page was the
+ * RX view of a JIT-pool alias, and ml626 refused it as unaligned. The fault
+ * went back to the guest as c0000005, Mono's handler VirtualProtect'ed the
+ * byte to PAGE_EXECUTE_READWRITE and retried, and ml461 counted 2,000
+ * identical redeliveries before terminating the process.
+ *
+ * With FEAT_LSE2 a misaligned LSE atomic that does not cross a 16-byte
+ * boundary neither alignment-faults nor loses single-copy atomicity, so the
+ * same hardware SWPAL on the RW alias is the genuine atomic (the faulting one
+ * hit a permission fault, not an alignment fault, for exactly that reason).
+ * A swap that crosses 16 bytes, or a host without LSE2, still returns 0 and is
+ * refused as before. SWPAL whatever A/R ask for, as the aligned case does.
+ * (MADEIRA_WOW_RWX_PLAIN=1 keeps such a 32-bit buffer out of the pool alias
+ * altogether; this is for when it is aliased.)
+ * The sysctl is read once; no Wine logging here. */
+static int ios_host_lse2 = -1;
+static int ios_mach_swp_lse2( uintptr_t rw_addr, int size_lg2, uint64_t in, uint64_t *old )
+{
+    const unsigned nbytes = 1u << size_lg2;
+
+    if (ios_host_lse2 < 0)
+    {
+        int v = 0;
+        size_t len = sizeof(v);
+        if (sysctlbyname( "hw.optional.arm.FEAT_LSE2", &v, &len, NULL, 0 )) v = 0;
+        ios_host_lse2 = v ? 1 : 0;
+    }
+    if (!ios_host_lse2 || !rw_addr || (rw_addr & 15) + nbytes > 16) return 0;
+    switch (size_lg2)
+    {
+    case 1:
+    {
+        uint32_t v = (uint16_t)in, o;
+        asm volatile(".arch_extension lse\n\tswpalh %w1, %w0, [%2]"
+                     : "=&r"(o) : "r"(v), "r"(rw_addr) : "memory");
+        *old = o;
+        return 1;
+    }
+    case 2:
+    {
+        uint32_t v = (uint32_t)in, o;
+        asm volatile(".arch_extension lse\n\tswpal %w1, %w0, [%2]"
+                     : "=&r"(o) : "r"(v), "r"(rw_addr) : "memory");
+        *old = o;
+        return 1;
+    }
+    case 3:
+    {
+        uint64_t o;
+        asm volatile(".arch_extension lse\n\tswpal %1, %0, [%2]"
+                     : "=&r"(o) : "r"(in), "r"(rw_addr) : "memory");
+        *old = o;
+        return 1;
+    }
+    }
+    return 0;
 }
 
 /* ml938/ml939: defined far below, next to the store emulator they reuse.
@@ -5844,17 +5907,31 @@ static void *ios_mach_exception_thread( void *arg )
                         int rt = insn & 0x1f;           /* old value lands here */
                         uint64_t align_mask = (1ULL << size_lg2) - 1;
 
-                        /* An unaligned atomic cannot be emulated atomically. Fall through
-                         * to the discriminator rather than quietly doing something weaker. */
+                        /* An unaligned atomic cannot be emulated with the builtins. Inside
+                         * one 16-byte granule ml2190 runs the hardware SWPAL (LSE2);
+                         * anything else falls through to the discriminator rather than
+                         * quietly doing something weaker. */
                         if (rw_addr & align_mask)
                         {
+                            /* __x holds x0..x28 only: an FP/LR operand is refused */
+                            const int regs_ok = (rs < 29 || rs == 31) && (rt < 29 || rt == 31);
+                            uint64_t in = (rs == 31 || !regs_ok) ? 0 : state.__x[rs];
+                            uint64_t old = 0;
+                            const int lse2 = regs_ok && ios_mach_swp_lse2( rw_addr, size_lg2, in, &old );
                             static int swp_unalign_n;
+
+                            if (lse2)
+                            {
+                                if (rt != 31) state.__x[rt] = old;
+                                emulated = 1;
+                            }
                             if (swp_unalign_n < 4)
                                 dprintf(STDERR_FILENO,
-                                    "[swp-emul] ml626 #%d REFUSING unaligned atomic: insn=0x%08x size=%d "
-                                    "addr=0x%llx rw=0x%llx\n",
-                                    ++swp_unalign_n, insn, 1 << size_lg2,
-                                    (unsigned long long)fault_addr, (unsigned long long)rw_addr);
+                                    "[swp-emul] ml626 #%d %s unaligned atomic: insn=0x%08x size=%d "
+                                    "addr=0x%llx rw=0x%llx%s\n",
+                                    ++swp_unalign_n, lse2 ? "LSE2 SWPAL for" : "REFUSING", insn, 1 << size_lg2,
+                                    (unsigned long long)fault_addr, (unsigned long long)rw_addr,
+                                    lse2 ? " (ml2190)" : "");
                         }
                         else
                         {

@@ -234,6 +234,7 @@ class RuntimeTests(unittest.TestCase):
                                   ('wow64', 'wow64fex', 'libwow64fex.dll')]:
             relative = f'build/fex-{arch}/build.sh'
             script = self.write(relative, (ROOT / relative).read_bytes())
+            self.write('build/fex-patches/apply.sh', (ROOT / 'build/fex-patches/apply.sh').read_bytes())
             self.write(f'FEX/build-{arch}/CMakeCache.txt', b'partial configure')
             binary = self.root / f'FEX/build-{arch}/Bin/{dll}'
             cmake = self.write('bin/cmake', b'#!/bin/sh\nset -eu\n'
