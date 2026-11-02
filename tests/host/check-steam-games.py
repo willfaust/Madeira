@@ -81,17 +81,19 @@ for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for 
               '"Free space where the game is installed"', '"Pause update"', '"Resume update"', '"The game"', '"Program"', '"Choose…"']:
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
-              '"Aspect & scaling"', '"Compatibility & performance"', '"Reduced-precision x87"', '"CPU cores reported"',
+              '"Aspect & scaling"', '"Compatibility & performance"', '"x87 precision"', '"CPU cores reported"',
               '"D3D9 anisotropic filtering"', '"On screen"', '"Performance overlay"', '"Live logs"', '"Touch controls"',
               '"Control opacity"', '"Control size"', '"Executable"', '"Game details"']:
     require(label in detail, f'Game details: {label}')
+require('if entry.anisotropyLimit != nil {\n                Picker("D3D9 anisotropic filtering"' in detail,
+        'Game details: D3D9 anisotropic filtering only for a game that already has a limit (to set it back)')
 # #461: every library entry but the Desktop has Launch arguments, Steam games too.
 require('if entry.desktop != true {\n            Section {\n                TextField("Launch arguments"' in detail,
         'Launch arguments for every entry but the Desktop, Steam games included (#461)')
 entries_start = library.index('private var entries: [LibraryEntry] {')
 require('$0.steamAppID == nil' in library[entries_start:library.index('var body: some View {', entries_start)],
         'Steam games are listed in the Steam section only, not also under Games')
-# A card's pills: an installed game shows a library game's (32-bit or 64-bit, graphics API, size), no
+# A card's pills: an installed game shows a library game's (its size), no
 # "Madeira Dock" or "Steam" pill; "Update" joins them; any other state keeps its own pill.
 cell = games[games.index('struct SteamGameCell: View {'):games.index('/// Progress, speed and the state of one download.')]
 require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ entry: LibraryEntry?) -> some View {' in cell and
@@ -103,10 +105,10 @@ require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ ent
         "layouts (dense list, list, grid); no Dock or Steam pill")
 badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibraryStatus: View {')]
 # The pills' texts are one rule (LibraryBadges.formatTexts, also the zoomable grid's measured labels).
-require(badges.index('texts.append("\\(entry.bits)-bit")') < badges.index('LibraryRendererBadge.compact(entry.graphicsAPI)') <
-        badges.index('if let note { texts.append(note) }') and
+# No bitness or graphics API pill: both were read from the program before it ran and were often wrong.
+require('entry.bits' not in badges and 'graphicsAPI' not in badges and 'if let note { texts.append(note) }' in badges and
         badges.index('ForEach(Self.formatTexts(entry, note: note)') < badges.index('private var size'),
-        'the pills in order: bits, graphics API, Update, then the size')
+        'the pills: no bitness or graphics API pill; Update, then the size')
 require('await library.refreshSteamMetadata(game, title: item.name)' in cell and 'if status.showsFormat, let game = item.installed' in cell,
         "an installed game's card reads its format through its library entry")
 steam_meta = library[library.index('    func refreshSteamMetadata('):]
