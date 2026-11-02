@@ -342,23 +342,46 @@ final class EADownloader: @unchecked Sendable {
         var fetched: UInt64 = 0
         var written = 0
         // Largest first: the long transfers start early and the small files fill the gaps.
-        let order = toFetch.sorted { $0.compressedSize > $1.compressedSize }
-        try await withThrowingTaskGroup(of: UInt64.self) { group in
-            var next = 0
-            func add() {
-                guard next < order.count else { return }
-                let entry = order[next]; next += 1
-                group.addTask { [client] in
-                    try Task.checkCancellation()
-                    let bytes = try await Self.fetch(entry, archive: archive, client: client, folder: folder, meter: meter)
-                    journal.record(entry)
-                    return bytes
+        // A file that fails all its attempts does not stop the others: the pass finishes,
+        // the failed files get two more passes (one at a time), and only then does the
+        // download fail, naming the first file that still would not come.
+        var order = toFetch.sorted { $0.compressedSize > $1.compressedSize }
+        for pass in 1...3 where !order.isEmpty {
+            var failed: [(EAZipEntry, Error)] = []
+            let width = pass == 1 ? parallel : 1
+            try await withThrowingTaskGroup(of: (EAZipEntry, Swift.Result<UInt64, Error>).self) { group in
+                var next = 0
+                func add() {
+                    guard next < order.count else { return }
+                    let entry = order[next]; next += 1
+                    group.addTask { [client] in
+                        try Task.checkCancellation()
+                        do {
+                            let bytes = try await Self.fetch(entry, archive: archive, client: client, folder: folder, meter: meter)
+                            journal.record(entry)
+                            return (entry, .success(bytes))
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            if Task.isCancelled { throw CancellationError() }
+                            return (entry, .failure(error))
+                        }
+                    }
+                }
+                for _ in 0..<width { add() }
+                while let (entry, result) = try await group.next() {
+                    switch result {
+                    case .success(let bytes): fetched += bytes; written += 1
+                    case .failure(let error): failed.append((entry, error))
+                    }
+                    add()
                 }
             }
-            for _ in 0..<parallel { add() }
-            while let bytes = try await group.next() {
-                fetched += bytes; written += 1
-                add()
+            order = failed.map(\.0)
+            if !failed.isEmpty {
+                EALog.event("[ea-download] pass=\(pass) failed-files=\(failed.count) first=\((failed[0].1 as? EADownloadError)?.errorDescription?.prefix(60) ?? "\(type(of: failed[0].1))")")
+                if pass == 3 { throw failed[0].1 }
+                try await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
         meter.set { $0.phase = .finishing }
@@ -426,32 +449,42 @@ final class EADownloader: @unchecked Sendable {
                 let end = min(archive.fileSize, start + guess + entry.compressedSize)
                 var header = Data()
                 var headerLength: Int?
+                var headerDone = false
+                var firstChunk = 0
                 var remaining = entry.compressedSize
                 var fetched: UInt64 = 0
                 for try await chunk in client.stream(archive.url, range: start..<end) {
-                    var data = chunk
-                    if headerLength == nil {
+                    var data = Data(chunk)
+                    if !headerDone {
+                        // The header can arrive in pieces (a new connection's first record is
+                        // often tiny): keep collecting until the whole header is here. Build 58
+                        // took the piece after a short first chunk as data, and the file's
+                        // checksum failed every time.
+                        if firstChunk == 0 { firstChunk = data.count }
                         header.append(data)
                         guard header.count >= 30 else { continue }
-                        guard let length = EAZipDirectory.localHeaderLength(header) else { throw EADownloadError.file("local header") }
-                        headerLength = length
-                        guard header.count >= length else { continue }
-                        data = header.subdata(in: length..<header.count)
+                        if headerLength == nil {
+                            guard let length = EAZipDirectory.localHeaderLength(header) else { throw EADownloadError.file("local header") }
+                            headerLength = length
+                        }
+                        guard let length = headerLength, header.count >= length else { continue }
+                        data = Data(header[length...])
                         header = Data()
+                        headerDone = true
                     }
-                    if Int64(data.count) > remaining { data = data.subdata(in: 0..<Int(remaining)) }
+                    if Int64(data.count) > remaining { data = Data(data.prefix(Int(remaining))) }
                     remaining -= Int64(data.count)
                     fetched += UInt64(data.count)
                     meter.add(UInt64(data.count))
                     try inflater.write(data, last: remaining == 0)
                     if remaining == 0 { break }
                 }
-                if remaining > 0, let headerLength {
+                if remaining > 0, headerDone, let headerLength {
                     // The header was longer than guessed: the rest of the data in a second range.
                     let dataStart = start + Int64(headerLength) + (entry.compressedSize - remaining)
-                    for try await data in client.stream(archive.url, range: dataStart..<dataStart + remaining) {
-                        var data = data
-                        if Int64(data.count) > remaining { data = data.subdata(in: 0..<Int(remaining)) }
+                    for try await chunk in client.stream(archive.url, range: dataStart..<dataStart + remaining) {
+                        var data = Data(chunk)
+                        if Int64(data.count) > remaining { data = Data(data.prefix(Int(remaining))) }
                         remaining -= Int64(data.count)
                         fetched += UInt64(data.count)
                         meter.add(UInt64(data.count))
@@ -462,6 +495,9 @@ final class EADownloader: @unchecked Sendable {
                 guard remaining == 0 else { throw EADownloadError.file("short read") }
                 try inflater.write(Data(), last: true)
                 guard inflater.written == entry.uncompressedSize, inflater.crc.checksum == entry.crc32 else {
+                    EALog.event("[ea-download] checksum name=\(parts.last!) method=\(entry.method) size=\(inflater.written)/\(entry.uncompressedSize)"
+                                + " crc=\(String(inflater.crc.checksum, radix: 16))/\(String(entry.crc32, radix: 16)) header=\(headerLength ?? -1)/\(guess)"
+                                + " first-chunk=\(firstChunk) compressed=\(entry.compressedSize)")
                     throw EADownloadError.file("checksum " + parts.last!)
                 }
                 try handle.close(); closed = true
