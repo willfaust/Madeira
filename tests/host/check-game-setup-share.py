@@ -38,6 +38,8 @@ info = plistlib.loads((app / 'Info.plist').read_bytes())
 
 check('Button("Share Setup"' in library and 'Button("Apply Shared Setup"' in library,
       'Game details has Share Setup and Apply Shared Setup')
+check('DisclosureGroup("Config lines")' in source and 'setup.iniPlaces' in source,
+      'the apply sheet lists the config lines and settings file places')
 check('GameSetupShareSheet(entry: entry)' in library and 'pending.setup.apply(to: &entry' in library,
       'the buttons open the share sheet and apply into the open entry')
 check('.modifier(GameSetupInboxPresenter())' in library, 'the library asks which game gets an opened setup')
@@ -90,6 +92,9 @@ print("text=\(fromText.title)|\(fromText.iniFiles.count)|\(fromText.entry.count 
 let link = "madeira://setup?d=" + (try! setup.text()).dropFirst(GameSetup.textPrefix.count)
 print("link=\((try? GameSetup(text: link))?.title ?? "nil")")
 print("contents=" + setup.contents.joined(separator: ","))
+let places = GameSetup(title: "T", entry: [:], config: "", switches: [:],
+                       iniFiles: [.init(path: "game/Data/x.ini", data: Data()), .init(path: "drive/users/a/b.ini", data: Data())])
+print("shown=" + setup.configLines.joined(separator: ";") + "|" + places.iniPlaces.joined(separator: ";"))
 print("file=" + GameSetup(title: "A/B: C?", entry: [:], config: "", switches: [:], iniFiles: []).fileName)
 print("match=\(setup.match(steamAppID: 22380, program: nil))\(setup.match(steamAppID: nil, program: "FalloutNV.exe"))\(setup.match(steamAppID: 1, program: "x.exe"))")
 var bad: [String] = []
@@ -134,6 +139,8 @@ else:
         check(out['link'] == 'Fallout: New Vegas', 'a madeira://setup link reads too')
         check(out['contents'] == '4 game settings,2 config lines,2 launch switches,touch controls and controller,1 settings file',
               'Apply Shared Setup lists what the setup holds')
+        check(out['shown'] == 'fence-chain = 6;env.A = 1|Game folder/Data/x.ini;C:\\users\\a\\b.ini',
+              'the apply sheet shows each config line and where each settings file goes')
         check(out['file'] == 'A-B- C-.madeirasetup', 'the file name has no characters file systems refuse')
         check(out['match'] == '220', 'a setup knows its game by Steam app or program')
         check(out['bad'] == 'refused,refused,refused,newer', 'other text is refused; a newer format says to update')

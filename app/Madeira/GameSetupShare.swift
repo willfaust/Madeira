@@ -232,15 +232,28 @@ struct GameSetup {
         var out: [String] = []
         let fields = entry.keys.filter { !Self.controlKeys.contains($0) && !Self.sameGameKeys.contains($0) }.count
         if fields > 0 { out.append(fields == 1 ? "1 game setting" : "\(fields) game settings") }
-        let lines = config.split(separator: "\n").filter {
-            let t = $0.trimmingCharacters(in: .whitespaces); return !t.isEmpty && !t.hasPrefix("#")
-        }.count
+        let lines = configLines.count
         if lines > 0 { out.append(lines == 1 ? "1 config line" : "\(lines) config lines") }
         let on = switches.filter { ($0.value as? Bool) == true || (($0.value as? String).map { !$0.isEmpty } ?? false) }.count
         if on > 0 { out.append(on == 1 ? "1 launch switch" : "\(on) launch switches") }
         if hasControls { out.append("touch controls and controller") }
         if !iniFiles.isEmpty { out.append(iniFiles.count == 1 ? "1 settings file" : "\(iniFiles.count) settings files") }
         return out
+    }
+
+    /// The config lines a setup writes, comments left out, for the apply sheet to show.
+    var configLines: [String] {
+        config.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+    }
+
+    /// Where each settings file goes, as the player reads it: in the game's folder or on C:.
+    var iniPlaces: [String] {
+        iniFiles.map { file in
+            if file.path.hasPrefix("game/") { return "Game folder/" + file.path.dropFirst(5) }
+            if file.path.hasPrefix("drive/") { return "C:\\" + file.path.dropFirst(6).replacingOccurrences(of: "/", with: "\\") }
+            return file.path
+        }
     }
 
     var hasControls: Bool { entry.keys.contains { Self.controlKeys.contains($0) && $0 != "touchControls" } }
@@ -462,6 +475,28 @@ struct GameSetupApplySheet: View {
                     if otherGame {
                         Text("This setup was made for \(setup.title). It may not suit \(gameTitle).")
                             .foregroundStyle(.orange)
+                    }
+                }
+                if !setup.configLines.isEmpty || !setup.iniFiles.isEmpty {
+                    Section {
+                        if !setup.configLines.isEmpty {
+                            DisclosureGroup("Config lines") {
+                                ForEach(Array(setup.configLines.enumerated()), id: \.offset) {
+                                    Text($0.element).font(.caption.monospaced()).textSelection(.enabled)
+                                }
+                            }
+                        }
+                        if !setup.iniFiles.isEmpty {
+                            DisclosureGroup("Settings files") {
+                                ForEach(Array(setup.iniPlaces.enumerated()), id: \.offset) {
+                                    Text($0.element).font(.caption.monospaced()).textSelection(.enabled)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("What it changes")
+                    } footer: {
+                        Text("Check these before applying a setup from someone you don't know.")
                     }
                 }
                 Section {

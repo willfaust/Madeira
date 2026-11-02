@@ -260,6 +260,7 @@ final class AchievementWatcher {
     private let queue = DispatchQueue(label: "madeira.achievements", qos: .utility)
     private var startedAt = Date()
     private var firstScanDone = false
+    private var wasRunning = false
 
     func start() {
         guard timer == nil else { return }
@@ -267,6 +268,13 @@ final class AchievementWatcher {
         queue.async { self.scan(announce: false) }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self else { return }
+            // Only while a game runs and Madeira is on screen, plus one scan after the game
+            // stops (Steam writes the stats file on exit). Unlocks made in the background are
+            // announced on return.
+            guard MainActor.assumeIsolated({ UIApplication.shared.applicationState == .active }) else { return }
+            let running = wine_process_is_running() != 0
+            defer { self.wasRunning = running }
+            guard running || self.wasRunning else { return }
             self.queue.async { self.scan(announce: true) }
         }
     }
