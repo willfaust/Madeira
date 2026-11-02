@@ -10718,6 +10718,118 @@ static void ios_fault_operand_trace( ucontext_t *context, const void *fault_addr
     }
 }
 
+/* ml1291: where a fatal guest fault came from, for code we cannot look at.
+ *
+ * Grounded's browser GPU process (UnrealCEFSubProcess.exe --type=gpu-process) died
+ * in libcef.dll on `cmp [r9], dil` with r9 = 0x30, right after ANGLE and Media
+ * Foundation loaded, with no Wine call logged in between. The game's own libcef.dll
+ * is ~120 MB, so the log has to carry what is needed to read the faulting function
+ * and its callers: for the exact guest RIP and every return address found on the
+ * guest stack, the image (an "MZ"/"PE" header at a 64 KB boundary below it, the
+ * way Wine maps images), the RVA, and the code bytes around it. A return address
+ * only counts when the bytes before it are a CALL (E8 rel32, or FF /2 in its 2, 3,
+ * 6 and 7 byte forms), so stale stack data stays out. Every read goes through Mach,
+ * as the rest of this path does. The first 4 faults that get here are described;
+ * MADEIRA_GUEST_CTX=0 turns it off. */
+static int ios_guest_ctx_read( uint64_t va, void *buf, size_t len )
+{
+    mach_vm_size_t got = 0;
+    if (va < 0x10000) return 0;
+    return mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)va, len,
+                                   (mach_vm_address_t)buf, &got ) == KERN_SUCCESS && got == len;
+}
+
+/* The image containing va (Wine maps images at 64 KB boundaries), or 0. */
+static uint64_t ios_guest_ctx_image( uint64_t va, uint32_t *size )
+{
+    uint64_t a;
+    int n;
+
+    for (a = va & ~0xffffull, n = 0; n < 4096 && a >= 0x10000; a -= 0x10000, n++)
+    {
+        uint8_t mz[2];
+        uint32_t lfanew = 0, sig = 0, soi = 0;
+
+        if (!ios_guest_ctx_read( a, mz, 2 ) || mz[0] != 'M' || mz[1] != 'Z') continue;
+        if (!ios_guest_ctx_read( a + 0x3c, &lfanew, 4 ) || lfanew > 0x1000 - 0x100) continue;
+        if (!ios_guest_ctx_read( a + lfanew, &sig, 4 ) || sig != 0x00004550) continue;
+        if (!ios_guest_ctx_read( a + lfanew + 0x50, &soi, 4 )) continue;   /* SizeOfImage */
+        if (va >= a + soi) return 0;     /* the nearest image below does not cover va */
+        *size = soi;
+        return a;
+    }
+    return 0;
+}
+
+static void ios_guest_ctx_hex( const char *what, uint64_t base, uint64_t from, int len )
+{
+    uint8_t b[32];
+    int off, k;
+
+    for (off = 0; off < len; off += 32)
+    {
+        char hex[32 * 3 + 1];
+        if (!ios_guest_ctx_read( from + off, b, sizeof(b) )) { ERR("  [guest-ctx] %s rva %#llx: unreadable\n", what,
+                                                                  (unsigned long long)(from + off - base) ); break; }
+        for (k = 0; k < 32; k++) snprintf( hex + k * 3, 4, "%02x ", b[k] );
+        ERR("  [guest-ctx] %s rva %#llx: %s\n", what, (unsigned long long)(from + off - base), hex);
+    }
+}
+
+static int ios_guest_ctx_is_call( uint64_t ret )
+{
+    uint8_t c[7];
+
+    if (!ios_guest_ctx_read( ret - 7, c, sizeof(c) )) return 0;
+    if (c[2] == 0xe8) return 1;                                   /* E8 rel32 */
+    if (c[5] == 0xff && (c[6] & 0x38) == 0x10 && (c[6] >> 6) == 3) return 1;   /* FF /2 reg */
+    if (c[4] == 0xff && (c[5] & 0x38) == 0x10 && (c[5] >> 6) == 1) return 1;   /* FF /2 [r+d8] */
+    if (c[1] == 0xff && (c[2] & 0x38) == 0x10 && ((c[2] >> 6) == 2 || (c[2] & 0xc7) == 0x05)) return 1;   /* d32 / rip */
+    if (c[0] == 0xff && (c[1] & 0x38) == 0x10 && (c[1] & 0xc7) == 0x84) return 1;   /* FF /2 [SIB+d32] */
+    if (c[3] == 0xff && (c[4] & 0x38) == 0x10 && (c[4] & 0xc7) == 0x44) return 1;   /* FF /2 [SIB+d8] */
+    return 0;
+}
+
+/* rsp is the live SRA RSP (x23); gregs_rsp, the saved one, is used when it cannot be read. */
+static void ios_guest_fault_context( uint64_t rip, uint64_t rsp, uint64_t gregs_rsp )
+{
+    static int count = -1;
+    uint64_t stack[256], base;
+    uint32_t size = 0;
+    int i, found = 0;
+
+    if (count < 0)
+    {
+        const char *e = getenv( "MADEIRA_GUEST_CTX" );
+        count = (e && *e == '0') ? 4 : 0;
+    }
+    if (count >= 4) return;
+    count++;
+
+    base = ios_guest_ctx_image( rip, &size );
+    ERR("  [guest-ctx] ml1291 rip=%p image=%p size=%#x rva=%#llx rsp=%p\n", (void *)rip, (void *)base, size,
+        base ? (unsigned long long)(rip - base) : 0ull, (void *)rsp);
+    if (base) ios_guest_ctx_hex( "rip", base, rip - 0x180, 0x200 );
+
+    if (!ios_guest_ctx_read( rsp, stack, sizeof(stack) ))
+    {
+        if (gregs_rsp == rsp || !ios_guest_ctx_read( gregs_rsp, stack, sizeof(stack) )) return;
+        ERR("  [guest-ctx] live rsp unreadable, using saved rsp=%p\n", (void *)gregs_rsp);
+    }
+    for (i = 0; i < 256 && found < 16; i++)
+    {
+        uint64_t q = stack[i], b;
+        uint32_t sz = 0;
+
+        if (q < 0x10000 || q >= 0x8000000000ull) continue;
+        if (!ios_guest_ctx_is_call( q ) || !(b = ios_guest_ctx_image( q, &sz ))) continue;
+        found++;
+        ERR("  [guest-ctx] ret #%d [rsp+%#x]=%p image=%p rva=%#llx\n", found, i * 8, (void *)q, (void *)b,
+            (unsigned long long)(q - b));
+        ios_guest_ctx_hex( "ret", b, q - 0x60, 0x80 );
+    }
+}
+
 static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
 {
     EXCEPTION_RECORD rec = { 0 };
@@ -11309,6 +11421,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                                     (void*)bb, (void*)xrip, xb[0],xb[1],xb[2],xb[3],xb[4],xb[5],xb[6],xb[7],xb[8],xb[9],xb[10],xb[11],xb[12],xb[13],xb[14],xb[15]);
                             else
                                 ERR("  [guest-exact] ml885 block=%p rip=%p (bytes unreadable)\n", (void*)bb, (void*)xrip);
+                            ios_guest_fault_context( xrip, REGn_sig(23, context), cs[5] );   /* ml1291 */
                         }
                         else ERR("  [guest-exact] ml885 block=%p unresolved: %s\n", (void*)bb, why);
                     }
