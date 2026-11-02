@@ -378,10 +378,26 @@ final class EAAPI: @unchecked Sendable {
         let (data, response) = try await http.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            EALog.event("[ea-api] \(method) failed reason=http-\(status)")
+            EALog.event("[ea-api] \(method) failed reason=http-\(status)\(Self.errorNote(data))")
             throw EAAPIError.http(status)
         }
         return data
+    }
+
+    /// What an error answer says, for the log: the GraphQL `errors[].message` strings or
+    /// the OAuth `error`/`error_description`, never the body itself (nothing else of a
+    /// refused answer is needed, and a token never appears in these fields).
+    static func errorNote(_ data: Data) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "" }
+        var messages: [String] = []
+        if let errors = json["errors"] as? [[String: Any]] {
+            messages = errors.prefix(3).compactMap { $0["message"] as? String }
+        } else {
+            messages = ["error", "error_description"].compactMap { json[$0] as? String }
+        }
+        guard !messages.isEmpty else { return "" }
+        let text = messages.joined(separator: " | ").replacingOccurrences(of: "\n", with: " ")
+        return " message=\"\(text.prefix(300))\""
     }
 
     private func object(_ request: URLRequest, method: String) async throws -> [String: Any] {
@@ -493,15 +509,20 @@ final class EAAPI: @unchecked Sendable {
         // One offer per game: the first (EA lists an offer per edition).
         var seen = Set<String>()
         games = games.filter { seen.insert($0.slug.isEmpty ? $0.id : $0.slug).inserted }
-        try await fillCatalog(&games)
+        await fillCatalog(&games)
         return games
     }
 
-    /// The legacy catalog's content id, install folder and program for each offer.
-    private func fillCatalog(_ games: inout [EAOwnedGame]) async throws {
+    /// The legacy catalog's content id, install folder and program for each offer. The
+    /// locale is EA's `Locale` enum, passed as a variable ("en", as the EA app's own
+    /// queries pass it); build 48 showed a quoted "en_US" literal refused with HTTP 400.
+    /// A refused slice is logged and skipped: the library still lists its games; an
+    /// install takes the content id from the build's manifest instead, and Play says
+    /// when a licence is needed and no content id is known.
+    private func fillCatalog(_ games: inout [EAOwnedGame]) async {
         let query = """
-        query MadeiraCatalogDefs($offerIds: [String!]!) {
-          legacyOffers(offerIds: $offerIds, locale: "en_US") {
+        query MadeiraCatalogDefs($offerIds: [String!]!, $locale: Locale) {
+          legacyOffers(offerIds: $offerIds, locale: $locale) {
             id contentId displayName displayType multiplayerId executePathOverride installationDirectory installCheckOverride
             isDownloadable dipManifestRelativePath
           }
@@ -509,7 +530,14 @@ final class EAAPI: @unchecked Sendable {
         """
         for start in stride(from: 0, to: games.count, by: 25) {
             let slice = games[start..<min(start + 25, games.count)]
-            let data = try await graphQL("MadeiraCatalogDefs", query: query, variables: ["offerIds": slice.map(\.id)], method: "catalog-defs")
+            let data: [String: Any]
+            do {
+                data = try await graphQL("MadeiraCatalogDefs", query: query,
+                                         variables: ["offerIds": slice.map(\.id), "locale": "en"], method: "catalog-defs")
+            } catch {
+                EALog.event("[ea-api] catalog-defs skipped offers=\(slice.count) reason=\((error as? EAAPIError)?.reason ?? "network")")
+                continue
+            }
             guard let offers = data["legacyOffers"] as? [[String: Any]] else { continue }
             for offer in offers {
                 guard let id = offer["id"] as? String, let index = games.firstIndex(where: { $0.id == id }) else { continue }
@@ -526,14 +554,14 @@ final class EAAPI: @unchecked Sendable {
     func images(slug: String) async -> (cover: URL?, wide: URL?) {
         guard !slug.isEmpty else { return (nil, nil) }
         let query = """
-        query MadeiraGameImages($gameSlug: String!) {
-          game(slug: $gameSlug, locale: "en") {
+        query MadeiraGameImages($gameSlug: String!, $locale: Locale!) {
+          game(slug: $gameSlug, locale: $locale) {
             packArt { aspect9x16Image { path } aspect2x1Image { path } }
             keyArt { aspect16x9Image { path } largestImage { path } }
           }
         }
         """
-        guard let data = try? await graphQL("MadeiraGameImages", query: query, variables: ["gameSlug": slug], method: "game-images"),
+        guard let data = try? await graphQL("MadeiraGameImages", query: query, variables: ["gameSlug": slug, "locale": "en"], method: "game-images"),
               let game = data["game"] as? [String: Any] else { return (nil, nil) }
         func path(_ node: Any?, _ keys: String...) -> URL? {
             var current = node as? [String: Any]
