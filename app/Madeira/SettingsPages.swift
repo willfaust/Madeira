@@ -173,7 +173,11 @@ struct SettingsPageView: View {
         case .advanced:
             Section {
                 Toggle("Extended logging", isOn: $input.diagnostics)
-            } header: { Text("Diagnostics") }
+                // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
+                ClaudeHelpButton(entry: nil)
+            } header: { Text("Diagnostics") } footer: {
+                Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
+            }
             Section {
                 Button("All settings") { sheet = .allSettings }
             } footer: {

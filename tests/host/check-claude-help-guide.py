@@ -82,6 +82,8 @@ check(project.count('/* ClaudeHelp.swift in Sources */') == 2 and project.count(
 check('ClaudeHelp.install()' in main, 'the guide is copied into Documents when the app starts')
 check(library.count('ClaudeHelpButton(entry: entry)') == 1 and library.count('ClaudeHelpButton(entry: nil)') == 1,
       'Game details (with the game) and Settings > Diagnostics (without one) offer Get Help from Claude')
+pages = (app / 'SettingsPages.swift').read_text(encoding='utf-8')
+check(pages.count('ClaudeHelpButton(entry: nil)') == 1, 'the Advanced settings page offers Get Help from Claude under Diagnostics')
 check('GameProfile(windowsPath: entry.windowsPath).text' in helper and 'LibraryPrefs.sharedSwitches(entry.windowsPath)' in helper,
       "the game's file holds its own config and its Game details switches")
 for log in ('LogSummary.fileName', 'LogSummary.gameLogName', '"madeira-log.txt"', 'MadeiraConfig.fileName'):

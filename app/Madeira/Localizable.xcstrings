@@ -8195,6 +8195,74 @@
         }
       }
     },
+    "Get Help from Claude": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hilfe von Claude holen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pedir ayuda a Claude"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude에게 도움 받기"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pedir ajuda ao Claude"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Помощь от Claude"
+          }
+        }
+      }
+    },
+    "Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hilfe von Claude holen teilt eine Anleitung zu bekannten Lösungen, die letzten Protokolle und madeira.cfg. Für die Konfiguration eines Spiels nutze die Taste auf dessen Spieldetails-Seite."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pedir ayuda a Claude comparte una guía de soluciones conocidas, los últimos registros y madeira.cfg. Para incluir también la configuración de un juego, usa el botón de su página de detalles."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude에게 도움 받기는 알려진 해결 방법 안내, 최근 로그와 madeira.cfg를 공유합니다. 게임 하나의 설정도 함께 보내려면 그 게임의 게임 세부 정보 페이지에 있는 버튼을 사용하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pedir ajuda ao Claude compartilha um guia de correções conhecidas, os últimos registros e o madeira.cfg. Para incluir também a configuração de um jogo, use o botão na página de detalhes dele."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "«Помощь от Claude» отправляет руководство по известным исправлениям, последние журналы и madeira.cfg. Чтобы добавить настройки одной игры, нажмите эту кнопку на странице сведений об игре."
+          }
+        }
+      }
+    },
     "Get LocalDevVPN": {
       "localizations": {
         "de": {
