@@ -589,6 +589,16 @@ void ios_child_slot_bind_peb( void *peb )
     pthread_mutex_unlock( &ios_child_lock );
 }
 
+/* The Windows image path of the child whose boot thread this is, NULL for a child without a slot. The slot is this
+ * thread's until its boot thread returns, so no lock. Read by virtual_ios.c: a guest-window placeholder held for the
+ * game's folder (MADEIRA_WOW_HOLD_FOR) goes only to a program from that folder. */
+const char *ios_child_image_path( void )
+{
+    int slot = ios_child_slot_current;
+    if (slot < 0 || slot >= IOS_CHILD_SLOTS || !ios_child_slots[slot].used) return NULL;
+    return ios_child_slots[slot].path;
+}
+
 /* The child process with this PEB ended (process_exit_wrapper). Marks the slot that holds it, whichever thread
  * ended it; the slot itself is released when the child's boot thread returns, if it ever does. */
 void ios_child_slot_exited( void *peb )

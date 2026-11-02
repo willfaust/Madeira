@@ -3600,8 +3600,17 @@ struct ContentView: View {
             if DockGameSession.has32BitProgram(in: gameFolder, machine: DockInstallers.machine) {
                 setenv("MADEIRA_WOW_HOLD_WINDOWS", "1", 1)
                 logStore.log("[dock-wow] the game's folder holds a 32-bit program: one guest-window placeholder is held from session start (MADEIRA_WOW_HOLD_WINDOWS=1)")
+                // The held window goes only to the game's own 32-bit programs: Valve's 32-bit client service,
+                // demand-started seconds into the session once a CEG game installed it, took it and the game
+                // found no slot (2026-11-02). A program from elsewhere still gets any other free slot.
+                if MadeiraConfig.flag("MADEIRA_WOW_HOLD_FOR_GAME") {   // 0: any 32-bit program may take the held window, as before 2026-11-02
+                    setenv("MADEIRA_WOW_HOLD_FOR", game.windowsInstallPath + "\\", 1)
+                } else {
+                    unsetenv("MADEIRA_WOW_HOLD_FOR")
+                }
             } else {
                 unsetenv("MADEIRA_WOW_HOLD_WINDOWS")
+                unsetenv("MADEIRA_WOW_HOLD_FOR")
             }
             // A 64-bit title beside its 32-bit helpers: its memory takes donor RAM first even while
             // a 32-bit program is in the session (virtual_ios.c ios_swap_x64_policy, swap-x64 unset).
