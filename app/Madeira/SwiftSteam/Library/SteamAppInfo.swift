@@ -28,6 +28,8 @@ struct SteamAppInfo {
     var libraryHero: String?
     var headerImage: String?
     var parentID: UInt32?
+    /// The app has a Steam Workshop (`common.workshop_visible`).
+    var workshopVisible = false
     /// Steam's launch configuration (`config.launch`), in Steam's order.
     /// SteamDirectStart and Madeira Dock select an installed Windows entry;
     /// Dock passes its original key to Valve's client.
@@ -40,6 +42,38 @@ struct SteamAppInfo {
     /// only uses the Steam Cloud API (its files live in the user's `remote` folder).
     var saveFiles: [SaveFile] = []
     var rootOverrides: [RootOverride] = []
+    /// The DLC the app lists (`extended.listofdlc`), in Steam's order. A DLC's
+    /// files are the app's depots that name it (`DepotInfo.dlcAppID`).
+    var dlcList: [UInt32] = []
+    /// The DLC apps an install leaves out although the account owns them: the
+    /// ones the player turned off (SteamDLC). Empty by default.
+    var dlcOff: Set<UInt32> = []
+    /// Steam's branches of the app (`depots.branches`): "public" and its betas,
+    /// by name. A password-protected one (`pwdrequired`) needs its beta code
+    /// before Steam names its manifests (SteamLibraryFetcher.applyBranch).
+    var branches: [Branch] = []
+    /// The branch an install takes (SteamBranch, Game details › Steam ›
+    /// Version): "public" unless the player picked a beta.
+    var branch = SteamAppInfo.publicBranch
+
+    static let publicBranch = "public"
+
+    /// One `depots.branches` entry. Untrusted text, bounded when parsed.
+    struct Branch: Codable, Hashable, Sendable {
+        var name: String
+        var buildID: UInt32
+        var description: String
+        var passwordRequired: Bool
+        /// `timeupdated`, Unix seconds; 0 when PICS states none.
+        var updated: Int
+    }
+
+    /// The build the chosen branch publishes, as the install record states it.
+    /// The public build for "public" and for a branch PICS does not list.
+    var branchBuildID: UInt32 {
+        guard branch != Self.publicBranch, let entry = branches.first(where: { $0.name == branch }), entry.buildID > 0 else { return buildID }
+        return entry.buildID
+    }
 
     /// One `ufs.savefiles` entry: `root` names a folder ("WinAppDataLocalLow",
     /// "GameInstall", ...), `path` a subfolder of it, `pattern` a wildcard.
@@ -125,6 +159,18 @@ struct SteamAppInfo {
         var publicManifestID: UInt64? {
             manifests["public"]
         }
+
+        /// The manifest an install of `branch` takes: the branch's own, else the
+        /// public one, as Valve's client keeps a depot a beta does not change.
+        func manifestID(_ branch: String) -> UInt64? {
+            manifests[branch] ?? publicManifestID
+        }
+
+        /// Whether `branch` is a beta with its own manifest of this depot: the
+        /// manifest request code then names the branch.
+        func hasOwnManifest(_ branch: String) -> Bool {
+            branch != SteamAppInfo.publicBranch && manifests[branch] != nil
+        }
     }
 
     // MARK: - Computed Properties
@@ -174,17 +220,23 @@ struct SteamAppInfo {
 
     /// The depots a Windows install takes: matching OS, architecture-neutral
     /// or matching osarch, common or requested-language content (by default
-    /// `depotLanguage`), no low-violence alternates, no DLC or shared
-    /// redistributables, and only depots that publish a public manifest. A
-    /// 64-bit selection falls back to 32-bit depots when the app only
+    /// `depotLanguage`), no low-violence alternates, no shared
+    /// redistributables, and only depots that publish a manifest for the chosen
+    /// branch (`branch`, else the public one). A
+    /// DLC depot (dlcappid) is taken only when the account's licenses include
+    /// it (`ownedDLC`, depot IDs), as Valve's client installs owned DLC with
+    /// the game: New Vegas's Courier's Stash packs are DLC depots of the game.
+    /// A DLC the player turned off (`dlcOff`, SteamDLC) is left out.
+    /// A 64-bit selection falls back to 32-bit depots when the app only
     /// publishes those.
     func installDepots(os: String = "windows", arch: String = "64",
-                       language: String? = nil) -> [DepotInfo] {
+                       language: String? = nil, ownedDLC: Set<UInt32> = []) -> [DepotInfo] {
         let language = language ?? depotLanguage
         func select(_ arch: String) -> [DepotInfo] {
             depots.filter { d in
-                d.supports(os: os) && d.dlcAppID == nil && !d.isSharedInstall &&
-                d.publicManifestID != nil && !d.lowViolence &&
+                d.supports(os: os) && !d.isSharedInstall &&
+                (d.dlcAppID.map { ownedDLC.contains(d.depotID) && !dlcOff.contains($0) } ?? true) &&
+                d.manifestID(branch) != nil && !d.lowViolence &&
                 (d.osarch.isEmpty || d.osarch == arch) &&
                 (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
             }.sorted { $0.depotID < $1.depotID }
@@ -197,12 +249,28 @@ struct SteamAppInfo {
         return preferred
     }
 
+    /// The `sharedinstall` redistributables (DirectX, VC++ runtimes) another app
+    /// owns, usually Steamworks Common Redistributables (228980), that a Windows
+    /// install of this app names: matching OS and language, no low-violence
+    /// alternates. Valve's client records them under the game's SharedDepots and
+    /// refuses to start the game ("required app 228980 not ready") until the
+    /// owner app is installed with them, so they are downloaded into the
+    /// owner's folder and recorded there.
+    func redistDepots(os: String = "windows", language: String? = nil) -> [DepotInfo] {
+        let language = language ?? depotLanguage
+        return depots.filter { d in
+            d.isSharedInstall && d.fromApp != nil && d.fromApp != appID && d.dlcAppID == nil &&
+                d.supports(os: os) && !d.lowViolence &&
+                (d.language.isEmpty || d.language.caseInsensitiveCompare(language) == .orderedSame)
+        }.sorted { $0.depotID < $1.depotID }
+    }
+
     /// Every depot with why it was or was not selected, for the install log
     /// ("sel", or the first failing rule). IDs and flags only.
     func depotSelectionSummary(os: String = "windows", arch: String = "64",
-                               language: String? = nil, limit: Int = 24) -> String {
+                               language: String? = nil, ownedDLC: Set<UInt32> = [], limit: Int = 24) -> String {
         let language = language ?? depotLanguage
-        let chosen = Set(installDepots(os: os, arch: arch, language: language).map(\.depotID))
+        let chosen = Set(installDepots(os: os, arch: arch, language: language, ownedDLC: ownedDLC).map(\.depotID))
         return depots.sorted { $0.depotID < $1.depotID }.prefix(limit).map { d in
             let why = selectionRule(d, chosen: chosen, os: os, language: language)
             let from = d.fromApp.map { "<\($0)" } ?? ""
@@ -216,7 +284,7 @@ struct SteamAppInfo {
         if !d.supports(os: os) { return "os" }
         if d.dlcAppID != nil { return "dlc" }
         if d.isSharedInstall { return "shared" }
-        if d.publicManifestID == nil { return "nomanifest" }
+        if d.manifestID(branch) == nil { return "nomanifest" }
         if d.lowViolence { return "lowviolence" }
         if !d.language.isEmpty && d.language.caseInsensitiveCompare(language) != .orderedSame { return "lang" }
         return "arch"
@@ -225,6 +293,27 @@ struct SteamAppInfo {
     /// Owned apps that can be installed for Windows at all.
     var installableOnWindows: Bool {
         supportsWindows && type.isPlayable && !installDepots().isEmpty
+    }
+
+    /// The depots one DLC adds to a Windows install of this app when owned: the
+    /// depots that name it and pass the same rules as the app's own (OS,
+    /// architecture, language). Empty for a DLC that only unlocks content.
+    func dlcDepots(_ dlcID: UInt32, os: String = "windows", arch: String = "64",
+                   language: String? = nil) -> [DepotInfo] {
+        let own = Set(depots.filter { $0.dlcAppID == dlcID }.map(\.depotID))
+        return installDepots(os: os, arch: arch, language: language, ownedDLC: own).filter { $0.dlcAppID == dlcID }
+    }
+
+    /// The DLC this app knows: the ones it lists and the ones its depots name,
+    /// without itself; at most 1024.
+    var knownDLC: [UInt32] {
+        var seen = Set<UInt32>(), result: [UInt32] = []
+        for id in dlcList + depots.sorted(by: { $0.depotID < $1.depotID }).compactMap(\.dlcAppID)
+        where id != appID && seen.insert(id).inserted {
+            result.append(id)
+            if result.count == 1024 { break }
+        }
+        return result
     }
 
     /// Approximate compressed download size for a platform. Per depot it
@@ -282,6 +371,7 @@ struct SteamAppInfo {
             info.type = AppType(pics: common["type"] as? String ?? "")
             info.oslist = common["oslist"] as? String ?? ""
             info.freeToDownload = (common["freetodownload"] as? String) == "1"
+            info.workshopVisible = (common["workshop_visible"] as? String) == "1"
             // Artwork names, English first, else any language.
             func asset(_ node: Any?) -> String? {
                 guard let languages = node as? [String: Any] else { return nil }
@@ -309,6 +399,13 @@ struct SteamAppInfo {
             }
         }
 
+        // Extended section: the DLC the app lists, "id,id,...". Untrusted text, bounded.
+        if let extended = appInfo["extended"] as? [String: Any],
+           let list = extended["listofdlc"] as? String, list.utf8.count <= 64 << 10 {
+            info.dlcList = list.split(separator: ",").prefix(1024)
+                .compactMap { UInt32($0.trimmingCharacters(in: .whitespaces)) }.filter { $0 != 0 && $0 != appID }
+        }
+
         // Config section
         if let config = appInfo["config"] as? [String: Any] {
             info.installDir = config["installdir"] as? String ?? ""
@@ -319,60 +416,7 @@ struct SteamAppInfo {
 
         // Depots section
         if let depots = appInfo["depots"] as? [String: Any] {
-            for (key, depotData) in depots {
-                guard let depotID = UInt32(key),
-                      let depot = depotData as? [String: Any] else { continue }
-
-                var di = DepotInfo(depotID: depotID)
-                di.name = depot["name"] as? String ?? ""
-                if let config = depot["config"] as? [String: Any] {
-                    di.oslist = config["oslist"] as? String ?? ""
-                    di.osarch = config["osarch"] as? String ?? ""
-                    di.language = config["language"] as? String ?? ""
-                    di.lowViolence = (config["lowviolence"] as? String) == "1"
-                }
-                if let maxSizeStr = depot["maxsize"] as? String, let maxSize = UInt64(maxSizeStr) {
-                    di.maxSize = maxSize
-                } else if let maxSize = depot["maxsize"] as? UInt32 {
-                    di.maxSize = UInt64(maxSize)
-                }
-                // Text VDF leaves every leaf as a String, so that is checked
-                // first; the UInt32 branch serves any binary-VDF caller.
-                if let dlcStr = depot["dlcappid"] as? String, let dlc = UInt32(dlcStr) {
-                    di.dlcAppID = dlc
-                } else if let dlc = depot["dlcappid"] as? UInt32 {
-                    di.dlcAppID = dlc
-                }
-                di.isSharedInstall = (depot["sharedinstall"] as? String) == "1"
-                if let from = (depot["depotfromapp"] as? String).flatMap(UInt32.init), from != appID {
-                    di.fromApp = from
-                }
-                if let manifests = depot["manifests"] as? [String: Any] {
-                    for (branch, entry) in manifests {
-                        if let gidStr = entry as? String, let gid = UInt64(gidStr) {
-                            // Legacy flat format: branch -> gid string.
-                            di.manifests[branch] = gid
-                        } else if let gid = entry as? UInt64 {
-                            di.manifests[branch] = gid
-                        } else if let dict = entry as? [String: Any] {
-                            // Modern format (2023+): branch -> { gid, size, download }.
-                            // Most apps carry their sizes here now.
-                            if let gidStr = dict["gid"] as? String, let gid = UInt64(gidStr) {
-                                di.manifests[branch] = gid
-                            }
-                            if branch == "public" {
-                                if let dStr = dict["download"] as? String, let d = UInt64(dStr) {
-                                    di.publicDownloadBytes = d
-                                }
-                                if let sStr = dict["size"] as? String, let s = UInt64(sStr) {
-                                    di.publicSizeBytes = s
-                                }
-                            }
-                        }
-                    }
-                }
-                info.depots.append(di)
-            }
+            info.depots = parseDepots(depots, appID: appID)
 
             // Build ID
             if let branches = depots["branches"] as? [String: Any],
@@ -383,7 +427,9 @@ struct SteamAppInfo {
                     info.buildID = buildID
                 }
             }
+            info.branches = parseBranches(depots["branches"])
         }
+
 
         // Auto-Cloud section. Untrusted text: bounded, and only ever used to
         // form paths below known folders (SteamCloud validates each one).
@@ -413,6 +459,122 @@ struct SteamAppInfo {
         guard !info.name.isEmpty else { return nil }
 
         return info
+    }
+
+    /// The depot entries of a `depots` section: the app's own, or a private
+    /// branch's (PICSPrivateBeta). Keys that are not depot IDs (`branches`,
+    /// `baselanguages`) are skipped.
+    static func parseDepots(_ depots: [String: Any], appID: UInt32) -> [DepotInfo] {
+        var result: [DepotInfo] = []
+        for (key, depotData) in depots {
+            guard let depotID = UInt32(key),
+                  let depot = depotData as? [String: Any] else { continue }
+
+            var di = DepotInfo(depotID: depotID)
+            di.name = depot["name"] as? String ?? ""
+            if let config = depot["config"] as? [String: Any] {
+                di.oslist = config["oslist"] as? String ?? ""
+                di.osarch = config["osarch"] as? String ?? ""
+                di.language = config["language"] as? String ?? ""
+                di.lowViolence = (config["lowviolence"] as? String) == "1"
+            }
+            if let maxSizeStr = depot["maxsize"] as? String, let maxSize = UInt64(maxSizeStr) {
+                di.maxSize = maxSize
+            } else if let maxSize = depot["maxsize"] as? UInt32 {
+                di.maxSize = UInt64(maxSize)
+            }
+            // Text VDF leaves every leaf as a String, so that is checked
+            // first; the UInt32 branch serves any binary-VDF caller.
+            if let dlcStr = depot["dlcappid"] as? String, let dlc = UInt32(dlcStr) {
+                di.dlcAppID = dlc
+            } else if let dlc = depot["dlcappid"] as? UInt32 {
+                di.dlcAppID = dlc
+            }
+            di.isSharedInstall = (depot["sharedinstall"] as? String) == "1"
+            if let from = (depot["depotfromapp"] as? String).flatMap(UInt32.init), from != appID {
+                di.fromApp = from
+            }
+            if let manifests = depot["manifests"] as? [String: Any] {
+                for (branch, entry) in manifests {
+                    if let gidStr = entry as? String, let gid = UInt64(gidStr) {
+                        // Legacy flat format: branch -> gid string.
+                        di.manifests[branch] = gid
+                    } else if let gid = entry as? UInt64 {
+                        di.manifests[branch] = gid
+                    } else if let dict = entry as? [String: Any] {
+                        // Modern format (2023+): branch -> { gid, size, download }.
+                        // Most apps carry their sizes here now.
+                        if let gidStr = dict["gid"] as? String, let gid = UInt64(gidStr) {
+                            di.manifests[branch] = gid
+                        }
+                        if branch == "public" {
+                            if let dStr = dict["download"] as? String, let d = UInt64(dStr) {
+                                di.publicDownloadBytes = d
+                            }
+                            if let sStr = dict["size"] as? String, let s = UInt64(sStr) {
+                                di.publicSizeBytes = s
+                            }
+                        }
+                    }
+                }
+            }
+            result.append(di)
+        }
+        return result
+    }
+
+    /// Whether a branch name is one Madeira keeps and writes to an install
+    /// record: 1-64 characters of letters, digits, `.`, `-` and `_`.
+    static func validBranchName(_ name: String) -> Bool {
+        !name.isEmpty && name.utf8.count <= 64 &&
+            name.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || ".-_".unicodeScalars.contains($0)) }
+    }
+
+    /// `depots.branches`: public first, then the betas by name; at most 64,
+    /// names Madeira cannot keep left out.
+    static func parseBranches(_ node: Any?) -> [Branch] {
+        guard let table = node as? [String: Any] else { return [] }
+        func text(_ value: Any?, _ limit: Int) -> String {
+            guard let string = value as? String else { return "" }
+            return String(string.prefix(limit))
+        }
+        let names = table.keys.filter(validBranchName).sorted { a, b in
+            a == publicBranch ? b != publicBranch : (b == publicBranch ? false : a < b)
+        }
+        return names.prefix(64).compactMap { name in
+            guard let entry = table[name] as? [String: Any] else { return nil }
+            return Branch(name: name, buildID: UInt32(text(entry["buildid"], 12)) ?? 0,
+                          description: text(entry["description"], 200).trimmingCharacters(in: .whitespacesAndNewlines),
+                          passwordRequired: text(entry["pwdrequired"], 4) == "1",
+                          updated: Int(text(entry["timeupdated"], 12)) ?? 0)
+        }
+    }
+
+    /// Adds a private branch's manifests (the depot section Steam returns for
+    /// its beta code) to the app's depots: each depot it names gets the
+    /// branch's manifest, and a depot only the branch has is added with its
+    /// own entry. Returns how many depots got a manifest of the branch.
+    mutating func addPrivateBranch(_ name: String, depots section: [String: Any]) -> Int {
+        // Steam's binary KeyValues root may wrap the depots in one named section.
+        var table = section
+        if !table.keys.contains(where: { UInt32($0) != nil }), table.count == 1,
+           let inner = table.values.first as? [String: Any] { table = inner }
+        var added = 0
+        for depot in Self.parseDepots(table, appID: appID).prefix(512) {
+            guard let gid = depot.manifests[name] else { continue }
+            if let index = depots.firstIndex(where: { $0.depotID == depot.depotID }) {
+                depots[index].manifests[name] = gid
+            } else {
+                depots.append(depot)
+            }
+            added += 1
+        }
+        if let branches = table["branches"] {
+            for entry in Self.parseBranches(branches) where !self.branches.contains(where: { $0.name == entry.name }) {
+                self.branches.append(entry)
+            }
+        }
+        return added
     }
 }
 
@@ -554,5 +716,91 @@ enum SteamLanguage {
                          "tr": "turkish", "uk": "ukrainian", "vi": "vietnamese"]
             return names[language]
         }
+    }
+}
+
+// MARK: - DLC choice
+
+/// Which owned DLC a Steam download takes along. Like Valve's client, every
+/// owned DLC is on unless the player turned it off on the game's page; the
+/// turned-off DLC are kept per game in the app's defaults (`steam-dlc-off`).
+/// Steam still decides ownership: it gives a depot key only for owned content.
+enum SteamDLC {
+    private static let offKey = "steam-dlc-off"
+
+    /// The DLC the player turned off for a game.
+    static func off(_ appID: Int) -> Set<Int> {
+        let value = (UserDefaults.standard.dictionary(forKey: offKey) as? [String: [Int]])?[String(appID)] ?? []
+        return Set(value.prefix(1024))
+    }
+
+    static func setOn(_ dlcID: Int, _ on: Bool, for appID: Int) {
+        var all = UserDefaults.standard.dictionary(forKey: offKey) as? [String: [Int]] ?? [:]
+        var set = Set(all[String(appID)] ?? [])
+        if on { set.remove(dlcID) } else { set.insert(dlcID) }
+        all[String(appID)] = set.isEmpty ? nil : set.sorted()
+        UserDefaults.standard.set(all, forKey: offKey)
+        SteamLog.event("[steam-dlc] app=\(appID) dlc=\(dlcID) on=\(on ? 1 : 0)")
+    }
+
+    /// The turned-off DLC as App IDs for SteamAppInfo.dlcOff.
+    static func offApps(_ appID: Int) -> Set<UInt32> {
+        Set(off(appID).filter { $0 > 0 && $0 <= Int(UInt32.max) }.map { UInt32($0) })
+    }
+}
+
+// MARK: - Branch choice
+
+/// Which Steam branch ("version") a game's downloads take: "public" unless the
+/// player picked a beta on the game's page (Game details › Steam › Version).
+/// Kept per game in the app's defaults (`steam-branches`), with the beta code
+/// the player typed for a password-protected branch (`steam-beta-codes`) and
+/// the private branches that code opened. A beta code opens a game's test
+/// builds, not the account; Steam still decides ownership and checks the code
+/// again on every download.
+enum SteamBranch {
+    private static let chosenKey = "steam-branches"
+    private static let codesKey = "steam-beta-codes"
+    private static let unlockedKey = "steam-beta-unlocked"
+
+    /// The branch the game's downloads take.
+    static func chosen(_ appID: Int) -> String {
+        let value = (UserDefaults.standard.dictionary(forKey: chosenKey) as? [String: String])?[String(appID)]
+        return value.flatMap { SteamAppInfo.validBranchName($0) ? $0 : nil } ?? SteamAppInfo.publicBranch
+    }
+
+    static func choose(_ branch: String, for appID: Int) {
+        guard SteamAppInfo.validBranchName(branch) else { return }
+        var all = UserDefaults.standard.dictionary(forKey: chosenKey) as? [String: String] ?? [:]
+        all[String(appID)] = branch == SteamAppInfo.publicBranch ? nil : branch
+        UserDefaults.standard.set(all, forKey: chosenKey)
+        SteamLog.event("[steam-branch] app=\(appID) choice=\(branch)")
+    }
+
+    /// The beta code kept for the game, nil without one.
+    static func code(_ appID: Int) -> String? {
+        let value = (UserDefaults.standard.dictionary(forKey: codesKey) as? [String: String])?[String(appID)]
+        return value.flatMap { $0.isEmpty || $0.utf8.count > 256 ? nil : $0 }
+    }
+
+    /// The private branches the kept code opened (CheckAppBetaPassword), by name.
+    static func unlocked(_ appID: Int) -> [String] {
+        let value = (UserDefaults.standard.dictionary(forKey: unlockedKey) as? [String: [String]])?[String(appID)] ?? []
+        return value.filter(SteamAppInfo.validBranchName).prefix(64).map { $0 }
+    }
+
+    /// Keeps a code that opened `branches`, or with nil forgets the code (a
+    /// chosen private branch goes back to public).
+    static func setCode(_ code: String?, branches: [String], for appID: Int) {
+        var codes = UserDefaults.standard.dictionary(forKey: codesKey) as? [String: String] ?? [:]
+        var unlocked = UserDefaults.standard.dictionary(forKey: unlockedKey) as? [String: [String]] ?? [:]
+        let previous = Self.unlocked(appID)
+        let kept = branches.filter(SteamAppInfo.validBranchName).prefix(64).map { $0 }
+        codes[String(appID)] = code == nil || kept.isEmpty ? nil : code
+        unlocked[String(appID)] = code == nil || kept.isEmpty ? nil : kept
+        UserDefaults.standard.set(codes, forKey: codesKey)
+        UserDefaults.standard.set(unlocked, forKey: unlockedKey)
+        if code == nil, previous.contains(chosen(appID)) { choose(SteamAppInfo.publicBranch, for: appID) }
+        SteamLog.event("[steam-branch] app=\(appID) code=\(code == nil ? "removed" : "kept") private=\(kept.count)")
     }
 }

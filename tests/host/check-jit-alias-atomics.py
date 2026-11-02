@@ -62,6 +62,8 @@ code += helper
 code += r'''
 /* The general-purpose part of Darwin's arm_thread_state64_t. */
 struct thread_state { uint64_t __x[29], __fp, __lr, __sp; };
+/* [anon-cas]: an emulated CAS on an anonymous alias is counted for the [spin] report. */
+static void ios_anon_cas_note( unsigned long long addr, int handed ) { (void)addr; (void)handed; }
 
 static int route( uint32_t insn, uintptr_t rw_addr, int in_jit, struct thread_state *st )
 {

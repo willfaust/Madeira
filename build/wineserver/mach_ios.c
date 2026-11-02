@@ -1142,6 +1142,16 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
     mach_port_t process_port = get_process_port( process );
     mach_vm_offset_t data;
 
+#ifdef WINE_IOS
+    /* Keep local writes disabled by default: enabling them globally regressed
+     * Steam. Explicitly opt in only for pseudo-processes in this Unix task.
+     * The request handler has already checked PROCESS_VM_WRITE rights. */
+    const char *local_write = getenv( "MADEIRA_LOCAL_PROCESS_WRITE" );
+    if (!process_port && process->unix_pid == getpid() && local_write &&
+        !strcmp( local_write, "1" ))
+        process_port = mach_task_self();
+#endif
+
     if (written) *written = 0;
 
     if (!process_port)

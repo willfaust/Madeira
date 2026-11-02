@@ -263,6 +263,14 @@ is missing.
 
 ### Refreshing the signing
 
+Off by default: refresh the signing with the installer that signed Madeira
+(SideStore, AltStore, SideInstaller, a computer). A refresh asks Apple's
+developer portal for a profile on the same Apple ID other sideloaded apps are
+signed with, so Madeira leaves that to the installer. With it off, Settings has
+no Signing section, nothing runs over the library and Madeira takes in no
+sign-in an installer left. `env.MADEIRA_SIGNING_REFRESH = 1` in madeira.cfg
+turns all of what follows back on.
+
 A copy signed with a free Apple ID opens for seven days: that is how long its
 provisioning profile lasts. **Settings → Signing** shows when it runs out, for
 such a week-long profile only (a paid account's lasts a year). A new profile for

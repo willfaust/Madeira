@@ -254,6 +254,15 @@ struct ios_fdt_ent
 static struct ios_fdt_ent ios_fdt[IOS_FDT_MAX];
 static unsigned int ios_fdt_gen;
 
+/* Madeira: the thread id for the fd ledger's lines, 0 on a thread without a TEB.
+ * GetCurrentThreadId() reads the TEB; the storm-end worker (ios_storm_end_thread, a plain host thread) has none, and
+ * its first [fdtrace] line would read NULL+0x48 and end the whole app. */
+static unsigned int ios_fdt_tid(void)
+{
+    TEB *teb = NtCurrentTeb();
+    return teb ? (unsigned int)HandleToULong( teb->ClientId.UniqueThread ) : 0;
+}
+
 static void ios_fdt_reg( int fd, int kind, void *peb )
 {
     struct ios_fdt_ent *e;
@@ -266,11 +275,11 @@ static void ios_fdt_reg( int fd, int kind, void *peb )
         if (reuse_cap++ < 200)
             wine_log_write("[fdtrace] SILENT-CLOSE fd=%d was %s owner_tid=%04x owner_peb=%p gen=%u; rereg %s tid=%04x peb=%p rev=ml586",
                            fd, ios_fdt_names[e->kind], e->tid, e->peb, e->gen,
-                           ios_fdt_names[kind], (unsigned int)GetCurrentThreadId(), peb);
+                           ios_fdt_names[kind], ios_fdt_tid(), peb);
     }
     e->kind = (unsigned char)kind;
     e->prev_kind = 0;
-    e->tid  = (unsigned int)GetCurrentThreadId();
+    e->tid  = ios_fdt_tid();
     e->peb  = peb;
     e->gen  = __sync_add_and_fetch( &ios_fdt_gen, 1 );
 }
@@ -304,14 +313,14 @@ static void ios_fdt_note_close( int fd, const char *why, void *dead_peb )
         int cross = (e->peb != dead_peb);
         wine_log_write("[fdtrace]%s close fd=%d why=%s kind=%s owner_tid=%04x owner_peb=%p gen=%u closer_tid=%04x dead_peb=%p rev=ml586",
                        cross ? " CROSS!" : "", fd, why, ios_fdt_names[e->kind],
-                       e->tid, e->peb, e->gen, (unsigned int)GetCurrentThreadId(), dead_peb);
+                       e->tid, e->peb, e->gen, ios_fdt_tid(), dead_peb);
         e->prev_kind = e->kind;
         e->kind = FDT_CLOSED;
     }
     else
         wine_log_write("[fdtrace] close fd=%d why=%s untracked%s closer_tid=%04x dead_peb=%p rev=ml586",
                        fd, why, (e->kind == FDT_CLOSED) ? " (prev comm fd)" : "",
-                       (unsigned int)GetCurrentThreadId(), dead_peb);
+                       ios_fdt_tid(), dead_peb);
 }
 
 /* victim autopsy: what the ledger knows about a failing comm fd */
@@ -319,7 +328,7 @@ static void ios_fdt_autopsy( const char *what, int fd, int ret, int err )
 {
     struct ios_fdt_ent *e = (fd >= 0 && fd < IOS_FDT_MAX) ? &ios_fdt[fd] : NULL;
     wine_log_write("[fdtrace] VICTIM %s tid=%04x fd=%d ret=%d errno=%d ledger=%s owner_tid=%04x owner_peb=%p gen=%u prev=%s rev=ml586",
-                   what, (unsigned int)GetCurrentThreadId(), fd, ret, err,
+                   what, ios_fdt_tid(), fd, ret, err,
                    e ? ios_fdt_names[e->kind] : "oob", e ? e->tid : 0, e ? e->peb : NULL,
                    e ? e->gen : 0, e ? ios_fdt_names[e->prev_kind] : "oob");
 }
@@ -352,6 +361,96 @@ int ios_peb_is_dead( const void *peb )
     for (i = 0; i < n; i++) if (ios_proc_sockets[i].peb == peb) return 0;
     for (i = 0; i < IOS_DEAD_PEB_MAX; i++) if (ios_dead_pebs[i] == peb) return 1;
     return 0;
+}
+
+/* Madeira storm-end: is this the PEB of a LIVE child pseudo-process (one that registered a master socket with the wineserver)?
+ * The session's first process has no entry here, and neither has a PEB nobody knows: both answer 0. Lock-free, like
+ * ios_peb_is_dead (read from the Mach exception thread). */
+int ios_peb_is_live_child( const void *peb )
+{
+    int i, n = ios_proc_socket_count;
+    if (!peb) return 0;
+    if (n > IOS_MAX_PROC_SOCKETS) n = IOS_MAX_PROC_SOCKETS;
+    for (i = 0; i < n; i++) if (ios_proc_sockets[i].peb == peb) return 1;
+    return 0;
+}
+
+/* Madeira storm-end: END ONE CHILD PSEUDO-PROCESS FROM OUTSIDE ITS THREADS.
+ *
+ * The redelivery guard (signal_arm64_ios.c, "[redeliv] 2000 identical redeliveries") used to end the whole app, whichever
+ * Windows process the storm was in. A storm in a child (a launcher's network-service helper) now ends that process only
+ * (the caller's switch and policy are in signal_arm64_ios.c, ios_storm_action). process_exit_wrapper does the bookkeeping on the dying process's own thread; the storming thread cannot be
+ * made to run it (its stack is the problem), so the same steps run here, keyed by the PEB, on a short-lived worker thread
+ * (the Mach exception thread must never wait on a lock a Windows thread holds):
+ *   - the master socket closes: the wineserver sees EOF, wakes the process's waiters and kills its threads server-side;
+ *   - the child table (process_ios.c), the dead-PEB list, the fd cache, the sub-floor windows, the JIT pool allocations and the
+ *     guest window are released exactly as process_exit_wrapper releases them.
+ * Not done here: ios_retire_own_fixed_base_image (it needs the owning thread's server connection); the caller does not use this
+ * path for a process that owns the fixed-base image. The process's other threads are left as an ordinary exit leaves them: the
+ * ones that wake into reclaimed memory are ended one by one by the [zombie] rule in signal_arm64_ios.c. */
+struct ios_storm_end { void *peb; int status; };
+static struct ios_storm_end ios_storm_end_args[8];   /* no malloc on the Mach exception thread; a few at a time at most */
+static unsigned ios_storm_end_next;
+
+static void *ios_storm_end_thread( void *arg )
+{
+    struct ios_storm_end a = *(struct ios_storm_end *)arg;
+    extern int ios_child_slot_name( void *peb, char *out, size_t len );
+    extern void ios_child_slot_exited( void *peb );
+    extern int ios_child_slot_note_exit( void *peb, int status );
+    extern void ios_jit_reclaim_process( void *peb );
+    extern void ios_fd_cache_release( void *peb );
+    extern void ios_subfloor_release_owner( void *owner );
+    extern void ios_wow_window_release( void *peb_id );
+    char name[64];
+    int i, n, fd = -1;
+
+    pthread_setname_np( "wine-storm-end" );
+    ios_child_slot_name( a.peb, name, sizeof(name) );
+    n = ios_proc_socket_count;
+    if (n > IOS_MAX_PROC_SOCKETS) n = IOS_MAX_PROC_SOCKETS;
+    for (i = 0; i < n; i++)
+    {
+        /* claim the entry the way an ordinary exit clears it: whoever gets there first does the closing, once */
+        if (ios_proc_sockets[i].peb != a.peb) continue;
+        fd = ios_proc_sockets[i].fd;
+        if (!__sync_bool_compare_and_swap( &ios_proc_sockets[i].peb, a.peb, NULL )) fd = -1;
+        break;
+    }
+    if (fd < 0)
+    {
+        wine_log_write( "[redeliv] the Windows process %s (peb=%p) had already ended; nothing more to release rev=storm-end", name, a.peb );
+        return NULL;
+    }
+    wine_log_write( "[redeliv] ending only the Windows process %s (peb=%p, master socket %d): the app and the other processes keep running "
+                    "rev=storm-end", name, a.peb, fd );
+    ios_fdt_note_close( fd, "exit-master-storm", a.peb );
+    close( fd );
+    ios_child_slot_exited( a.peb );
+    ios_child_slot_note_exit( a.peb, a.status );
+    ios_dead_pebs[__sync_fetch_and_add( &ios_dead_peb_next, 1 ) % IOS_DEAD_PEB_MAX] = a.peb;
+    ios_fd_cache_release( a.peb );
+    ios_subfloor_release_owner( a.peb );
+    ios_jit_reclaim_process( a.peb );
+    ios_wow_window_release( a.peb );
+    wine_log_write( "[redeliv] the Windows process %s (peb=%p) is released: socket, child table, JIT allocations, guest window rev=storm-end",
+                    name, a.peb );
+    return NULL;
+}
+
+/* 1: a worker thread was started and will end the process; 0: nothing was done (the caller keeps its old behaviour). */
+int ios_end_child_process_async( void *peb, int status )
+{
+    struct ios_storm_end *a;
+    pthread_t t;
+
+    if (!ios_peb_is_live_child( peb )) return 0;
+    a = &ios_storm_end_args[__sync_fetch_and_add( &ios_storm_end_next, 1 ) % 8];
+    a->peb = peb;
+    a->status = status;
+    if (pthread_create( &t, NULL, ios_storm_end_thread, a )) return 0;
+    pthread_detach( t );
+    return 1;
 }
 #endif
 static _Thread_local int initial_cwd = -1;
@@ -656,13 +755,37 @@ extern void ios_jit_anon_alias_note_write( unsigned long long addr );
 
 #define IOS_REPLY_PAGE 0x1000   /* guest page: pool ranges and anonymous-RWX aliases are multiples of it */
 
+static BOOL ios_reply_host_writable( uintptr_t addr, size_t size );
+
+/* ml2230 (device log 111): a page the JIT pool gave up (a poisoned range whose non-executable pages were dropped,
+ * no freelist entry and no mapping left) is a hole inside the pool's address range, and the kernel puts other
+ * mappings there: a child process's first thread got its pthread stack in one, and its first server reply into a
+ * stack buffer went to the RW alias of that hole, which is not mapped (rpcss.exe died at boot, the Steam client's
+ * COM call waited for it forever). A pool RX page is never writable at its own address, so a page that is writable
+ * there is stored directly. env.MADEIRA_REPLY_OWN_WRITABLE=0: the pool's address range alone decides, as before. */
+static int ios_reply_own_writable( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_REPLY_OWN_WRITABLE" );   /* 0: a reply into the JIT pool's address range always goes through its RW alias, as before */
+        on = !(e && e[0] == '0');
+    }
+    return on;
+}
+
 /* The RW alias of a guest address that is a JIT-pool RX view (not writable at its own address), or 0. */
 static uintptr_t ios_reply_rw_alias( uintptr_t addr )
 {
     uintptr_t rx = (uintptr_t)ios_jit_rx_base_global, rw = (uintptr_t)ios_jit_rw_base_global;
     size_t size = ios_jit_pool_size_global;
 
-    if (rx && rw && size && addr >= rx && addr - rx < size) return rw + (addr - rx);
+    if (rx && rw && size && addr >= rx && addr - rx < size)
+    {
+        uintptr_t page = addr & ~(uintptr_t)(IOS_REPLY_PAGE - 1);
+        if (ios_reply_own_writable() && ios_reply_host_writable( page, IOS_REPLY_PAGE )) return 0;   /* ml2230 */
+        return rw + (addr - rx);
+    }
     return ios_jit_anon_alias_lookup( addr );
 }
 
@@ -1645,6 +1768,243 @@ static int ios_xp_cmp_u64( const void *a, const void *b )
     return x < y ? -1 : x > y;
 }
 
+/* Madeira [spin] ml1140 -- a guest thread that makes millions of the same cheap call a second.
+ *
+ * A .NET game: about 10 s after the process starts, one or two threads of the .NET runtime call GetLastError /
+ * SetLastError 12-19 million times a second for as long as the log goes on, with no window and no syscall in between
+ * ([xp-api] x64->EC, [xp-api-top] names only the callee). [thread-sample] puts them inside the runtime's own code,
+ * but the older [spin] ml677 snapshot (signal_arm64_ios.c, ios_dump_all_thread_stacks)
+ * keys on ONE 4 KB host-pc window and a loop that alternates between FEX's code cache and the ARM64EC copy of
+ * kernelbase / ntdll never sits in one: it printed nothing. This one keys on what the xprobe already measures: the
+ * x64->EC call rate with one target taking nearly all of the sampled calls, for several reports in a row.
+ *
+ * It runs on the xprobe thread (the only reader of these counters), once a second does nothing but compare two numbers;
+ * on the first hit it looks at the one or two Wine threads that used >= 80% of a core: their registers (the ARM64EC
+ * register mapping, as [x86_live]), the x86 code around the guest RIP, and the return addresses on the x86 stack that
+ * have a CALL right before them, with module and offset. Twice at most for one streak (4 s and 20 s: does the loop
+ * move?), three looks a run. With MADEIRA_LEAN_DIAG no thread is touched: one line only. Off the hot path: nothing runs
+ * in the game's threads and nothing is recorded per call. env.MADEIRA_SPIN_DIAG=0 turns [spin] off altogether. */
+static int ios_lean_diag;   /* defined with the sampler below */
+
+/* [spin] helpers: pure functions, no thread or memory access */
+#define IOS_SPIN_RATE   5.0e6     /* x64->EC calls per second, all threads */
+#define IOS_SPIN_SHARE  0.80      /* of the sampled call targets, the same one */
+#define IOS_SPIN_SECS   4         /* consecutive reports (about 1 s each) */
+#define IOS_SPIN_AGAIN  20        /* a second look at the same streak */
+#define IOS_SPIN_SHOTS  3         /* looks per run */
+struct ios_spin_state { uint64_t callee; int streak, shots; };
+
+/* One report in, 0 (nothing), 1 (first look) or 2 (second look) out. */
+static int ios_spin_step( struct ios_spin_state *s, double rate, uint64_t top, double share )
+{
+    if (rate < IOS_SPIN_RATE || !top || share < IOS_SPIN_SHARE) { s->callee = 0; s->streak = 0; return 0; }
+    if (top != s->callee) { s->callee = top; s->streak = 0; }
+    s->streak++;
+    if (s->shots >= IOS_SPIN_SHOTS) return 0;
+    if (s->streak == IOS_SPIN_SECS) { s->shots++; return 1; }
+    if (s->streak == IOS_SPIN_AGAIN) { s->shots++; return 2; }
+    return 0;
+}
+
+/* b: the 8 bytes right before an address v. A return address has a CALL immediately before it: E8 rel32 (5 bytes), or
+ * FF /2 (2 to 7 bytes, whose length the ModRM / SIB / displacement say). NULL: not preceded by a call. */
+static const char *ios_spin_call_kind( const unsigned char b[8] )
+{
+    int len;
+    if (b[3] == 0xe8) return "call rel32";
+    for (len = 2; len <= 7; len++)
+    {
+        const unsigned char *p = b + 8 - len;
+        int mod, rm, want;
+        if (p[0] != 0xff || ((p[1] >> 3) & 7) != 2) continue;
+        mod = p[1] >> 6; rm = p[1] & 7;
+        if (mod == 3) want = 2;
+        else if (mod == 0) want = rm == 5 ? 6 : rm == 4 ? ((len >= 3 && (p[2] & 7) == 5) ? 7 : 3) : 2;
+        else if (mod == 1) want = rm == 4 ? 4 : 3;
+        else want = rm == 4 ? 7 : 6;
+        if (want == len) return "call indirect";
+    }
+    return NULL;
+}
+
+static void ios_spin_hex( const unsigned char *b, int n, char *out )
+{
+    int i;
+    for (i = 0; i < n; i++) { out[i * 3] = "0123456789abcdef"[b[i] >> 4]; out[i * 3 + 1] = "0123456789abcdef"[b[i] & 15]; out[i * 3 + 2] = ' '; }
+    out[n ? n * 3 - 1 : 0] = 0;
+}
+/* end of the [spin] helpers */
+
+/* The module list of the process a TEB belongs to, into a caller-owned array (the xprobe's own map follows ONE process and
+ * the sampler's is shared with another thread). */
+static int ios_spin_modmap( uint64_t teb, struct ios_xp_mod *out, int cap )
+{
+    uint64_t peb = 0, ldr = 0, head, cur; int guard = 0, n = 0;
+    if (!teb || !ios_ts_read( teb + 0x60, &peb, 8 ) || !peb || !ios_ts_read( peb + 0x18, &ldr, 8 ) || !ldr) return 0;
+    head = ldr + 0x10;
+    if (!ios_ts_read( head, &cur, 8 )) return 0;
+    while (cur && cur != head && guard++ < 400 && n < cap)
+    {
+        uint64_t base = 0, buf = 0, next = 0; uint32_t size = 0; uint16_t len = 0, w[40]; int k;
+        if (!ios_ts_read( cur + 0x30, &base, 8 ) || !ios_ts_read( cur + 0x40, &size, 4 ) ||
+            !ios_ts_read( cur + 0x58, &len, 2 ) || !ios_ts_read( cur + 0x60, &buf, 8 )) break;
+        if (base && size)
+        {
+            struct ios_xp_mod *m = &out[n++];
+            m->base = base; m->size = size; len /= 2; if (len > 39) len = 39;
+            if (len && ios_ts_read( buf, w, len * 2 )) { for (k = 0; k < len; k++) m->name[k] = w[k] < 128 ? (char)tolower( w[k] ) : '?'; m->name[len] = 0; }
+            else strcpy( m->name, "?" );
+        }
+        if (!ios_ts_read( cur, &next, 8 )) break;
+        cur = next;
+    }
+    return n;
+}
+static void ios_spin_where( const struct ios_xp_mod *mods, int n, uint64_t a, char *out, size_t cap )
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (a >= mods[i].base && a < mods[i].base + mods[i].size) { snprintf( out, cap, "%s+0x%llx", mods[i].name, (unsigned long long)(a - mods[i].base) ); return; }
+    snprintf( out, cap, "no module" );
+}
+
+static void ios_spin_capture( const char *wall, int look, double rate, double share, int streak, uint64_t top, const char *top_sym )
+{
+    extern int ios_jit_pool_image_pc( uintptr_t pc, uintptr_t *pe_addr_out );
+    extern uint64_t ios_native_rip_from_hostpc( uint64_t, uint64_t, const char ** );
+    mach_port_t self_port = pthread_mach_thread_np( pthread_self() );
+    thread_act_array_t tl; mach_msg_type_number_t tc; unsigned k; int seen = 0;
+    static struct ios_xp_mod mods[160];
+
+    wine_log_write( "[spin] ml1140 %s look %d: x64->EC %.0f/s, %.0f%% of the sampled calls for %d s go to %s (0x%llx)%s",
+                    wall, look, rate, share * 100.0, streak, top_sym, (unsigned long long)top,
+                    ios_lean_diag ? "; MADEIRA_LEAN_DIAG: no thread is looked at" : "" );
+    if (ios_lean_diag) return;
+    if (task_threads( mach_task_self(), &tl, &tc ) != KERN_SUCCESS) return;
+    for (k = 0; k < tc && seen < 2; k++)
+    {
+        thread_basic_info_data_t bi; mach_msg_type_number_t bic = THREAD_BASIC_INFO_COUNT;
+        arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+        uint64_t teb, frame[16], rip_exact = 0, rip_state = 0, rsp = 0, stack_base = 0, stack_limit = 0, bb = 0, stk[96];
+        unsigned char code[128], before[8];
+        int have_frame, have_code, have_stk, nmods, cand, wtid = 0, ni;
+        const char *why = "", *rsp_note = "";
+        pthread_t pt;
+        uint64_t cands[3];
+        char where[96], rwhere[96], hex[128 * 3 + 4], line[1000];
+        if (tl[k] == self_port) continue;
+        if (thread_info( tl[k], THREAD_BASIC_INFO, (thread_info_t)&bi, &bic ) != KERN_SUCCESS || bi.cpu_usage < 800) continue;
+        pt = pthread_from_mach_thread_np( tl[k] );   /* before the suspend: libpthread's list lock must never be taken by a suspended thread's owner */
+        if (!(teb = ios_ts_teb( pt ))) continue;
+        if (thread_suspend( tl[k] ) != KERN_SUCCESS) continue;
+        if (thread_get_state( tl[k], ARM_THREAD_STATE64, (thread_state_t)&st, &cnt ) != KERN_SUCCESS) { thread_resume( tl[k] ); continue; }
+        /* Everything read here is a plain read of a few hundred bytes (vm_read_overwrite, no lock): the thread is held for
+         * microseconds. */
+        have_frame = st.__x[28] > 0x10000 && ios_ts_read( st.__x[28] + 0x18, frame, sizeof(frame) );
+        ios_ts_read( st.__x[28], &bb, 8 );
+        ios_ts_read( teb + 0x08, &stack_base, 8 );
+        ios_ts_read( teb + 0x10, &stack_limit, 8 );
+        ios_ts_read( teb + 0x48, &wtid, 4 );
+        {   /* the x86 RSP: x23 while the thread runs FEX-translated code, sp while it runs ARM64EC code (the guest stack is the host stack there) */
+            uintptr_t pe_probe = 0;
+            int in_ec = ios_jit_pool_image_pc( (uintptr_t)arm_thread_state64_get_pc( st ), &pe_probe );
+            cands[0] = in_ec ? arm_thread_state64_get_sp( st ) : st.__x[23];
+            cands[1] = in_ec ? st.__x[23] : arm_thread_state64_get_sp( st );
+            cands[2] = have_frame ? frame[1 + 4] : 0;
+        }
+        for (cand = 0; cand < 3; cand++)
+            if (cands[cand] >= stack_limit && cands[cand] < stack_base && !(cands[cand] & 7)) { rsp = cands[cand]; break; }
+        rsp_note = rsp ? "" : " (outside the TEB's stack range: the first readable candidate)";
+        for (cand = 0; cand < 3 && !rsp; cand++)   /* the TEB's range need not be the guest stack's (a WoW64 or EC stack): the first readable one, said so */
+            if (cands[cand] >= 0x100000000ULL && !(cands[cand] & 7) && ios_ts_read( cands[cand], &bb, 8 )) rsp = cands[cand];
+        have_stk = rsp && ios_ts_read( rsp, stk, sizeof(stk) );
+        rip_state = have_frame ? frame[0] : 0;
+        if (bb > 0x10000) rip_exact = ios_native_rip_from_hostpc( bb, arm_thread_state64_get_pc( st ), &why );
+        have_code = 0;
+        {
+            uint64_t at = rip_exact ? rip_exact : rip_state;
+            if (at > 64) have_code = ios_ts_read( at - 32, code, sizeof(code) );
+            if (!have_code && at) { memset( code, 0, sizeof(code) ); have_code = ios_ts_read( at, code + 32, 96 ); }
+        }
+        thread_resume( tl[k] );
+        seen++;
+
+        nmods = ios_spin_modmap( teb, mods, 160 );
+        {
+            uint64_t at = rip_exact ? rip_exact : rip_state; uintptr_t pe = 0; const char *cls;
+            uint64_t pc = arm_thread_state64_get_pc( st );
+            ios_spin_where( mods, nmods, at, where, sizeof(where) );
+            cls = ios_jit_pool_image_pc( (uintptr_t)pc, &pe ) ? "ARM64EC image copy" : "FEX code or native";
+            wine_log_write( "[spin] ml1140 thread %04x teb=0x%llx cpu=%d%% host pc=0x%llx (%s) lr=0x%llx sp=0x%llx x23=0x%llx | guest RIP exact=0x%llx (%s) State.rip=0x%llx%s",
+                            (unsigned)wtid, (unsigned long long)teb, bi.cpu_usage / 10, (unsigned long long)pc, cls,
+                            (unsigned long long)arm_thread_state64_get_lr( st ), (unsigned long long)arm_thread_state64_get_sp( st ),
+                            (unsigned long long)st.__x[23], (unsigned long long)rip_exact, rip_exact ? where : why,
+                            (unsigned long long)rip_state, have_frame ? "" : " (frame unreadable)" );
+        }
+        /* The x86 registers by the ARM64EC mapping (as [x86_live]); exact while the thread is in translated or EC code. */
+        wine_log_write( "[spin] ml1140   RAX=0x%llx RCX=0x%llx RDX=0x%llx RBX=0x%llx RSP=0x%llx RBP=0x%llx RSI=0x%llx RDI=0x%llx"
+                        " R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx",
+                        (unsigned long long)st.__x[8], (unsigned long long)st.__x[0], (unsigned long long)st.__x[1], (unsigned long long)st.__x[27],
+                        (unsigned long long)rsp, (unsigned long long)st.__fp, (unsigned long long)st.__x[25], (unsigned long long)st.__x[26],
+                        (unsigned long long)st.__x[2], (unsigned long long)st.__x[3], (unsigned long long)st.__x[4], (unsigned long long)st.__x[5],
+                        (unsigned long long)st.__x[19], (unsigned long long)st.__x[20], (unsigned long long)st.__x[21], (unsigned long long)st.__x[22] );
+        {   /* Madeira [spin]: is this spin tied to a compare-and-swap on an anonymous alias? (signal_arm64_ios.c ios_anon_cas_note) */
+            extern volatile unsigned long long ios_anon_cas_last_addr, ios_anon_cas_last_ms;
+            extern volatile unsigned ios_anon_cas_emulated, ios_anon_cas_handed;
+            if (ios_anon_cas_emulated || ios_anon_cas_handed)
+            {
+                const struct { const char *name; uint64_t v; } xr[] = {
+                    { "RAX", st.__x[8] }, { "RCX", st.__x[0] }, { "RDX", st.__x[1] }, { "RBX", st.__x[27] }, { "RSP", rsp }, { "RBP", st.__fp },
+                    { "RSI", st.__x[25] }, { "RDI", st.__x[26] }, { "R8", st.__x[2] }, { "R9", st.__x[3] }, { "R10", st.__x[4] },
+                    { "R11", st.__x[5] }, { "R12", st.__x[19] }, { "R13", st.__x[20] }, { "R14", st.__x[21] }, { "R15", st.__x[22] } };
+                unsigned long long last = ios_anon_cas_last_addr, page = last >> 14, now_ms;
+                struct timespec ts;
+                char in[120];
+                int n = 0, xi;
+
+                clock_gettime( CLOCK_MONOTONIC, &ts );
+                now_ms = (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)(ts.tv_nsec / 1000000);
+                in[0] = 0;
+                for (xi = 0; xi < (int)(sizeof(xr) / sizeof(xr[0])); xi++)
+                    if ((xr[xi].v >> 14) == page && n < (int)sizeof(in) - 12) n += snprintf( in + n, sizeof(in) - n, " %s", xr[xi].name );
+                wine_log_write( "[spin] ml1140   compare-and-swaps on an anonymous RWX alias so far: %u emulated here, %u handed to FEX "
+                                "(env.MADEIRA_ANON_CAS_FLUSH); the last at 0x%llx, %llu s before this look; registers inside its 16 KB page:%s",
+                                ios_anon_cas_emulated, ios_anon_cas_handed, last, now_ms >= ios_anon_cas_last_ms ? (now_ms - ios_anon_cas_last_ms) / 1000 : 0ull,
+                                in[0] ? in : " none" );
+            }
+        }
+        if (have_code)
+        {
+            ios_spin_hex( code, (int)sizeof(code), hex );
+            wine_log_write( "[spin] ml1140   x86 code from RIP-32 (RIP is byte 32): %s", hex );
+        }
+        else wine_log_write( "[spin] ml1140   x86 code at the guest RIP is unreadable" );
+        if (have_stk)
+        {
+            int n = snprintf( line, sizeof(line), "[spin] ml1140   return addresses on the x86 stack (a CALL right before them) from RSP=0x%llx%s:", (unsigned long long)rsp, rsp_note ), shown = 0;
+            for (ni = 0; ni < 96 && shown < 12 && n < (int)sizeof(line) - 120; ni++)
+            {
+                const char *kind;
+                if (stk[ni] < 0x10000 || !ios_ts_read( stk[ni] - 8, before, 8 )) continue;
+                if (!(kind = ios_spin_call_kind( before ))) continue;
+                ios_spin_where( mods, nmods, stk[ni], rwhere, sizeof(rwhere) );
+                n += snprintf( line + n, sizeof(line) - n, " sp+0x%x=%s(%s)", ni * 8, rwhere, kind );
+                shown++;
+            }
+            if (!shown) n += snprintf( line + n, sizeof(line) - n, " none in the first %d qwords", 96 );
+            wine_log_write( "%s", line );
+            wine_log_write( "[spin] ml1140   first stack qwords: %llx %llx %llx %llx %llx %llx %llx %llx", (unsigned long long)stk[0], (unsigned long long)stk[1],
+                            (unsigned long long)stk[2], (unsigned long long)stk[3], (unsigned long long)stk[4], (unsigned long long)stk[5],
+                            (unsigned long long)stk[6], (unsigned long long)stk[7] );
+        }
+        else wine_log_write( "[spin] ml1140   no readable x86 stack (x23, sp and the frame's RSP: none readable; the TEB's stack is 0x%llx..0x%llx)",
+                             (unsigned long long)stack_limit, (unsigned long long)stack_base );
+    }
+    for (k = 0; k < tc; k++) mach_port_deallocate( mach_task_self(), tl[k] );
+    vm_deallocate( mach_task_self(), (vm_address_t)tl, tc * sizeof(*tl) );
+    if (!seen) wine_log_write( "[spin] ml1140 no Wine thread used 80%% of a core at this moment" );
+}
+
 static void ios_xp_api_report( const char *wall, double wall_s )
 {
     extern volatile long long ios_xp_set_event, ios_xp_reset_event, ios_xp_pulse_event;
@@ -1738,6 +2098,8 @@ static void ios_xp_api_report( const char *wall, double wall_s )
             wine_log_write( "%s", line );
 
             /* top x64->EC call targets from the ring entries appended since the last report */
+            uint64_t spin_top = 0;          /* [spin]: the one target that takes most of the sampled calls */
+            double spin_share = 0;
             if (got_fex && have_fex && ecc > 0)
             {
                 uint64_t idx = fex[392], pidx = fex_prev[392], newn = idx - pidx, k, run = 0;
@@ -1756,6 +2118,7 @@ static void ios_xp_api_report( const char *wall, double wall_s )
                         cnt = 1;
                     }
                     if (!bestn) break;
+                    if (!shown) { spin_top = best; spin_share = (double)bestn / (double)newn; }
                     {
                         char sym[160];
                         ios_xp_symbol( best, sym, sizeof(sym) );
@@ -1767,6 +2130,24 @@ static void ios_xp_api_report( const char *wall, double wall_s )
                 }
                 (void)run;
                 wine_log_write( "%s", line );
+            }
+            /* Madeira [spin] -- two numbers compared once a second; a look only on a streak (ios_spin_step) */
+            {
+                static struct ios_spin_state spin_state;
+                static int spin_off = -1;   /* env.MADEIRA_SPIN_DIAG=0: no [spin] at all */
+                int look;
+                if (spin_off < 0)
+                {
+                    const char *e = getenv( "MADEIRA_SPIN_DIAG" );
+                    spin_off = (e && e[0] == '0' && !e[1]) ? 1 : 0;
+                }
+                look = spin_off ? 0 : ios_spin_step( &spin_state, got_fex && have_fex ? ecc / dt : 0.0, spin_top, spin_share );
+                if (look)
+                {
+                    char sym[160];
+                    ios_xp_symbol( spin_top, sym, sizeof(sym) );
+                    ios_spin_capture( wall, look, ecc / dt, spin_share, spin_state.streak, spin_top, sym );
+                }
             }
             /* QPC: per-thread gap distribution, busiest four slots */
             if (got_nt && have_nt)
@@ -1875,7 +2256,8 @@ static void ios_xp_api_report( const char *wall, double wall_s )
  * Not before the game has presented for MADEIRA_BG_QOS_DELAY_S (default 60 s):
  * its first minute is when it talks to the launcher and Social Club (sign-in,
  * entitlement), which must not slow down. Never the game's own process.
- * Default list below; an empty value turns it off. Needs the [xp] sampler. */
+ * Default list below; an empty value turns it off. Needs the [xp] sampler
+ * (MADEIRA_PROBES not 0). */
 #include <pthread/qos.h>
 #define IOS_BG_QOS_HOLD_NS (2000ull * 1000 * 1000)
 static volatile uint64_t ios_bg_game_seen_ns;   /* 0: no game has presented */
@@ -2932,6 +3314,154 @@ static void ios_wprof_main( void )
     }
 }
 
+/* ============================================================================
+ * Madeira [frame]: per-second frame anatomy for DXMT titles, opt-in.
+ *
+ * Question it answers: is a D3D11 game GPU-bound, CPU-bound or held by the
+ * display? Logs had no frame or GPU timing at all (only a Metal HUD
+ * screenshot), because DXMT's winemetal_unix.c reports into hooks
+ * (ios_frame_*, ml1050) whose instrument was not part of this port: they
+ * were empty stubs in virtual_ios.c. They are implemented here, behind
+ * MADEIRA_FRAME_STATS (unset or 0: off, exactly as before -- ios_frame_stats_on
+ * stays 0 and winemetal makes no hook call and adds no completion handler; any
+ * other value: on for every caller, 64-bit included). Once a second:
+ *
+ *   [frame] 1.00 s: present 30.0/s (skipped 0) game 30.0/s |
+ *     GPU busy 948 ms = 95% (31.6 ms/frame) | cmdbufs 124, span sum 1010 ms,
+ *     in flight max 3 | nextDrawable wait 12.0 ms (max 4.1) | per frame:
+ *     render 41.0 compute 9.0 blit 6.0 passes, attachments load 22.0 store
+ *     63.0 clear 19.0 | panel 120 Hz intent 60 mode 1 | limiter 0.0 ms
+ *
+ * "GPU busy" is the union of the command buffers' GPUStartTime..GPUEndTime
+ * (ios_frame_gpu_span, for a winemetal that reports it; ours does not yet,
+ * so busy reads 0 until it does); "span sum"
+ * adds the spans and over-counts when buffers overlap. Busy near 100 % = the
+ * GPU is the limit; a large nextDrawable wait = the display/compositor holds
+ * the producer; neither = the CPU side. Accumulators are relaxed atomics, the
+ * busy union takes one uncontended mutex per command buffer, and the line is
+ * printed by whichever per-frame hook first sees a second elapsed. */
+int ios_frame_stats_on = 0;
+static uint64_t ios_fr_t0;
+static uint64_t ios_fr_ticks, ios_fr_presents, ios_fr_skipped, ios_fr_cmdbufs, ios_fr_span_ns, ios_fr_busy_ns;
+static uint64_t ios_fr_dw_ns, ios_fr_dw_max_ns, ios_fr_lim_ns, ios_fr_qmax, ios_fr_pass[3], ios_fr_att[3];
+static volatile int ios_fr_panel_hz, ios_fr_intent_hz, ios_fr_mode;
+static pthread_mutex_t ios_fr_gpu_lock = PTHREAD_MUTEX_INITIALIZER;
+static double ios_fr_gpu_end;   /* GPU timeline high-water mark (s), under ios_fr_gpu_lock */
+
+#define IOS_FR_ADD(v, x) __atomic_fetch_add( &(v), (uint64_t)(x), __ATOMIC_RELAXED )
+#define IOS_FR_TAKE(v)   __atomic_exchange_n( &(v), 0, __ATOMIC_RELAXED )
+
+static void ios_fr_max( uint64_t *v, uint64_t x )
+{
+    uint64_t c = __atomic_load_n( v, __ATOMIC_RELAXED );
+    while (x > c && !__atomic_compare_exchange_n( v, &c, x, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) ;
+}
+
+static void ios_fr_maybe_report( void )
+{
+    static mach_timebase_info_data_t tb;
+    uint64_t now = mach_absolute_time(), t0 = __atomic_load_n( &ios_fr_t0, __ATOMIC_RELAXED ), one_s;
+    double secs, frames, busy, span, dw, dwmax, lim;
+    uint64_t ticks, pres, skip, cmdbufs, qmax, pass[3], att[3];
+    int i;
+
+    if (!tb.denom) mach_timebase_info( &tb );
+    one_s = (uint64_t)(1e9 * tb.denom / tb.numer);
+    if (!t0) { __atomic_compare_exchange_n( &ios_fr_t0, &t0, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ); return; }
+    if (now - t0 < one_s) return;
+    if (!__atomic_compare_exchange_n( &ios_fr_t0, &t0, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) return;   /* another thread reports */
+
+    secs = (double)(now - t0) * tb.numer / tb.denom / 1e9;
+    ticks = IOS_FR_TAKE( ios_fr_ticks ); pres = IOS_FR_TAKE( ios_fr_presents ); skip = IOS_FR_TAKE( ios_fr_skipped );
+    cmdbufs = IOS_FR_TAKE( ios_fr_cmdbufs ); qmax = IOS_FR_TAKE( ios_fr_qmax );
+    busy = IOS_FR_TAKE( ios_fr_busy_ns ) / 1e6; span = IOS_FR_TAKE( ios_fr_span_ns ) / 1e6;
+    dw = IOS_FR_TAKE( ios_fr_dw_ns ) / 1e6; dwmax = IOS_FR_TAKE( ios_fr_dw_max_ns ) / 1e6; lim = IOS_FR_TAKE( ios_fr_lim_ns ) / 1e6;
+    for (i = 0; i < 3; i++) { pass[i] = IOS_FR_TAKE( ios_fr_pass[i] ); att[i] = IOS_FR_TAKE( ios_fr_att[i] ); }
+    frames = pres ? (double)pres : ticks ? (double)ticks : 1.0;
+    wine_log_write( "[frame] %.2f s: present %.1f/s (skipped %llu) game %.1f/s | GPU busy %.0f ms = %.0f%% (%.1f ms/frame) | "
+                    "cmdbufs %llu, span sum %.0f ms, in flight max %llu | nextDrawable wait %.1f ms (max %.1f) | per frame: render %.1f "
+                    "compute %.1f blit %.1f passes, attachments load %.1f store %.1f clear %.1f | panel %d Hz intent %d mode %d | limiter %.1f ms",
+                    secs, pres / secs, (unsigned long long)skip, ticks / secs, busy, secs > 0 ? busy / (secs * 10.0) : 0.0, busy / frames,
+                    (unsigned long long)cmdbufs, span, (unsigned long long)qmax, dw, dwmax,
+                    pass[0] / frames, pass[2] / frames, pass[1] / frames, att[0] / frames, att[1] / frames, att[2] / frames,
+                    ios_fr_panel_hz, ios_fr_intent_hz, ios_fr_mode, lim );
+}
+
+/* Called once at process init (the sampler arming site): reads the switch. */
+static void ios_frame_stats_arm( void )
+{
+    const char *e = getenv( "MADEIRA_FRAME_STATS" );   /* [frame] once a second: unset/0 off (default), anything else on */
+    if (!e || !*e || !strcmp( e, "0" )) return;
+    ios_frame_stats_on = 1;
+    wine_log_write( "[frame] instrument on (MADEIRA_FRAME_STATS=%s): one line per second with presents, GPU busy "
+                    "and nextDrawable wait; unset it for timing-sensitive runs", e );
+}
+
+/* The game's Present: once per Present on the presenting thread (winemetal's
+ * QueryDisplaySettingForLayer, ml1050). */
+void ios_frame_game_tick( void )
+{
+    if (!ios_frame_stats_on) return;
+    IOS_FR_ADD( ios_fr_ticks, 1 );
+    ios_fr_maybe_report();
+}
+
+/* presentDrawable on the encode thread (skipped: RAW mode dropped the frame) */
+void ios_frame_encode_present( int skipped )
+{
+    if (!ios_frame_stats_on) return;
+    if (skipped) IOS_FR_ADD( ios_fr_skipped, 1 ); else IOS_FR_ADD( ios_fr_presents, 1 );
+    ios_fr_maybe_report();
+}
+
+void ios_frame_drawable_wait( unsigned long long ns )
+{
+    if (!ios_frame_stats_on) return;
+    IOS_FR_ADD( ios_fr_dw_ns, ns );
+    ios_fr_max( &ios_fr_dw_max_ns, ns );
+}
+
+/* a command buffer completed: its GPU span and how many were in flight */
+void ios_frame_gpu( unsigned long long gpu_ns, unsigned long long inflight )
+{
+    if (!ios_frame_stats_on) return;
+    IOS_FR_ADD( ios_fr_cmdbufs, 1 );
+    IOS_FR_ADD( ios_fr_span_ns, gpu_ns );
+    ios_fr_max( &ios_fr_qmax, inflight );
+}
+
+/* the same buffer on the GPU timeline (seconds, CACurrentMediaTime base):
+ * the union of these is the time the GPU had work */
+void ios_frame_gpu_span( double start_s, double end_s )
+{
+    double from, add = 0;
+    if (!ios_frame_stats_on || !(start_s > 0.0) || !(end_s > start_s)) return;
+    pthread_mutex_lock( &ios_fr_gpu_lock );
+    from = start_s > ios_fr_gpu_end ? start_s : ios_fr_gpu_end;
+    if (end_s > from) add = end_s - from;
+    if (end_s > ios_fr_gpu_end) ios_fr_gpu_end = end_s;
+    pthread_mutex_unlock( &ios_fr_gpu_lock );
+    if (add > 0) IOS_FR_ADD( ios_fr_busy_ns, add * 1e9 );
+}
+
+void ios_frame_note_display( int panel_hz, int intent_hz, int mode )
+{
+    ios_fr_panel_hz = panel_hz; ios_fr_intent_hz = intent_hz; ios_fr_mode = mode;
+}
+
+void ios_frame_limiter( unsigned long long ns )
+{
+    if (ios_frame_stats_on) IOS_FR_ADD( ios_fr_lim_ns, ns );
+}
+
+/* kind 0 render, 1 blit, 2 compute; attachments of a render pass */
+void ios_frame_pass( unsigned kind, unsigned loads, unsigned stores, unsigned clears )
+{
+    if (!ios_frame_stats_on) return;
+    IOS_FR_ADD( ios_fr_pass[kind < 3 ? kind : 0], 1 );
+    IOS_FR_ADD( ios_fr_att[0], loads ); IOS_FR_ADD( ios_fr_att[1], stores ); IOS_FR_ADD( ios_fr_att[2], clears );
+}
+
 /* madeira-bcd lean-diag: env.MADEIRA_LEAN_DIAG = 1 (opt-in, read once where the
  * samplers are armed). The periodic diagnostics that suspend threads stop: the
  * [thread-sample] bursts (every thread suspended 4x every 20 s), the guest RIP
@@ -3230,9 +3760,9 @@ unsigned int server_call_unlocked( void *req_ptr )
 
     ios_srv_req_count++;
 #ifdef WINE_IOS
-    ios_bg_qos_check();   /* madeira-bcd: [bg-qos] */
     /* killed inside a section (ios_defer_section_abort): no more requests */
     if (ios_section_state() & IOS_SECTION_ABORT) return STATUS_THREAD_IS_TERMINATING;
+    ios_bg_qos_check();   /* [bg-qos] */
     if (__atomic_load_n( &g_madeira_srv_direct, __ATOMIC_RELAXED ) > 0 && ios_srv_try_direct( req, &ret ))
         return ret;   /* madeira-bcd: MADEIRA_SRV_DIRECT */
 #endif
@@ -3374,6 +3904,64 @@ static NTSTATUS invoke_user_apc( CONTEXT *context, const struct user_apc *apc, N
 }
 
 
+/* Madeira iosb-guard: an async I/O completion in a 32-bit pseudo-process writes an
+ * IO_STATUS_BLOCK32 (status + information, 8 bytes) to the address the request carried.
+ * ntdll picks the 32-bit layout from the calling pseudo-process, not from the call, so
+ * a write issued by 64-bit native code running inside a 32-bit process (the emulator's
+ * own console output, with an uninitialised 64-bit status block) hands back a stale
+ * stack value as that address. The store then faulted on an unmapped page, the
+ * redelivery guard looped on it, and on an unlucky day it could land somewhere mapped.
+ *
+ * The store is kept when the address is in the process's own 4 GB guest window, when
+ * the fault path would serve it below the iOS floor (a sub-floor image window or a low
+ * allocation), or when all 8 bytes lie in some task mapping (any protection: the fault
+ * path may heal it); a pointer into a hole is dropped with an "[iosb-guard]" line.
+ * 64-bit processes are never checked. env.MADEIRA_IOSB_DEAD_TARGET=0 always stores.
+ * The two probes live in signal_arm64_ios.c and never dereference the address. */
+extern int ios_iosb_probe_mapped( unsigned long long addr, unsigned long long len );
+extern int ios_iosb_probe_served_low( unsigned long long addr, unsigned long long len );
+
+#define IOS_IOSB_GUARD_BYTES   8ull             /* IO_STATUS_BLOCK32 */
+#define IOS_IOSB_GUARD_WINDOW  0x100000000ull   /* one guest window */
+#define IOS_IOSB_GUARD_FLOOR   0x100000000ull   /* iOS maps nothing below 4 GB */
+
+static int ios_iosb_guard_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_IOSB_DEAD_TARGET" );
+        on = !(e && e[0] == '0' && !e[1]);
+    }
+    return on;
+}
+
+/* 1 when an IO_STATUS_BLOCK32 written at `addr` reaches memory (or might), 0 for a hole. */
+static int ios_iosb32_store_lands( unsigned long long addr, unsigned long long window )
+{
+    if (addr + IOS_IOSB_GUARD_BYTES < addr) return 0;
+    if (window && addr >= window && addr - window < IOS_IOSB_GUARD_WINDOW) return 1;
+    if (addr < IOS_IOSB_GUARD_FLOOR) return ios_iosb_probe_served_low( addr, IOS_IOSB_GUARD_BYTES );
+    return ios_iosb_probe_mapped( addr, IOS_IOSB_GUARD_BYTES );
+}
+
+static void ios_set_async_iosb( client_ptr_t iosb, NTSTATUS status, ULONG_PTR info )
+{
+    if (iosb && in_wow64_call() && ios_iosb_guard_on() && !ios_iosb32_store_lands( iosb, ios_wow_base() ))
+    {
+        static volatile unsigned dropped;
+        unsigned n = __sync_add_and_fetch( &dropped, 1 );
+
+        if (n <= 8 || !(n & (n - 1)))
+            dprintf( 2, "[iosb-guard] #%u 32-bit process (window %p): async completion status=%#x info=%#llx not stored, "
+                     "%#llx is not memory (env.MADEIRA_IOSB_DEAD_TARGET=0 stores anyway)\n",
+                     n, (void *)ios_wow_base(), (unsigned)status, (unsigned long long)info, (unsigned long long)iosb );
+        return;
+    }
+    set_async_iosb( iosb, status, info );
+}
+
+
 /***********************************************************************
  *              invoke_system_apc
  */
@@ -3401,7 +3989,7 @@ static void invoke_system_apc( const union apc_call *call, union apc_result *res
             result->async_io.status = status;
             result->async_io.total = info;
             /* the server will pass us NULL if a call failed synchronously */
-            set_async_iosb( call->async_io.sb, result->async_io.status, info );
+            ios_set_async_iosb( call->async_io.sb, result->async_io.status, info );
         }
         else result->async_io.status = STATUS_PENDING; /* restart it */
         break;
@@ -5035,6 +5623,17 @@ void process_exit_wrapper( int status )
         ios_fdt_note_close( ios_proc_sockets[i].fd, "exit-master", dead_peb );
         close( ios_proc_sockets[i].fd );
         ios_proc_sockets[i].peb = NULL;
+        {   /* Madeira child-exit: this child's process ended; its slot in process_ios.c must not keep a session alive */
+            extern void ios_child_slot_exited( void *peb );
+            ios_child_slot_exited( dead_peb );
+        }
+        {   /* child-exit: and the status it ended with stays in the table's ring (for a game-end watch);
+             * an error status of a process no slot holds is said once per exit, so a log shows when the watch missed one */
+            extern int ios_child_slot_note_exit( void *peb, int status );
+            if (!ios_child_slot_note_exit( dead_peb, status ) && ((unsigned)status & 0xC0000000u) == 0xC0000000u)
+                wine_log_write("[child-table] a process ended with status 0x%x and the table has no slot for it (peb=%p)",
+                               (unsigned)status, dead_peb);
+        }
         ios_dead_pebs[__sync_fetch_and_add( &ios_dead_peb_next, 1 ) % IOS_DEAD_PEB_MAX] = dead_peb;
         /* ml571: drop this pseudo-process's fd cache and close what it held.
          * Must happen on the SAME identity used to key it, and before the JIT
@@ -5377,6 +5976,33 @@ static void ios_hw_dword( HANDLE key, const char *name, DWORD value )
     NtSetValueKey( key, &str, 0, REG_DWORD, &value, sizeof(value) );
 }
 
+/* Session Manager\Environment is saved with the prefix: write a value only
+ * when it differs from what the key holds. 1 = written. */
+static int ios_hw_env_value( HANDLE key, const char *name, const char *value )
+{
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION info;
+        char raw[offsetof( KEY_VALUE_PARTIAL_INFORMATION, Data ) + 128 * sizeof(WCHAR)];
+    } buf;
+    WCHAR nameW[64];
+    UNICODE_STRING str;
+    ULONG size = 0, n = strlen( value ), i;
+    const WCHAR *old;
+
+    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
+    init_unicode_string( &str, nameW );
+    if (!NtQueryValueKey( key, &str, KeyValuePartialInformation, &buf, sizeof(buf), &size ) &&
+        buf.info.Type == REG_SZ && buf.info.DataLength >= n * sizeof(WCHAR))
+    {
+        old = (const WCHAR *)buf.info.Data;
+        for (i = 0; i < n; i++) if (old[i] != (unsigned char)value[i]) break;
+        if (i == n && (buf.info.DataLength == n * sizeof(WCHAR) || !old[n])) return 0;
+    }
+    ios_hw_sz( key, name, value );
+    return 1;
+}
+
 /***********************************************************************
  *           ios_hw_registry_publish
  *
@@ -5391,25 +6017,34 @@ static void ios_hw_dword( HANDLE key, const char *name, DWORD value )
  * first process builds its environment. The processor values describe what
  * the x86-64 guest sees from FEX's CPUID (hw_registry_ios.h), the count is
  * GetSystemInfo's. Children of the session read the same registry.
+ * MADEIRA_HW_REGISTRY=2 also writes wineboot's five processor values in
+ * Session Manager\Environment (saved with the prefix, only when they differ).
  */
 void ios_hw_registry_publish(void)
 {
     static const char machine[] = "\\Registry\\Machine";
     static const char sysdesc[] = "HARDWARE\\DESCRIPTION\\System";
+    static const char envkey[] = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment";
     /* FEX reads this switch itself (FetchHostFeatures); it is only mirrored here. */
     static const char fex_avx[] = "MADEIRA_FEX_AVX";
     const char *avx = getenv( fex_avx );
     struct hwreg_cpu cpu;
     struct hwreg_bios bios;
-    unsigned int i, count, cpus = 0, fpus = 0;
+    struct hwreg_env env[HWREG_ENV_VALUES];
+    unsigned int i, count, cpus = 0, fpus = 0, rewritten = 0;
     unsigned char *smbios;
     ULONG smbios_len = 0;
-    char path[96];
+    char path[96], extra[128] = "";
+    WCHAR envW[ARRAY_SIZE(envkey)];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
     HANDLE key;
+    int mode;
 
-    /* 0 writes no HARDWARE\DESCRIPTION keys (wineboot's volatile hardware tree,
-     * which no session had before). */
-    if (!hwreg_enabled( getenv( "MADEIRA_HW_REGISTRY" ) ))
+    /* Default 1: wineboot's volatile HKLM\HARDWARE\DESCRIPTION\System keys. 0: none
+     * (no session had them before). 2: also the Session Manager\Environment values. */
+    mode = hwreg_mode( getenv( "MADEIRA_HW_REGISTRY" ) );
+    if (!mode)
     {
         wine_log_write( "[hw-registry] MADEIRA_HW_REGISTRY=0, no HARDWARE\\DESCRIPTION keys written" );
         return;
@@ -5418,7 +6053,9 @@ void ios_hw_registry_publish(void)
     count = hwreg_cpu_count( peb->NumberOfProcessors );
     /* AVX exists only in FEX's ARM64EC module; a 32-bit main image runs the WOW64
      * module, which has no AVX. */
-    hwreg_fex_cpu( &cpu, avx && avx[0] == '1' && !ios_main_image_i386, ios_hw_cntfrq() );
+    /* as FEX reads it: "1..." AVX and AVX2; exactly "2" AVX without AVX2 */
+    hwreg_fex_cpu( &cpu, (!avx || ios_main_image_i386) ? 0 : avx[0] == '1' ? 1 :
+                         (avx[0] == '2' && !avx[1]) ? 2 : 0, ios_hw_cntfrq() );
     if (!cpu.mhz) cpu.mhz = ios_hw_power_mhz();
     smbios = ios_hw_smbios( &smbios_len );
     hwreg_bios_values( &bios, smbios, smbios_len, PACKAGE_VERSION );
@@ -5476,11 +6113,27 @@ void ios_hw_registry_publish(void)
         }
     }
 
+    if (mode == 2)
+    {
+        ascii_to_unicode( envW, envkey, ARRAY_SIZE(envkey) );
+        init_unicode_string( &name, envW );
+        InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
+        if (!NtOpenKey( &key, KEY_QUERY_VALUE | KEY_SET_VALUE, &attr ))
+        {
+            hwreg_environment( env, &cpu, peb->NumberOfProcessors );
+            for (i = 0; i < HWREG_ENV_VALUES; i++) rewritten += ios_hw_env_value( key, env[i].name, env[i].value );
+            NtClose( key );
+            snprintf( extra, sizeof(extra), "; Session Manager\\Environment: %u of %u processor values rewritten",
+                      rewritten, (unsigned int)HWREG_ENV_VALUES );
+        }
+        else snprintf( extra, sizeof(extra), "; Session Manager\\Environment missing, not touched" );
+    }
+
     wine_log_write( "[hw-registry] HKLM\\%s (volatile): %u/%u CentralProcessor + %u FloatingPointProcessor "
-                    "\"%s\" %s \"%s\" ~MHz %u FeatureSet 0x%08x; BIOS \"%s\" \"%s\" (%s, %u Wine default(s))",
+                    "\"%s\" %s \"%s\" ~MHz %u FeatureSet 0x%08x; BIOS \"%s\" \"%s\" (%s, %u Wine default(s))%s",
                     sysdesc, cpus, count, fpus, cpu.identifier, cpu.vendor, cpu.brand, (unsigned int)cpu.mhz,
                     (unsigned int)cpu.feature_set, bios.sys_vendor, bios.sys_product,
-                    smbios_len ? "SMBIOS" : "no SMBIOS table", bios.defaults );
+                    smbios_len ? "SMBIOS" : "no SMBIOS table", bios.defaults, extra );
 }
 /* hw-registry-test:end */
 
@@ -5622,6 +6275,120 @@ static void ios_hidpad_publish(void)
     }
     wine_log_write( "[hid-pad] ml2102 %s %04X:%04X registered (%u/4 keys) as %s rev=ml2105",
                     id->env, id->vid, id->pid, written, symlink );
+}
+
+static void ios_vcrt_sz( HANDLE key, const char *name, const char *value )
+{
+    WCHAR nameW[32], data[48];
+    UNICODE_STRING str;
+    size_t n = strnlen( value, ARRAY_SIZE(data) - 1 );
+
+    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
+    ascii_to_unicode( data, value, n );
+    data[n] = 0;
+    init_unicode_string( &str, nameW );
+    NtSetValueKey( key, &str, 0, REG_SZ, data, (n + 1) * sizeof(WCHAR) );
+}
+
+static void ios_vcrt_dword( HANDLE key, const char *name, DWORD value )
+{
+    WCHAR nameW[32];
+    UNICODE_STRING str;
+
+    ascii_to_unicode( nameW, name, strlen( name ) + 1 );
+    init_unicode_string( &str, nameW );
+    NtSetValueKey( key, &str, 0, REG_DWORD, &value, sizeof(value) );
+}
+
+/* "14.42.34433" or "14.42.34433.0": three or four decimal numbers of at most five digits
+ * separated by dots, nothing else. 1 = parsed into v[0..3] (the fourth is 0 when absent). */
+static int ios_vcrt_version( const char *s, unsigned int v[4] )
+{
+    unsigned int part, digits;
+
+    for (part = 0; part < 4; part++)
+    {
+        v[part] = 0;
+        for (digits = 0; *s >= '0' && *s <= '9'; s++, digits++) v[part] = v[part] * 10 + (*s - '0');
+        if (!digits || digits > 5) return 0;
+        if (!*s) return part >= 2;
+        if (*s++ != '.') return 0;
+    }
+    return 0;
+}
+
+/***********************************************************************
+ *           ios_vcrt_arm64_key_publish
+ *
+ * Madeira vcrt-arm64: the "Installed" marker of Microsoft's ARM64 Visual C++
+ * 2015-2022 redistributable, HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\arm64
+ * (and the same key under Wow6432Node, where the prefix template keeps its x64
+ * one). Some engine bootstrappers are x64 programs, but the session reports an
+ * ARM64 machine, so they stop with "Microsoft Visual C++ 2015-2022
+ * Redistributable (arm64) is required" and exit 0x2329; the prefix has the x64
+ * and x86 markers only. Off unless env.MADEIRA_VCRT_ARM64_KEY = 1 or a version
+ * such as 14.44.35211 (usually in a game's own configuration lines). "1" writes
+ * 14.44.35211.0: a bootstrapper compares the marker with the version it was
+ * built against, and a higher number only passes more of these checks. The keys
+ * are volatile, as wineboot's hardware keys: nothing is saved with the prefix,
+ * and a key already there is left alone. Written once per session by the first
+ * process (loader_ios.c), before the program starts.
+ */
+void ios_vcrt_arm64_key_publish(void)
+{
+    static const char machine[] = "\\Registry\\Machine";
+    static const char *const keys[] =
+    {
+        "Software\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\arm64",
+        "Software\\Wow6432Node\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\arm64",
+    };
+    const char *sw = getenv( "MADEIRA_VCRT_ARM64_KEY" );
+    unsigned int v[4] = { 14, 44, 35211, 0 }, i, made = 0, kept = 0, failed = 0;
+    char version[32], path[160];
+    WCHAR pathW[160];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE key;
+
+    if (!sw || !sw[0] || !strcmp( sw, "0" )) return;
+    if (strcmp( sw, "1" ) && !ios_vcrt_version( sw, v ))
+    {
+        wine_log_write( "[vcrt-arm64] MADEIRA_VCRT_ARM64_KEY=\"%.40s\" is neither 1 nor a version "
+                        "like 14.42.34433.0, nothing written", sw );
+        return;
+    }
+    snprintf( version, sizeof(version), "%u.%u.%u.%u", v[0], v[1], v[2], v[3] );
+
+    for (i = 0; i < ARRAY_SIZE(keys); i++)
+    {
+        snprintf( path, sizeof(path), "%s\\%s", machine, keys[i] );
+        ascii_to_unicode( pathW, path, strlen( path ) + 1 );
+        init_unicode_string( &name, pathW );
+        InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
+        if (!NtOpenKey( &key, KEY_QUERY_VALUE, &attr ))
+        {
+            NtClose( key );
+            kept++;
+            continue;
+        }
+        if (!(key = ios_hw_key( machine, keys[i] )))
+        {
+            failed++;
+            continue;
+        }
+        ios_vcrt_dword( key, "Bld", v[2] );
+        ios_vcrt_dword( key, "Installed", 1 );
+        ios_vcrt_dword( key, "Major", v[0] );
+        ios_vcrt_dword( key, "Minor", v[1] );
+        ios_vcrt_dword( key, "Rbld", v[3] );
+        ios_vcrt_sz( key, "Version", version );
+        NtClose( key );
+        made++;
+    }
+    wine_log_write( "[vcrt-arm64] HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\arm64 "
+                    "(volatile) Installed=1 Version %s: %u of %u view(s) written, %u already there and left alone, "
+                    "%u could not be made; MADEIRA_VCRT_ARM64_KEY unset or 0 turns it off",
+                    version, made, (unsigned int)ARRAY_SIZE(keys), kept, failed );
 }
 #endif
 
@@ -5833,6 +6600,11 @@ size_t server_init_process_child( int child_fd_socket )
     if (fcntl( child_fd_socket, F_SETFD, FD_CLOEXEC ) == -1)
         wine_log_write("[Wine child] WARNING: fcntl FD_CLOEXEC failed on fd %d", child_fd_socket);
     ios_register_proc_socket( ios_jit_current_peb(), child_fd_socket );
+    {   /* Madeira child-exit: the child's slot in process_ios.c learns its PEB, so process_exit_wrapper can mark
+         * it ended whichever thread ends the process (a child that exits off its boot thread never releases it) */
+        extern void ios_child_slot_bind_peb( void *peb );
+        ios_child_slot_bind_peb( ios_jit_current_peb() );
+    }
 
     wine_log_write("[Wine child] server_init_process_child: fd_socket=%d (peb=%p)",
                    child_fd_socket, ios_jit_current_peb());
@@ -5912,6 +6684,13 @@ void server_init_process_done(void)
      * reissues the ids of dead processes, so drop what a dead process with this id
      * left behind. This process owns no handles yet. A no-op while fastsync is off. */
     madeira_fast_flush_pid();
+
+    /* The client half of the directory cache is kept per process id for the same reason
+     * (wine/dlls/ntdll/unix/file.c): drop a dead process's listings. */
+    {
+        extern void madeira_dir_cache_flush_pid(void);
+        madeira_dir_cache_flush_pid();
+    }
 
     if (!get_device_info( initial_cwd, &info ) && (info.Characteristics & FILE_REMOVABLE_MEDIA))
         chdir( "/" );
@@ -6103,19 +6882,32 @@ void server_init_process_done(void)
          * ios_thread_sampler_main() above. */
         if (__sync_bool_compare_and_swap(&ios_ts_armed, 0, 1))
         {
+            /* Madeira: MADEIRA_PROBES picks which always-on profilers start,
+             * for timing runs: unset/1 = all (as before); "light" = only the
+             * xprobe ([xp]/[xp-t]/[xp-api], counters read 4x a second, no thread
+             * is ever suspended); 0 = none. The thread sampler suspends every
+             * thread 4x per 20 s and the guest RIP profile suspends the game's
+             * threads 200x in a second after that -- cheap, but not free on a
+             * device whose efficiency cores are saturated (a heavy game at 1080p). */
+            const char *probes_env = getenv("MADEIRA_PROBES");
+            int probes = !probes_env || !*probes_env ? 2 : !strcmp(probes_env, "0") ? 0 : !strcmp(probes_env, "light") ? 1 : 2;
             /* 1: no thread-suspending samplers ([thread-sample], [rip-profile], [cpu-split], [wprof]) and rare memory walks; [xp] unchanged */
             const char *lean_env = getenv("MADEIRA_LEAN_DIAG");
             /* 1: a [power] line every 5 s (coalition GPU energy, IOReport, battery) and [power-t] (energy per thread) */
             const char *probe_env = getenv("MADEIRA_POWER_PROBE");
             ios_lean_diag = lean_env && *lean_env && strcmp(lean_env, "0") != 0;
             ios_power_probe_on = probe_env && *probe_env && strcmp(probe_env, "0") != 0;
+            if (probes < 2)
+                wine_log_write("[probes] MADEIRA_PROBES=%s: thread sampler, guest RIP profile and W-thread profiler off%s",
+                               probes_env, probes ? "; [xp] counters stay" : "; [xp] counters off too");
             if (ios_lean_diag)
                 wine_log_write("[lean-diag] madeira-bcd MADEIRA_LEAN_DIAG=%s: [thread-sample] bursts, guest RIP profile ([rip-profile], "
                                "[cpu-split]) and [wprof] off; [sync-census] every 20 s and [xp]/[xp-t]/[xp-api] every 250 ms / 1 s as "
                                "before; the warmer's memory walks every ~10 min", lean_env);
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_xprobe_main(); });   /* ml1128 */
-            if (!ios_lean_diag) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_wprof_main(); });   /* ml1129 */
+            ios_frame_stats_arm();   /* [frame]: off unless MADEIRA_FRAME_STATS is set */
+            if (probes >= 2) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
+            if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_xprobe_main(); });   /* ml1128 */
+            if (probes >= 2 && !ios_lean_diag) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_wprof_main(); });   /* ml1129 */
         }
         if (!getenv("MADEIRA_QUIET"))
         {

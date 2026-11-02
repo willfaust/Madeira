@@ -247,9 +247,10 @@ static void d3d12_log(const char *fmt, ...) {
 typedef int64_t LONG64;
 static LONG64 InterlockedExchangeAdd64(volatile LONG64 *p, LONG64 v) { LONG64 o = *p; *p += v; return o; }
 static LONG InterlockedExchange(volatile LONG *p, LONG v) { LONG o = *p; *p = v; return o; }
-struct mad_tvs { LONG64 seen; };
+struct mad_tvs { LONG64 seen; UINT32 k; };
 struct mad_tview { UINT fmt; UINT64 off, num; UINT8 uav, eoff; obj_handle_t tex; UINT64 id, sh_gpu; struct mad_tvs *sh; };
-struct mad_resource { obj_handle_t buffer; void *cpu; UINT64 size, gpu_address; struct mad_tview *tview; unsigned ntview, tview_cap; int heap; };
+struct mad_resource { obj_handle_t buffer; void *cpu; UINT64 size, gpu_address; struct mad_tview *tview; unsigned ntview, tview_cap; int heap;
+                      void *own_mem; };
 typedef struct mad_resource ID3D12Resource;
 static int released;
 static void ID3D12Resource_Release(ID3D12Resource *r) { (void)r; released++; }
@@ -322,6 +323,25 @@ static obj_handle_t mad_tvs_view(struct mad_device *d, struct mad_resource *r, s
     *rec = &tvs_rec[tvs_made++ & 7]; (*rec)->seen = g_presents_now;
     return (obj_handle_t)(uintptr_t)ti->gpu_resource_id;
 }
+/* typed-view-rgb32 (R32G32B32 read through a 16-byte-element copy of UPLOAD memory): format 6 is the
+ * harness's RGB32; every view of it here is of a non-UPLOAD buffer, which keeps reason 2 */
+static volatile LONG g_tv_rgb32_other, g_tv_rgb32_views;
+static int mad_tv_rgb32_format(DXGI_FORMAT f, enum WMTPixelFormat *pf) { if (f != 6) return 0; *pf = WMTPixelFormatRGBA32Float; return 1; }
+static obj_handle_t mad_tvs_view_x(struct mad_device *d, struct mad_resource *r, struct WMTTextureInfo *ti,
+                                   UINT64 byte_off, UINT64 num, UINT bytes, UINT dbytes, UINT64 *gpu, struct mad_tvs **rec) {
+    (void)dbytes;
+    return mad_tvs_view(d, r, ti, byte_off, num, bytes, gpu, rec);
+}
+static void mad_tvs_drop(struct mad_tvs *t) { (void)t; }
+static void mad_tvs_touch(struct mad_tvs *t) { t->seen = g_presents_now; }
+/* tv-hash: no table below 32 views; the lookup is then the scan it replaced */
+static unsigned mad_tvh_find(const struct mad_resource *r, UINT fmt, UINT64 off, UINT64 num, UINT uav) {
+    unsigned k;
+    for (k = 0; k < r->ntview; k++)
+        if (r->tview[k].fmt == fmt && r->tview[k].off == off && r->tview[k].num == num && r->tview[k].uav == (UINT8)uav) return k;
+    return r->ntview;
+}
+static void mad_tvh_add(struct mad_resource *r, unsigned k) { (void)r; (void)k; }
 ''' + body('static int mad_typed_buffer_view(struct mad_device *d, struct mad_resource *r, DXGI_FORMAT fmt,') + r'''
 static int bad;
 #define EXPECT(c, what) do { if (!(c)) { printf("FAIL %s\n", what); bad = 1; } else printf("ok   %s\n", what); } while (0)

@@ -19,6 +19,11 @@
  * No manufacturer, hardware serial or physical-media capabilities are inferred. */
 struct madeira_disk_info { uint64_t bytes; };
 
+/* The ProductId a program reads from the disk. The descriptor's product field
+ * is sized from this literal, so it and the copy below can never disagree
+ * about the length. */
+#define MADEIRA_DISK_PRODUCT "Madeira virtual disk"
+
 static inline uint64_t madeira_disk_capacity( uint64_t blocks, uint64_t block_size )
 {
     if (!blocks || !block_size || blocks > INT64_MAX / block_size) return 0;
@@ -91,7 +96,7 @@ static inline unsigned int madeira_disk_ioctl( const struct madeira_disk_info *d
     case IOCTL_STORAGE_QUERY_PROPERTY:
     {
         STORAGE_PROPERTY_QUERY query;
-        struct { STORAGE_DEVICE_DESCRIPTOR descriptor; char product[21]; } value = {0};
+        struct { STORAGE_DEVICE_DESCRIPTOR descriptor; char product[sizeof(MADEIRA_DISK_PRODUCT)]; } value = {0};
         if (!in || in_size < sizeof(query)) return STATUS_INVALID_PARAMETER;
         memcpy( &query, in, sizeof(query) );
         if (query.PropertyId != StorageDeviceProperty) return STATUS_NOT_SUPPORTED;
@@ -101,7 +106,7 @@ static inline unsigned int madeira_disk_ioctl( const struct madeira_disk_info *d
         value.descriptor.Size = offsetof(__typeof__(value), product) + sizeof(value.product);
         value.descriptor.BusType = BusTypeVirtual;
         value.descriptor.ProductIdOffset = offsetof(__typeof__(value), product);
-        memcpy( value.product, "Madeira virtual disk", sizeof(value.product) );
+        memcpy( value.product, MADEIRA_DISK_PRODUCT, sizeof(value.product) );
         /* The standard two-step descriptor query: a header gives the full
          * required size without touching any bytes beyond that header. */
         if (out_size < value.descriptor.Size)

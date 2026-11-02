@@ -324,6 +324,20 @@ static void destructor_fixture(void)
     uintptr_t fn = (uintptr_t)finish_destroy;
     memcpy(tail + 8, &fn, 8); memcpy(image + 0x4a720, tail, sizeof(tail));
 }
+static void channel_reply_fixture(const char *before)
+{
+    /* The Channel Response after its patched instruction: load the name from the
+     * CefString wrapper (RSI), CALL Connect, and reach the original reply cleanup.
+     * The helper's own bytes stay out of the tree, so this stand-in replaces the
+     * filler between the hook's end and the cleanup, which the patch leaves alone. */
+    const size_t at = IOS_SCH_RENDER_CHANNEL_KEEP + 7, end = IOS_SCH_RENDER_CHANNEL_REPLY + 0x19;
+    unsigned char code[] = {0x48,0x8b,0x16,0xe8,0,0,0,0}; /* mov rdx,[rsi]; call Connect */
+    int32_t disp = (int32_t)(IOS_SCH_IPC_CONNECT - (at + sizeof(code)));
+    assert(end >= at + sizeof(code) && !memcmp(image + at, before + at, end - at));
+    memcpy(code + 4, &disp, 4);
+    memcpy(image + at, code, sizeof(code));
+    memset(image + at + sizeof(code), 0x90, end - at - sizeof(code));
+}
 static void *renderer_thread(void *unused)
 {
     (void)unused;
@@ -374,8 +388,8 @@ __asm__(
 "call_loop: push %r14; sub $32,%rsp; mov %rcx,%r14; jmp *%rdx\n"
 "initial_connect: sub $40,%rsp; jmp *%r9\n"
 "lookup_direct: push %rbx; sub $32,%rsp; jmp *%rcx\n"
-/* Execute the actual Channel Response instruction, subsequent argument loads
- * and relative CALL to Connect. RSI is its CefString pointer wrapper. */
+/* Execute the patched Channel Response instruction, then the stand-in's argument
+ * load and relative CALL to Connect. RSI is its CefString pointer wrapper. */
 "receive_channel: push %rbx; push %rsi; sub $40,%rsp; mov %rcx,%rax; mov %rdx,%rsi;"
 "mov %r8b,%bl; jmp *%r9\n"
 "probe_get: push %rbx; push %rdi; sub $40,%rsp; mov %rcx,%rbx;"
@@ -407,21 +421,29 @@ int main(int argc, char **argv)
     *(uint64_t *)(image + IOS_SCH_VT_RENDERER + IOS_SCH_SLOT_RENDERER * 8) = base + IOS_SCH_GET_HANDLER;
     *(uint64_t *)(image + IOS_SCH_VT_RENDERER + IOS_SCH_SLOT_BROWSER * 8) = base + IOS_SCH_GET_NULL;
     *(uint64_t *)(image + IOS_SCH_VT_RPH) = base + IOS_SCH_WEBKIT;
+    /* The image holds the filler, not the helper's code: the opt-out is checked
+     * against the image as it was before the patch. */
+    char *before = malloc(IOS_SCH_SIZE);
+    assert(before);
+    memcpy(before, image, IOS_SCH_SIZE);
     ios_sc_render_handler_patch(image, IOS_SCH_SIZE, &nt, sec, &name);
     if (argc > 1 && !strcmp(argv[1], "disabled")) {
-        assert(!memcmp(image + 0x4b290, "\x48\x8b\x05\xf9\x28\x18\x00\xc3", 8));
+        assert(!memcmp(image + 0x4b290, before + 0x4b290, 8));
         for (size_t i = 0; i < sizeof(ios_sch_ipc_split); i++) assert(!image[IOS_SCH_IPC_SPLIT+i]);
         assert((unsigned char)image[IOS_SCH_IPC_CONNECT] == 0xe9);
         assert((unsigned char)image[IOS_SCH_RENDER_DRAIN_SITE] == 0xe8);
-        assert(!memcmp(image + IOS_SCH_RENDER_CHANNEL_KEEP, "\x44\x0f\xb6\xc3", 4));
+        assert(!memcmp(image + IOS_SCH_RENDER_CHANNEL_KEEP, before + IOS_SCH_RENDER_CHANNEL_KEEP, 7));
         for (size_t i = 0; i < sizeof(ios_sch_renderer_channels); i++)
             assert(!image[IOS_SCH_RENDER_CHANNEL_THUNK+i]);
+        free(before);
         assert(!munmap(image, IOS_SCH_SIZE));
         puts("PASS: IPC split opt-out preserves the earlier renderer, drain and diagnostic patches");
         return 0;
     }
     assert((unsigned char)image[0x4b290] == 0xe9);
     assert((unsigned char)image[IOS_SCH_RENDER_CHANNEL_KEEP] == 0xe9);
+    channel_reply_fixture(before);
+    free(before);
     if (argc > 1 && !strcmp(argv[1], "legacy"))
         memcpy(image + 0x4b290, "\x48\x8b\x05\xf9\x28\x18\x00\xc3", 8);
     if (argc > 1 && !strcmp(argv[1], "old-rebind"))

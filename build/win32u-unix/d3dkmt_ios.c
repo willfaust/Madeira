@@ -18,31 +18,48 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-/* Wraps wine/dlls/win32u/d3dkmt.c (compiled unchanged, four adapter entry
- * points renamed upstream_*) for one opt-in feature.
+/* Wraps wine/dlls/win32u/d3dkmt.c (compiled unchanged, the adapter entry
+ * points renamed upstream_*) for two things:
  *
- * The iOS virtual-monitor regime has no GPU in win32u's list, so D3DKMT knows
- * no adapter: EnumAdapters2 lists none, QueryAdapterInfo answers two types,
- * QueryStatistics fills nothing. Engines and SDKs that check the driver
- * through D3DKMT (Streamline's hardware-scheduling check, GTA V Enhanced's
- * device check) find no driver behind the D3D12 device.
+ * 1. A bounded [vkmt] trace of every adapter-level D3DKMT entry point
+ *    implemented here (OpenAdapterFromLuid / FromHdc, CloseAdapter,
+ *    CreateDevice / DestroyDevice, QueryAdapterInfo with the info type,
+ *    QueryVideoMemoryInfo, QueryStatistics, CheckVidPnExclusiveOwnership,
+ *    SetVidPnSourceOwner, CheckOcclusion, SetQueuedLimit, Escape). The
+ *    enumeration side (EnumAdapters2, OpenAdapterFromDeviceName,
+ *    OpenAdapterFromGdiDisplayName) logs in sysparams_ios.c. On by default, a
+ *    few lines per session: the first 16 calls of each entry point plus
+ *    failures up to the 64th; QueryAdapterInfo logs its first 64 calls and the
+ *    first call of every info type after that. MADEIRA_KMT_TRACE=0 silences
+ *    it. A D3D12 title can enumerate D3DKMT adapters right before creating its
+ *    device, find none, and give up without anything in the log showing what
+ *    it asked next.
  *
- * With MADEIRA_KMT_ADAPTER=1 (default off; nothing below changes an answer
- * without it) the D3D12/DXGI GPU becomes a D3DKMT adapter. Its LUID is the one
- * DXGI's GetAdapterLuid, NVAPI and madeira_d3d12 report -- bswap64 of the Metal
- * device's registryID -- computed here from MTLCreateSystemDefaultDevice
- * (resolved with dlsym, so this file needs no Objective-C and no link change).
- * EnumAdapters2 lists it (sysparams_ios.c), OpenAdapterFromHdc opens it, and
- * QueryAdapterInfo answers for it like a WDDM 3.1 desktop driver:
- * DRIVERVERSION, UMD/KMD_DRIVER_VERSION (the registry DriverVersion, Windows'
- * a.b.c.d -> a<<48|b<<32|c<<16|d), ADAPTERTYPE, PHYSICALADAPTERCOUNT /
- * DEVICEIDS, ADAPTERADDRESS, the WDDM 1.2 .. 3.1 caps (hardware scheduling on),
- * DRIVER_DESCRIPTION, ADAPTERREGISTRYINFO, NODEMETADATA, GETSEGMENTSIZE /
- * GETSEGMENTGROUPSIZE (dedicated = vram-mb, else 4096 MB), ADAPTERPERFDATA and
- * ADAPTERPERFDATA_CAPS. Every other type keeps upstream's answer.
- * QueryStatistics describes the adapter, its segments and nodes, and
- * QueryVideoMemoryInfo's LOCAL budget (upstream: 0 without Vulkan) becomes the
- * same dedicated size. */
+ * 2. Opt-in, env.MADEIRA_KMT_ADAPTER = 1 (default off; nothing below changes
+ *    an answer without it): the D3D12/DXGI GPU becomes a D3DKMT adapter.
+ *    Its LUID is the one DXGI's GetAdapterLuid, NVAPI and madeira_d3d12
+ *    report -- bswap64 of the Metal device's registryID -- computed here from
+ *    MTLCreateSystemDefaultDevice (resolved with dlsym, so this file needs no
+ *    Objective-C and no link change). EnumAdapters2 lists it (sysparams_ios.c),
+ *    OpenAdapterFromHdc opens it, and QueryAdapterInfo answers for it like a
+ *    WDDM 3.1 desktop driver: DRIVERVERSION, UMD/KMD_DRIVER_VERSION (the
+ *    registry DriverVersion, Windows' a.b.c.d -> a<<48|b<<32|c<<16|d),
+ *    ADAPTERTYPE, PHYSICALADAPTERCOUNT / DEVICEIDS, ADAPTERADDRESS, the WDDM
+ *    1.2 .. 3.1 caps (hardware scheduling on), DRIVER_DESCRIPTION,
+ *    ADAPTERREGISTRYINFO, NODEMETADATA, GETSEGMENTSIZE / GETSEGMENTGROUPSIZE
+ *    (dedicated = vram-mb, else 4096 MB), ADAPTERPERFDATA and
+ *    ADAPTERPERFDATA_CAPS. Every other type keeps upstream's answer and is
+ *    logged. QueryStatistics describes the adapter, its segments and nodes,
+ *    and QueryVideoMemoryInfo's LOCAL budget (upstream: 0 without Vulkan)
+ *    becomes the same dedicated size.
+ *
+ * Upstream's answers, for comparison: EnumAdapters2 lists the GPUs Vulkan /
+ * OpenGL / the display driver found (none in the iOS virtual-monitor regime);
+ * OpenAdapterFromLuid accepts any LUID; OpenAdapterFromHdc is a stub
+ * (STATUS_NO_MEMORY); QueryAdapterInfo knows CHECKDRIVERUPDATESTATUS (FALSE)
+ * and DRIVERVERSION (WDDM 1.3) and answers STATUS_NOT_IMPLEMENTED to the rest;
+ * QueryVideoMemoryInfo reads a Vulkan budget (zeros here); QueryStatistics is
+ * a stub that fills nothing. */
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -65,25 +82,52 @@ static int madeira_d3dkmt_pthread_once( pthread_once_t *once, void (*init)(void)
     return pthread_once( once, init );
 }
 
+#define NtGdiDdDDIOpenAdapterFromLuid          upstream_NtGdiDdDDIOpenAdapterFromLuid
 #define NtGdiDdDDIOpenAdapterFromHdc            upstream_NtGdiDdDDIOpenAdapterFromHdc
+#define NtGdiDdDDICloseAdapter                  upstream_NtGdiDdDDICloseAdapter
+#define NtGdiDdDDICreateDevice                  upstream_NtGdiDdDDICreateDevice
+#define NtGdiDdDDIDestroyDevice                 upstream_NtGdiDdDDIDestroyDevice
 #define NtGdiDdDDIQueryAdapterInfo              upstream_NtGdiDdDDIQueryAdapterInfo
 #define NtGdiDdDDIQueryStatistics               upstream_NtGdiDdDDIQueryStatistics
 #define NtGdiDdDDIQueryVideoMemoryInfo          upstream_NtGdiDdDDIQueryVideoMemoryInfo
+#define NtGdiDdDDISetQueuedLimit                upstream_NtGdiDdDDISetQueuedLimit
+#define NtGdiDdDDISetVidPnSourceOwner           upstream_NtGdiDdDDISetVidPnSourceOwner
+#define NtGdiDdDDICheckOcclusion                upstream_NtGdiDdDDICheckOcclusion
+#define NtGdiDdDDICheckVidPnExclusiveOwnership  upstream_NtGdiDdDDICheckVidPnExclusiveOwnership
+#define NtGdiDdDDIEscape                        upstream_NtGdiDdDDIEscape
 #define pthread_once( once, init )              madeira_d3dkmt_pthread_once( once, init )
 #include "../../wine/dlls/win32u/d3dkmt.c"
+#undef NtGdiDdDDIOpenAdapterFromLuid
 #undef NtGdiDdDDIOpenAdapterFromHdc
+#undef NtGdiDdDDICloseAdapter
+#undef NtGdiDdDDICreateDevice
+#undef NtGdiDdDDIDestroyDevice
 #undef NtGdiDdDDIQueryAdapterInfo
 #undef NtGdiDdDDIQueryStatistics
 #undef NtGdiDdDDIQueryVideoMemoryInfo
+#undef NtGdiDdDDISetQueuedLimit
+#undef NtGdiDdDDISetVidPnSourceOwner
+#undef NtGdiDdDDICheckOcclusion
+#undef NtGdiDdDDICheckVidPnExclusiveOwnership
+#undef NtGdiDdDDIEscape
 #undef pthread_once
 
 #include "madeira_kmt.h"
 
 /* The headers declared the renamed names; these are the exported ones. */
+NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc );
 NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc );
+NTSTATUS WINAPI NtGdiDdDDICloseAdapter( const D3DKMT_CLOSEADAPTER *desc );
+NTSTATUS WINAPI NtGdiDdDDICreateDevice( D3DKMT_CREATEDEVICE *desc );
+NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc );
 NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc );
 NTSTATUS WINAPI NtGdiDdDDIQueryStatistics( D3DKMT_QUERYSTATISTICS *stats );
 NTSTATUS WINAPI NtGdiDdDDIQueryVideoMemoryInfo( D3DKMT_QUERYVIDEOMEMORYINFO *desc );
+NTSTATUS WINAPI NtGdiDdDDISetQueuedLimit( D3DKMT_SETQUEUEDLIMIT *desc );
+NTSTATUS WINAPI NtGdiDdDDISetVidPnSourceOwner( const D3DKMT_SETVIDPNSOURCEOWNER *desc );
+NTSTATUS WINAPI NtGdiDdDDICheckOcclusion( const D3DKMT_CHECKOCCLUSION *desc );
+NTSTATUS WINAPI NtGdiDdDDICheckVidPnExclusiveOwnership( const D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP *desc );
+NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc );
 
 /* kmt-test:begin -- tests/host/check-kmt-adapter.py compiles this region on the host. */
 
@@ -113,9 +157,10 @@ struct madeira_kmt_nodemetadata   /* D3DKMT_NODEMETADATA with DXGK_NODEMETADATA 
     unsigned char GpuMmuSupported, IoMmuSupported;
 };
 struct madeira_kmt_wddm_1_2_caps { UINT GraphicsPreemptionGranularity, ComputePreemptionGranularity, Value; };
-/* D3DKMT_ADAPTER_PERFDATA (64 bytes) and D3DKMT_ADAPTER_PERFDATACAPS. The caps
- * are filled as far as the caller's buffer goes (the SDK's temperature fields
- * sit past 40 bytes, and GTA V Enhanced passes 40). */
+/* D3DKMT_ADAPTER_PERFDATA (64 bytes) and D3DKMT_ADAPTER_PERFDATACAPS. D3D12
+ * titles ask both on their real device (type 63 with 40 bytes, type 62 with
+ * 64), where upstream answers NOT_IMPLEMENTED. The caps are filled as far as
+ * the caller's buffer goes (the SDK's temperature fields sit past 40 bytes). */
 struct madeira_kmt_adapter_perfdata
 {
     UINT PhysicalAdapterIndex;
@@ -373,6 +418,46 @@ static int madeira_kmt_answer( UINT type, void *data, UINT size, const struct ma
 
 /* kmt-test:end */
 
+/* QueryAdapterInfo type names for the [vkmt] trace. */
+static const char *madeira_kmt_type_name( UINT type )
+{
+#define KMT_NAME(x) [KMTQAITYPE_##x] = #x
+    static const char * const names[] =
+    {
+        KMT_NAME(UMDRIVERPRIVATE), KMT_NAME(UMDRIVERNAME), KMT_NAME(UMOPENGLINFO), KMT_NAME(GETSEGMENTSIZE),
+        KMT_NAME(ADAPTERGUID), KMT_NAME(FLIPQUEUEINFO), KMT_NAME(ADAPTERADDRESS), KMT_NAME(SETWORKINGSETINFO),
+        KMT_NAME(ADAPTERREGISTRYINFO), KMT_NAME(CURRENTDISPLAYMODE), KMT_NAME(MODELIST),
+        KMT_NAME(CHECKDRIVERUPDATESTATUS), KMT_NAME(VIRTUALADDRESSINFO), KMT_NAME(DRIVERVERSION),
+        KMT_NAME(ADAPTERTYPE), KMT_NAME(OUTPUTDUPLCONTEXTSCOUNT), KMT_NAME(WDDM_1_2_CAPS),
+        KMT_NAME(UMD_DRIVER_VERSION), KMT_NAME(DIRECTFLIP_SUPPORT), KMT_NAME(MULTIPLANEOVERLAY_SUPPORT),
+        KMT_NAME(DLIST_DRIVER_NAME), KMT_NAME(WDDM_1_3_CAPS), KMT_NAME(MULTIPLANEOVERLAY_HUD_SUPPORT),
+        KMT_NAME(WDDM_2_0_CAPS), KMT_NAME(NODEMETADATA), KMT_NAME(CPDRIVERNAME), KMT_NAME(XBOX),
+        KMT_NAME(INDEPENDENTFLIP_SUPPORT), KMT_NAME(MIRACASTCOMPANIONDRIVERNAME),
+        KMT_NAME(PHYSICALADAPTERCOUNT), KMT_NAME(PHYSICALADAPTERDEVICEIDS), KMT_NAME(DRIVERCAPS_EXT),
+        KMT_NAME(QUERY_MIRACAST_DRIVER_TYPE), KMT_NAME(QUERY_GPUMMU_CAPS),
+        KMT_NAME(QUERY_MULTIPLANEOVERLAY_DECODE_SUPPORT), KMT_NAME(QUERY_HW_PROTECTION_TEARDOWN_COUNT),
+        KMT_NAME(QUERY_ISBADDRIVERFORHWPROTECTIONDISABLED), KMT_NAME(MULTIPLANEOVERLAY_SECONDARY_SUPPORT),
+        KMT_NAME(INDEPENDENTFLIP_SECONDARY_SUPPORT), KMT_NAME(PANELFITTER_SUPPORT),
+        KMT_NAME(PHYSICALADAPTERPNPKEY), KMT_NAME(GETSEGMENTGROUPSIZE), KMT_NAME(MPO3DDI_SUPPORT),
+        KMT_NAME(HWDRM_SUPPORT), KMT_NAME(MPOKERNELCAPS_SUPPORT), KMT_NAME(MULTIPLANEOVERLAY_STRETCH_SUPPORT),
+        KMT_NAME(GET_DEVICE_VIDPN_OWNERSHIP_INFO), KMT_NAME(QUERYREGISTRY), KMT_NAME(KMD_DRIVER_VERSION),
+        KMT_NAME(BLOCKLIST_KERNEL), KMT_NAME(BLOCKLIST_RUNTIME), KMT_NAME(ADAPTERGUID_RENDER),
+        KMT_NAME(ADAPTERADDRESS_RENDER), KMT_NAME(ADAPTERREGISTRYINFO_RENDER),
+        KMT_NAME(CHECKDRIVERUPDATESTATUS_RENDER), KMT_NAME(DRIVERVERSION_RENDER), KMT_NAME(ADAPTERTYPE_RENDER),
+        KMT_NAME(WDDM_1_2_CAPS_RENDER), KMT_NAME(WDDM_1_3_CAPS_RENDER), KMT_NAME(QUERY_ADAPTER_UNIQUE_GUID),
+        KMT_NAME(NODEPERFDATA), KMT_NAME(ADAPTERPERFDATA), KMT_NAME(ADAPTERPERFDATA_CAPS),
+        [KMTQUITYPE_GPUVERSION] = "GPUVERSION", KMT_NAME(DRIVER_DESCRIPTION), KMT_NAME(DRIVER_DESCRIPTION_RENDER),
+        KMT_NAME(SCANOUT_CAPS), KMT_NAME(PARAVIRTUALIZATION_RENDER), KMT_NAME(SERVICENAME),
+        KMT_NAME(WDDM_2_7_CAPS), KMT_NAME(DISPLAY_UMDRIVERNAME), KMT_NAME(TRACKEDWORKLOAD_SUPPORT),
+        KMT_NAME(HYBRID_DLIST_DLL_SUPPORT), KMT_NAME(DISPLAY_CAPS), KMT_NAME(WDDM_2_9_CAPS),
+        KMT_NAME(CROSSADAPTERRESOURCE_SUPPORT), KMT_NAME(WDDM_3_0_CAPS), KMT_NAME(WSAUMDIMAGENAME),
+        KMT_NAME(VGPUINTERFACEID), KMT_NAME(WDDM_3_1_CAPS),
+    };
+#undef KMT_NAME
+    if (type < sizeof(names) / sizeof(names[0]) && names[type]) return names[type];
+    return "?";
+}
+
 int madeira_kmt_adapter_enabled(void)
 {
     static int enabled = -1;
@@ -380,8 +465,13 @@ int madeira_kmt_adapter_enabled(void)
     if (enabled < 0)
     {
         const char *v = getenv( "MADEIRA_KMT_ADAPTER" );
-        enabled = v && (!strcmp( v, "1" ) || !strcasecmp( v, "on" ) || !strcasecmp( v, "true" ) ||
-                        !strcasecmp( v, "yes" ));
+        int on = v && (!strcmp( v, "1" ) || !strcasecmp( v, "on" ) || !strcasecmp( v, "true" ) ||
+                       !strcasecmp( v, "yes" ));
+        if (on)
+            dprintf( 2, "[vkmt] kmt-adapter=1 (MADEIRA_KMT_ADAPTER): the D3D12/DXGI GPU is a D3DKMT "
+                     "adapter (EnumAdapters2 lists it; QueryAdapterInfo answers WDDM 3.1, UMD version, caps, "
+                     "device ids, segment sizes)\n" );
+        enabled = on;
     }
     return enabled;
 }
@@ -407,12 +497,13 @@ static void madeira_kmt_luid_init(void)
     {
         madeira_kmt_luid_from_registry_id( registry_id, &madeira_kmt_luid_value );
         madeira_kmt_luid_ok = 1;
-        dprintf( 2, "[vkmt] MADEIRA_KMT_ADAPTER adapter LUID %08x:%08x (bswap64 of Metal registryID %#llx, "
-                 "as DXGI / NVAPI / madeira_d3d12)\n", (unsigned)madeira_kmt_luid_value.HighPart,
+        dprintf( 2, "[vkmt] adapter LUID %08x:%08x (bswap64 of Metal registryID %#llx, as DXGI / NVAPI / "
+                 "madeira_d3d12)\n", (unsigned)madeira_kmt_luid_value.HighPart,
                  (unsigned)madeira_kmt_luid_value.LowPart, registry_id );
     }
     else
-        dprintf( 2, "[vkmt] MADEIRA_KMT_ADAPTER: no Metal device registryID, no adapter listed\n" );
+        dprintf( 2, "[vkmt] no Metal device registryID (MTLCreateSystemDefaultDevice %p, device %p): "
+                 "MADEIRA_KMT_ADAPTER lists no adapter\n", (void *)create_device, device );
 }
 
 int madeira_kmt_adapter_luid( LUID *luid )
@@ -422,8 +513,8 @@ int madeira_kmt_adapter_luid( LUID *luid )
     return madeira_kmt_luid_ok;
 }
 
-/* vram-mb when set (as winemetal's video budget), else the 4096 MB the
- * registry GPU is written with. */
+/* The DXGI budget's fixed part: vram-mb when set (as winemetal's video budget),
+ * else the 4096 MB the registry GPU is written with. */
 unsigned long long madeira_kmt_dedicated_bytes(void)
 {
     static unsigned long long cached;
@@ -436,6 +527,29 @@ unsigned long long madeira_kmt_dedicated_bytes(void)
     return cached;
 }
 
+/* The [vkmt] entry-point trace; MADEIRA_KMT_TRACE=0 turns it off. */
+int madeira_kmt_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *v = getenv( "MADEIRA_KMT_TRACE" );
+        enabled = !v || strcmp( v, "0" );
+    }
+    return enabled;
+}
+
+/* first 16 calls, failures up to the 64th */
+static int kmt_trace( int *calls, NTSTATUS status )
+{
+    int n;
+
+    if (!madeira_kmt_trace_enabled()) return 0;
+    n = __atomic_add_fetch( calls, 1, __ATOMIC_RELAXED );
+    return n <= 16 || (status && n <= 64);
+}
+
 static int kmt_is_ours( const LUID *luid )
 {
     LUID ours;
@@ -444,26 +558,95 @@ static int kmt_is_ours( const LUID *luid )
 }
 
 /******************************************************************************
+ *           NtGdiDdDDIOpenAdapterFromLuid    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromLuid( D3DKMT_OPENADAPTERFROMLUID *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDIOpenAdapterFromLuid( desc );
+
+    if (desc && kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x OpenAdapterFromLuid luid=%08x:%08x -> %#x hAdapter=%#x%s\n",
+                 (unsigned)GetCurrentThreadId(), (unsigned)desc->AdapterLuid.HighPart,
+                 (unsigned)desc->AdapterLuid.LowPart, (unsigned)status, status ? 0 : (unsigned)desc->hAdapter,
+                 !madeira_kmt_adapter_enabled() ? "" :
+                 kmt_is_ours( &desc->AdapterLuid ) ? " (the madeira adapter)" : " (not the madeira adapter's LUID)" );
+    return status;
+}
+
+/******************************************************************************
  *           NtGdiDdDDIOpenAdapterFromHdc    (win32u.@)
  */
 NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc )
 {
+    static int calls;
     D3DKMT_OPENADAPTERFROMLUID open;
     NTSTATUS status;
     LUID luid;
+    int ours = 0;
 
-    if (!madeira_kmt_adapter_enabled() || !desc || !madeira_kmt_adapter_luid( &luid ))
-        return upstream_NtGdiDdDDIOpenAdapterFromHdc( desc );
-
-    /* One GPU drives every DC; same source id as OpenAdapterFromGdiDisplayName's virtual adapter. */
-    memset( &open, 0, sizeof(open) );
-    open.AdapterLuid = luid;
-    if (!(status = NtGdiDdDDIOpenAdapterFromLuid( &open )))
+    if (madeira_kmt_adapter_enabled() && desc && madeira_kmt_adapter_luid( &luid ))
     {
-        desc->hAdapter = open.hAdapter;
-        desc->AdapterLuid = luid;
-        desc->VidPnSourceId = 1;
+        /* One GPU drives every DC; same source id as OpenAdapterFromGdiDisplayName's virtual adapter. */
+        memset( &open, 0, sizeof(open) );
+        open.AdapterLuid = luid;
+        if (!(status = upstream_NtGdiDdDDIOpenAdapterFromLuid( &open )))
+        {
+            desc->hAdapter = open.hAdapter;
+            desc->AdapterLuid = luid;
+            desc->VidPnSourceId = 1;
+        }
+        ours = 1;
     }
+    else status = upstream_NtGdiDdDDIOpenAdapterFromHdc( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x OpenAdapterFromHdc hdc=%p -> %#x hAdapter=%#x (%s)\n",
+                 (unsigned)GetCurrentThreadId(), desc ? (void *)desc->hDc : NULL, (unsigned)status,
+                 (desc && !status) ? (unsigned)desc->hAdapter : 0, ours ? "madeira adapter" : "upstream stub" );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDICloseAdapter    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDICloseAdapter( const D3DKMT_CLOSEADAPTER *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDICloseAdapter( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x CloseAdapter hAdapter=%#x -> %#x\n", (unsigned)GetCurrentThreadId(),
+                 desc ? (unsigned)desc->hAdapter : 0, (unsigned)status );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDICreateDevice    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDICreateDevice( D3DKMT_CREATEDEVICE *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDICreateDevice( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x CreateDevice hAdapter=%#x -> %#x hDevice=%#x\n", (unsigned)GetCurrentThreadId(),
+                 desc ? (unsigned)desc->hAdapter : 0, (unsigned)status,
+                 (desc && !status) ? (unsigned)desc->hDevice : 0 );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDIDestroyDevice    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDIDestroyDevice( const D3DKMT_DESTROYDEVICE *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDIDestroyDevice( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x DestroyDevice hDevice=%#x -> %#x\n", (unsigned)GetCurrentThreadId(),
+                 desc ? (unsigned)desc->hDevice : 0, (unsigned)status );
     return status;
 }
 
@@ -472,18 +655,50 @@ NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc( D3DKMT_OPENADAPTERFROMHDC *desc )
  */
 NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
 {
+    static int calls;
+    static unsigned int seen[4];   /* info types 0..127 already logged */
     struct madeira_kmt_identity id;
     NTSTATUS status = STATUS_SUCCESS;
+    int ours = 0, n, first_of_type = 0;
 
     if (madeira_kmt_adapter_enabled() && desc && desc->hAdapter && desc->pPrivateDriverData &&
         get_d3dkmt_object( desc->hAdapter, D3DKMT_ADAPTER ))
     {
         madeira_kmt_identity( &id );
         id.dedicated = madeira_kmt_dedicated_bytes();
-        if (madeira_kmt_answer( desc->Type, desc->pPrivateDriverData, desc->PrivateDriverDataSize, &id, &status ))
-            return status;
+        ours = madeira_kmt_answer( desc->Type, desc->pPrivateDriverData, desc->PrivateDriverDataSize, &id, &status );
     }
-    return upstream_NtGdiDdDDIQueryAdapterInfo( desc );
+    if (!ours) status = upstream_NtGdiDdDDIQueryAdapterInfo( desc );
+
+    n = __atomic_add_fetch( &calls, 1, __ATOMIC_RELAXED );
+    if (desc && (UINT)desc->Type < 128)
+    {
+        unsigned int bit = 1u << (desc->Type & 31);
+        first_of_type = !(__atomic_fetch_or( &seen[desc->Type >> 5], bit, __ATOMIC_RELAXED ) & bit);
+    }
+    if (desc && (n <= 64 || first_of_type) && madeira_kmt_trace_enabled())
+    {
+        char value[40] = "";
+        if (!status && desc->pPrivateDriverData && desc->PrivateDriverDataSize >= 8 &&
+            desc->PrivateDriverDataSize <= 64)
+        {
+            unsigned long long v;
+            memcpy( &v, desc->pPrivateDriverData, sizeof(v) );
+            snprintf( value, sizeof(value), " value=%#llx", v );
+        }
+        else if (!status && desc->pPrivateDriverData && desc->PrivateDriverDataSize >= 4 &&
+                 desc->PrivateDriverDataSize <= 64)
+        {
+            UINT v;
+            memcpy( &v, desc->pPrivateDriverData, sizeof(v) );
+            snprintf( value, sizeof(value), " value=%#x", v );
+        }
+        dprintf( 2, "[vkmt] tid=%04x QueryAdapterInfo hAdapter=%#x type=%u (%s) size=%u -> %#x%s (%s)\n",
+                 (unsigned)GetCurrentThreadId(), (unsigned)desc->hAdapter, (unsigned)desc->Type,
+                 madeira_kmt_type_name( desc->Type ), (unsigned)desc->PrivateDriverDataSize, (unsigned)status, value,
+                 ours ? "madeira adapter" : "upstream" );
+    }
+    return status;
 }
 
 /******************************************************************************
@@ -491,12 +706,15 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
  */
 NTSTATUS WINAPI NtGdiDdDDIQueryStatistics( D3DKMT_QUERYSTATISTICS *stats )
 {
+    static int calls;
     NTSTATUS status = upstream_NtGdiDdDDIQueryStatistics( stats );
+    const char *how = "upstream stub, nothing filled";
 
     /* The madeira adapter describes itself -- two segments (local video
      * memory, then the system-memory aperture), two nodes (3D, copy), one
-     * source -- where upstream fills nothing. */
-    if (!status && stats && kmt_is_ours( &stats->AdapterLuid ))
+     * source -- where upstream fills nothing (D3D12 titles ask type 0 on
+     * their real device). */
+    if (!status && stats && madeira_kmt_adapter_enabled() && kmt_is_ours( &stats->AdapterLuid ))
     {
         unsigned long long dedicated = madeira_kmt_dedicated_bytes();
         switch (stats->Type)
@@ -506,24 +724,32 @@ NTSTATUS WINAPI NtGdiDdDDIQueryStatistics( D3DKMT_QUERYSTATISTICS *stats )
             stats->QueryResult.AdapterInformation.NbSegments = 2;
             stats->QueryResult.AdapterInformation.NodeCount = 2;
             stats->QueryResult.AdapterInformation.VidPnSourceCount = 1;
+            how = "madeira adapter: 2 segments, 2 nodes, 1 source";
             break;
         case D3DKMT_QUERYSTATISTICS_SEGMENT:
         {
             D3DKMT_QUERYSTATISTICS_SEGMENT_INFORMATION *seg = &stats->QueryResult.SegmentInformation;
-            ULONG segment = stats->QuerySegment.SegmentId;
-            if (segment > 1) return STATUS_INVALID_PARAMETER;
+            ULONG id = stats->QuerySegment.SegmentId;
+            if (id > 1) { status = STATUS_INVALID_PARAMETER; how = "madeira adapter: no such segment"; break; }
             memset( seg, 0, sizeof(*seg) );
-            seg->CommitLimit = segment ? dedicated / 2 : dedicated;
-            seg->Aperture = segment;
+            seg->CommitLimit = id ? dedicated / 2 : dedicated;
+            seg->Aperture = id;
+            how = id ? "madeira adapter: segment 1 (aperture)" : "madeira adapter: segment 0 (local)";
             break;
         }
-        case D3DKMT_QUERYSTATISTICS_NODE:   /* idle */
+        case D3DKMT_QUERYSTATISTICS_NODE:
             memset( &stats->QueryResult.NodeInformation, 0, sizeof(stats->QueryResult.NodeInformation) );
+            how = "madeira adapter: node, idle";
             break;
         default:
             break;
         }
     }
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x QueryStatistics type=%d luid=%08x:%08x -> %#x (%s)\n",
+                 (unsigned)GetCurrentThreadId(), stats ? (int)stats->Type : -1,
+                 stats ? (unsigned)stats->AdapterLuid.HighPart : 0, stats ? (unsigned)stats->AdapterLuid.LowPart : 0,
+                 (unsigned)status, how );
     return status;
 }
 
@@ -532,7 +758,9 @@ NTSTATUS WINAPI NtGdiDdDDIQueryStatistics( D3DKMT_QUERYSTATISTICS *stats )
  */
 NTSTATUS WINAPI NtGdiDdDDIQueryVideoMemoryInfo( D3DKMT_QUERYVIDEOMEMORYINFO *desc )
 {
+    static int calls;
     NTSTATUS status = upstream_NtGdiDdDDIQueryVideoMemoryInfo( desc );
+    int ours = 0;
 
     /* Upstream reads the budget from Vulkan and leaves zeros without it. */
     if (!status && madeira_kmt_adapter_enabled() && desc->MemorySegmentGroup == D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL &&
@@ -540,6 +768,85 @@ NTSTATUS WINAPI NtGdiDdDDIQueryVideoMemoryInfo( D3DKMT_QUERYVIDEOMEMORYINFO *des
     {
         desc->Budget = madeira_kmt_dedicated_bytes();
         desc->AvailableForReservation = desc->Budget / 2;
+        ours = 1;
     }
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x QueryVideoMemoryInfo hAdapter=%#x group=%d -> %#x budget=%llu MB (%s)\n",
+                 (unsigned)GetCurrentThreadId(), desc ? (unsigned)desc->hAdapter : 0,
+                 desc ? (int)desc->MemorySegmentGroup : -1, (unsigned)status,
+                 (desc && !status) ? (unsigned long long)(desc->Budget >> 20) : 0ull,
+                 ours ? "madeira adapter" : "upstream" );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDISetQueuedLimit    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDISetQueuedLimit( D3DKMT_SETQUEUEDLIMIT *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDISetQueuedLimit( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x SetQueuedLimit -> %#x\n", (unsigned)GetCurrentThreadId(), (unsigned)status );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDISetVidPnSourceOwner    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDISetVidPnSourceOwner( const D3DKMT_SETVIDPNSOURCEOWNER *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDISetVidPnSourceOwner( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x SetVidPnSourceOwner hDevice=%#x sources=%u -> %#x\n",
+                 (unsigned)GetCurrentThreadId(), desc ? (unsigned)desc->hDevice : 0,
+                 desc ? (unsigned)desc->VidPnSourceCount : 0, (unsigned)status );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDICheckOcclusion    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDICheckOcclusion( const D3DKMT_CHECKOCCLUSION *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDICheckOcclusion( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x CheckOcclusion hwnd=%p -> %#x\n", (unsigned)GetCurrentThreadId(),
+                 desc ? (void *)desc->hWnd : NULL, (unsigned)status );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDICheckVidPnExclusiveOwnership    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDICheckVidPnExclusiveOwnership( const D3DKMT_CHECKVIDPNEXCLUSIVEOWNERSHIP *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDICheckVidPnExclusiveOwnership( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x CheckVidPnExclusiveOwnership hAdapter=%#x source=%u -> %#x\n",
+                 (unsigned)GetCurrentThreadId(), desc ? (unsigned)desc->hAdapter : 0,
+                 desc ? (unsigned)desc->VidPnSourceId : 0, (unsigned)status );
+    return status;
+}
+
+/******************************************************************************
+ *           NtGdiDdDDIEscape    (win32u.@)
+ */
+NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc )
+{
+    static int calls;
+    NTSTATUS status = upstream_NtGdiDdDDIEscape( desc );
+
+    if (kmt_trace( &calls, status ))
+        dprintf( 2, "[vkmt] tid=%04x Escape hAdapter=%#x type=%d size=%u -> %#x\n", (unsigned)GetCurrentThreadId(),
+                 desc ? (unsigned)desc->hAdapter : 0, desc ? (int)desc->Type : -1,
+                 desc ? (unsigned)desc->PrivateDriverDataSize : 0, (unsigned)status );
     return status;
 }

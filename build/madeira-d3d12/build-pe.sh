@@ -61,17 +61,33 @@ if [ -n "${MAD_BUILD_ID:-}" ]; then EXTRA+=(-DMAD_BUILD_ID="\"$MAD_BUILD_ID\"");
 # texture-buffer probe and/or the clear functions when those do not compile,
 # so the other kernels never depend on them.
 echo "=== helper kernels (metallib) ==="
+MAD_KERNELS_FLAGS=""   # the -D flags of the compile that succeeded (the iOS 18 copy below uses them too)
 mad_kernels_metal() {
-    xcrun -sdk iphoneos metal -std=metal3.0 "$@" -o "$OUT/mad_kernels.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels.err"
+    xcrun -sdk iphoneos metal -std=metal3.0 "$@" -o "$OUT/mad_kernels.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels.err" &&
+        MAD_KERNELS_FLAGS="$*"
 }
 if command -v xcrun > /dev/null 2>&1 &&
    { mad_kernels_metal ||
+     mad_kernels_metal -DMAD_NO_NAN_CLEAN ||
      mad_kernels_metal -DMAD_NO_TEXBUF_PROBE ||
      mad_kernels_metal -DMAD_NO_CLEAR_RECTS ||
-     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS; }; then
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS ||
+     mad_kernels_metal -DMAD_NO_TEXBUF_PROBE -DMAD_NO_CLEAR_RECTS -DMAD_NO_NAN_CLEAN; }; then
     (cd "$OUT" && xxd -i mad_kernels.metallib > mad_kernels_metallib.h)
     EXTRA+=(-DMAD_HAVE_KERNELS -I"$OUT")
     echo "  $(wc -c < "$OUT/mad_kernels.metallib" | tr -d ' ') bytes"
+    # The same kernels for iOS 18 (AIR 2.7): the library above takes the SDK's
+    # default target (AIR 2.8 with the iOS 26 SDK), which iOS 18 refuses. The
+    # runtime loads this copy only when the first is refused (madeira_d3d12.c).
+    if xcrun -sdk iphoneos metal -std=metal3.0 --target=air64-apple-ios18.0 $MAD_KERNELS_FLAGS \
+           -o "$OUT/mad_kernels_ios18.metallib" "$SRC/mad_kernels.metal" 2> "$OUT/mad_kernels_ios18.err"; then
+        (cd "$OUT" && xxd -i mad_kernels_ios18.metallib > mad_kernels_ios18_metallib.h)
+        EXTRA+=(-DMAD_HAVE_KERNELS_IOS18)
+        echo "  iOS 18 copy: $(wc -c < "$OUT/mad_kernels_ios18.metallib" | tr -d ' ') bytes"
+    else
+        echo "  the iOS 18 copy did not build -- iOS 18 runs without the helper kernels, as before"
+        head -20 "$OUT/mad_kernels_ios18.err" 2> /dev/null || true
+    fi
 else
     echo "  helper kernels did not build -- what needs them is skipped"
     head -20 "$OUT/mad_kernels.err" 2> /dev/null || true

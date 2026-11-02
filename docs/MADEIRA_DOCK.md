@@ -43,7 +43,9 @@ them.
   - `app/Madeira/arm64ec-windows/dock-notices.txt` (Dock's licence, the
     exception, the GPL text and the LLVM/MinGW-w64 runtime notices).
 
-  Both are build outputs and are gitignored. `--check` also runs Dock's own
+  Both are build outputs and are gitignored; `tools/build-ipa.sh` (and so the CI
+  IPA) runs the script, since without `dockhost.exe` the app hides Dock and the
+  Steam library. `--check` also runs Dock's own
   unit tests. Without a built `dockhost.exe`, Madeira shows no Dock button.
 
 ## Using it
@@ -189,7 +191,10 @@ arguments are not supported.
    and turns the final `probe-result` into a message. Covered: unsupported
    client build, no licence, a licence Valve's client did not confirm within
    the host's 90 s after sign-in (34), a bad transfer, Valve's own launch
-   refusal codes, and per-user executable preparation errors. The first 16
+   refusal codes, and per-user executable preparation errors. The game
+   session's service manager and hold report `game-scm-services`, `game-scm`
+   or `game-scm-timeout`, and `launch-keep-alive` then `launch-keep-alive-held`
+   (round `ml2020`; the Switches table below has the three switches). The first 16
    callback IDs Valve's client posts after sign-in are logged in order as
    `session-callback-ids` (numbers only), with `session-requested-app-entitled`
    and `session-subscription-count`, so a sign-in that never reaches the
@@ -449,6 +454,10 @@ never asks. The preparation is Valve's; Dock does not touch the files.
 | `MADEIRA_TIMER_FAIRNESS` | on | madeira-bcd, read by the wineserver. `0`: a WM_PAINT that is always pending keeps every timer of its thread waiting, as Windows' order says |
 | `MADEIRA_DOCK_RESET_CLEAN` | on | madeira-bcd. `0`: Reset only forgets the records; installed files stay |
 | `MADEIRA_DOCK_VULKAN_STANDIN` | on | madeira-bcd. Before a Dock start, a Vulkan loader an installer wrote into system32 (RDR2's VulkanRT) moves into `Documents/madeira-reset-backup`, so the session links Madeira's `vulkan-1.dll` stand-in again, as a direct launch does. `0`: it stays |
+| `MADEIRA_DOCK_GAME_SCM` | auto | read by the app and the host: `1` starts Wine's service manager in every Dock game session, `0` never; unset, only when the prefix's `system.reg` registers an automatic-start Win32 service whose image is outside the Windows folder (a launcher's own service). The app logs `[dock-game-scm]` and exports the decision; the host reports `game-scm-services`, `game-scm` or `game-scm-timeout` |
+| `MADEIRA_DOCK_GAME_SCM_SERVER_SYNC` | on | `0`: a session that starts the service manager keeps madsync (under madsync Wine's services.exe never answered its RPC clients on device, so the default turns it off for that session, as a start that runs installers does) |
+| `MADEIRA_DOCK_GAME_SCM_FASTSYNC` | on | `0`: a session that gives madsync up for the service manager runs Wine's standard sync instead of fastsync (fastsync keeps every object's state with the server; without it a job-system game sent ~33,000 waits and wakes a second to the server). A game's own fastsync switch is kept
+| `MADEIRA_DOCK_KEEP_ALIVE` | auto | read by the host: `0` ends the session 3 s after Valve's client stops reporting the game as running, as before; unset, the host follows the game's own process tree and holds the session while a member still shows a window or is younger than 60 s (a launcher restarting itself, the game it then starts); a `;`-separated list of image names adds programs outside the tree. Reports `launch-keep-alive`, then `launch-keep-alive-held` |
 | `MADEIRA_DOTNET_FUSION` | on | `0`: never place `fusion.dll` in the .NET 2.0 folder |
 | `MADEIRA_DOCK_HIDE_DESKTOP` | on | `0`: a Dock start's starting screen ends on the desktop's first frame, as before (no census) |
 | `MADEIRA_DOCK_AUTO_REVEAL` | on | `0`: a window that may need the user never reveals the desktop by itself (Show desktop still does) |
@@ -551,6 +560,12 @@ credentials:
   session with Steam's launch entry, Game details offers it, the file is in
   the Xcode project, and (with Swift) the swap, the restore and refused paths
   outside the game's folder.
+- `check-dock-game-session.py`: the game session's service-manager decision
+  (`DockGameSession.swift` compiled on the host: the three-way switch, Wine's
+  `system.reg` parsed for automatic-start services outside Windows, the
+  export to the host, the log line, the madsync rule), the report allow-list
+  and round for the host's `game-scm*` and `launch-keep-alive*` fields, and
+  the pinned host's switches.
 - `build/madeira-dock/build.sh --check`: Dock's own ASan/UBSan unit tests
   (transfer parsing, 2,000 malformed inputs, client selection, launch-result
   and callback bounds).

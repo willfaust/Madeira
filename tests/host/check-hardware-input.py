@@ -308,6 +308,11 @@ let hiddenDesktopCursor = PointerPolicy.cursorShown(desktop: true, directEnabled
 assert(!hiddenDesktopCursor)
 assert(PointerPolicy.route(focused: true, hover: true, locked: false, cursorShown: hiddenDesktopCursor, absoluteAllowed: true) == .relative)
 assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: false, reports: 1, shown: true))
+// A direct game that hides the Windows cursor to draw its own keeps absolute motion when opted in.
+assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 1, shown: false))
+assert(PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 1, shown: false, hiddenAbsolute: true))
+assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 1, shown: false, relative: true, hiddenAbsolute: true))
+assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: false, reports: 1, shown: false, hiddenAbsolute: true))
 
 // The rollback keeps the desktop absolute even when its hidden-cursor
 // metadata says otherwise; direct-mode visibility remains unchanged.

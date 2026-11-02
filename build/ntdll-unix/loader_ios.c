@@ -1470,6 +1470,76 @@ static int ios_log_throttle_drop( const char *str, unsigned len )
     return drop;
 }
 
+/* [recovery-log], env.MADEIRA_RECOVERY_LOG_SAMPLE = 1 (opt-in, log only; contributed by le0-VV).
+ *
+ * A program that recovers from invalid instructions by the thousand each second makes FEX write a five-line report of each
+ * one through the debug channel ("D <tid> Exception: Code: C000001D Address: ...", "Reconstructing context", "pc: ...",
+ * "Rethrowing onto guest stack: ...", "Passing through exception"); at that rate the writes alone slow the program and fill
+ * the log. [log-throttle] above caps lines by their shape; this one samples exactly these five records of a C000001D
+ * exception: the first 16 of each kind and every 1024th after that (with a "[recovery-log] kind=..." note). Everything else
+ * passes: other exception codes, access violations, loader errors, a record that is not one whole line, a thread or text the
+ * filter does not know. Nothing is delivered differently and no guard is relaxed. Unset: every line is written as before.
+ * __wine_main reads the switch before any guest thread runs; signal_arm64_ios.c's ILL report reads the same flag. */
+int ios_recovery_log_sampling;
+
+static int ios_recovery_log_option( void )
+{
+    const char *e = getenv( "MADEIRA_RECOVERY_LOG_SAMPLE" );
+    return e && !strcmp( e, "1" );
+}
+
+/* Sample known instruction-recovery records; retain other exceptions and mixed writes. */
+static int ios_recovery_log_admit( const char *str, unsigned int len )
+{
+    static const char *tags[] = {
+        "Exception: Code: C000001D Address:", "Reconstructing context", "pc: ",
+        "Rethrowing onto guest stack: ", "Passing through exception"
+    };
+    static unsigned long long context[64], seen[5];
+    unsigned int i = 2, digits = 0, tid = 0, slot, kind;
+    unsigned long long key, n;
+
+    if (!__atomic_load_n( &ios_recovery_log_sampling, __ATOMIC_RELAXED )) return 1;
+    if (!str || len < 4 || str[0] != 'D' || str[1] != ' ') return 1;
+    while (i < len && digits < 8)
+    {
+        unsigned int c = (unsigned char)str[i], v;
+        if (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else break;
+        tid = (tid << 4) | v;
+        i++; digits++;
+    }
+    if (!digits || !tid || i >= len || str[i++] != ' ') return 1;
+    slot = (tid >> 2) & 63;
+    key = (unsigned long long)tid << 1;
+    if (str[len - 1] != '\n' || memchr( str, '\n', len - 1 ))
+    {
+        __atomic_store_n( &context[slot], key, __ATOMIC_RELAXED );
+        return 1;
+    }
+    if (len - i >= 17 && !memcmp( str + i, "Exception: Code: ", 17 ))
+    {
+        size_t prefix = strlen( tags[0] );
+        __atomic_store_n( &context[slot], key |
+                         (len - i >= prefix && !memcmp( str + i, tags[0], prefix )), __ATOMIC_RELAXED );
+    }
+    if (__atomic_load_n( &context[slot], __ATOMIC_RELAXED ) != (key | 1)) return 1;
+    for (kind = 0; kind < 5; kind++)
+    {
+        size_t size = strlen( tags[kind] );
+        if (len - i < size || memcmp( str + i, tags[kind], size )) continue;
+        if ((kind == 1 || kind == 4) && len - i != size + 1) continue;
+        n = __atomic_add_fetch( &seen[kind], 1, __ATOMIC_RELAXED );
+        if (n <= 16) return 1;
+        if (n == 17 || !(n % 1024))
+            dprintf( 2, "[recovery-log] kind=%u seen=%llu; keeping first 16 and every 1024th instruction-recovery record\n", kind, n );
+        return !(n % 1024);
+    }
+    return 1;
+}
+
 /* madeira-bcd: rtcs-cap v1. The PE ntdll (upstream's tracked binary) prints
  * "[rtcs] pre:" for every exception prepare_exception_arm64ec sees; its
  * 40-line cap (signal_arm64ec.c) only covers the block before the ERR. A
@@ -1555,11 +1625,16 @@ static NTSTATUS ios_wrap_2(void *a)
 {
     struct wine_dbg_write_params *p = a;
     if (p && ios_log_throttle_drop( p->str, p->len )) return p->len;
-    /* madeira-bcd rtcs-cap (above): the PE ntdll's "[rtcs] pre:" lines, after the throttle. */
+    /* rtcs-cap (above): the PE ntdll's "[rtcs] pre:" lines, after the throttle. */
     if (!ios_rtcs_admit( p->str, p->len ))
     {
         g_wine_unix_call_count++;
         return p->len;  /* what write() returns for the whole line */
+    }
+    if (!ios_recovery_log_admit( p->str, p->len ))   /* [recovery-log], MADEIRA_RECOVERY_LOG_SAMPLE */
+    {
+        g_wine_unix_call_count++;
+        return p->len;
     }
     return ios_wrap_unix_call(2, a, unixcall_wine_dbg_write);
 }
@@ -2463,6 +2538,30 @@ static void load_ntdll_wow64_functions( HMODULE module )
     exports = get_module_data_dir( module, IMAGE_FILE_EXPORT_DIRECTORY, NULL );
     assert( exports );
 
+    /* [wow-initblock], log only. The block this function fills belongs to the SESSION's 64-bit
+     * ntdll image, which every i386 pseudo-process's wow64.dll reads through
+     * pLdrSystemDllInitBlock when it dispatches an exception / APC / callback into its own 32-bit
+     * ntdll; each i386 child boot overwrites it again (load_wow64_ntdll in the child path). The
+     * values only agree while every i386 process has its ntdll at the same guest address. When a
+     * relaunched child gets its ntdll at another base (a dead process's image still occupies the
+     * shared window), an older process's next exception is dispatched to the NEW process's
+     * KiUserExceptionDispatcher, and FEX reports a NoExec entry block there. Say so when a boot
+     * replaces a DIFFERENT ntdll base (the first boot sees 0 and stays silent; the same base stays
+     * silent); at most 4 lines. */
+    {
+        static LONG overwrites;
+        ULONG64 old_handle = pLdrSystemDllInitBlock->ntdll_handle;
+        ULONG64 old_exc = pLdrSystemDllInitBlock->pKiUserExceptionDispatcher;
+
+        if (old_handle && old_handle != TO_GUEST( (ULONG_PTR)module ) && InterlockedIncrement( &overwrites ) <= 4)
+            ERR( "[wow-initblock] the session LdrSystemDllInitBlock held ntdll_handle=0x%llx "
+                 "KiUserExceptionDispatcher=0x%llx; this i386 boot replaces it with ntdll_handle=0x%llx "
+                 "(wow_base=0x%llx) -- an older i386 process whose ntdll sits at the old base now dispatches "
+                 "exceptions to the new one's address\n",
+                 (unsigned long long)old_handle, (unsigned long long)old_exc,
+                 (unsigned long long)TO_GUEST( (ULONG_PTR)module ), (unsigned long long)wow_base );
+    }
+
     pLdrSystemDllInitBlock->ntdll_handle = TO_GUEST( (ULONG_PTR)module );
 
 #define GET_FUNC(name) pLdrSystemDllInitBlock->p##name = \
@@ -3196,6 +3295,28 @@ static void start_main_thread(void)
                      "[wow-window] main-process reserve FAILED 0x%x — a 32-bit main image "
                      "cannot run without a guest window; terminating this process\n",
                      (unsigned)wst );
+            /* This is the SESSION'S OWN program, not a child (a 32-bit program
+             * started on a device whose address space has no 4 GB window left).
+             * The pthread_exit() inside fatal_error() ends the boot thread
+             * (wine_process_thread) in the middle of __wine_main, so the end work
+             * after __wine_main never runs: the app keeps showing the session
+             * as running until the user closes it. exit() is the shim's
+             * wine_ios_exit (shims/wine_ios_exit.h): on the boot thread it
+             * long-jumps back to wine_process_thread, which ends the session as
+             * it does for any program; on any other thread it leaves by
+             * pthread_exit, as before. The status goes to the exit hook first,
+             * so the exit report carries it. env.MADEIRA_WOW_MAIN_FAIL_EXIT = 0
+             * keeps fatal_error(). Log tag [wow-window]. */
+            {
+                const char *fe = getenv( "MADEIRA_WOW_MAIN_FAIL_EXIT" );
+                if (!(fe && fe[0] == '0'))
+                {
+                    extern void wine_launched_process_did_exit( int status ) __attribute__((weak));
+                    os_log_error( OS_LOG_DEFAULT, "[Wine ntdll] FATAL: no WoW64 guest window for the 32-bit main image (status %x)", (unsigned)wst );
+                    if (wine_launched_process_did_exit) wine_launched_process_did_exit( (int)wst );
+                    exit( 1 );
+                }
+            }
             fatal_error( "no WoW64 guest window for the 32-bit main image (status %x)\n",
                          (unsigned)wst );
         }
@@ -3294,11 +3415,22 @@ static void start_main_thread(void)
 #ifdef WINE_IOS
     /* wineboot's volatile HARDWARE\DESCRIPTION keys (server_ios.c). After
      * init_cpu_info, which sets the processor count the keys and the SMBIOS
-     * table are built from. First process of a session only. */
+     * table are built from, and before init_startup_info reads Session
+     * Manager\Environment (MADEIRA_HW_REGISTRY=2 also writes wineboot's
+     * PROCESSOR_* values there). First process of a session only. */
     {
         extern void ios_hw_registry_publish(void);
         WINE_IOS_LOG("ios_hw_registry_publish...");
         ios_hw_registry_publish();
+    }
+#endif
+#ifdef WINE_IOS
+    /* env.MADEIRA_VCRT_ARM64_KEY, off by default: the volatile ARM64 Visual C++
+     * redistributable marker some engine bootstrappers ask for (server_ios.c). Reads
+     * its one switch and returns at once without it. First process of a session only. */
+    {
+        extern void ios_vcrt_arm64_key_publish(void);
+        ios_vcrt_arm64_key_publish();
     }
 #endif
     WINE_IOS_LOG("init_files...");
@@ -4224,6 +4356,7 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
  */
 DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
 {
+    __atomic_store_n( &ios_recovery_log_sampling, ios_recovery_log_option(), __ATOMIC_RELAXED );   /* [recovery-log]: before any guest thread */
     main_argc = argc;
     main_argv = argv;
 

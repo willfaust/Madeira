@@ -83,7 +83,7 @@ struct fd { int unix_fd; };
 static void init_epoll( void ) { }
 static void remove_epoll_user( struct fd *fd, int user ) { }
 #define ws_log(...) ((void)0)
-static int ios_srv_log_sample(unsigned *n) { return (*n)++ < 8; }
+static int ios_srv_log_sample(unsigned long *n) { return (*n)++ < 8; }
 
 static int realloc_calls, realloc_fail_mask;      /* bit n: the n-th realloc from now fails */
 static void *test_realloc( void *p, size_t n )

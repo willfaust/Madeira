@@ -40,6 +40,10 @@ enum EMsg: UInt32 {
     case clientPICSAccessTokenResponse = 8906
     case clientGetDepotDecryptionKey = 5438
     case clientGetDepotDecryptionKeyResponse = 5439
+    case clientCheckAppBetaPassword = 5450
+    case clientCheckAppBetaPasswordResponse = 5451
+    case clientPICSPrivateBetaRequest = 8907
+    case clientPICSPrivateBetaResponse = 8908
     case serviceMethod = 146
     case serviceMethodResponse = 147
     case serviceMethodCallFromClient = 151
@@ -52,6 +56,16 @@ enum EMsg: UInt32 {
 enum SteamServiceMethod: String {
     case getManifestRequestCode = "ContentServerDirectory.GetManifestRequestCode#1"
     case getCDNAuthToken = "ContentServerDirectory.GetCDNAuthToken#1"
+    /// Opens a PC's Steam content server for this account on the local network (SteamLANPeer).
+    case requestPeerContentServer = "ContentServerDirectory.RequestPeerContentServer#1"
+    /// Which apps a PC on this account serves, and its public IP (SteamLANPeer).
+    case getPeerContentInfo = "ContentServerDirectory.GetPeerContentInfo#1"
+    /// Tells Steam this device is a remote client of the account, with its client ID (SteamLANPeer).
+    case remoteClientNotifyOnline = "RemoteClient.NotifyOnline#1"
+    /// The account's Steam clients and their remote client IDs (SteamLANPeer).
+    case remoteClientGetRecentClients = "RemoteClient.GetRecentClients#1"
+    /// Relays a discovery-format packet to the account's other clients (SteamLANPeer).
+    case remoteClientSendSteamBroadcastPacket = "RemoteClient.SendSteamBroadcastPacket#1"
     /// The account's own playtime and last-played times.
     case getOwnedGames = "Player.GetOwnedGames#1"
     /// The account's Steam Cloud file list for one app.
@@ -63,6 +77,13 @@ enum SteamServiceMethod: String {
     case cloudClientBeginFileUpload = "Cloud.ClientBeginFileUpload#1"
     case cloudClientCommitFileUpload = "Cloud.ClientCommitFileUpload#1"
     case cloudCompleteAppUploadBatch = "Cloud.CompleteAppUploadBatchBlocking#1"
+    /// Steam Workshop (SteamWorkshop.swift): the account's subscribed items,
+    /// browsing and searching an app's items, item details, subscribing.
+    case workshopGetUserFiles = "PublishedFile.GetUserFiles#1"
+    case workshopQueryFiles = "PublishedFile.QueryFiles#1"
+    case workshopGetDetails = "PublishedFile.GetDetails#1"
+    case workshopSubscribe = "PublishedFile.Subscribe#1"
+    case workshopUnsubscribe = "PublishedFile.Unsubscribe#1"
 }
 
 // MARK: - Result codes

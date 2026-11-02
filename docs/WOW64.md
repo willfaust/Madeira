@@ -76,6 +76,13 @@ Nothing is reserved for 32-bit support until a 32-bit program needs it.
   pseudo-process's threads, so the teardown cannot run on the dying thread.
 - `MADEIRA_WOW_PLACEHOLDERS=1` restores ahead-of-time placeholders for every
   slot, for a 64-bit launcher that starts 32-bit children on a crowded map.
+- **Under address pressure** the idle placeholders go back: every ~10 s while
+  one exists, when the band has less than `MADEIRA_WOW_PRESSURE_RELEASE_MB`
+  (256) free, exited windows whose threads are gone are torn down and every
+  unadopted placeholder is handed back to the kernel (`[wow-window] ml2030`).
+  A 64-bit game holding a placeholder for a 32-bit program in its folder
+  otherwise ran the band dry and lost its Metal and Wine allocations. A
+  32-bit program started later takes a fresh slot if the band still has one.
 
 Inside a window, TEB/PEB pairs, 32-bit stacks, images (relocated to their
 guest base) and `KUSER_SHARED_DATA` at guest `0x7ffe0000` are placed by the
@@ -252,6 +259,7 @@ the switch is only consulted for a WoW64 process, window or thread.
 | `MADEIRA_WOW_EXTRA_WINDOW` | on | 32-bit | Allow a window carved from the `[cage]` holdback tail for a second process |
 | `MADEIRA_WOW_SPILL_CEF` | on | 32-bit | Allow a spill window below the FEX host band when the band is full |
 | `MADEIRA_WOW_LIVE_WINDOW_GUARD` | on | 32-bit | Keep an exited process's window while its worker threads still exist |
+| `MADEIRA_WOW_PRESSURE_RELEASE_MB` | 256 | session | Hand idle window placeholders back when the band has less free space than this (MB); 0: keep them |
 | `MADEIRA_WOW_STRICT_LIMITS` | on | 32-bit | Treat an allocation as a guest request only when both bounds are in the caller's window |
 | `MADEIRA_LAA` | on | 32-bit | A 32-bit main image that is not large-address-aware still gets a 4 GB guest ceiling (0: 2 GB) |
 | `MADEIRA_LAA_LOWFIRST` | on | 32-bit | With a raised ceiling, place below 2 GB first and spill above only when the low half cannot serve |

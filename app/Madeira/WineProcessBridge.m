@@ -675,6 +675,32 @@ static BOOL madeira_bundle_has_i386(NSString *bundle)
     return access(ntdll.fileSystemRepresentation, R_OK) == 0;
 }
 
+/* Microsoft's x86 Visual C++ runtime, taken out of Microsoft's installer by the app
+ * (VCRedist.swift) into Documents/vcruntime32: linked over Wine's i386 builtins in
+ * syswow64 for 32-bit programs, as the x86_64-vcruntime overlay below does for 64-bit
+ * ones (that one reads Documents/vcruntime). Runs after the syswow64 farm links, so
+ * removing the folder brings the builtins back at the next session. 32-bit code runs
+ * whole under the emulator, so there is no ARM64EC exemption to keep here.
+ * env.MADEIRA_VCREDIST_X86 = 0 leaves them out. */
+static void madeira_overlay_vcruntime32(NSFileManager *fm, NSString *prefix)
+{
+    const char *e = getenv("MADEIRA_VCREDIST_X86");   /* 0: 32-bit programs keep Wine's own C++ runtime instead of the Microsoft x86 runtime the app downloaded (Documents/vcruntime32) */
+    if (e && e[0] == '0') { dprintf(STDERR_FILENO, "[WineProc] MADEIRA_VCREDIST_X86=0: Microsoft x86 runtime overlay skipped\n"); return; }
+    NSString *source = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject
+                        stringByAppendingPathComponent:@"vcruntime32"];
+    NSArray *files = [fm contentsOfDirectoryAtPath:source error:nil];
+    if (!files.count) return;
+    NSString *farmDir = [prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"];
+    int linked = 0;
+    for (NSString *f in files) {
+        if (![f.pathExtension.lowercaseString isEqualToString:@"dll"]) continue;
+        NSString *dst = [farmDir stringByAppendingPathComponent:f];
+        [fm removeItemAtPath:dst error:nil];
+        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:[source stringByAppendingPathComponent:f] error:nil]) linked++;
+    }
+    dprintf(STDERR_FILENO, "[WineProc] Symlinked %d MS VC++ x86 runtime DLLs over i386 builtins (Documents/vcruntime32; MADEIRA_VCREDIST_X86=0 leaves them out)\n", linked);
+}
+
 /* C:\windows\syswow64: the i386 farm, the Windows name for this pattern. A
  * 32-bit process's system32 is redirected here, and the unix loader's
  * machine -> directory mapping looks here for the 32-bit ntdll, kernel32 and
@@ -1029,6 +1055,41 @@ static void madeira_link_wine_mono(NSFileManager *fm, NSString *prefix, NSString
                 [source hasPrefix:bundle] ? "bundle" : "downloaded");
     else
         dprintf(STDERR_FILENO, "[wine-mono] ml1275 FAILED to link C:\\windows\\mono\\mono-2.0 errno=%d\n", errno);
+}
+
+/* Wine Gecko: the MSIs Madeira downloaded (WineGecko.swift, Library/Application
+ * Support/WineGecko) go into this prefix's Wine download cache, $HOME/.cache/
+ * wine (HOME is the prefix). The first program that needs mshtml then gets
+ * Gecko from appwiz.cpl's install_from_cache, which checks the same SHA-256,
+ * instead of its "Wine Gecko Installer" download window: the x86 MSI for a
+ * 32-bit program, x86_64 for a 64-bit (ARM64EC) one. Renewed every session
+ * (the path is per install); a real file there is the prefix's own. */
+static void madeira_link_wine_gecko(NSFileManager *fm, NSString *prefix)
+{
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *cache = [prefix stringByAppendingPathComponent:@".cache/wine"];
+    for (NSString *name in @[ @"wine-gecko-2.47.4-x86.msi", @"wine-gecko-2.47.4-x86_64.msi" ])
+    {
+        NSString *source = [[support stringByAppendingPathComponent:@"WineGecko"] stringByAppendingPathComponent:name];
+        NSString *dst = [cache stringByAppendingPathComponent:name];
+        struct stat st;
+
+        if (lstat(dst.fileSystemRepresentation, &st) == 0 && !S_ISLNK(st.st_mode))
+            continue;
+        if (access(source.fileSystemRepresentation, R_OK) != 0)
+        {
+            if (lstat(dst.fileSystemRepresentation, &st) == 0)
+                [fm removeItemAtPath:dst error:nil];
+            dprintf(STDERR_FILENO, "[wine-gecko] %s not downloaded yet; Wine asks for it if a program needs it\n", name.UTF8String);
+            continue;
+        }
+        [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:dst error:nil];
+        if ([fm createSymbolicLinkAtPath:dst withDestinationPath:source error:nil])
+            dprintf(STDERR_FILENO, "[wine-gecko] Wine's download cache has %s\n", name.UTF8String);
+        else
+            dprintf(STDERR_FILENO, "[wine-gecko] FAILED to link %s errno=%d\n", name.UTF8String, errno);
+    }
 }
 
 /* C:\windows\winsxs for 32-bit processes: the x86 side-by-side assemblies Wine
@@ -1525,15 +1586,26 @@ static void *wine_process_thread(void *arg) {
          * game", LibraryEntry.configureLaunch) knows its title too. It passes that
          * game's App ID and install folder in MADEIRA_STEAM_APPID / MADEIRA_STEAM_APPPATH,
          * and this launch publishes the game's own identity instead of the fixed one. Both
-         * are cleared here, so no later launch inherits them. */
+         * are cleared here, so no later launch inherits them.
+         *
+         * ml2310: a game from another store (an Epic library entry) is not a Steam game
+         * either. The library sets MADEIRA_NO_STEAM_IDENTITY=1 for its launch: with the
+         * fixed identity its launcher took its Steam path, the Steam API start failed and
+         * it showed only an error. */
         const char *dock_session = getenv("MADEIRA_DOCK_SESSION");
         const char *direct_app = getenv("MADEIRA_STEAM_APPID");    /* set by the library for one direct Steam start (Start with: The game); not a setting */
         const char *direct_path = getenv("MADEIRA_STEAM_APPPATH"); /* that game's install folder, with MADEIRA_STEAM_APPID; not a setting */
+        const char *no_steam_id = getenv("MADEIRA_NO_STEAM_IDENTITY"); /* set by the library for one launch of a game from another store; not a setting */
         if (dock_session && dock_session[0] == '1') {
             unsetenv("SteamAppPath");
             unsetenv("SteamGameId");
             unsetenv("SteamAppId");
             dprintf(STDERR_FILENO, "[steam-env] Madeira Dock session: no fixed Steam game identity published\n");
+        } else if (no_steam_id && no_steam_id[0] == '1') {
+            unsetenv("SteamAppPath");
+            unsetenv("SteamGameId");
+            unsetenv("SteamAppId");
+            dprintf(STDERR_FILENO, "[steam-env] a game from another store: no Steam game identity published\n");
         } else if (direct_app && direct_app[0] && strlen(direct_app) <= 10 &&
             strspn(direct_app, "0123456789") == strlen(direct_app) &&
             direct_path && (direct_path[0] == 'C' || direct_path[0] == 'c') && direct_path[1] == ':' &&
@@ -1549,6 +1621,7 @@ static void *wine_process_thread(void *arg) {
         }
         unsetenv("MADEIRA_STEAM_APPID");
         unsetenv("MADEIRA_STEAM_APPPATH");
+        unsetenv("MADEIRA_NO_STEAM_IDENTITY");
 
         /* iOS-Madeira 2026-07-02: publish the TRUE JIT-pool RX->RW offset to
          * xtajit64.dll (its own FEXCore copy reads this via getenv in
@@ -1620,6 +1693,21 @@ static void *wine_process_thread(void *arg) {
              * the mapping survives the screen locking. See virtual_ios.c ml1077. */
             {
                 long capMB = (long)madeira_cfg_int("swap-mb", 0);   /* ml1095: madeira.cfg swap-mb = N */
+                long onlyPoolMB = capMB >= 64 ? 0 : (long)madeira_cfg_int("donor-pool-mb", 0);
+                unsetenv("MADEIRA_SWAP_DONOR_ONLY");
+                if (onlyPoolMB >= 512 && madeira_cfg_int("donor-only", 1)) {   /* madeira.cfg donor-only = 0: donor-pool-mb without swap-mb does nothing, as before ml2200 */
+                    /* ml2200: donor RAM without the swap file. The tier maps only the pool
+                     * (virtual_ios.c ios_swap_init); no file is created. */
+                    unsetenv("MADEIRA_SWAP_FILE");
+                    unsetenv("MADEIRA_SWAP_MB");
+                    setenv("MADEIRA_SWAP_DONOR_ONLY", "1", 1);
+                    char poolKind[32] = "";
+                    madeira_cfg_get("donor-pool-kind", poolKind, sizeof poolKind);
+                    extern long MadeiraDonorPoolStart(long megabytes, int purgeable);
+                    long got = MadeiraDonorPoolStart(onlyPoolMB, strcmp(poolKind, "purgeable") == 0);
+                    LOG("ml2200 donor-only tier: %ld of %ld MB (%s), no swap file", got, onlyPoolMB, poolKind[0] ? poolKind : "ledger");
+                    fprintf(stderr, "[swap] ml2200 app: donor pool %ld of %ld MB without a swap file (swap-mb unset)\n", got, onlyPoolMB);
+                }
                 if (capMB >= 64) {
                     NSString *swapPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"madeira-swap.bin"];
                     [[NSFileManager defaultManager] removeItemAtPath:swapPath error:nil];
@@ -1642,6 +1730,16 @@ static void *wine_process_thread(void *arg) {
                         }
                         LOG("ml1077 swap tier armed: %{public}s, %ld MB", swapPath.UTF8String, capMB);
                         fprintf(stderr, "[swap] ml1077 app: backing file %s, cap %ld MB\n", swapPath.UTF8String, capMB);
+                        /* ml1150: donor pool, the tier's first stage (DonorPool.m). donor-pool-kind = ledger (default) |
+                         * purgeable chooses how the extension creates the memory (the A/B of ml1152). */
+                        long poolMB = (long)madeira_cfg_int("donor-pool-mb", 0);   /* madeira.cfg donor-pool-mb = N */
+                        if (poolMB >= 512) {
+                            char poolKind[32] = "";
+                            madeira_cfg_get("donor-pool-kind", poolKind, sizeof poolKind);   /* madeira.cfg donor-pool-kind = ledger | purgeable */
+                            extern long MadeiraDonorPoolStart(long megabytes, int purgeable);
+                            long got = MadeiraDonorPoolStart(poolMB, strcmp(poolKind, "purgeable") == 0);
+                            LOG("ml1150 donor pool: %ld of %ld MB (%s)", got, poolMB, poolKind[0] ? poolKind : "ledger");
+                        }
                     }
                 }
             }
@@ -2054,8 +2152,10 @@ static void *wine_process_thread(void *arg) {
                 madeira_link_syswow64(fm, prefix, bundlePath);
                 madeira_link_syswow64_wbem(fm, prefix, bundlePath);
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
+                madeira_overlay_vcruntime32(fm, prefix);   /* VCRedist.swift's Microsoft x86 runtime */
             }
             madeira_link_wine_mono(fm, prefix, bundlePath);
+            madeira_link_wine_gecko(fm, prefix);
             if (madeira_d3d9_wined3d_wanted())
                 madeira_link_d3d9_wined3d(fm, prefix, bundlePath, has_i386_set);
             madeira_setup_vulkan(fm, prefix, bundlePath, use_arm64ec);

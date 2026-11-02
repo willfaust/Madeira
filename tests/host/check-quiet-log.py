@@ -192,7 +192,35 @@ if m:
     check(re.search(r"^\s*quiet-log = 1$", cfg, re.M) is not None, "Horizon Zero Dawn's list sets quiet-log = 1")
     check(re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", cfg, re.M) is not None,
           "Horizon Zero Dawn's list sets env.MADEIRA_SRV_FGETPATH = 1")
-others = rec.replace(m.group(0), "") if m else rec
+hfw = re.search(r'static let horizonForbiddenWest = GameRecommendation\(\s*id: "horizon-forbidden-west", '
+                r'title: "Horizon Forbidden West", version: (\d+),.*?config: """(.*?)"""', rec, re.S)
+check(bool(hfw), "Horizon Forbidden West's list found")
+if hfw:
+    check(re.search(r"^\s*quiet-log = 1$", hfw.group(2), re.M) is not None
+          and re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", hfw.group(2), re.M) is not None,
+          "Horizon Forbidden West's list sets both switches")
+rca = re.search(r'static let ratchetClankRiftApart = GameRecommendation\(\s*id: "ratchet-clank-rift-apart", '
+                r'title: "Ratchet & Clank: Rift Apart", version: (\d+),.*?config: """(.*?)"""', rec, re.S)
+check(bool(rca), "Ratchet & Clank: Rift Apart's list found")
+if rca:
+    check(re.search(r"^\s*quiet-log = 1$", rca.group(2), re.M) is not None
+          and re.search(r"^\s*env\.MADEIRA_SRV_FGETPATH = 1$", rca.group(2), re.M) is not None,
+          "Rift Apart's list sets both switches (HFW's general lines)")
+others = rec
+for found in (m, hfw, rca):
+    if found:
+        others = others.replace(found.group(0), "")
+# Lists ported from community tested lists that also turn the log off: quiet-log only, never the
+# server's F_GETPATH switch.
+quiet_only = ("marvels-spider-man-miles-morales", "marvels-spider-man-remastered", "marvels-spider-man-2",
+              "minecraft-dungeons-2")
+for qid in quiet_only:
+    q = re.search(r'static let \w+ = GameRecommendation\(\s*id: "%s",.*?config: """(.*?)"""' % re.escape(qid), rec, re.S)
+    check(bool(q) and re.search(r"^\s*quiet-log = 1$", q.group(1), re.M) is not None
+          and "MADEIRA_SRV_FGETPATH" not in q.group(1),
+          "list %s sets quiet-log = 1 and not env.MADEIRA_SRV_FGETPATH" % qid)
+    if q:
+        others = others.replace(q.group(0), "")
 check("quiet-log" not in re.sub(r"///.*", "", others) and "MADEIRA_SRV_FGETPATH" not in re.sub(r"///.*", "", others),
       "no other game's list sets either switch")
 

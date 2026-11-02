@@ -89,6 +89,14 @@ prelude = r'''
 #include <signal.h>
 #include <sys/mman.h>
 #include <linux/falloc.h>
+#include <pthread.h>
+/* ml1291's deferred punches: a worker thread, the free list under virtual_mutex, and
+ * ml1293's MS_KILLPAGES (Darwin: drop dirty pages before the punch; a plain msync here). */
+#define pthread_setname_np(name) ((void)(name))   /* Darwin's one-argument form */
+#ifndef MS_KILLPAGES
+#define MS_KILLPAGES MS_ASYNC
+#endif
+static pthread_mutex_t virtual_mutex = PTHREAD_MUTEX_INITIALIZER;
 typedef unsigned long ULONG_PTR;
 typedef long NTSTATUS;
 #define NT_SUCCESS(s) ((s) >= 0)
@@ -156,6 +164,15 @@ static unsigned long long ios_swap_footprint_mb( void ) { return 1234; }
 static int cfg_mode = 1;
 static void ios_swap_cfg( int *mode, int *min_mb ) { *mode = cfg_mode; *min_mb = 0; }
 static unsigned long long ios_swap_disk_used( void ) { return 0; }
+/* ml2021: madeira.cfg swap-wow64 (default), no WoW64 guest window, and the donor guard's host free RAM */
+static long madeira_cfg_int( const char *key, long def ) { (void)key; return def; }
+static unsigned long ios_wow_window_covering( const void *s, const void *e ) { (void)s; (void)e; return 0; }
+static uint64_t ios_donor_system_free( void ) { return 0; }
+/* the calling program is not a Chromium browser (ios_swap_browser) */
+static int ios_avail_phys_chromium( void ) { return 0; }
+/* ml2021: the swap core asks whether a 32-bit program is in the session (none here) */
+static unsigned ios_wow_window_count, ios_wow_placeholder_count;
+static struct { unsigned long base; } ios_wow_windows[1], ios_wow_placeholders[1];
 /* the take and the map must run with the lock held: wrap the core's versions */
 #define ios_swap_image_take real_ios_swap_image_take
 #define ios_swap_image_map real_ios_swap_image_map
@@ -174,9 +191,9 @@ static ssize_t test_pwrite( int fd, const void *buf, size_t len, off_t off )
     return pwrite( fd, buf, len, off );
 }
 #define pwrite( fd, buf, len, off ) test_pwrite( fd, buf, len, off )
-static int virtual_mutex;
-static void server_enter_uninterrupted_section( int *m, sigset_t *s ) { (void)m; (void)s; locked++; }
-static void server_leave_uninterrupted_section( int *m, sigset_t *s ) { (void)m; (void)s; locked--; }
+/* virtual_mutex is the prelude's (ml1291's punch worker locks it); the section only counts depth */
+static void server_enter_uninterrupted_section( pthread_mutex_t *m, sigset_t *s ) { (void)m; (void)s; locked++; }
+static void server_leave_uninterrupted_section( pthread_mutex_t *m, sigset_t *s ) { (void)m; (void)s; locked--; }
 /* the view table: one image view at most */
 static struct file_view the_view;
 static int have_view;
@@ -397,6 +414,7 @@ int main( void )
     setenv( "MADEIRA_SWAP_FILE", path, 1 );
     setenv( "MADEIRA_SWAP_MB", "256", 1 );
     setenv( "MADEIRA_SWAP_COVERAGE", "blocks", 1 );   /* merged free list: given-back ranges lower the bump */
+    setenv( "MADEIRA_SWAP_PUNCH_DEFER", "0", 1 );     /* ml1291: synchronous punches, ranges back at once (check-swap-coverage.py tests the queue) */
     ios_swap_init();
     {
         char pm[5]; unsigned long ino = 0;

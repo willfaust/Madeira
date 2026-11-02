@@ -282,6 +282,7 @@ static BOOL pipeline_ensure(MadeiraGLPresenter *p, MTLPixelFormat format) {
 // readout and the launch checks that wait for a first frame see GL games too.
 static _Atomic uint64_t gl_present_count;
 extern uint64_t madeira_get_present_count(void);
+extern void madeira_frame_mark(const void *layer);   // Winios.m: the overlay's frame times
 
 uint64_t madeira_frame_count(void) {
     return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed);
@@ -351,6 +352,7 @@ static BOOL present_slot(MadeiraGLPresenter *p, GLSlot *s, void *hwnd) {
     [cb commit];
     s->last = cb;
     atomic_fetch_add_explicit(&gl_present_count, 1, memory_order_relaxed);
+    madeira_frame_mark((__bridge const void *)layer);
 
     if (++p->frames == 1 || p->frames % 600 == 0)
         GLLOG("hwnd %p: %lu frames presented (%dx%d)", hwnd, p->frames, p->width, p->height);

@@ -127,6 +127,17 @@ size_t ios_jit_pool_size_global = 0x20000000;
 /* madeira-bcd pool-low (region C) is off here: no region, every test on it is 0 */
 uintptr_t ios_jit_low_rx_global, ios_jit_low_rw_global;
 size_t ios_jit_low_size_global;
+/* ml2021: madeira.cfg swap-wow64 (default), no WoW64 guest window, and the donor guard's host free RAM */
+static long madeira_cfg_int( const char *key, long def ) { (void)key; return def; }
+static ULONG_PTR ios_wow_window_covering( const void *s, const void *e ) { (void)s; (void)e; return 0; }
+static uint64_t ios_donor_system_free( void ) { return 0; }
+/* the churn filter's limit check (ios_swap_footprint_tight); 0 = no limit known, never tight */
+size_t os_proc_available_memory( void ) { return 0; }
+/* the calling program is not a Chromium browser (ios_swap_browser) */
+static int ios_avail_phys_chromium( void ) { return 0; }
+/* ml2021: the swap core asks whether a 32-bit program is in the session (none here) */
+static unsigned ios_wow_window_count, ios_wow_placeholder_count;
+static struct { unsigned long base; } ios_wow_windows[1], ios_wow_placeholders[1];
 static int ios_jit_low_overlaps( uintptr_t a, size_t size )
 ''' + body_of(virt, 'static int ios_jit_low_overlaps(') + r'''
 /* Wine's rules (unix_private/virtual.c), EXEC mapped to read for the test */

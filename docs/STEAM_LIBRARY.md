@@ -135,7 +135,8 @@ opens again when needed.
 account that owns the depot, so ownership is Steam's decision, not Madeira's.
 
 1. Product info of the app (and of the apps whose depots it shares) selects the
-   Windows, 64-bit (else 32-bit) depots of the game language, without DLC,
+   Windows, 64-bit (else 32-bit) depots of the game language, with the depots
+   of the owned DLC left on (below, "DLC") and without other DLC,
    redistributables or regional alternates. The game language is
    **Settings › Steam › Game language**, kept in madeira.cfg as
    `env.MADEIRA_STEAM_LANGUAGE` (a Steam API language name such as
@@ -208,6 +209,147 @@ Any other session also pauses downloads and closes the connection
 (`runWineFullSequence`). Madeira does not start more than one session per app
 run (`docs/LIBRARY.md`).
 
+## DLC
+
+A game's owned DLC downloads with it, as in Valve's client.
+
+**What you see.** The download sheet of a game that is not installed has a
+**DLC** section: every DLC the account owns for the game, with a switch (on
+by default) and about how much it downloads. A DLC with no files of its own
+(it only unlocks content the game already has) is listed as **No download**,
+without a switch. An installed game's Game details page has **Owned DLC (n)** in its
+Steam section, with the same switches and, per DLC, **Installed** or
+**not installed**. When a DLC that is on is missing from the install,
+**Download DLC: <name>** (or **Download n DLC**) runs Repair with it: the DLC's
+files are fetched, and the game's own files are checked and kept. A DLC turned
+off is left out of the next update or repair and its install record entry;
+its files stay until the game is uninstalled, as an earlier language's do.
+
+**How it works.** The library refresh already reads product info for every
+app in the account's licenses; the DLC among them (`common.type` DLC) are kept
+for their game: an owned DLC belongs to a game when its `common.parent` is the
+game, or the game lists it (`extended.listofdlc`) or one of its depots names it
+(`dlcappid`). A DLC's files are the game's depots with its `dlcappid`, chosen
+by the same OS, architecture and language rules as the game's own
+(`SteamAppInfo.dlcDepots`). The cached library keeps, per game, each owned
+DLC's name, depots and sizes (`SteamOwnedGame.dlc`; an older cache has none
+until the next refresh, and downloads then take no DLC).
+
+A download takes every DLC depot the account's licenses include
+(`installDepots(ownedDLC:)`, the licensed depot IDs) except those of the DLC
+the player turned off (`SteamAppInfo.dlcOff`, from `SteamDLC.offApps`). Steam
+still decides ownership: it gives a depot key only for content the account
+owns, and a DLC depot it refuses a key for is left out; the game installs
+without it. The install record lists DLC depots under
+`InstalledDepots` with their `dlcappid`, as Valve's client writes them. The
+switches are kept per game in the app's defaults (`steam-dlc-off`: the DLC
+turned off, by App ID).
+
+`env.MADEIRA_STEAM_DLC = 0` turns it off: no DLC is listed or downloaded, and
+downloads take the game's depots only, as before.
+
+Log: `[steam-dlc] install app=<id> off=<n> dlc-depots=<n>`, `[steam-dlc]
+app=<id> dlc=<id> on=<0|1>` and the `dlc=<n>` count on `[steam-library] owned`.
+
+Not checked on a device yet: whether Valve's client, started through Madeira
+Dock, takes the recorded DLC as installed without downloading it again, and DLC
+whose files live in the DLC's own product info rather than the game's (listed
+as **No download** for now).
+
+## Version (beta branches)
+
+A game's **Version** picker, on its download sheet and in the Steam section of
+its Game details page, works like the Betas tab of Valve's client. It lists
+**Public (default)** and the game's beta branches (`depots.branches`, with
+their descriptions). A password-protected beta (`pwdrequired`) shows up once
+its code was entered with **Enter beta code**: Steam checks the code
+(`ClientCheckAppBetaPassword`) and names the private branches it opens. The
+code and those names are kept per game in the app's defaults
+(`steam-beta-codes`, `steam-beta-unlocked`; **Remove beta code** forgets them
+and puts a chosen private branch back to public). The choice is kept in
+`steam-branches` (`SteamBranch`) and applies to the game's next download,
+update or repair. On an installed game whose record names another branch,
+**Download <branch>** (or **Download the public build**) switches it: files that
+match are kept and only what differs is fetched.
+
+A download asks for the chosen branch (`SteamLibraryFetcher.applyBranch`). A
+beta takes each depot's manifest for the branch (`manifests.<branch>`), and the
+public one for a depot the beta does not change, as Valve's client does; the
+manifest request code names the branch for a depot with its own beta manifest
+(`app_branch`). For a password-protected beta, the code is checked again and
+Steam's private depot section (`ClientPICSPrivateBeta`, binary KeyValues) gives
+the branch's manifests; without a code Steam accepts, the download stops with
+"needs a beta code" instead of taking the public build. A branch Steam no
+longer lists falls back to public. The install record states the branch's
+build and names the branch as `BetaKey` in `UserConfig` and `MountedConfig`,
+as Valve's client writes it, so the client keeps the game on that branch; the
+update badge compares against the recorded branch's build.
+
+Log: `[steam-branch] app=<id> choice=<branch>`, `code=kept|removed private=<n>`,
+`code-check ... eresult=<n> private=<n>`, `private-depots ... eresult=<n>
+bytes=<n>`, `private-manifests=<n>`, `branch-gone=1 using=public`, and
+`branch=<name>` on `[steam-depot] selection`. The code itself is never logged.
+
+Not checked on a device yet: whether Valve's client, started through Madeira
+Dock, starts a password-protected beta install without asking for the code
+itself. "The game" (SteamDirectStart) still picks among the launch entries
+without a beta key.
+## From a PC on this network
+Settings › Steam › **Downloads from PCs on this network** (off by default).
+A download then asks a PC of the same account on the same network first,
+through Steam's own local network game transfers, and takes from the content
+servers only what the PC does not serve. On the PC: the same Steam account,
+Settings › Downloads › Game file transfer over local network on, and no
+download or game running (Valve's client serves only while idle). The PC is
+found through Steam; **PC address** is only for a PC that is not found. Both
+devices must reach the internet through the same router: Valve refuses a
+transfer between different public IP addresses ("IP Login Restriction
+Failed" in the requester's `content_log.txt`).
+The code is `app/Madeira/SwiftSteam/Content/SteamLANPeer.swift`, the
+`[steam-lan]` part of `DepotDownloader.install` and `SteamSession.handleRelayed`.
+The messages and fields are Valve's (SteamDatabase protobufs:
+`steammessages_remoteclient_discovery`, `steammessages_remoteclient_service*`,
+`steammessages_contentsystem.steamclient`, `steammessages_clientlanp2p`), the
+order is the one a Steam client follows (worked out against Steam on Windows,
+2026-10-29):
+1. **Joining the account's devices.** `RemoteClient.NotifyOnline` (a
+   notification: no reply) with this device's client ID (random, kept in
+   `madeira.steam.lanClientID`), then this device's status
+   (`CMsgRemoteClientBroadcastStatus`) through
+   `RemoteClient.SendSteamBroadcastPacket`. Steam relays it to the account's
+   other clients and pushes theirs back
+   (`RemoteClientSteamClient.NotifySteamBroadcastPacket`): client ID, host
+   name, accounts and IP addresses. A relayed discovery from them is answered
+   with this device's status. Without this, `RequestPeerContentServer` fails
+   with Account Not Found (18) before reaching the PC.
+2. **Discovery on the network.** A `CMsgRemoteClientBroadcastDiscovery`
+   datagram goes straight to the PC's UDP port 27036 (its address from step 1,
+   in this device's /24), not as a broadcast: iOS gives sideloaded apps no
+   multicast entitlement. Every packet starts `FF FF FF FF 21 4C 5F A0`. The PC
+   answers with its status and sends a discovery of its own, which is answered
+   with this device's status; the PC's `remote_connections.txt` then logs
+   "Received broadcast message from client ... (Madeira)".
+3. **Opening the PC's content server.** `ContentServerDirectory.RequestPeerContentServer`
+   on the app's Steam connection: both client IDs, the account, the App ID and
+   `current_build_id`, the build this device already has (0: none). Sending
+   the PC's own build gets "Content Version" (47). The answer is a TCP port
+   (27040 on Windows), the depots the PC has and an access token; the PC logs
+   "Accepted peer connection ... (matching IP)".
+4. **Chunks.** On that TCP connection, `k_EMsgClientPeerChunkRequest` (9902:
+   app, depot, chunk SHA-1, access token) and `k_EMsgClientPeerChunkResponse`
+   (9903), framed like every Steam TCP message (length, `VT01`, message type
+   with the protobuf flag, header length 0, body). Up to 16 requests are in
+   flight at once on the one connection; answers are matched by SHA-1. Valve's
+   client sends the chunk decrypted and still compressed; it is decompressed,
+   checked against the manifest's Adler-32 and the chunk's SHA-1, and written
+   like a chunk from a content server.
+A chunk the PC fails to send is fetched from the content servers. After
+four failures in a row the PC is dropped for the rest of that download. Log:
+`[steam-lan] relayed status host=...` (a device of the account seen through
+Steam), `open app=... pc=... at <address>:<port>` (Steam opened it), `skip: ...`
+or `... did not open` (why not), and `done ... chunks= bytes= seconds=
+mbit/s= failures=`.
+
 ## Downloads in the background
 
 On iOS 26 and later, a download submits a `BGContinuedProcessingTask` when it
@@ -240,13 +382,15 @@ In `Documents/madeira.cfg`, all on by default:
   grace period and the clean pause remain.
 - `env.MADEIRA_DOWNLOAD_NOTIFICATIONS = 0`: no notifications and no
   permission request.
+- `env.MADEIRA_STEAM_DLC = 0`: no owned DLC is listed or downloaded (above,
+  "DLC").
 
 `env.MADEIRA_STEAM_TRACE = 1` adds protocol trace lines (message names and
 result codes, never payloads or credentials).
 
 ## Logs
 
-`[steam-library]`, `[steam-depot]`, `[steam-repair]`, `[steam-cdn]`,
+`[steam-library]`, `[steam-depot]`, `[steam-dlc]`, `[steam-branch]`, `[steam-repair]`, `[steam-cdn]`,
 `[steam-shared]`, `[steam-shared-record]`, `[steam-record]`, `[steam-playtime]`,
 `[steam-account]`, `[steam-games]`, `[steam-start]` (Start with: the mode,
 where the program came from, how many launch entries and programs) and
@@ -434,10 +578,38 @@ devices; see the pull request for what was and was not device-tested), the Swift
 views, iOS background-task behaviour, and running a downloaded game (through
 Madeira Dock or as The game).
 
+## Steam connection recovery
+
+An initial WebSocket failure releases its task and session before another
+connection is tried. A connection request tries at most three distinct CM
+endpoints from Valve's directory. Timeouts, DNS and connection failures, and
+generic TLS negotiation failures can try another endpoint. Explicit server or
+client certificate failures, cancellation and offline errors stop immediately.
+Certificate and hostname verification remain URLSession's defaults. If the
+directory has no unused endpoint, the last transport error is retained.
+
+Transport errors retain only a known error domain and numeric code, without
+the failing URL, headers or error payload. Replaced connections cannot deliver
+messages or close a newer connection. Cancelling a pending handshake cancels
+its WebSocket, and a late success cannot publish a cancelled connection.
+
+The retry, endpoint-exclusion and cleanup code and host fixture are adapted
+from [kuscholar/iDeck at e3d845e](https://github.com/kuscholar/iDeck/tree/e3d845edd4cf46a247baea6d2cc398d7ba71812d)
+(`SteamConnection.swift`, `CMServerList.swift`, `SteamError.swift` and
+`tests/host/check-steam-cm-transport.py`). Madeira also guards successful receive
+callbacks and tests cancellation after a delayed success. Existing source
+copyright and licence notices are retained.
+
+Run `python3 tests/host/check-steam-cm-transport.py`. It compiles the production
+connection-loop and receive methods with scripted transports and the real
+endpoint-selection code. It checks retry bounds, cleanup, certificate failures,
+error redaction, cancellation and replacement connections. It does not establish
+live Steam, VPN, TLS-handshake or device behaviour.
+
 ## Not included, and limits
 
-- No Steam Cloud, no achievements, no workshop content, no DLC installation,
-  no branch (beta) selection: the public branch.
+- No Steam Cloud, no achievements, no workshop content. Beta branches: see
+  "Version (beta branches)" above. DLC: see "DLC" above.
 - A file that a newer build no longer contains is not deleted by an update
   (the install keeps it); **Uninstall** removes the whole folder.
 - Only the account's licenses are read; family sharing and free-on-demand
