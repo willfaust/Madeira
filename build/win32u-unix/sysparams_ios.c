@@ -2963,20 +2963,64 @@ void reset_monitor_update_serial(void)
  * follows DXGI's: Apple 106B:0001, or NVIDIA when DXMT reports NVIDIA
  * (DXMT_ENABLE_NVEXT=1; the app then also sets dxgi.customDeviceId=2544, a
  * GeForce RTX 3060, so DXGI, EnumDisplayDevices, SetupAPI and NVAPI name the
- * same GPU). */
+ * same GPU). A game's "Graphics card the game sees" (app/Madeira/GPUCards.swift)
+ * wins over both: MADEIRA_GPU_VENDOR and MADEIRA_GPU_DEVICE (hex) and
+ * MADEIRA_GPU_NAME, the card the app also gives DXMT's DXGI and Direct3D 9. */
 static const char ios_video_guidA[] = "{8C0C2A5B-0E7E-4B0E-9E3F-1D0A6B5C4D21}";
+
+/* Every identity a launch may register: Madeira's own, "Report an NVIDIA GPU"'s
+ * and each GPUCards.swift card (tests/host/check-gpu-card.py keeps them in step). */
+static const struct { UINT16 vendor, device; } ios_known_gpus[] =
+{
+    { 0x106b, 0x0001 },   /* Apple, the default */
+    { 0x10de, 0x2544 },   /* GeForce RTX 3060 */
+    { 0x10de, 0x1c03 },   /* GeForce GTX 1060 6GB */
+    { 0x10de, 0x0292 },   /* GeForce 7900 GS */
+    { 0x1002, 0x73df },   /* Radeon RX 6700 XT */
+    { 0x1002, 0x67df },   /* Radeon RX 580 */
+    { 0x8086, 0x3e92 },   /* UHD Graphics 630 */
+};
+
+static BOOL ios_chosen_gpu_ids( UINT16 *vendor, UINT16 *device )
+{
+    const char *v = getenv( "MADEIRA_GPU_VENDOR" ), *d = getenv( "MADEIRA_GPU_DEVICE" );
+    unsigned long vendor_id, device_id;
+    char *end;
+
+    if (!v || !*v || !d || !*d) return FALSE;
+    vendor_id = strtoul( v, &end, 16 );
+    if (*end || !vendor_id || vendor_id > 0xffff) return FALSE;
+    device_id = strtoul( d, &end, 16 );
+    if (*end || device_id > 0xffff) return FALSE;
+    *vendor = vendor_id;
+    *device = device_id;
+    return TRUE;
+}
 
 static void ios_virtual_gpu_ids( UINT16 *vendor, UINT16 *device )
 {
     const char *nv = getenv( "DXMT_ENABLE_NVEXT" );
+    if (ios_chosen_gpu_ids( vendor, device )) return;
     if (nv && nv[0] == '1') { *vendor = 0x10de; *device = 0x2544; }
     else { *vendor = 0x106b; *device = 0x0001; }
 }
 
-/* Every game shares one prefix and the registry is saved, so a launch with the
- * other identity left its adapter behind: two display devices under Enum\PCI,
+/* The adapter's name: the chosen card's, else the PCI table's. */
+static const char *ios_virtual_gpu_name( UINT16 vendor, UINT16 device )
+{
+    UINT16 chosen_vendor, chosen_device;
+    const char *name = getenv( "MADEIRA_GPU_NAME" );
+
+    if (name && *name && ios_chosen_gpu_ids( &chosen_vendor, &chosen_device ) &&
+        chosen_vendor == vendor && chosen_device == device)
+        return name;
+    return gpu_device_name( vendor, device, "Madeira Display" );
+}
+
+/* Every game shares one prefix and the registry is saved, so a launch with
+ * another identity left its adapter behind: two display devices under Enum\PCI,
  * both pointing at Class\{display}\0000, and the stale one may sort first.
- * Remove the identity this launch does not report. */
+ * Remove the identities this launch does not report. */
 static void ios_forget_virtual_gpu( UINT16 vendor, UINT16 device )
 {
     static const char *classes[] = { guid_devinterface_display_adapterA, guid_display_device_arrivalA };
@@ -3023,6 +3067,7 @@ static void ios_register_virtual_gpu(void)
     WCHAR bufferW[128];
     DWORD len;
     HKEY hkey;
+    unsigned int i;
     int kmt;
 
     if (done) return;
@@ -3032,9 +3077,10 @@ static void ios_register_virtual_gpu(void)
     if (!enum_key || !control_key) return;
 
     ios_virtual_gpu_ids( &pci.vendor, &pci.device );
-    if (pci.vendor == 0x10de) ios_forget_virtual_gpu( 0x106b, 0x0001 );
-    else ios_forget_virtual_gpu( 0x10de, 0x2544 );
-    name = gpu_device_name( pci.vendor, pci.device, "Madeira Display" );
+    for (i = 0; i < ARRAY_SIZE(ios_known_gpus); i++)
+        if (ios_known_gpus[i].vendor != pci.vendor || ios_known_gpus[i].device != pci.device)
+            ios_forget_virtual_gpu( ios_known_gpus[i].vendor, ios_known_gpus[i].device );
+    name = ios_virtual_gpu_name( pci.vendor, pci.device );
     RtlUTF8ToUnicodeN( gpu.name, sizeof(gpu.name) - sizeof(WCHAR), &len, name, strlen( name ) );
     gpu.refcount = 1;
     gpu.index = 0;
@@ -3094,7 +3140,7 @@ void madeira_kmt_identity( struct madeira_kmt_identity *id )
     ios_virtual_gpu_ids( &pci.vendor, &pci.device );
     id->vendor = pci.vendor;
     id->device = pci.device;
-    snprintf( id->name, sizeof(id->name), "%s", gpu_device_name( pci.vendor, pci.device, "Madeira Display" ) );
+    snprintf( id->name, sizeof(id->name), "%s", ios_virtual_gpu_name( pci.vendor, pci.device ) );
     snprintf( id->driver_version, sizeof(id->driver_version), "%s", driver_vendor_to_version( pci.vendor ) );
     snprintf( id->path, sizeof(id->path), "PCI\\VEN_%04X&DEV_%04X&SUBSYS_00000000&REV_00\\%08X",
               pci.vendor, pci.device, 0 );

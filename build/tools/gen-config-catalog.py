@@ -688,6 +688,18 @@ OVERLAY = {
                 "note": "1: DXGI names NVIDIA as the vendor, DXMT's NVAPI answers and win32u registers the display "
                         "adapter as a GeForce RTX 3060 (driver 581.57). Per game: Game details > Report an NVIDIA GPU, "
                         "which also sets the matching DXGI device id."},
+    # Set by a library entry's "Graphics card the game sees" (app/Madeira/GPUCards.swift),
+    # which also gives DXMT's DXGI and Direct3D 9 the same card.
+    "env.MADEIRA_GPU_VENDOR": {"title": "Windows' display adapter: PCI vendor id (hex)",
+                "note": "With MADEIRA_GPU_DEVICE: the display adapter win32u registers (EnumDisplayDevices, SetupAPI, "
+                        "the display driver key, D3DKMT), instead of Apple 106B:0001 or the RTX 3060 of Report an "
+                        "NVIDIA GPU. Per game: Game details > Graphics card the game sees, which sets DXGI and "
+                        "Direct3D 9 to the same card."},
+    "env.MADEIRA_GPU_DEVICE": {"title": "Windows' display adapter: PCI device id (hex)",
+                "note": "With MADEIRA_GPU_VENDOR: the adapter's device id. Per game: Game details > Graphics card the game sees."},
+    "env.MADEIRA_GPU_NAME": {"title": "Windows' display adapter: name",
+                "note": "The adapter name Windows reports with MADEIRA_GPU_VENDOR and MADEIRA_GPU_DEVICE; unset, the "
+                        "name of the PCI id. Per game: Game details > Graphics card the game sees."},
     "ags-rewrite": {"title": "D3D12 AMD AGS 64-bit atomics rewrite"},
     "env.MADEIRA_EXE": {"title": "Program to start at launch (Windows path or name)"},
     "env.MADEIRA_ONBOARDING": {"title": "First-run Steam setup"},

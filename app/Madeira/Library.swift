@@ -4072,12 +4072,22 @@ struct LibraryDetail: View {
                 Text("Application default").tag(0)
                 ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
             }
-            Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+            // GPUCards.swift: a chosen card replaces the two NVIDIA switches below.
+            Picker(selection: Binding(get: { bcd.gpuCard }, set: { id in bcd.gpuCard = id; LibraryPrefs.setGPUCard(id, for: entry.windowsPath) })) {
+                Text("Automatic").tag("")
+                ForEach(GPUCards.all, id: \.id) { Text($0.title).tag($0.id) }
+            } label: {
+                compatLabel("Graphics card the game sees", "For games that refuse this GPU or only run on cards they know")
             }
-            Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
-                compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
+            Group {
+                Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
+                    compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
+                }
+                Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
+                    compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
+                }
             }
+            .disabled(GPUCards.card(bcd.gpuCard) != nil)
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel("Wine's C++ runtime", "Instead of the game's msvcp/vcruntime")
             }
@@ -4320,6 +4330,7 @@ struct LibraryDetail: View {
 /// LibraryPrefs' switches and the GameProfiles.swift file's lines.
 struct BCDGameValues {
     var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false
+    var gpuCard = ""
     var realSuspend: Bool? = nil, unityIL2CPP = false
     var configText = ""
     init() {}
@@ -4327,6 +4338,7 @@ struct BCDGameValues {
         avx = LibraryPrefs.avx(windowsPath)
         nvidia = LibraryPrefs.nvidia(windowsPath)
         olderNvidia = LibraryPrefs.olderNvidia(windowsPath)
+        gpuCard = LibraryPrefs.gpuCard(windowsPath) ?? ""
         wineVCRT = LibraryPrefs.wineVCRT(windowsPath)
         realSuspend = LibraryPrefs.realSuspend(windowsPath)
         configText = GameProfile(windowsPath: windowsPath).text

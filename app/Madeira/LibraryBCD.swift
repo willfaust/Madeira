@@ -16,7 +16,8 @@ import Metal
 enum BCDLaunch {
     /// The switches every launch of a game applies. Everything is set or unset, so a
     /// previous launch's choice never leaks into this one.
-    static func applyExtras(avx: Bool, wineVCRT: Bool, nvidia: Bool, olderNvidia: Bool = false, profile: GameProfile?) {
+    static func applyExtras(avx: Bool, wineVCRT: Bool, nvidia: Bool, olderNvidia: Bool = false, card: GPUCard? = nil,
+                            profile: GameProfile?) {
         if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
         if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
         var dxmtExtra: [String] = []
@@ -42,6 +43,18 @@ enum BCDLaunch {
         }
         // "Older NVIDIA card (Direct3D 9)": after the NVIDIA ids, so its D3D9 ids win.
         if olderNvidia { dxmtExtra += D3D9Identity.olderNvidia.options }
+        // "Graphics card the game sees" (GPUCards.swift): the same card in DXGI,
+        // Direct3D 9, NVAPI and Windows' adapter. applyLibrary turns both NVIDIA
+        // switches off when one is chosen, so nothing above names another card.
+        if let card {
+            let metalName = MTLCreateSystemDefaultDevice()?.name
+            dxmtExtra += GPUCards.dxmtOptions(card, metalName: metalName)
+            for (name, value) in GPUCards.environment(card, metalName: metalName) {
+                if let value { setenv(name, value, 1) } else { unsetenv(name) }
+            }
+        } else {
+            for name in GPUCards.identityNames { unsetenv(name) }
+        }
         // The game's own settings (GameProfiles.swift).
         if let p = profile, p.hasSettings, let u = p.url {
             setenv("MADEIRA_CFG_GAME", u.path, 1)
@@ -61,14 +74,21 @@ enum BCDLaunch {
         }
         let path = entry.windowsPath
         let profile = GameProfile(windowsPath: path)
-        let olderNvidia = LibraryPrefs.olderNvidia(path)
+        // A chosen card replaces both NVIDIA switches.
+        let card = GPUCards.card(LibraryPrefs.gpuCard(path))
+        let nvidia = card == nil && LibraryPrefs.nvidia(path)
+        let olderNvidia = card == nil && LibraryPrefs.olderNvidia(path)
         applyExtras(avx: LibraryPrefs.avx(path), wineVCRT: LibraryPrefs.wineVCRT(path),
-                    nvidia: LibraryPrefs.nvidia(path), olderNvidia: olderNvidia, profile: profile)
-        if let appID = entry.steamAppID { D3D9Identity.syncGamePrefs(appID: appID, olderNvidia: olderNvidia) }
+                    nvidia: nvidia, olderNvidia: olderNvidia, card: card, profile: profile)
+        if let appID = entry.steamAppID {
+            if let card { D3D9Identity.syncGamePrefs(appID: appID, card: card) }
+            else { D3D9Identity.syncGamePrefs(appID: appID, olderNvidia: olderNvidia) }
+        }
         let program = path.split(separator: "\\").last.map(String.init) ?? path
+        let cardLog = card.map { $0.id + " " + $0.vendorHex + ":" + $0.deviceHex } ?? "-"
         LogStore.shared.log("[bcd] library launch \(program): avx=\(LibraryPrefs.avx(path) ? 1 : 0) "
-                            + "wine-vcrt=\(LibraryPrefs.wineVCRT(path) ? 1 : 0) nvidia=\(LibraryPrefs.nvidia(path) ? 1 : 0) "
-                            + "older-nvidia=\(olderNvidia ? 1 : 0) "
+                            + "wine-vcrt=\(LibraryPrefs.wineVCRT(path) ? 1 : 0) nvidia=\(nvidia ? 1 : 0) "
+                            + "older-nvidia=\(olderNvidia ? 1 : 0) gpu-card=\(cardLog) "
                             + "game-config=\(profile.hasSettings ? 1 : 0)")
     }
 
@@ -132,7 +152,22 @@ enum D3D9Identity {
     ]
 
     /// Keeps the game's sD3DDevice on the card it will see, before a launch (no session runs).
+    /// Switched off, a name any GPUCards card wrote goes back to the Metal name too.
     static func syncGamePrefs(appID: Int, olderNvidia: Bool) {
+        rewritePrefs(appID: appID) { text, metalName in
+            olderNvidia ? prefsText(text, olderNvidia: true, metalName: metalName)
+                        : GPUCards.prefsText(text, wanted: nil, metalName: metalName)
+        }
+    }
+
+    /// The same for a game with "Graphics card the game sees" chosen: that card's name.
+    static func syncGamePrefs(appID: Int, card: GPUCard) {
+        rewritePrefs(appID: appID) { text, metalName in
+            GPUCards.prefsText(text, wanted: GPUCards.name(card, metalName: metalName), metalName: metalName)
+        }
+    }
+
+    private static func rewritePrefs(appID: Int, _ update: (String, String?) -> String?) {
         guard let relative = prefsFiles[appID] else { return }
         let users = LibraryModel.drive.appendingPathComponent("users", isDirectory: true)
         let metalName = MTLCreateSystemDefaultDevice()?.name
@@ -141,7 +176,7 @@ enum D3D9Identity {
             guard let data = try? Data(contentsOf: file) else { continue }
             let utf8 = String(data: data, encoding: .utf8)
             guard let text = utf8 ?? String(data: data, encoding: .isoLatin1),
-                  let updated = prefsText(text, olderNvidia: olderNvidia, metalName: metalName),
+                  let updated = update(text, metalName),
                   let out = updated.data(using: utf8 != nil ? .utf8 : .isoLatin1) else { continue }
             do {
                 try out.write(to: file, options: .atomic)
