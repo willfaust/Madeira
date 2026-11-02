@@ -60,7 +60,7 @@ require('func isdotnetframework' in lower and 'dotnetfx' not in named and
 require('SteamSignIn.flag(name, default: true)' in installers, 'every installer switch defaults on and reads env.NAME')
 for switch in ('MADEIRA_DOCK_INSTALLERS', 'MADEIRA_INSTALL_DEFAULT_KEY', 'MADEIRA_DOCK_INSTALL_CHOICE',
                'MADEIRA_DOCK_INSTALL_SCM', 'MADEIRA_DOCK_INSTALL_SERVER_SYNC', 'MADEIRA_DOTNET_FUSION',
-               'MADEIRA_INSTALL_SKIP_DOTNET'):
+               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_DOCK_INSTALL_REGISTRY'):
     require(f'flag("{switch}")' in installers, f'switch {switch} is read')
 require('reg.exe' not in installers, 'the batch never writes the registry (no reg.exe in the bundle)')
 require(content.count('setenv("MADEIRA_MADSYNC_SESSION", "0", 1)') == 1 and
@@ -192,6 +192,52 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(SteamInstallScripts.keys(runtime.run) == ["Software\\Valve\\Steam\\Apps\\7000", "Software\\Wow6432Node\\Valve\\Steam\\Apps\\7000"], "both registry views")
         require(SteamInstallScripts.keys(SteamInstallRun(name: "u", hive: .user, key: "Software\\X", value: 1)) == ["Software\\X"], "HKCU: one view")
         require(SteamInstallScripts.entries(script: Data(script.utf8), appID: 0).count == 1, "invalid app IDs add nothing")
+
+        // ---- the scripts' "Registry" values
+        let vendor = SteamInstallScripts.values(script: Data(script.utf8), installDir: dir)
+        require(vendor == [SteamInstallValue(hive: .machine, key: "SOFTWARE\\Fixture Vendor", name: "Install Dir",
+                                             data: .string(dir), followsInstall: true)],
+                "a Registry string with %INSTALLDIR% becomes the install folder and follows it (\(vendor))")
+        let localized = """
+        "InstallScript"
+        {
+            "Registry"
+            {
+                "HKEY_LOCAL_MACHINE\\\\Software\\\\Fixture Studio\\\\Game"
+                {
+                    "string"
+                    {
+                        "english" { "Language" "English" "Installed Path" "%INSTALLDIR%\\\\" }
+                        "german" { "Language" "Deutsch" "Installed Path" "%INSTALLDIR%\\\\" }
+                    }
+                    "dword" { "Version" "7" "Flags" "0x10" "Bad" "seven" }
+                }
+                "HKEY_CURRENT_USER\\\\Software\\\\Fixture Studio" { "string" { "Player" "fixture" } }
+                "HKEY_CLASSES_ROOT\\\\fixture" { "string" { "" "ignored" } }
+            }
+        }
+        """
+        let german = SteamInstallScripts.values(script: Data(localized.utf8), installDir: dir, language: "german")
+        let gameKey = "Software\\Fixture Studio\\Game"
+        require(german.contains(SteamInstallValue(hive: .machine, key: gameKey, name: "Language", data: .string("Deutsch"), followsInstall: false))
+                && german.contains(SteamInstallValue(hive: .machine, key: gameKey, name: "Installed Path", data: .string(dir + "\\"), followsInstall: true))
+                && !german.contains { $0.data == .string("English") },
+                "per-language sections: the install's language is taken, the others left out")
+        let fallback = SteamInstallScripts.values(script: Data(localized.utf8), installDir: dir, language: "korean")
+        require(fallback.contains { $0.name == "Language" && $0.data == .string("English") }, "a language the script lacks falls back to english")
+        require(german.contains(SteamInstallValue(hive: .machine, key: gameKey, name: "Version", data: .dword(7), followsInstall: false))
+                && german.contains(SteamInstallValue(hive: .machine, key: gameKey, name: "Flags", data: .dword(16), followsInstall: false))
+                && !german.contains { $0.name == "Bad" },
+                "dwords decimal or 0x hex; a non-number is left out")
+        require(german.contains { $0.hive == .user && $0.key == "Software\\Fixture Studio" && $0.name == "Player" }
+                && !german.contains { $0.key.lowercased().contains("fixture") && $0.data == .string("ignored") },
+                "HKCU values kept; other hives ignored")
+        require(DockInstallScripts.processes(script: Data(localized.utf8), installDir: dir, appID: 7000).isEmpty,
+                "a Registry section adds no programs")
+        let reg = SteamInstallRegistry.write(german.filter { $0.hive == .machine }, in: "WINE REGISTRY Version 2\n", now: 1).text
+        require(reg.contains("[Software\\\\Fixture Studio\\\\Game] 1") && reg.contains("[Software\\\\Wow6432Node\\\\Fixture Studio\\\\Game] 1")
+                && reg.contains("\"Installed Path\"=\"" + dir.replacingOccurrences(of: "\\", with: "\\\\") + "\\\\\""),
+                "written in both registry views, in Wine's escaping")
 
         // ---- recorded values
         let record = """
@@ -345,6 +391,10 @@ func pe(_ url: URL, machine: UInt16) throws {
                 firstNote.contains("Installer file missing: gone") && firstNote.contains("Already done: shared runtime") && firstNote.contains("standard synchronization"),
                 "the sheet's note (\(firstNote))")
         require(logged("dotnet-fusion=no-source") && logged("program=runtime a file=setup32.exe status=unsupported reason=32-bit-installer"), "fusion and per-program log lines")
+        let seeded = (try? String(contentsOf: prefix.appendingPathComponent("system.reg"), encoding: .utf8)) ?? ""
+        require(seeded.contains("[Software\\\\Wow6432Node\\\\Fixture Vendor]") && seeded.contains("\"Install Dir\"=\"C:\\\\")
+                && logged("app=7000 registry values=1 written=2"),
+                "the start writes the script's Registry value in both views before the session, and logs it")
         require(MadeiraDockLaunch.arguments(DockInstallers.script) ==
                 "/desktop=madeira,1280x720 C:\\windows\\system32\\cmd.exe /c call C:\\madeira-dock-installers.cmd & C:\\windows\\system32\\dockhost.exe",
                 "installers first, then the host, in one session, no quoted tokens")

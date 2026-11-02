@@ -460,6 +460,7 @@ Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_INSTALL_CHOICE` | on | `0`: no per-game choice; every start runs whatever is pending |
 | `MADEIRA_DOCK_INSTALL_SCM` | on | `0`: the batch records "services off" instead of starting the service manager (also read by the host's `--start-services`) |
 | `MADEIRA_DOCK_INSTALL_SERVER_SYNC` | on | `0`: a start that runs installers keeps madsync and leaves the service step out |
+| `MADEIRA_DOCK_INSTALL_REGISTRY` | on | Before each Dock start the app writes the "Registry" values of the install scripts in the game's folder, as Valve's client does when it installs a game (a launcher that reads its folder there offered to install the game). Missing values are added, a path that follows the install folder is corrected, any other value stays; per-language values follow the install's language. `0`: only the programs' records are written, as before 2026-11-02 |
 | `MADEIRA_DOCK_INSTALL_SEPARATE` | on | madeira-bcd. `0`: the host follows the installers in the same session |
 | `MADEIRA_DOCK_INSTALL_LAYOUT` | on | madeira-bcd. `0`: a session of one-time installs keeps the game's `env.MADEIRA_SC_PA_POOLS` and `env.MADEIRA_RDR2_VA_HOLD` lines |
 | `MADEIRA_TIMER_FAIRNESS` | on | madeira-bcd, read by the wineserver. `0`: a WM_PAINT that is always pending keeps every timer of its thread waiting, as Windows' order says |

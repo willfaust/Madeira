@@ -55,18 +55,21 @@ enum SteamInstallScripts {
     }
 
     /// Install scripts: .vdf files with a "Run Process" section in `folder` and up to
-    /// `depth` levels below it. Symbolic links are not followed.
-    static func scripts(folder: URL, depth: Int = 1) -> [URL] {
+    /// `depth` levels below it (`registry`: a "Registry" section counts too). Symbolic
+    /// links are not followed.
+    static func scripts(folder: URL, depth: Int = 1, registry: Bool = false) -> [URL] {
         var found: [URL] = []
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
         guard let items = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { return [] }
         for item in items.sorted(by: { $0.path < $1.path }).prefix(500) {
             guard let values = try? item.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
             if values.isDirectory == true {
-                if depth > 0 { found += scripts(folder: item, depth: depth - 1) }
+                if depth > 0 { found += scripts(folder: item, depth: depth - 1, registry: registry) }
             } else if item.pathExtension.lowercased() == "vdf", (values.fileSize ?? .max) <= maxScriptBytes,
-                      let contents = try? Data(contentsOf: item),
-                      String(decoding: contents, as: UTF8.self).range(of: "run process", options: .caseInsensitive) != nil {
+                      let contents = try? Data(contentsOf: item) {
+                let text = String(decoding: contents, as: UTF8.self)
+                guard text.range(of: "run process", options: .caseInsensitive) != nil
+                      || (registry && text.range(of: "\"registry\"", options: .caseInsensitive) != nil) else { continue }
                 found.append(item)
             }
         }
@@ -89,6 +92,92 @@ enum SteamInstallScripts {
     /// text. Scripts repeat the "Run Process" key, one section per installer, so a
     /// key-value reader that keeps the last copy of a repeated key would miss entries.
     static func entries(script: Data, appID: Int? = nil) -> [(SteamInstallRun, [String: String])] {
+        var result: [(SteamInstallRun, [String: String])] = []
+        var path: [String] = []          // keys of the open sections, lowercased
+        var pending: String?             // a key waiting for its value or section
+        var fields: [String: String] = [:]
+        for (text, quoted) in tokens(script) {
+            if path.count > 32 { break }
+            if !quoted && text == "{" {
+                path.append(pending?.lowercased() ?? ""); pending = nil
+                if path.count >= 2, path[path.count - 2] == "run process" { fields = [:] }
+            } else if !quoted && text == "}" {
+                // An entry section closes: path is [..., "run process", <entry>].
+                if path.count >= 2, path[path.count - 2] == "run process", let name = path.last,
+                   let key = runKey(fields, appID: appID), let (hive, sub) = hive(key), !sub.isEmpty {
+                    let minimum = fields["minimumhasrunvalue"].flatMap { UInt32($0.trimmingCharacters(in: .whitespaces)) } ?? 1
+                    let run = SteamInstallRun(name: name, hive: hive, key: sub, value: max(1, minimum))
+                    if !result.contains(where: { $0.0 == run }) { result.append((run, fields)) }
+                }
+                if !path.isEmpty { path.removeLast() }
+                pending = nil
+            } else if let key = pending {
+                if path.count >= 2, path[path.count - 2] == "run process" { fields[key.lowercased()] = text }
+                pending = nil
+            } else {
+                pending = text
+            }
+        }
+        return result
+    }
+
+    /// The values of a script's "Registry" section, which Valve's desktop client writes
+    /// when it installs the game and which a game or its launcher may read to find its
+    /// folder. Shape: "Registry" { "<HKLM or HKCU key>" { "string" { "<name>" "<data>" }
+    /// "dword" { "<name>" "<number>" } } }; a "string" or "dword" section may instead hold
+    /// one section per language, of which `language` (else "english") is taken.
+    /// %INSTALLDIR% becomes `installDir`; such a string follows the install folder.
+    static func values(script: Data, installDir: String, language: String = "english") -> [SteamInstallValue] {
+        var stack: [String] = []         // open sections, as written
+        var pending: String?
+        var found: [(key: String, kind: String, language: String?, name: String, data: String)] = []
+        for (text, quoted) in tokens(script) {
+            if stack.count > 32 { break }
+            if !quoted && text == "{" {
+                stack.append(pending ?? ""); pending = nil
+            } else if !quoted && text == "}" {
+                if !stack.isEmpty { stack.removeLast() }
+                pending = nil
+            } else if let name = pending {
+                pending = nil
+                // [..., "Registry", key, kind] or [..., "Registry", key, kind, language]
+                let lower = stack.map { $0.lowercased() }
+                guard let r = lower.lastIndex(of: "registry"), stack.count == r + 3 || stack.count == r + 4,
+                      ["string", "dword"].contains(lower[r + 2]) else { continue }
+                found.append((stack[r + 1], lower[r + 2], stack.count == r + 4 ? lower[r + 3] : nil, name, text))
+            } else {
+                pending = text
+            }
+        }
+        let wanted = found.contains { $0.language == language.lowercased() } ? language.lowercased() : "english"
+        var result: [SteamInstallValue] = []
+        for entry in found where entry.language == nil || entry.language == wanted {
+            guard result.count < 64, let (hive, key) = hive(entry.key), !key.isEmpty, key.utf8.count <= 512,
+                  entry.name.utf8.count <= 256, entry.data.utf8.count <= 2048,
+                  !(entry.name + entry.data).unicodeScalars.contains(where: { $0.value < 0x20 }) else { continue }
+            let content: SteamInstallValue.Content
+            if entry.kind == "dword" {
+                let digits = entry.data.trimmingCharacters(in: .whitespaces)
+                guard let number = digits.lowercased().hasPrefix("0x") ? UInt32(digits.dropFirst(2), radix: 16) : UInt32(digits)
+                else { continue }
+                content = .dword(number)
+            } else {
+                content = .string(DockInstallScripts.expand(entry.data, installDir: installDir, path: false))
+            }
+            let value = SteamInstallValue(hive: hive, key: key, name: entry.name, data: content,
+                                          followsInstall: entry.data.range(of: "%INSTALLDIR%", options: .caseInsensitive) != nil)
+            if let at = result.firstIndex(where: { $0.hive == value.hive && $0.key.lowercased() == value.key.lowercased()
+                                                    && $0.name.lowercased() == value.name.lowercased() }) {
+                result[at] = value   // the last one written wins, as in the client
+            } else {
+                result.append(value)
+            }
+        }
+        return result
+    }
+
+    /// A script's tokens: quoted or bare strings, and the braces (unquoted). At most 200,000.
+    private static func tokens(_ script: Data) -> [(text: String, quoted: Bool)] {
         var bytes = Array(script.prefix(maxScriptBytes))
         if bytes.starts(with: [0xef, 0xbb, 0xbf]) { bytes.removeFirst(3) }
         var position = 0
@@ -119,34 +208,8 @@ enum SteamInstallScripts {
             while position < bytes.count, bytes[position] > 32, bytes[position] != 123, bytes[position] != 125 { value.append(bytes[position]); position += 1 }
             return (String(decoding: value, as: UTF8.self), true)
         }
-        var result: [(SteamInstallRun, [String: String])] = []
-        var path: [String] = []          // keys of the open sections, lowercased
-        var pending: String?             // a key waiting for its value or section
-        var fields: [String: String] = [:]
-        var tokens = 0
-        while let (text, quoted) = token() {
-            tokens += 1
-            if tokens > 200_000 || path.count > 32 { break }
-            if !quoted && text == "{" {
-                path.append(pending?.lowercased() ?? ""); pending = nil
-                if path.count >= 2, path[path.count - 2] == "run process" { fields = [:] }
-            } else if !quoted && text == "}" {
-                // An entry section closes: path is [..., "run process", <entry>].
-                if path.count >= 2, path[path.count - 2] == "run process", let name = path.last,
-                   let key = runKey(fields, appID: appID), let (hive, sub) = hive(key), !sub.isEmpty {
-                    let minimum = fields["minimumhasrunvalue"].flatMap { UInt32($0.trimmingCharacters(in: .whitespaces)) } ?? 1
-                    let run = SteamInstallRun(name: name, hive: hive, key: sub, value: max(1, minimum))
-                    if !result.contains(where: { $0.0 == run }) { result.append((run, fields)) }
-                }
-                if !path.isEmpty { path.removeLast() }
-                pending = nil
-            } else if let key = pending {
-                if path.count >= 2, path[path.count - 2] == "run process" { fields[key.lowercased()] = text }
-                pending = nil
-            } else {
-                pending = text
-            }
-        }
+        var result: [(text: String, quoted: Bool)] = []
+        while result.count < 200_000, let next = token() { result.append(next) }
         return result
     }
 
@@ -644,6 +707,8 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
 ///   (off: such entries are ignored).
 /// - `MADEIRA_DOCK_INSTALL_CHOICE`: the per-game One-time installs choice (off: every start
 ///   runs whatever is pending).
+/// - `MADEIRA_DOCK_INSTALL_REGISTRY`: the install scripts' "Registry" values are written
+///   before each start (off: only the programs' records are).
 /// - `MADEIRA_DOCK_INSTALL_SCM`: the service-manager step before the first installer.
 /// - `MADEIRA_DOCK_INSTALL_SERVER_SYNC`: a start that runs installers turns madsync off for
 ///   its session (off: madsync stays and the service-manager step is left out).
@@ -765,6 +830,28 @@ enum DockInstallers {
             }
         }
         return (result, scripts)
+    }
+
+    /// The "Registry" values of the install scripts in the game's own folder (one level
+    /// down), in the language its install record states. Valve's client writes them when
+    /// it installs a game; on the Dock route nothing did, and a launcher that reads its
+    /// folder from them offered to install the game instead of starting it.
+    nonisolated static func registryValues(_ game: DockGame, drive: URL) -> [SteamInstallValue] {
+        let folder = drive.appendingPathComponent(game.library + "/common/" + game.installDir, isDirectory: true)
+        guard inside(folder, drive: drive) else { return [] }
+        let record = drive.appendingPathComponent(game.library + "/appmanifest_\(game.id).acf")
+        let text = (try? Data(contentsOf: record)).map { String(decoding: $0.prefix(1 << 20), as: UTF8.self) } ?? ""
+        let language = text.range(of: #""language"\s+"([A-Za-z_]{1,32})""#, options: .regularExpression)
+            .map { String(text[$0]).split(separator: "\"").last.map(String.init) ?? "english" } ?? "english"
+        var result: [SteamInstallValue] = []
+        for file in SteamInstallScripts.scripts(folder: folder, depth: 1, registry: true) {
+            guard let contents = try? Data(contentsOf: file) else { continue }
+            for value in SteamInstallScripts.values(script: contents, installDir: game.windowsInstallPath, language: language)
+            where !result.contains(value) && result.count < 64 {
+                result.append(value)
+            }
+        }
+        return result
     }
 
     /// The number of install-script programs a game has (the Dock sheet's list).
@@ -1011,6 +1098,20 @@ enum DockInstallers {
         // A Record as done / Reset request saved since the last start, before the plan reads
         // the registry.
         applyRequest(game, found: found, prefix: prefix, drive: drive, others: others)
+        // The scripts' "Registry" values, as Valve's client writes them when it installs the
+        // game: missing ones are added, a path that follows the install folder is corrected,
+        // and any other value the prefix already has stays.
+        if flag("MADEIRA_DOCK_INSTALL_REGISTRY") {   // 0: the install scripts' Registry values are not written
+            let values = registryValues(game, drive: drive)
+            if !values.isEmpty {
+                do {
+                    let written = try SteamInstallRegistry.write(values, prefix: prefix)
+                    LogStore.shared.log("[dock-installers] app=\(app) registry values=\(values.count) written=\(written)")
+                } catch {
+                    LogStore.shared.log("[dock-installers] app=\(app) registry values not written: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
         guard !found.isEmpty else {
             LogStore.shared.log("[dock-installers] app=\(app) scripts=\(scripts) programs=0"); return
         }
