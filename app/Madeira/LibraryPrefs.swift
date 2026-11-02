@@ -50,6 +50,27 @@ enum LibraryPrefs {
     static func realSuspend(_ windowsPath: String) -> Bool? { (dict(realSuspendKey) as [String: Bool])[windowsPath] }
     static func setRealSuspend(_ on: Bool?, for windowsPath: String) { store(on, realSuspendKey, windowsPath) }
 
+    /// The switches a shared setup carries (GameSetupShare.swift), by name; a switch
+    /// that is off or unset is left out.
+    static func sharedSwitches(_ windowsPath: String) -> [String: Any] {
+        var out: [String: Any] = [:]
+        if avx(windowsPath) { out["avx"] = true }
+        if wineVCRT(windowsPath) { out["wineVCRT"] = true }
+        if nvidia(windowsPath) { out["nvidia"] = true }
+        if olderNvidia(windowsPath) { out["olderNvidia"] = true }
+        if let suspend = realSuspend(windowsPath) { out["realSuspend"] = suspend }
+        return out
+    }
+
+    /// A shared setup's switches replace the game's: one the setup leaves out is off.
+    static func applySharedSwitches(_ switches: [String: Any], for windowsPath: String) {
+        setAVX(switches["avx"] as? Bool ?? false, for: windowsPath)
+        setWineVCRT(switches["wineVCRT"] as? Bool ?? false, for: windowsPath)
+        setNvidia(switches["nvidia"] as? Bool ?? false, for: windowsPath)
+        setOlderNvidia(switches["olderNvidia"] as? Bool ?? false, for: windowsPath)
+        setRealSuspend(switches["realSuspend"] as? Bool, for: windowsPath)
+    }
+
     /// FNV-1a over a string: stable across launches, unlike String.hashValue.
     /// Names a game's config file (GameProfiles.swift) and fingerprints the
     /// recommended settings Madeira wrote (GameRecommendationsApply.swift).
