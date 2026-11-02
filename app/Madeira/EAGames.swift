@@ -60,13 +60,11 @@ struct EAGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var ea = EALibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("madeiraLibraryHideEA") private var hidden = false
     @AppStorage("madeiraEAShowUninstalled") private var showUninstalled = true
-    @State private var selected: EASelection?
-    @State private var showSignIn = false
-
-    private struct EASelection: Identifiable { let id: String }
+    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EASheets (LibraryGridPage.swift).
+    var inGrid = false
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
         let items = EAGamesRules.items(ea, search: search)
@@ -79,7 +77,7 @@ struct EAGamesSection: View {
             }
             if !(hidden && collapsible) {
                 if !ea.signedIn {
-                    EASignInCard { showSignIn = true }
+                    EASignInCard { sheets.eaSignIn = true }
                 }
                 if !mine.isEmpty {
                     LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
@@ -106,19 +104,7 @@ struct EAGamesSection: View {
                 }
             }
         }
-        // The library reappears after every session: downloads continue then.
-        .onAppear { ea.start(); ea.reconcileSession() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { ea.reconcileSession() } }
-        .sheet(item: $selected) { selection in
-            EAGameSheet(offerID: selection.id) { entry in
-                // Let the download sheet finish dismissing before presenting the details page.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-            }
-        }
-        .sheet(isPresented: $showSignIn) { EASignInView() }
-        .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
-            Button("OK", role: .cancel) { ea.error = nil }
-        } message: { Text(ea.error ?? "") }
+        .modifier(EASheets(open: open, attached: !inGrid))
     }
 
     private func cell(_ item: EAItem, list: Bool, dense: Bool) -> some View {
@@ -126,10 +112,42 @@ struct EAGamesSection: View {
             if let installed = item.installed, ea.downloads[item.id] == nil {
                 open(library.eaEntry(installed))
             } else {
-                selected = EASelection(id: item.id)
+                sheets.eaGame = .init(id: item.id)
             }
         } label: { EAGameCell(item: item, list: list, dense: dense) }
             .libraryCardButtonStyle(grid: !list)
+    }
+}
+
+/// What the EA app section's page owns: the library's start and its reconcile after every session, the download and
+/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
+/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+struct EASheets: ViewModifier {
+    let open: (LibraryEntry) -> Void
+    var attached = true
+    @ObservedObject private var ea = EALibrary.shared
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
+    @Environment(\.scenePhase) private var scenePhase
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if attached {
+            content
+            // The library reappears after every session: downloads continue then.
+            .onAppear { if EALibrary.enabled { ea.start(); ea.reconcileSession() } }
+            .onChange(of: scenePhase) { _, phase in if phase == .active && EALibrary.enabled { ea.reconcileSession() } }
+            .sheet(item: $sheets.eaGame) { selection in
+                EAGameSheet(offerID: selection.id) { entry in
+                    // Let the download sheet finish dismissing before presenting the details page.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
+                }
+            }
+            .sheet(isPresented: $sheets.eaSignIn) { EASignInView() }
+            .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
+                Button("OK", role: .cancel) { ea.error = nil }
+            } message: { Text(ea.error ?? "") }
+        } else {
+            content
+        }
     }
 }
 
