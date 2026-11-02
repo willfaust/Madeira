@@ -10,7 +10,12 @@ three things that Windows programs use every day have no decoder:
   mixer as PCM, which sounds like loud static;
 - quartz's MPEG-I and "GStreamer" splitters (DirectShow MP3/WAV playback);
 - Media Foundation's fallback media source (MP4/MOV video through the source
-  resolver).
+  resolver);
+- the Windows Media Format reader (`wmvcore`: `WMCreateReader`,
+  `WMCreateSyncReader`, and DirectShow's WM ASF Reader on top of it), which
+  plays WMV/WMA (ASF) files. A visual novel's cutscenes went through it; the
+  reader failed to connect (`no enabled demuxer recognised the stream`,
+  `0x80040265`) and the game showed a white screen with no sound.
 
 This port supplies that unix side in `libntdll_unix.a`, bound by name in
 `load_builtin_unixlib()` (`build/ntdll-unix/virtual_ios.c`).
@@ -27,14 +32,26 @@ Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
 | File | What it is |
 |---|---|
 | `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and the `wg_transform` subset `wma_decoder.c` uses, on libavcodec: WMA v1/v2/Pro/Lossless and XMA1/2 only. Other transforms (AAC, H.264, WMV, resampler, colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
-| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov), MPEG audio / PCM decode through libavcodec + libswresample, a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c` / `media_source.c` ask for. |
+| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov, asf), MPEG audio / PCM / WMA decode through libavcodec + libswresample, Windows Media video (WMV7/8/9, VC-1, MS-MPEG4 v1-v3) decoded in software by libavcodec (`mav_lavc_video`), a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c`, `media_source.c` and `wm_reader.c` ask for: NV12, I420, YV12, YUY2, UYVY, YVYU, BGRx, BGRA, RGBA, 24-bit BGR (the WM reader's default, bottom-up), RGB565 and RGB555. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
 | `build/ffmpeg/build.sh` | FFmpeg 7.1.5, pinned by SHA-256, LGPL-only configuration. |
 
 FFmpeg is built with no H.264, HEVC or AAC decoder or parser: those streams go
-to the platform decoders. See `THIRD-PARTY-NOTICES.md` for the exact component
-list and its licence.
+to the platform decoders. Windows Media video has no platform decoder on iOS,
+so FFmpeg's LGPL `wmv1`, `wmv2`, `wmv3`, `vc1` and `msmpeg4v1-3` decoders are
+built and decode it on the CPU (one thread, FFmpeg's C code: `--disable-asm`).
+See `THIRD-PARTY-NOTICES.md` for the exact component list and its licence.
+
+**Containers and codecs.** MP3/WAV: MPEG audio and PCM. MP4/MOV: H.264 or
+HEVC video (VideoToolbox) with AAC, MPEG audio or PCM. ASF (WMV/WMA): Windows
+Media video (libavcodec) with WMA v1/v2/Pro/Lossless or MPEG audio. AVI,
+MPEG program streams, Bink and the like are not handled here (Bink and most
+engines' own formats are decoded by the game itself). The codec format of an
+ASF stream (`wg_parser_stream_get_codec_format`) is the one Wine's GStreamer
+backend reports: WMV1/WMV2/WMV3/WMVA/WVC1 video, WMA audio with its version,
+block alignment and codec data, so a game that reads the file's profile
+through `IWMProfile` sees the real stream types.
 
 **One demuxer, several readers: back-pressure.** Each stream is read on its
 own thread by quartz and Media Foundation; a packet read for another stream
@@ -46,8 +63,8 @@ reader that demuxes for it waits (without the parser lock, which the other
 reader needs) until the queue has drained to three quarters of that. A stream
 that is not read for 5 s is marked unread and queued without waiting (dropped
 past the old hard limits, as before) until it is read again; one thread
-reading both streams (the earliest-buffer mode) never waits for itself; a
-seek, a disable or disconnect wakes a waiting reader.
+reading both streams (the WM reader's earliest-buffer mode) never waits for
+itself; a seek, a disable or disconnect wakes a waiting reader.
 
 The PE half of winegstreamer is upstream's and unchanged. Wine's configure
 disables the module when GStreamer is missing, so a PE build tree has to be
@@ -65,7 +82,7 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 |---|---|---|
 | `MADEIRA_WG_64BIT` | WMA only | `0`: 64-bit processes get the stub table again; `1`: their `wg_parser` too (see above). |
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
-| `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV is refused at connect. |
+| `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV or ASF is refused at connect. |
 | `MADEIRA_WG_VIDEO_FORMAT` | `nv12` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32`. |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
@@ -83,6 +100,17 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]` cap).
   (a slow video reader loses nothing, while the same build without
   back-pressure drops pictures; an unread stream holds the other reader once;
   one thread reading both never waits; disconnect wakes a waiting reader).
+- `tests/host/check-wg-parser-asf.py` (Linux): builds a host FFmpeg from the
+  same tarball with the port's demuxers and decoders and test-only WMV/WMA
+  encoders and the asf muxer, synthesises WMV7, WMV8 and MS-MPEG4 v3 files
+  with WMA2 audio, and checks under ASan/UBSan, against an independent
+  libavcodec decode of the same file: every picture bit-exact, in order; the
+  WM reader's way (bottom-up BGR, S16, earliest-buffer reads) to the end; every
+  format it offers after a keyframe seek; a WMV3 stream of garbage; and, with
+  small queue limits, the back-pressure cases (a slow video reader loses
+  nothing, while the same build without back-pressure drops pictures; an
+  unread stream; one thread reading both; disconnect while a reader waits).
+  WMV9/VC-1 streams themselves are not covered: FFmpeg cannot encode them.
 - `tests/host/check-wma-decoder.py` (Linux or macOS, needs a configured
   Wine tree for the generated headers): compiles the production
   `winegstreamer_unixlib_ios.c` under ASan/UBSan against a host FFmpeg built

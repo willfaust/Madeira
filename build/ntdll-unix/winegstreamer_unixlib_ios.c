@@ -2220,7 +2220,9 @@ C_ASSERT( (int)MAV_FMT_U8 == (int)WG_AUDIO_FORMAT_U8 && (int)MAV_FMT_S16 == (int
 C_ASSERT( (int)MAV_PIX_BGRA == (int)WG_VIDEO_FORMAT_BGRA && (int)MAV_PIX_BGRx == (int)WG_VIDEO_FORMAT_BGRx
           && (int)MAV_PIX_RGBA == (int)WG_VIDEO_FORMAT_RGBA && (int)MAV_PIX_I420 == (int)WG_VIDEO_FORMAT_I420
           && (int)MAV_PIX_NV12 == (int)WG_VIDEO_FORMAT_NV12 && (int)MAV_PIX_YUY2 == (int)WG_VIDEO_FORMAT_YUY2
-          && (int)MAV_PIX_YV12 == (int)WG_VIDEO_FORMAT_YV12 );
+          && (int)MAV_PIX_YV12 == (int)WG_VIDEO_FORMAT_YV12 && (int)MAV_PIX_BGR == (int)WG_VIDEO_FORMAT_BGR
+          && (int)MAV_PIX_RGB15 == (int)WG_VIDEO_FORMAT_RGB15 && (int)MAV_PIX_RGB16 == (int)WG_VIDEO_FORMAT_RGB16
+          && (int)MAV_PIX_UYVY == (int)WG_VIDEO_FORMAT_UYVY && (int)MAV_PIX_YVYU == (int)WG_VIDEO_FORMAT_YVYU );
 
 static BOOL wg_parser_switch_on(void)
 {
@@ -2512,6 +2514,41 @@ static NTSTATUS wgp_get_codec_format( wg_parser_stream_t handle, struct wg_forma
         format->u.audio.channels = info.native.channels;
         format->u.audio.rate = info.native.rate;
         return S_OK;
+    case MAV_CODEC_WMA:
+        /* what the WM reader's stream configuration (and a game reading the
+         * file's profile) describes the stream by */
+        memset( format, 0, sizeof(*format) );
+        format->major_type = WG_MAJOR_TYPE_AUDIO_WMA;
+        format->u.audio.version = info.version;
+        format->u.audio.bitrate = info.bitrate;
+        format->u.audio.rate = info.native.rate;
+        format->u.audio.depth = info.depth;
+        format->u.audio.channels = info.native.channels;
+        format->u.audio.block_align = info.block_align;
+        format->u.audio.codec_data_len = info.codec_data_len < sizeof(format->u.audio.codec_data) ? info.codec_data_len : sizeof(format->u.audio.codec_data);
+        memcpy( format->u.audio.codec_data, info.codec_data, format->u.audio.codec_data_len );
+        return S_OK;
+    case MAV_CODEC_WMV:
+    {
+        static const wg_video_format wmv[] =
+        {
+            [MAV_WMV_WMV1] = WG_VIDEO_FORMAT_WMV1, [MAV_WMV_WMV2] = WG_VIDEO_FORMAT_WMV2,
+            [MAV_WMV_WMV3] = WG_VIDEO_FORMAT_WMV3, [MAV_WMV_WMVA] = WG_VIDEO_FORMAT_WMVA,
+            [MAV_WMV_WVC1] = WG_VIDEO_FORMAT_WVC1,
+        };
+        /* the MS-MPEG4 family has no wg_format: its current (decoded) format stands in */
+        if (info.wmv == MAV_WMV_NONE || (unsigned)info.wmv >= ARRAY_SIZE(wmv)) return wgp_get_current_format( handle, format );
+        memset( format, 0, sizeof(*format) );
+        format->major_type = WG_MAJOR_TYPE_VIDEO_WMV;
+        format->u.video.format = wmv[info.wmv];
+        format->u.video.width = info.vnative.width;
+        format->u.video.height = info.vnative.height;
+        format->u.video.fps_n = info.vnative.fps_n;
+        format->u.video.fps_d = info.vnative.fps_d;
+        format->u.video.codec_data_len = info.codec_data_len < sizeof(format->u.video.codec_data) ? info.codec_data_len : sizeof(format->u.video.codec_data);
+        memcpy( format->u.video.codec_data, info.codec_data, format->u.video.codec_data_len );
+        return S_OK;
+    }
     case MAV_CODEC_H264:
         memset( format, 0, sizeof(*format) );
         format->major_type = WG_MAJOR_TYPE_VIDEO_H264;

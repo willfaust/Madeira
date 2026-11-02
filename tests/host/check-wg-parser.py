@@ -723,7 +723,9 @@ static int check_picture( const uint8_t *buf, uint32_t size, enum mav_pixel_form
     switch (fmt)
     {
     case MAV_PIX_NV12: case MAV_PIX_I420: case MAV_PIX_YV12: CHECK( l.stride[0] == ((W + 3) & ~3) && size == W * H * 3 / 2, "%s stride", what ); break;
-    case MAV_PIX_YUY2: CHECK( l.stride[0] == ((W * 2 + 3) & ~3), "%s stride", what ); break;
+    case MAV_PIX_YUY2: case MAV_PIX_UYVY: case MAV_PIX_YVYU: case MAV_PIX_RGB15: case MAV_PIX_RGB16:
+        CHECK( l.stride[0] == ((W * 2 + 3) & ~3), "%s stride", what ); break;
+    case MAV_PIX_BGR: CHECK( l.stride[0] == ((W * 3 + 3) & ~3), "%s stride", what ); break;
     default: CHECK( l.stride[0] == W * 4, "%s stride", what ); break;
     }
     for (y = 0; y < H; y++)
@@ -751,6 +753,40 @@ static int check_picture( const uint8_t *buf, uint32_t size, enum mav_pixel_form
                 CHECK( buf[ry * l.stride[0] + 2 * x] == Y && buf[ry * l.stride[0] + 4 * (x / 2) + 1] == U
                        && buf[ry * l.stride[0] + 4 * (x / 2) + 3] == V, "%s YUY2(%d,%d)", what, x, y );
                 break;
+            case MAV_PIX_UYVY:   /* U0 Y0 V0 Y1 */
+                CHECK( buf[ry * l.stride[0] + 4 * (x / 2) + 1 + 2 * (x & 1)] == Y && buf[ry * l.stride[0] + 4 * (x / 2)] == U
+                       && buf[ry * l.stride[0] + 4 * (x / 2) + 2] == V, "%s UYVY(%d,%d)", what, x, y );
+                break;
+            case MAV_PIX_YVYU:   /* Y0 V0 Y1 U0 */
+                CHECK( buf[ry * l.stride[0] + 2 * x] == Y && buf[ry * l.stride[0] + 4 * (x / 2) + 3] == U
+                       && buf[ry * l.stride[0] + 4 * (x / 2) + 1] == V, "%s YVYU(%d,%d)", what, x, y );
+                break;
+            case MAV_PIX_BGR: case MAV_PIX_RGB15: case MAV_PIX_RGB16:
+            {
+                double yy = 1.164383 * (Y - 16), r = yy + 1.596027 * (V - 128),
+                       g = yy - 0.391762 * (U - 128) - 0.812968 * (V - 128), b = yy + 2.017232 * (U - 128);
+                int rr = (int)lround( fmin( 255, fmax( 0, r ) ) ), rg = (int)lround( fmin( 255, fmax( 0, g ) ) ),
+                    rb = (int)lround( fmin( 255, fmax( 0, b ) ) );
+                if (fmt == MAV_PIX_BGR)
+                {
+                    const uint8_t *px = buf + ry * l.stride[0] + 3 * x;
+                    int er = abs( px[2] - rr ), eg = abs( px[1] - rg ), eb = abs( px[0] - rb );
+                    if (er > maxerr) maxerr = er;
+                    if (eg > maxerr) maxerr = eg;
+                    if (eb > maxerr) maxerr = eb;
+                }
+                else
+                {
+                    /* little-endian 16 bits; a component within one step of the 8-bit reference's */
+                    unsigned px = buf[ry * l.stride[0] + 2 * x] | buf[ry * l.stride[0] + 2 * x + 1] << 8;
+                    int six = fmt == MAV_PIX_RGB16;
+                    int R5 = six ? px >> 11 : (px >> 10) & 31, G = six ? (px >> 5) & 63 : (px >> 5) & 31, B5 = px & 31;
+                    CHECK( six || !(px & 0x8000), "%s: x bit set", what );
+                    CHECK( abs( R5 - (rr >> 3) ) <= 1 && abs( G - (six ? rg >> 2 : rg >> 3) ) <= 1 && abs( B5 - (rb >> 3) ) <= 1,
+                           "%s (%d,%d): %04x for %d %d %d", what, x, y, px, rr, rg, rb );
+                }
+                break;
+            }
             default:
             {
                 /* BT.601, limited range: the untagged, sub-720-line default */
@@ -917,6 +953,9 @@ static int test_mp4_formats( const uint8_t *mp4, size_t size )
         { MAV_PIX_NV12, 0, "nv12" }, { MAV_PIX_I420, 0, "i420" }, { MAV_PIX_YV12, 0, "yv12" }, { MAV_PIX_YUY2, 0, "yuy2" },
         { MAV_PIX_BGRx, 0, "bgrx" }, { MAV_PIX_BGRA, 0, "bgra" }, { MAV_PIX_RGBA, 0, "rgba" },
         { MAV_PIX_BGRx, 1, "bgrx bottom-up" }, { MAV_PIX_NV12, 1, "nv12 bottom-up" },
+        /* the WM reader's (wm_reader.c): bottom-up BGR by default, and the others it offers */
+        { MAV_PIX_BGR, 1, "bgr bottom-up" }, { MAV_PIX_BGR, 0, "bgr" }, { MAV_PIX_UYVY, 0, "uyvy" }, { MAV_PIX_YVYU, 0, "yvyu" },
+        { MAV_PIX_RGB16, 1, "rgb16 bottom-up" }, { MAV_PIX_RGB15, 1, "rgb15 bottom-up" },
     };
     struct mav_parser *p = mav_create( 0 ); struct source s; struct mav_stream_info vi; unsigned int i;
 
@@ -940,12 +979,13 @@ static int test_mp4_formats( const uint8_t *mp4, size_t size )
         o.width = W / 2;
         CHECK( mav_enable_video( p, 0, &o ) == MAV_E_PARAM, "another size refused (no scaler)" );
         CHECK( mav_get_buffer( p, 0, &(struct mav_buffer){0} ) == MAV_NO_BUFFER, "refused stream is disabled" );
-        o = vi.vnative; o.fmt = (enum mav_pixel_format)3;   /* BGR: not produced here */
+        o = vi.vnative; o.fmt = (enum mav_pixel_format)7;   /* AYUV: not produced here */
         CHECK( mav_enable_video( p, 0, &o ) == MAV_E_PARAM, "unsupported pixel format refused" );
         CHECK( mav_enable( p, 0, &(struct mav_output){ MAV_FMT_S16, 44100, 2, 3 } ) == MAV_E_STATE, "audio enable on video refused" );
     }
     src_stop( &s ); mav_destroy( p );
-    printf( "PASS: mp4 picture formats pixel-checked: nv12 i420 yv12 yuy2 bgrx bgra rgba (BT.601 within 1), bottom-up bgrx/nv12; "
+    printf( "PASS: mp4 picture formats pixel-checked: nv12 i420 yv12 yuy2 uyvy yvyu bgrx bgra rgba bgr (BT.601 within 1), "
+            "rgb16 rgb15 (within one step), bottom-up bgrx/nv12/bgr/rgb16/rgb15; "
             "other sizes and formats refused\n" );
     return 0;
 }
