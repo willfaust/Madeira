@@ -224,15 +224,15 @@ enum ItchFormat {
     }
 
     /// The upload Madeira installs: the game's own Windows file (not a demo, soundtrack
-    /// or preorder), a 64-bit or any-architecture one before a 32-bit one, a .zip
-    /// before an installer or another archive, then the biggest.
+    /// or preorder), a 64-bit or any-architecture one before a 32-bit one, a .zip or
+    /// .7z before an installer or another archive, then the biggest.
     static func choose(_ uploads: [ItchUpload]) -> ItchUpload? {
         let games = uploads.filter { $0.windows && $0.type == "default" && !$0.preorder }
         let full = games.filter { !$0.demo }
         let pool = full.isEmpty ? games : full
         func score(_ u: ItchUpload) -> (Int, Int, Int64) {
             let name = u.filename.lowercased()
-            let kind = name.hasSuffix(".zip") ? 3 : name.hasSuffix(".exe") ? 2 : u.buildID != 0 ? 2 : 0
+            let kind = name.hasSuffix(".zip") || name.hasSuffix(".7z") ? 3 : name.hasSuffix(".exe") ? 2 : u.buildID != 0 ? 2 : 0
             let arch = u.windowsArch == "386" ? 0 : 1
             return (arch, kind, u.size)
         }

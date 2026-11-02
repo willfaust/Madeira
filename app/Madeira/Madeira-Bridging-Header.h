@@ -10,6 +10,8 @@
 #import "PadOutput.h"
 // Steam content decoders (liblzma shim, zstd decoder, zip chunks), used by the owned library's downloads.
 #import "SwiftSteam/lzma_shim.h"
+// itch.io .7z downloads (ItchArchive.swift): a streaming 7z reader over liblzma and zlib.
+#import "SwiftItch/itch_7z.h"
 // On-device remote pairing for Built-in StikJIT (build/rppairing-ios, JITPairing.swift).
 #import "MadeiraRPPairing.h"
 // madeira-bcd: the bundled prefix template, read by the Dock's Reset (DockReset.swift).

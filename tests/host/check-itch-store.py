@@ -346,9 +346,24 @@ with tempfile.TemporaryDirectory(prefix='madeira-itch-') as tmp:
             print('SKIP: Swift compiler unavailable; the compiled itch.io checks did not run')
     else:
         extra = [] if sys.platform == 'darwin' else ['-I', str(tmp / 'zlib')]
-        build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', *extra, '-o', str(exe),
+        # ItchArchive.swift's .7z half calls the C reader (itch_7z.c), which the app gets
+        # through its bridging header: build it here and import its header the same way.
+        cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
+        reader = tmp / 'itch_7z.o'
+        built_c = bool(cc) and subprocess.run([cc, '-c', '-O1', '-I', str(app / 'SwiftItch'),
+                                               str(app / 'SwiftItch/itch_7z.c'), '-o', str(reader)]).returncode == 0
+        require(built_c, 'itch_7z.c compiles on the host')
+        lzma = ['-llzma']
+        if sys.platform != 'darwin' and not any(Path(d, 'liblzma.so').exists() for d in
+                                                ('/usr/lib', '/usr/lib64', '/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu')):
+            # No development symlink: link the runtime library by its path.
+            runtime = next((p for d in ('/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/usr/lib64', '/usr/lib', '/lib/x86_64-linux-gnu')
+                            for p in [Path(d, 'liblzma.so.5')] if p.exists()), None)
+            lzma = ['-Xlinker', str(runtime)] if runtime else lzma
+        build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', *extra,
+                                '-import-objc-header', str(app / 'SwiftItch/itch_7z.h'), '-o', str(exe),
                                 str(tmp / 'stubs.swift'), str(tmp / 'api.swift'), str(app / 'SwiftItch/ItchArchive.swift'),
-                                str(tmp / 'program.swift'), str(tmp / 'checks.swift')])
+                                str(tmp / 'program.swift'), str(tmp / 'checks.swift'), str(reader), *lzma, '-lz'])
         require(build.returncode == 0, 'the itch.io sources compile on the host')
         if build.returncode == 0:
             run = subprocess.run([str(exe), str(work)])

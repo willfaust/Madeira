@@ -53,6 +53,7 @@ struct ItchDownloadProgress: Equatable, Sendable {
 enum ItchInstallError: LocalizedError {
     case diskSpace(needed: Int64)
     case unsupportedFile(String)
+    case innerRar
     case noProgram
 
     var errorDescription: String? {
@@ -60,7 +61,9 @@ enum ItchInstallError: LocalizedError {
         case .diskSpace(let needed):
             return "Not enough free space on this device: this download needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) more. Free some space, then try again."
         case .unsupportedFile(let name):
-            return "This game comes as \(name), which Madeira cannot unpack yet. Only .zip archives, .exe files and .msi installers install from itch.io for now."
+            return "This game comes as \(name), which Madeira cannot unpack yet. Only .zip and .7z archives, .exe files and .msi installers install from itch.io for now."
+        case .innerRar:
+            return "This game's download holds a .rar archive, which Madeira cannot unpack. Unpack it in the game's folder in drive_c\\itch with another app, then add the game's .exe with + in the library."
         case .noProgram:
             return "Madeira could not tell which program starts this game. Open its folder in drive_c\\itch and add the game's .exe with + in the library."
         }
@@ -70,6 +73,7 @@ enum ItchInstallError: LocalizedError {
         switch self {
         case .diskSpace: return "disk-space"
         case .unsupportedFile: return "unsupported-file"
+        case .innerRar: return "inner-rar"
         case .noProgram: return "no-program"
         }
     }
@@ -661,7 +665,7 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             await loadChoice(id, force: true)
             guard case .upload(let upload)? = choices[id] else { throw ItchAPIError.noWindowsUpload }
             let name = upload.filename.lowercased()
-            let isZip = name.hasSuffix(".zip"), isExe = name.hasSuffix(".exe") || name.hasSuffix(".msi")
+            let isZip = name.hasSuffix(".zip") || name.hasSuffix(".7z"), isExe = name.hasSuffix(".exe") || name.hasSuffix(".msi")
             // A butler build's download is a .zip of the build whatever the upload's name.
             guard isZip || isExe || upload.buildID != 0 else {
                 throw ItchInstallError.unsupportedFile("." + ((upload.filename as NSString).pathExtension.isEmpty ? "unknown" : (upload.filename as NSString).pathExtension))
@@ -701,13 +705,23 @@ final class ItchTransfer: NSObject, URLSessionDownloadDelegate, @unchecked Senda
             let installBytes: Int64 = try await Task.detached(priority: .userInitiated) {
                 let fm = FileManager.default
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if ItchArchive.isZip(archive) {
-                    let bytes = try ItchArchive.unpack(archive, to: target) { done, total in
-                        Task { @MainActor in
-                            ItchLibrary.shared.downloads[id]?.progress = ItchDownloadProgress(phase: .unpacking, totalBytes: total, doneBytes: done)
-                        }
+                let report: (UInt64, UInt64) -> Void = { done, total in
+                    Task { @MainActor in
+                        ItchLibrary.shared.downloads[id]?.progress = ItchDownloadProgress(phase: .unpacking, totalBytes: total, doneBytes: done)
                     }
+                }
+                if var bytes = try ItchArchive.unpackAny(archive, to: target, progress: report) {
                     try? fm.removeItem(at: archive)
+                    // A download that only holds the game's real archive (a .7z beside a
+                    // README, as some itch.io builds are): unpack that too.
+                    if ItchProgram.find(in: target, title: title) == nil, ItchSetup.installer(in: target) == nil {
+                        let inner = try ItchArchive.unpackInner(in: target, progress: report)
+                        if inner.rar { throw ItchInstallError.innerRar }
+                        if inner.unpacked > 0 || inner.removed > 0 {
+                            ItchLog.event("[itch-download] inner-archive id=\(id) bytes=\(inner.unpacked)")
+                        }
+                        bytes = bytes - min(bytes, inner.removed) + inner.unpacked
+                    }
                     return Int64(bytes)
                 }
                 // A lone program: the game itself, or its installer (ItchSetup), kept in the

@@ -258,3 +258,196 @@ enum ItchArchive {
         return UInt32(crc)
     }
 }
+
+// MARK: .7z (itch_7z.c)
+
+// A .7z unpacks the way a .zip does: the same name checks (a symbolic link stops it
+// too), every file CRC-checked, into a staging folder that replaces the destination
+// only when every file is in. The decoding is itch_7z.c's, a folder at a time as a
+// stream, so a solid archive of several GB never sits in memory.
+
+extension ItchArchive {
+    /// Whether a file starts like a .7z archive.
+    static func is7z(_ url: URL) -> Bool { i7z_is_7z(url.path) != 0 }
+
+    private static func sevenZipError(_ code: Int32, _ reason: String) -> ItchArchiveError {
+        switch Int(code) {
+        case I7Z_NOT_7Z: return .damaged("not-7z")
+        case I7Z_UNSUPPORTED:
+            return .unsupported(reason == "encrypted" ? "a password-protected .7z" : ".7z " + reason)
+        case I7Z_MEMORY: return .unsupported(".7z needs more memory than this device gives (\(reason))")
+        case I7Z_IO: return .damaged("7z-read")
+        default: return .damaged("7z-" + reason)
+        }
+    }
+
+    /// The C reader's output, written into the staging folder.
+    private final class SevenZipOutput {
+        let staging: URL
+        let names: [String?]
+        let total: UInt64
+        let progress: (UInt64, UInt64) -> Void
+        var output: FileHandle?
+        var done: UInt64 = 0
+        var reported: UInt64 = 0
+        var failure: Error?
+
+        init(staging: URL, names: [String?], total: UInt64, progress: @escaping (UInt64, UInt64) -> Void) {
+            self.staging = staging; self.names = names; self.total = total; self.progress = progress
+        }
+
+        func handle(_ event: Int32, _ item: UInt32, _ data: UnsafePointer<UInt8>?, _ length: Int) -> Int32 {
+            do {
+                switch Int(event) {
+                case I7Z_BEGIN:
+                    try Task.checkCancellation()
+                    guard Int(item) < names.count, let name = names[Int(item)] else { throw ItchArchiveError.damaged("7z-item") }
+                    let target = staging.appendingPathComponent(name)
+                    let fm = FileManager.default
+                    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    guard fm.createFile(atPath: target.path, contents: nil) else { throw ItchArchiveError.damaged("write") }
+                    output = try FileHandle(forWritingTo: target)
+                case I7Z_DATA:
+                    guard let output, let data else { throw ItchArchiveError.damaged("7z-order") }
+                    try output.write(contentsOf: Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: data), count: length, deallocator: .none))
+                    done += UInt64(length)
+                    if done - reported >= 8 << 20 {
+                        reported = done
+                        progress(done, total)
+                        try Task.checkCancellation()
+                    }
+                default:
+                    try output?.close()
+                    output = nil
+                }
+                return 0
+            } catch {
+                failure = error
+                try? output?.close()
+                output = nil
+                return 1
+            }
+        }
+    }
+
+    private static let sevenZipSink: i7z_sink = { context, event, item, data, length in
+        guard let context else { return 1 }
+        return Unmanaged<SevenZipOutput>.fromOpaque(context).takeUnretainedValue().handle(event, item, data, length)
+    }
+
+    /// Unpacks the .7z `archive` into `destination`, replacing what was there only once
+    /// every file is in. `progress` gets the bytes written so far and the total.
+    @discardableResult
+    static func unpack7z(_ archive: URL, to destination: URL,
+                         progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }) throws -> UInt64 {
+        var opened: OpaquePointer?
+        let reasonSize = 64
+        var reason = [CChar](repeating: 0, count: reasonSize)
+        let status = i7z_open(archive.path, &opened, &reason, reasonSize)
+        guard status == Int32(I7Z_OK), let z = opened else { throw sevenZipError(status, String(cString: reason)) }
+        defer { i7z_close(z) }
+        var names: [String?] = []
+        var seen = Set<String>()
+        for item in 0..<i7z_count(z) {
+            let flags = Int(i7z_flags(z, item))
+            let raw = String(cString: i7z_name(z, item))
+            if flags & I7Z_ITEM_ANTI != 0 { names.append(nil); continue }
+            if flags & I7Z_ITEM_LINK != 0 { throw ItchArchiveError.unsafeName(raw) }
+            guard let name = safeName(raw) else { throw ItchArchiveError.unsafeName(raw) }
+            let directory = flags & I7Z_ITEM_DIR != 0
+            if !seen.insert(name.lowercased()).inserted, !directory { throw ItchArchiveError.unsafeName(name) }
+            names.append(name)
+        }
+        let total = i7z_total(z)
+        let fm = FileManager.default
+        let staging = destination.deletingLastPathComponent()
+            .appendingPathComponent("." + destination.lastPathComponent + ".unpacking", isDirectory: true)
+        try? fm.removeItem(at: staging)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        do {
+            // Folders and empty files first: they have no data in the archive.
+            for (item, name) in names.enumerated() {
+                guard let name else { continue }
+                let flags = Int(i7z_flags(z, UInt32(item)))
+                let target = staging.appendingPathComponent(name)
+                if flags & I7Z_ITEM_DIR != 0 {
+                    try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                } else if flags & I7Z_ITEM_STREAM == 0 {
+                    try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    guard fm.createFile(atPath: target.path, contents: nil) else { throw ItchArchiveError.damaged("write") }
+                }
+            }
+            let output = SevenZipOutput(staging: staging, names: names, total: total, progress: progress)
+            let result = withExtendedLifetime(output) {
+                i7z_extract(z, sevenZipSink, Unmanaged.passUnretained(output).toOpaque(), &reason, reasonSize)
+            }
+            if let failure = output.failure { throw failure }
+            guard result == Int32(I7Z_OK) else { throw sevenZipError(result, String(cString: reason)) }
+            progress(total, total)
+            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+            try fm.moveItem(at: staging, to: destination)
+        } catch {
+            try? fm.removeItem(at: staging)
+            throw error
+        }
+        return total
+    }
+
+    /// Unpacks a .zip or .7z by its contents; nil when it is neither.
+    static func unpackAny(_ archive: URL, to destination: URL,
+                          progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }) throws -> UInt64? {
+        if isZip(archive) { return try unpack(archive, to: destination, progress: progress) }
+        if is7z(archive) { return try unpack7z(archive, to: destination, progress: progress) }
+        return nil
+    }
+
+    /// Archives inside an unpacked download: some itch.io builds are a .zip that holds
+    /// the game's real archive (a .7z and a README, say). Every .zip and .7z within two
+    /// levels of `folder` unpacks where it lies, its files beside it, and then goes.
+    /// Returns the bytes unpacked and the bytes of the archives removed; `rar` is set
+    /// when a .rar was there, which Madeira cannot unpack.
+    static func unpackInner(in folder: URL, progress: @escaping (UInt64, UInt64) -> Void = { _, _ in })
+        throws -> (unpacked: UInt64, removed: UInt64, rar: Bool) {
+        let fm = FileManager.default
+        var archives: [URL] = []
+        var rar = false
+        let base = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        if let walker = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in walker {
+                let relative = String(url.resolvingSymlinksInPath().standardizedFileURL.path.dropFirst(base.count + 1))
+                if relative.split(separator: "/").count > 2 { walker.skipDescendants(); continue }
+                let ext = url.pathExtension.lowercased()
+                if ext == "rar" { rar = true }
+                guard ext == "7z" || ext == "zip" else { continue }
+                if isZip(url) || is7z(url) { archives.append(url) }
+            }
+        }
+        var unpacked: UInt64 = 0, removed: UInt64 = 0
+        for archive in archives {
+            try Task.checkCancellation()
+            let parent = archive.deletingLastPathComponent()
+            let inner = parent.appendingPathComponent(".madeira-inner", isDirectory: true)
+            try? fm.removeItem(at: inner)
+            guard let bytes = try unpackAny(archive, to: inner, progress: progress) else { continue }
+            do {
+                // The archive's files join its folder; one already there is replaced.
+                let existing = Dictionary(((try? fm.contentsOfDirectory(atPath: parent.path)) ?? []).map { ($0.lowercased(), $0) },
+                                          uniquingKeysWith: { first, _ in first })
+                for name in try fm.contentsOfDirectory(atPath: inner.path) {
+                    if let old = existing[name.lowercased()], old != inner.lastPathComponent {
+                        try fm.removeItem(at: parent.appendingPathComponent(old))
+                    }
+                    try fm.moveItem(at: inner.appendingPathComponent(name), to: parent.appendingPathComponent(name))
+                }
+                try fm.removeItem(at: inner)
+            } catch {
+                try? fm.removeItem(at: inner)
+                throw error
+            }
+            let size = (try? fm.attributesOfItem(atPath: archive.path)[.size] as? UInt64) ?? 0
+            if (try? fm.removeItem(at: archive)) != nil { removed += size }
+            unpacked += bytes
+        }
+        return (unpacked, removed, rar && archives.isEmpty)
+    }
+}

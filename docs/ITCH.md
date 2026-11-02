@@ -7,7 +7,8 @@ Windows downloads.
   `api.itch.io`, the calls the itch app makes through go-itchio (MIT):
   `GET /profile`, `/profile/owned-keys`, `/games/<id>/uploads?download_key_id=`
   and `/uploads/<id>/download`. The API key goes in the `Authorization` header.
-- `app/Madeira/SwiftItch/ItchArchive.swift`: the zip unpacker.
+- `app/Madeira/SwiftItch/ItchArchive.swift`: the zip and 7z unpackers.
+- `app/Madeira/SwiftItch/itch_7z.c`: the 7z reader (checked by `tests/host/check-itch-7z.py`).
 - `app/Madeira/ItchLibrary.swift`: the account's games, downloads and installs.
 - `app/Madeira/ItchGames.swift`: the library section, download sheet, Game
   details section, Settings › itch.io and the sign-in sheet.
@@ -49,13 +50,25 @@ platforms listed), and installs one upload:
 1. the game's own Windows file (not a soundtrack, a preorder, or a demo when
    the full game is there);
 2. a 64-bit or any-architecture file before a 32-bit one;
-3. a `.zip` before an `.exe` (a butler build counts as a zip), then the biggest.
+3. a `.zip` or `.7z` before an `.exe` (a butler build counts as a zip), then the biggest.
 
-A `.zip` unpacks into `C:\itch\<title>`; a lone `.exe` goes there as it is.
-Other archives (`.rar`, `.7z`) are not supported yet; the sheet says so. The unpacker reads the archive a piece at a
-time (ZIP64 too), checks every CRC-32, and only replaces the install folder once
+A `.zip` or `.7z` unpacks into `C:\itch\<title>`; a lone `.exe` goes there as it is.
+`.rar` is not supported; the sheet says so. The unpackers read the archive a piece at a
+time (ZIP64 too), check every CRC-32, and only replace the install folder once
 every file is in. Names that leave the folder, absolute names, encrypted entries,
-symbolic links and two names that differ only in case stop it.
+symbolic links and two names that differ only in case stop them.
+
+The 7z reader (`itch_7z.c`) decodes each folder of the archive as a stream, so a
+solid archive of several GB never sits in memory: LZMA, LZMA2, the branch filters
+(x86 BCJ, ARM, ARM64, PowerPC, IA-64, SPARC) and Delta through the SDK's liblzma,
+BCJ2 itself, Deflate through zlib, Copy. Encrypted archives, PPMd and BZip2 are
+refused with the reason in the log.
+
+Some itch.io builds are a zip that only holds the game's real archive (Voices of
+the Void: a `.7z` and a README). When the unpacked download has no program, every
+`.zip` and `.7z` within two folder levels unpacks where it lies and goes
+(`[itch-download] inner-archive`); a `.rar` there fails with a note to unpack it
+by hand.
 
 The program that starts the game is the first `[[actions]]` path of the game's
 `.itch.toml`, else the folder's only program within three levels (uninstallers,

@@ -19,6 +19,7 @@
 		A1000531 /* SteamGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000531 /* SteamGames.swift */; };
 		A1007B02 /* SwiftItch/ItchAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B02 /* ItchAPI.swift */; };
 		A1007B03 /* SwiftItch/ItchArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B03 /* ItchArchive.swift */; };
+		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; };
 		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
 		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
@@ -273,6 +274,8 @@
 		A2000531 /* SteamGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamGames.swift"; sourceTree = "<group>"; };
 		A2007B02 /* ItchAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftItch/ItchAPI.swift"; sourceTree = "<group>"; };
 		A2007B03 /* ItchArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftItch/ItchArchive.swift"; sourceTree = "<group>"; };
+		A2007B30 /* itch_7z.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "SwiftItch/itch_7z.c"; sourceTree = "<group>"; };
+		A2007B31 /* itch_7z.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftItch/itch_7z.h"; sourceTree = "<group>"; };
 		A2007B04 /* ItchLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchLibrary.swift"; sourceTree = "<group>"; };
 		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
 		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
@@ -574,6 +577,8 @@
 				A2000531 /* SteamGames.swift */,
 				A2007B02 /* ItchAPI.swift */,
 				A2007B03 /* ItchArchive.swift */,
+				A2007B30 /* itch_7z.c */,
+				A2007B31 /* itch_7z.h */,
 				A2007B04 /* ItchLibrary.swift */,
 				A2007B05 /* ItchGames.swift */,
 				A2000900 /* LiquidMetal.metal */,
@@ -1018,6 +1023,7 @@
 				A1000531 /* SteamGames.swift in Sources */,
 				A1007B02 /* SwiftItch/ItchAPI.swift in Sources */,
 				A1007B03 /* SwiftItch/ItchArchive.swift in Sources */,
+				A1007B30 /* SwiftItch/itch_7z.c in Sources */,
 				A1007B04 /* ItchLibrary.swift in Sources */,
 				A1007B05 /* ItchGames.swift in Sources */,
 				A1000900 /* LiquidMetal.metal in Sources */,
