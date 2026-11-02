@@ -281,6 +281,11 @@ struct LibraryEntry: Codable, Identifiable {
     /// its program inside C:\Program Files\Epic Games, and each start adds Epic's
     /// sign-in arguments (EpicLibrary.launchArguments) for that launch only.
     var epicAppName: String?
+    /// An EA app game (EALibrary.swift): its offer id. `relativePath` is then its
+    /// program inside C:\Program Files\EA Games, and each start first gets the game's
+    /// licence, the EA app's environment and Madeira's stand-in for the EA app's
+    /// local service (EALibrary.prepareLaunch).
+    var eaOfferID: String?
     /// An Epic game with an official way to start without anti-cheat
     /// (epicAntiCheatOffProgram): nil or true starts that program.
     /// The anti-cheat cannot run in Wine on iOS, so on is the default.
@@ -907,7 +912,8 @@ final class LibraryModel: ObservableObject {
         // one (refreshSteamMetadata) updates that entry.
         if let i = next.firstIndex(where: { $0.id == entry.id }) ??
             next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID }) ??
-            next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) {
+            next.firstIndex(where: { entry.epicAppName != nil && $0.epicAppName == entry.epicAppName }) ??
+            next.firstIndex(where: { entry.eaOfferID != nil && $0.eaOfferID == entry.eaOfferID }) {
             // A details sheet may predate an asynchronous metadata refresh.
             if (next[i].metadataChecked ?? .distantPast) > (entry.metadataChecked ?? .distantPast) {
                 entry.folderBytes = next[i].folderBytes; entry.graphicsAPI = next[i].graphicsAPI
@@ -950,6 +956,40 @@ final class LibraryModel: ObservableObject {
         steamMetadataWaiting[appID] = nil
         guard entries.contains(where: { $0.steamAppID == appID }) else { return }
         persist(entries.filter { $0.steamAppID != appID })
+    }
+    /// An EA download finished (EALibrary): the game gets its library entry, or an
+    /// existing one follows the new build's program and keeps its title, artwork and
+    /// settings. Arguments follow the build's manifest unless the player changed them.
+    /// A new entry gets EA's cover art as its cover image.
+    @MainActor
+    func upsertEA(_ game: EAInstalledGame, previous: EAInstalledGame?, cover: URL?) async {
+        guard !readOnly else { return }
+        let existing = entries.first { $0.eaOfferID == game.offerID }
+        var entry = existing ?? LibraryEntry(title: game.title, relativePath: game.programPath, bits: 0)
+        entry.eaOfferID = game.offerID
+        entry.relativePath = game.programPath
+        entry.folderBytes = game.installBytes
+        if existing == nil || entry.arguments == (previous?.arguments ?? "") { entry.arguments = game.arguments }
+        let program = Self.drive.appendingPathComponent(game.programPath)
+        if let inspected = await Task.detached(priority: .utility, operation: { try? LibraryModel.inspect(program) }).value {
+            entry.bits = inspected.bits
+            entry.graphicsAPI = inspected.graphicsAPI ?? entry.graphicsAPI
+        }
+        if entry.coverFile == nil, let cover, let jpeg = await Self.epicCover(cover) {
+            let dir = Self.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let name = entry.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                entry.coverFile = name
+            }
+        }
+        entry.metadataChecked = nil
+        save(entry)
+    }
+    /// An EA game was uninstalled: its entry goes with its files.
+    func removeEA(offerID: String) {
+        guard entries.contains(where: { $0.eaOfferID == offerID }) else { return }
+        persist(entries.filter { $0.eaOfferID != offerID })
     }
     /// An Epic download finished (EpicLibrary): the game gets its library entry, or an
     /// existing one follows the new build's program and keeps its title, artwork and
@@ -2868,7 +2908,7 @@ struct LibraryView: View {
     @ObservedObject private var steamLibrary = SteamOwnedLibrary.shared
     private var entries: [LibraryEntry] {
         // Steam games are listed in their own section (SteamGames.swift).
-        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
+        let visible = model.entries.filter { $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.eaOfferID == nil && (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search)) }
         if sort == "added" { return visible.reversed() }
         return visible.sorted {
             if sort == "played", $0.lastPlayed != $1.lastPlayed { return ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
@@ -3049,6 +3089,9 @@ struct LibraryView: View {
             if EpicLibrary.enabled, settingsShow("Epic", "Epic Games", "sign in", "account") {
                 EpicSettingsSection(open: { settingsSheet = $0 })
             }
+            if EALibrary.enabled, settingsShow("EA", "EA app", "Origin", "sign in", "account") {
+                EASettingsSection(open: { settingsSheet = $0 })
+            }
             if settingsShow(".NET", "Mono", "Wine Mono", "framework", "download") { WineMonoSettingsSection() }
             if settingsShow("saves", "backup", "restore", "save games") { SavesSection() }
             if settingsShow("external", "drive", "USB", "SSD", "storage") { ExternalDrivesSection() }
@@ -3112,6 +3155,7 @@ struct LibraryView: View {
             case .allSettings: AllSettingsView()
             case .steamSignIn: SteamSignInView()
             case .epicSignIn: EpicSignInView()
+            case .eaSignIn: EASignInView()
             case .dock: MadeiraDockView(start: startDock)
             }
         }
@@ -3163,7 +3207,7 @@ struct LibraryView: View {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
                     }
-                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil }).isEmpty {
+                } else if model.entries.filter({ $0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil && $0.eaOfferID == nil }).isEmpty {
                     ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."))
                 } else {
                     cells(entries, width: viewport.size.width)
@@ -3172,6 +3216,11 @@ struct LibraryView: View {
                 // Game details page, the others their download sheet.
                 if EpicLibrary.enabled {
                     EpicGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The account's EA app games (EAGames.swift): installed ones open their
+                // Game details page, the others their download sheet.
+                if EALibrary.enabled {
+                    EAGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
                 }
                 }
             }
@@ -3469,6 +3518,19 @@ struct LibraryDetail: View {
         // A Steam game starts through Madeira Dock (ContentView.launchLibraryEntry)
         // once its files are complete and Dock can sign in; "The game" once its
         // program is chosen (no client or sign-in involved).
+        // An EA game starts once its files are complete and the account is signed in
+        // (EALibrary.prepareLaunch gets its licence and the EA app's environment).
+        if let offer = entry.eaOfferID {
+            if EALibrary.shared.downloads[offer] != nil {
+                error = "This game's download has not finished. Resume it and wait for it to complete before playing."; return
+            }
+            if EALibrary.shared.installed[offer] == nil {
+                error = "This EA game is no longer installed. Install it again from the EA app section."; return
+            }
+            if !EALibrary.shared.signedIn {
+                error = "Sign in to EA in Settings › EA app first. An EA game needs the sign-in to get its licence and start."; return
+            }
+        }
         // An Epic game starts once its files are complete (EpicLibrary).
         if let app = entry.epicAppName {
             if EpicLibrary.shared.downloads[app] != nil {
@@ -3880,6 +3942,9 @@ struct LibraryDetail: View {
                 if let appName = entry.epicAppName {
                     EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
                     EpicCloudSection(appName: appName)
+                }
+                if entry.eaOfferID != nil {
+                    EAEntrySection(entry: $entry) { leaving = true; dismiss() }
                 }
                 Section {
                     FPSChoice(mode: $entry.fpsMode)
@@ -4375,7 +4440,7 @@ struct MadeiraCredit: View {
 /// MADEIRA_RUNTIME_SETTINGS=0 hides this section.
 /// A sheet opened from Settings; LibraryView presents it from the Form itself.
 enum SettingsSheet: String, Identifiable {
-    case allSettings, steamSignIn, epicSignIn, dock
+    case allSettings, steamSignIn, epicSignIn, eaSignIn, dock
     var id: String { rawValue }
 }
 

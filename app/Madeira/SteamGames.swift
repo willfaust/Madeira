@@ -496,6 +496,10 @@ struct SteamGamesSection: View {
         if EpicLibrary.enabled && EpicLibrary.shared.signedIn {
             await EpicLibrary.shared.refreshLibrary(interactive: true)
         }
+        // The EA app section refreshes with the same pull (EAGames.swift).
+        if EALibrary.enabled && EALibrary.shared.signedIn {
+            await EALibrary.shared.refreshLibrary(interactive: true)
+        }
     }
 
     /// Sort by data from the Steam games' library entries.
