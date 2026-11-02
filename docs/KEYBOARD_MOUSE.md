@@ -201,7 +201,8 @@ that iPadOS granted it. A request alone is not proof of containment; see
   captures the mouse. The lock is released as soon as the program shows a
   cursor, when the program loses focus, and when the program stops draining
   the mouse (no report for 2 s while the mouse moves, e.g. it exited).
-  `MADEIRA_POINTER_AUTOLOCK=0` turns this off.
+  `MADEIRA_POINTER_AUTOLOCK=0` turns this off; a game's
+  `MADEIRA_POINTER_HIDDEN_ABSOLUTE=1` keeps it off and the motion absolute.
 - **Relative pointer mode:** the existing Relative toggle also selects relative
   hardware mouse motion and automatic lock. It does not need a cursor report
   from the game. A desktop game that hides its cursor also keeps its automatic
@@ -258,11 +259,13 @@ and restart to enable the fixes again. The same switch is listed in Settings > A
 | --- | --- | --- |
 | `MADEIRA_MOUSE_ROUTING` | on | `0`: restore the previous mouse routing and pointer-lock behaviour; restart Madeira. |
 | `MADEIRA_HWINPUT` | on | `0`: no keyboard/mouse bridging, pointer recognisers, touch filter, drawn cursor, lock or right-stick mouse; the app behaves as before this change (the Info.plist key stays). |
+| `MADEIRA_XCTEST_TYPING` | off | `1`: while the library keyboard is first responder, UIKit owns typing and raw GCKeyboard is suppressed. Done restores raw gameplay input. For verified XCTest automation only. |
 | `MADEIRA_INPUT_FOCUS` | on | `0`: keyboard and mouse reach the program whatever has focus in the app (still not while the app is inactive). |
 | `MADEIRA_DIRECT_CURSOR` | on | `0`: no cursor is drawn on the game view, motion stays relative there and the pointer never locks by itself; the driver reports nothing. |
 | `MADEIRA_POINTER_ABSOLUTE` | on | `0`: the program's cursor never follows the pointer's position; all motion is relative. |
 | `MADEIRA_POINTER_LOCK` | on | `0`: never lock the pointer; no lock button, Ctrl+Alt+P is sent to the program. |
 | `MADEIRA_POINTER_AUTOLOCK` | on | `0`: lock only by hand (Ctrl+Alt+P or the lock button). |
+| `MADEIRA_POINTER_HIDDEN_ABSOLUTE` | off | `1` (a game's own config): the program's cursor follows the pointer's position even while the program hides it, and the pointer never locks by itself. For a game that draws its own cursor at the cursor position, where relative motion lags the pointer and stops short of the screen edges. |
 | `MADEIRA_NAV_KEYS_E0` | on | `0`: the driver's previous extended-key flags for the navigation keys. |
 
 ## Logs
@@ -351,3 +354,15 @@ The Unicode contract is described in Microsoft's
 [KEYBDINPUT reference](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput).
 Apple documents explicit keyboard paste intent in its
 [UIPasteboard reference](https://developer.apple.com/documentation/uikit/uipasteboard).
+
+### XCTest typing with a connected hardware keyboard
+
+Ordinary DeviceKit `device.io.keys` uses UIKit typing, which does not establish
+GCKeyboard delivery. To automate a game with that route, opt in through the
+existing per-game config: `env.MADEIRA_XCTEST_TYPING = 1` (build22 or later).
+Open the library keyboard, focus the intended guest field, send synthetic keys,
+and verify a harmless mixed-case fixture, Backspace and Tab before credentials.
+Close the keyboard with Done before gameplay. The mode selects one typing owner
+only while that responder is active; default hardware input is unchanged.
+It is an automation transport choice, not a fix for unexplained DirectInput loss.
+Do not use its success as evidence that physical keyboard input is repaired.

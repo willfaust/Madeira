@@ -87,6 +87,10 @@ pump_done:
     pop rsi
     pop rbx
     ret
+/* The 15-byte gap spelled out as production has it (an 11-byte NOP, then a
+ * 4-byte one): GNU as releases order a two-NOP pad differently. */
+.byte 0x66,0x66,0x2e,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
+.byte 0x0f,0x1f,0x40,0x00
 .balign 16, 0x90
 sc_loop_add_ref:
     lock inc dword ptr [rcx+0x38]

@@ -101,6 +101,22 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    /* A zeroed description leaves RenderTargetWriteMask at 0, "write no
+     * channel": a runtime that honours the mask, as D3D12 does, draws the cube
+     * every frame without writing a pixel (only the clear colour shows). Set the
+     * write mask, and turn on the depth test texcube.hlsl is written for ("the
+     * face towards the viewer wins the depth test"): with it off, as the zeroed
+     * state had it, faces are drawn in index order and back faces cover front
+     * ones as the cube turns. The depth buffer below already exists and is
+     * cleared to 1.0 every frame. */
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = 0xffffffffu;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.DepthStencilState.DepthEnable = TRUE;
+    pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     ID3D12PipelineState *pso = NULL;
     hr = ID3D12Device_CreateGraphicsPipelineState(dev, &pd, &IID_ID3D12PipelineState, (void **)&pso);
     if (FAILED(hr) || !pso) { printf("cube: no pipeline %#lx\n", hr); return 1; }

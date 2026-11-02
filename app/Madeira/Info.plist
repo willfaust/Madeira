@@ -7,6 +7,10 @@
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).download.*</string>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*</string>
 	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
@@ -61,7 +65,7 @@
 		<string>_remotepairing-pairable-host._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Madeira uses the local network to pair with this device for JIT, without a computer.</string>
+	<string>Madeira uses the local network to pair with this device for JIT, without a computer, and to download Steam games from a PC on this network.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIFileSharingEnabled</key>

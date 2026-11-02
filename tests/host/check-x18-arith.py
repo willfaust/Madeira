@@ -38,21 +38,22 @@ def function(source, signature):
     return source[start:source.index('\n}', start) + 2] + '\n'
 
 
-defines = native[native.index('#define X18_ROLE_NONE 0'):native.index('static int ios_insn_x18_role(uint32_t insn)')]
+defines = native[native.index('#define X18_ROLE_NONE 0'):native.index('static int ios_insn_x18_role(uint32_t insn, int stores)')]
 code = '#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n' + defines
-code += function(native, 'static int ios_insn_x18_role(uint32_t insn)')
+code += function(native, 'static int ios_insn_x18_role(uint32_t insn, int stores)')
 code += function(native, 'static int ios_x18_arith_dest(uint32_t insn, int role)')
 code += function(native, 'static uint32_t ios_insn_replace_x18(uint32_t insn, int role, int scratch)')
 code += r'''
 #define FAIL(...) do { fprintf(stderr, __VA_ARGS__); exit(1); } while (0)
-static int dest( uint32_t insn ) { return ios_x18_arith_dest( insn, ios_insn_x18_role( insn ) ); }
+/* stores = 0: an image without the x18-as-stored-value rule (every image but opengl32) */
+static int dest( uint32_t insn ) { return ios_x18_arith_dest( insn, ios_insn_x18_role( insn, 0 ) ); }
 static void expect( uint32_t insn, int rd, uint32_t rewritten, const char *what )
 {
     int got = dest( insn );
     if (got != rd) FAIL("%s (0x%08x): dest %d, want %d\n", what, insn, got, rd);
     if (rd >= 0)
     {
-        uint32_t r = ios_insn_replace_x18( insn, ios_insn_x18_role( insn ), rd );
+        uint32_t r = ios_insn_replace_x18( insn, ios_insn_x18_role( insn, 0 ), rd );
         if (r != rewritten) FAIL("%s: rewritten 0x%08x, want 0x%08x\n", what, r, rewritten);
     }
 }

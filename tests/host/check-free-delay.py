@@ -71,6 +71,21 @@ static int fake_clock( int id, struct timespec *ts ) { (void)id; ts->tv_sec = fa
 static char *released[64];
 static int nreleased, bypass_seen;
 static NTSTATUS NtFreeVirtualMemory( HANDLE process, void **addr, SIZE_T *size, ULONG type );
+/* ios_fd_reuse (a reservation over the same program's held releases frees them) */
+typedef uintptr_t UINT_PTR;
+#define MEM_RESERVE             0x2000
+#define MEM_REPLACE_PLACEHOLDER 0x4000
+#define ROUND_ADDR(addr,mask) ((void *)((UINT_PTR)(addr) & ~(UINT_PTR)(mask)))
+static const UINT_PTR page_mask = 0xfff, granularity_mask = 0xffff;
+static void *cur_peb = (void *)0x7ffd0000;
+static void *ios_jit_current_peb( void ) { return cur_peb; }
+static struct file_view *find_view_range( const void *addr, size_t size )
+{
+    int i;
+    for (i = 0; i < nviews; i++)
+        if ((const char *)addr < views[i].base + views[i].size && views[i].base < (const char *)addr + size) return &views[i];
+    return NULL;
+}
 '''
 code += block
 code += r'''
@@ -134,7 +149,17 @@ int main( int argc, char **argv )
     fake_ms += 2000;
     ios_fd_drain( 0 );
     assert( nreleased == 9 && ios_fd_n == 0 && !ios_fd_bytes );
-    puts( "held 1-16 MB guest releases, released after the delay or past the cap" );
+    /* a reservation at the address of the same program's held release frees it at once;
+     * another program's release stays held (MADEIRA_FREE_DELAY_REUSE, default on) */
+    nviews = 0; nreleased = 0;
+    view( 0x7200000000ull, 2 * MB, 0, 1 );
+    assert( ios_fd_take( (char *)0x7200000000ull, &held ) == 1 );
+    assert( ios_fd_reuse( (void *)0x7200000000ull, 2 * MB, MEM_RELEASE ) == 0 && ios_fd_n == 1 );   /* not a reservation */
+    cur_peb = (void *)0x7ffe0000;
+    assert( ios_fd_reuse( (void *)0x7200000000ull, 2 * MB, MEM_RESERVE ) == 0 && ios_fd_n == 1 && nreleased == 0 );
+    cur_peb = (void *)0x7ffd0000;
+    assert( ios_fd_reuse( (void *)0x7200000000ull, 2 * MB, MEM_RESERVE ) == 1 && ios_fd_n == 0 && nreleased == 1 );
+    puts( "held 1-16 MB guest releases, released after the delay or past the cap; a reservation over its own release frees it" );
     return 0;
 }
 '''

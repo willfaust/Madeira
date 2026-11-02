@@ -218,8 +218,8 @@ hits = [f.name for f in sorted(nt.glob("*.c")) if raw.search(f.read_text(encodin
 check(not hits, "no raw debugstr of a command line in build/ntdll-unix", hits)
 check(re.search(r"creating child thread for %s[^;]*madeira_debugstr_cmdline_us\(\s*&params->CommandLine", proc, re.S),
       "spawn_process logs the redacted command line")
-check(len(re.findall(r"madeira_debugstr_cmdline_us\(\s*&params->CommandLine\s*\)", proc)) == 3,
-      "spawn_process ERR, NtCreateUserProcess ERR and TRACE: all three redacted")
+check(len(re.findall(r"madeira_debugstr_cmdline_us\(\s*&params->CommandLine\s*\)", proc)) == 4,
+      "spawn_process ERR, NtCreateUserProcess ERR and TRACE, and the [dock-steam-run] line: all four redacted")
 check("madeira_debugstr_cmdline_w(cmdline)" in env, "env_ios.c's command-line TRACE is redacted")
 tail = proc[proc.index("cmdline-tail(ml428)") - 1200:proc.index("cmdline-tail(ml428)")]
 check("madeira_redact_line_w( (const unsigned short *)nbuf" in tail and "tail[ti] = (char)shown[" in tail,

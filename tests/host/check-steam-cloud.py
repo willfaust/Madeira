@@ -178,6 +178,16 @@ let name = "%GameInstall%savedata/\(steamID)/data_0.sav"
 let local = try! SteamCloudAudit.run(listing: SteamCloudListing(), saveFiles: ufs, paths: paths)
 check(local.entries.count == 1 && local.entries[0].kind == .localOnly, "a device-only save in a {64BitSteamID} folder is found")
 check(local.entries.first?.path == name, "  its cloud name has the ID filled in (\(local.entries.first?.path ?? "-"))")
+// Rules as some games write them: platform "all" (Psychonauts, Dark Souls PTDE), the
+// placeholder in lower case (Sifu) and a path ending in "/." (100% Orange Juice).
+for (label, rule) in [("platform \"all\"", SteamAppInfo.SaveFile(root: "gameinstall", path: "savedata/{64BitSteamID}", pattern: "*", recursive: false, platforms: ["all"])),
+                      ("a lower-case {64bitsteamid}", SteamAppInfo.SaveFile(root: "gameinstall", path: "savedata/{64bitsteamid}", pattern: "*", recursive: false, platforms: [])),
+                      ("a path ending in /.", SteamAppInfo.SaveFile(root: "gameinstall", path: "savedata/{64BitSteamID}/.", pattern: "*", recursive: false, platforms: ["windows"]))] {
+    let found = try! SteamCloudAudit.run(listing: SteamCloudListing(), saveFiles: [rule], paths: paths)
+    check(found.entries.count == 1 && found.entries.first?.path == name, "  a rule with \(label) finds it under the same name")
+}
+let macOnly = [SteamAppInfo.SaveFile(root: "gameinstall", path: "savedata/{64BitSteamID}", pattern: "*", recursive: false, platforms: ["macos"])]
+check(try! SteamCloudAudit.run(listing: SteamCloudListing(), saveFiles: macOnly, paths: paths).entries.isEmpty, "  a macOS-only rule is still left out")
 let listed = SteamCloudFile(prefix: "%GameInstall%savedata/\(steamID)/", name: "data_0.sav",
                             sha: SteamCloudAudit.sha1(of: saves.appendingPathComponent("data_0.sav"))!,
                             timestamp: 1, size: UInt64(bytes.count), persistState: 0)

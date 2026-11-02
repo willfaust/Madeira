@@ -143,10 +143,14 @@ volatile long long ios_alert_wakes, ios_alert_waits, ios_qpc_syscalls, ios_affin
 volatile int ios_srv_req_count;
 volatile long long ios_alert_lat_n, ios_alert_lat_ticks, ios_alert_lat_hist[6], ios_alert_spin_tries, ios_alert_spin_hits;
 static void ios_ts_calibrate( void ) {}
+static void ios_stuck_store_check( void ) {}   /* ml1288's 100 ms check between bursts (MADEIRA_STUCK_CHECK) */
 static void ios_thread_sampler_pass( int b ) { (void)b; passes++; }
 static void ios_guest_rip_profile( int gen ) { (void)gen; profiles++; }
-static int h_usleep( unsigned us ) { (void)us; return 0; }
 static unsigned h_sleep( unsigned s ) { if (s != 20) abort(); if (++sleeps > 5) longjmp( done, 1 ); ios_alert_wakes += 100; return 0; }
+/* ml1288 waits the 20 s between bursts as 200 ticks of 100 ms (the stuck-store check runs
+ * between them): every 200th such tick is one 20 s period. */
+static unsigned ticks;
+static int h_usleep( unsigned us ) { if (us == 100000 && ++ticks % 200 == 0) h_sleep( 20 ); return 0; }
 static void wine_log_write( const char *fmt, ... ) __attribute__((format(printf, 1, 2)));
 static void wine_log_write( const char *fmt, ... )
 {

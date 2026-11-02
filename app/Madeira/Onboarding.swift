@@ -6,15 +6,16 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// First-run setup for JIT, Steam sign-in, Madeira Dock and Wine Mono (docs/LIBRARY.md).
+// First-run setup for JIT, Steam sign-in, Madeira Dock, Wine Mono and the Visual C++
+// runtime (docs/LIBRARY.md).
 // On a new install, and once after an update that raises the setup revision
 // (`madeiraOnboardingRevision` in UserDefaults, which iOS removes with the app,
 // is below OnboardingRules.revision), the library opens a full-screen setup: welcome, JIT,
 // Steam sign-in, Valve's client components for Madeira Dock (only when Dock is
-// available), Wine Mono (only when this device has none), done. After an update, only the
-// pages added since the revision this device last saw are shown. Every step can be
-// skipped. Settings › JIT or Settings › Steam can reopen it in full.
-// env.MADEIRA_ONBOARDING = 0 never opens it.
+// available), Wine Mono (only when this device has none), Microsoft's Visual C++ runtime
+// (only while the prefix lacks it), done. After an update, only the pages added since the
+// revision this device last saw are shown. Every step can be skipped. Settings › JIT or
+// Settings › Steam can reopen it in full. env.MADEIRA_ONBOARDING = 0 never opens it.
 //
 // The JIT page offers three ways in (in-app pairing on iOS 27, a pairing
 // file from a computer, StikDebug), each with its own numbered steps. It stores
@@ -23,8 +24,9 @@ import UniformTypeIdentifiers
 // Sign-in goes through SteamSignIn (the
 // token stays in its Keychain store) and the components through
 // MadeiraDockModel.prepareClient(), which downloads and verifies files without
-// starting Wine. Setup starts no Wine session and changes no JIT pool, engine
-// switch or launch configuration.
+// starting Wine; the Visual C++ runtime through VCRedistModel.install(), which takes the
+// DLLs out of Microsoft's installers on the device. Setup starts no Wine session and
+// changes no JIT pool, engine switch or launch configuration.
 // Log tag: [onboarding] (no account names, tokens or paths).
 
 // MARK: - Rules (Foundation and MadeiraConfig only; tests/host/check-onboarding.py compiles this part)
@@ -36,7 +38,7 @@ enum OnboardingRules {
     /// 1 was the first setup, stored as `madeiraOnboardingDone` (no longer read); 2 adds
     /// Install LocalDevVPN, on-device pairing and the Madeira JIT shortcut; 3 adds the
     /// Wine Mono download.
-    static let revision = 3
+    static let revision = 4
 
     /// `env.MADEIRA_ONBOARDING = 0` (madeira.cfg or the environment) never opens
     /// setup and hides "Run setup again". On by default.
@@ -44,13 +46,14 @@ enum OnboardingRules {
 
     enum Step: String, CaseIterable {
         case welcome, localDevVPN = "localdevvpn", jit, signIn = "sign-in", dockClient = "dock-client",
-             wineMono = "wine-mono", done
+             wineMono = "wine-mono", vcRedist = "vc-redist", done
 
         /// The revision whose setup first had this page.
         var introduced: Int {
             switch self {
             case .localDevVPN: return 2
             case .wineMono: return 3
+            case .vcRedist: return 4
             default: return 1
             }
         }
@@ -60,16 +63,18 @@ enum OnboardingRules {
     /// reaches this device through it. JIT is always offered. Sign-in is offered when
     /// Steam sign-in is enabled, or when Madeira Dock is available (Dock needs a
     /// sign-in). Valve's client components are offered only when Dock is available,
-    /// Wine Mono only when this device has none (`wineMono`). With `since` (the revision
-    /// this device last saw, after an update) only the pages added after it are offered.
+    /// Wine Mono only when this device has none (`wineMono`), the Visual C++ runtime only
+    /// when the prefix does not have it yet (`vcRedist`). With `since` (the revision this
+    /// device last saw, after an update) only the pages added after it are offered.
     static func steps(signIn: Bool, dock: Bool, localDevVPN: Bool = false, wineMono: Bool = false,
-                      since: Int = 0) -> [Step] {
+                      vcRedist: Bool = false, since: Int = 0) -> [Step] {
         var list: [Step] = [.welcome]
         if localDevVPN { list.append(.localDevVPN) }
         list.append(.jit)
         if signIn || dock { list.append(.signIn) }
         if dock { list.append(.dockClient) }
         if wineMono { list.append(.wineMono) }
+        if vcRedist { list.append(.vcRedist) }
         list.append(.done)
         return since > 0 ? list.filter { $0 == .welcome || $0 == .done || $0.introduced > since } : list
     }
@@ -77,6 +82,7 @@ enum OnboardingRules {
     /// Whether there is anything to set up between the welcome and done pages.
     static func hasSetup(_ steps: [Step]) -> Bool {
         steps.contains(.jit) || steps.contains(.signIn) || steps.contains(.dockClient) || steps.contains(.wineMono)
+            || steps.contains(.vcRedist)
     }
 
     /// Whether setup opens by itself when the library appears.
@@ -118,13 +124,21 @@ enum OnboardingRules {
     private var offerLocalDevVPN = false
     /// The same for Wine Mono: offered when this device had none when setup opened.
     private var offerWineMono = !WineMonoModel.available
+    /// The same for the Visual C++ runtime (VCRedist.swift): offered, when its switch is on,
+    /// while the device does not hold the pinned runtime.
+    private var offerVCRedist = false
     /// The revision this device had seen when setup opened by itself after an update (only
     /// the pages added since are shown); 0 for a new install and for Run setup again.
     @Published private(set) var since = 0
     var steps: [Step] { steps(since: since) }
     private func steps(since: Int) -> [Step] {
         OnboardingRules.steps(signIn: SteamSignIn.isEnabled, dock: MadeiraDock.enabled, localDevVPN: offerLocalDevVPN,
-                              wineMono: offerWineMono, since: since)
+                              wineMono: offerWineMono, vcRedist: offerVCRedist, since: since)
+    }
+    private static func vcRedistOffered() -> Bool {
+        guard VCRedistModel.enabled else { return false }
+        VCRedistModel.shared.refresh()
+        return !VCRedistModel.shared.complete
     }
     /// Setup can be opened: enabled, and something to set up.
     var available: Bool { Self.enabled && OnboardingRules.hasSetup(steps(since: 0)) }
@@ -137,6 +151,7 @@ enum OnboardingRules {
         guard !considered else { return }
         considered = true
         offerWineMono = !WineMonoModel.available
+        offerVCRedist = Self.vcRedistOffered()
         guard OnboardingRules.shouldShow(seen: Self.seen, enabled: Self.enabled, steps: steps(since: Self.seen)) else { return }
         open(reason: "revision \(Self.seen)->\(OnboardingRules.revision)", since: Self.seen)
     }
@@ -149,6 +164,7 @@ enum OnboardingRules {
         guard available, LibraryModel.shared.current == nil, wine_process_is_running() == 0 else { return }
         offerLocalDevVPN = !LocalDevVPN.isInstalled
         offerWineMono = !WineMonoModel.available
+        offerVCRedist = Self.vcRedistOffered()
         self.since = since
         LogStore.shared.log("[onboarding] shown reason=\(reason) steps=\(steps.map(\.rawValue).joined(separator: ","))")
         go(.welcome)
@@ -194,6 +210,7 @@ struct OnboardingView: View {
     @ObservedObject private var dock = MadeiraDockModel.shared
     @ObservedObject private var shortcut = JITNetworkShortcut.shared
     @ObservedObject private var mono = WineMonoModel.shared
+    @ObservedObject private var redist = VCRedistModel.shared
     @State private var showSignIn = false
     @State private var importingPairingFile = false
     @State private var pairingImportError: String?
@@ -225,6 +242,7 @@ struct OnboardingView: View {
                     case .signIn: signInPage
                     case .dockClient: dockClientPage
                     case .wineMono: wineMonoPage
+                    case .vcRedist: vcRedistPage
                     case .done: donePage
                     }
                 }
@@ -319,6 +337,7 @@ struct OnboardingView: View {
                 + (pages.contains(.signIn) ? ["Sign in to Steam in Madeira."] : [])
                 + (pages.contains(.dockClient) ? ["Download Valve's Steam client components for Madeira Dock."] : [])
                 + (pages.contains(.wineMono) ? ["Download Wine Mono, for games built on .NET Framework."] : [])
+                + (pages.contains(.vcRedist) ? ["Install Microsoft's Visual C++ runtime, which many games need."] : [])
             ForEach(offered.indices, id: \.self) { index in point(index + 1, offered[index]) }
             primary("Get started", symbol: "arrow.right") { model.next() }.padding(.top, 8)
             secondary("Skip setup") { model.skip() }
@@ -656,6 +675,41 @@ struct OnboardingView: View {
         }
     }
 
+    /// Microsoft's Visual C++ runtime (VCRedist.swift), offered while the device does not
+    /// have the pinned version. The download is checked against pinned sums and the DLLs are
+    /// taken out of the installers on the device: no Windows session, nothing restarts. Leaving
+    /// the page keeps the download going; Settings › Visual C++ runtimes shows it.
+    private var vcRedistPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header("Install the Visual C++ runtime", symbol: "puzzlepiece.extension.fill")
+            Text("Many Windows games are built with Microsoft Visual C++ and need its 2015-2022 runtime. Madeira downloads Microsoft's own installers and takes the runtime out of them, for 64-bit and 32-bit games alike. Games find it at their next start.")
+            if redist.complete {
+                Label("The Visual C++ 2015-2022 runtime is installed.", systemImage: "checkmark.circle.fill")
+                    .font(.headline).foregroundStyle(.green)
+                primary("Continue", symbol: "arrow.right") { model.next() }
+            } else {
+                Text("About \(VCRedistPin.totalMegabytes) MB from Microsoft's download servers, checked against pinned SHA-256 sums. No Windows session runs for this. The files stay as Microsoft shipped them, under Microsoft's licence terms for the redistributable.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                switch redist.phase {
+                case .downloading(let f), .installing(let f):
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: f)
+                        Text(redist.status).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                case .idle:
+                    if let error = redist.error {
+                        Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                    }
+                    primary(redist.error == nil ? "Download and install" : "Try again", symbol: "arrow.down.circle.fill") {
+                        LogStore.shared.log("[onboarding] Visual C++ runtime install")
+                        redist.install()
+                    }
+                }
+                secondary("Set up later") { model.next() }
+            }
+        }
+    }
+
     private var donePage: some View {
         VStack(alignment: .leading, spacing: 18) {
             header("You're all set", symbol: "checkmark.seal.fill")
@@ -667,6 +721,9 @@ struct OnboardingView: View {
             }
             if model.steps.contains(.wineMono) {
                 Text("Settings › .NET Framework downloads or removes Wine Mono.")
+            }
+            if model.steps.contains(.vcRedist) {
+                Text("Settings › Visual C++ runtimes installs Microsoft's runtime again, or removes it.")
             }
             Text("You can run this setup again from Settings › JIT or Settings › Steam.").foregroundStyle(.secondary)
             primary("Go to your library", symbol: "square.grid.2x2.fill") { model.finish() }
@@ -691,6 +748,10 @@ struct SteamSettingsSection: View {
     @State private var confirmSignOut = false
     /// Settings › Steam › Game language (SteamLanguage); "" follows the device.
     @State private var language = SteamLanguage.chosen ?? ""
+    /// Settings › Steam › Downloads from PCs on this network (SteamLANSetting).
+    @State private var lanOn = SteamLANSetting.enabled
+    /// A fixed PC address; "" finds the PC through Steam.
+    @State private var lanHost = SteamLANSetting.host
 
     /// Shown when Steam sign-in or Madeira Dock is available.
     static var shown: Bool { SteamSignIn.isEnabled || MadeiraDock.enabled }
@@ -712,6 +773,22 @@ struct SteamSettingsSection: View {
             // Off: no Steam Cloud checks, transfers or prompts before Play (docs/STEAM_CLOUD.md).
             if SteamOwnedLibrary.enabled {
                 Toggle("Steam Cloud saves", isOn: $cloud.on)
+                Toggle("Downloads from PCs on this network", isOn: $lanOn)
+                    .onChange(of: lanOn) { _, value in SteamLANSetting.enabled = value }
+                if lanOn {
+                    LabeledContent("PC address") {
+                        TextField("Automatic", text: $lanHost)
+                            .keyboardType(.decimalPad)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .multilineTextAlignment(.trailing)
+                            .foregroundStyle(lanHost.isEmpty || SteamLANSetting.isValidAddress(lanHost) ? Color.primary : Color.red)
+                    }
+                    .onChange(of: lanHost) { _, value in
+                        let trimmed = value.trimmingCharacters(in: .whitespaces)
+                        if trimmed.isEmpty || SteamLANSetting.isValidAddress(trimmed) { SteamLANSetting.host = trimmed }
+                    }
+                }
             }
             if MadeiraDock.enabled {
                 Button { open(.dock) } label: { Label("Madeira Dock", systemImage: "shippingbox") }
@@ -725,7 +802,7 @@ struct SteamSettingsSection: View {
         } header: {
             Text("Steam")
         } footer: {
-            Text("Game language: the language Steam downloads install, and the one Steam tells the game to use. A game without it gets English. Installed games keep their language until you choose Download in their page.\n\nMadeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.")
+            Text("Game language: the language Steam downloads install, and the one Steam tells the game to use. A game without it gets English. Installed games keep their language until you choose Download in their page.\n\nDownloads from PCs on this network: a game's download comes first from a PC on the same network whose Steam has it installed and up to date, through Steam's local network game transfers (Steam on the PC: same account, Settings › Downloads › Game file transfer over local network on, no download or game running). Anything the PC does not have comes from Steam's servers. Madeira finds the PC through Steam and shows up in the account's devices as \"Madeira\". PC address: only when the PC is not found; its IP address on this network.\n\nMadeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.")
         }
         .confirmationDialog("Sign out of Steam?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { signIn.signOut() }

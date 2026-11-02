@@ -60,7 +60,7 @@ signin_files = {'SteamSignIn.swift', 'SteamSignInView.swift', 'SteamAuthAPI.swif
 # The owned library and downloads (docs/STEAM_LIBRARY.md). SteamError and SteamProtoMessages are shared.
 library_files = {'CMServerList.swift', 'LicenseListBox.swift', 'SteamCMSession.swift', 'SteamConnection.swift', 'SteamMessageCodec.swift',
                  'SteamProtocol.swift', 'SteamSession.swift', 'ContentDecryptor.swift', 'DepotDownloader.swift',
-                 'DepotManifest.swift', 'SteamAppInfo.swift', 'SteamLibraryFetcher.swift', 'AppManifestWriter.swift'}
+                 'DepotManifest.swift', 'SteamLANPeer.swift', 'SteamAppInfo.swift', 'SteamLibraryFetcher.swift', 'AppManifestWriter.swift'}
 shared_files = {'SteamError.swift', 'SteamProtoMessages.swift'}
 require(signin_files <= {f.name for f in files} <= signin_files | library_files,
         'SwiftSteam holds the sign-in files and, besides them, only the library files (check-steam-library.py lists those)')

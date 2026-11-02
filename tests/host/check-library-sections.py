@@ -73,7 +73,8 @@ require(others.index('if hideOthers && SteamGamesSection.collapsible {') < other
         < others.index('cells(entries, width: viewport.size.width)'), 'Other games: collapsed, empty, then the games')
 require('@AppStorage("madeiraLibraryHideOthers") private var hideOthers = false' in view, 'Other games: remembered collapsed state')
 entries = between(view, 'private var entries: [LibraryEntry] {', 'var body: some View {')
-require('$0.desktop != true && $0.steamAppID == nil' in entries and 'localizedCaseInsensitiveContains(search)' in entries,
+require('$0.desktop != true' in entries and '$0.steamAppID == nil' in entries
+        and 'localizedCaseInsensitiveContains(search)' in entries,
         'Other games: the games you added (no Steam game, no desktop), filtered by the search')
 require('LibraryCells(items: items, layout: layout, width: viewportWidth)' in view, "Other games: the library's layout")
 

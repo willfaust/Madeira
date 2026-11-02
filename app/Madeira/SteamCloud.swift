@@ -186,12 +186,14 @@ struct SteamCloudPaths: Sendable {
     /// The path components of a relative save path, or nil when it is not a
     /// plain relative path (empty, absolute, or leaving its folder).
     func components(_ relative: String) -> [String]? {
+        // Placeholders match in any case (Sifu writes {64bitsteamid}), and a "." part is
+        // dropped rather than refusing the path (100% Orange Juice ends its path in "/.").
         let text = relative.replacingOccurrences(of: "\\", with: "/")
-            .replacingOccurrences(of: "{64BitSteamID}", with: String(steamID))
-            .replacingOccurrences(of: "{Steam3AccountID}", with: String(steamID & 0xFFFF_FFFF))
-        let parts = text.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+            .replacingOccurrences(of: "{64BitSteamID}", with: String(steamID), options: .caseInsensitive)
+            .replacingOccurrences(of: "{Steam3AccountID}", with: String(steamID & 0xFFFF_FFFF), options: .caseInsensitive)
+        let parts = text.split(separator: "/", omittingEmptySubsequences: true).map(String.init).filter { $0 != "." }
         guard !parts.isEmpty, parts.count <= 32,
-              !parts.contains(where: { $0 == "." || $0 == ".." || $0.contains(":") || $0.utf8.count > 255 }) else { return nil }
+              !parts.contains(where: { $0 == ".." || $0.contains(":") || $0.utf8.count > 255 }) else { return nil }
         return parts
     }
 
@@ -483,7 +485,10 @@ struct SteamCloudAudit: Equatable, Sendable {
         }
         // Local files the game's save patterns cover that the cloud does not list.
         var folders: [(label: String, url: URL, pattern: String, recursive: Bool)] = []
-        for save in saveFiles where save.platforms.isEmpty || save.platforms.contains("windows") {
+        // "all" is how many games list every platform (Psychonauts, Dark Souls: Prepare
+        // to Die Edition); dropping it left their local saves never offered for upload.
+        for save in saveFiles where save.platforms.isEmpty || save.platforms.contains("windows")
+                                     || save.platforms.contains("all") {
             guard let place = paths.location(cloudPath: "%\(save.root)%" + (save.path.isEmpty ? "x" : save.path + "/x")) else { continue }
             let folder = try paths.resolve(base: place.base, parts: Array(place.parts.dropLast()))
             // A Windows override moves the folder: its cloud name is not this one, so
