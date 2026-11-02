@@ -432,7 +432,22 @@ final class DepotDownloader {
         for name in (try? fm.contentsOfDirectory(atPath: journalDir.path)) ?? [] where !journalNames.contains(name) {
             try? fm.removeItem(at: journalDir.appendingPathComponent(name))
         }
-        for plan in plans {
+        // Two depots can list the same file (a DLC or update depot replacing a
+        // base file). Valve's client keeps the copy from the depot mounted
+        // later. Without that rule both copies were written to one path; a
+        // repair then checked each against the other's bytes and re-fetched
+        // the earlier depot's chunks over the later one's, flipping the file
+        // on every repair (Borderlands 2: the same 552 MB on each Repair, and
+        // Steam's CEG step ending with 53, DataCorruption). Only the last
+        // depot that lists a path writes it.
+        var lastOwner: [String: Int] = [:]
+        for (index, plan) in plans.enumerated() {
+            for file in plan.manifest.files where !file.isDirectory && file.flags & 0x200 == 0 {
+                lastOwner[Self.overlapKey(file.filename)] = index
+            }
+        }
+        var overridden = 0
+        for (planIndex, plan) in plans.enumerated() {
             try Task.checkCancellation()
             let journalURL = journalDir.appendingPathComponent("depot_\(plan.depotID)_\(plan.manifestGID).journal")
             let done = JournalWriter.load(journalURL)
@@ -441,6 +456,12 @@ final class DepotDownloader {
             var pending: [WorkItem] = []
             paths.reserveCapacity(plan.manifest.files.count)
             for (fileIndex, file) in plan.manifest.files.enumerated() {
+                // A later depot lists this file too: its copy is the one installed.
+                if !file.isDirectory, file.flags & 0x200 == 0,
+                   let owner = lastOwner[Self.overlapKey(file.filename)], owner != planIndex {
+                    overridden += 1
+                    paths.append(""); existing.append(false); continue
+                }
                 // Symlinks (flag 0x200) have no Windows meaning here; skip them.
                 guard file.flags & 0x200 == 0,
                       let relative = SteamInstallFiles.safeRelativePath(file.filename, folded: &folded[plan.installURL, default: [:]]) else {
@@ -487,7 +508,15 @@ final class DepotDownloader {
             result.pending.append(pending)
             result.journals.append(journalURL)
         }
+        if overridden > 0 {
+            SteamLog.event("[steam-depot] overlap files=\(overridden) (a later depot's copy is installed, as Valve's client does)")
+        }
         return result
+    }
+
+    /// One install path, compared as Windows compares names: any case, either slash.
+    private nonisolated static func overlapKey(_ filename: String) -> String {
+        filename.replacingOccurrences(of: "\\", with: "/").lowercased()
     }
 
     /// Create or resize a file to its manifest length. Existing bytes below
