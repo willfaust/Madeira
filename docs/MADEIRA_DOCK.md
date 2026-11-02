@@ -425,8 +425,18 @@ plan, the running program and, once the batch ended, how many succeeded.
 batch's program list and each game's choice.
 
 If the install record lists per-user custom executables (`CheckGuid`), Dock
-asks Valve's client to prepare them before launching. `env.MADEIRA_DOCK_CEG = 0`
-never asks. The preparation is Valve's; Dock does not touch the files.
+asks Valve's client to prepare them before launching. First it starts Valve's
+registered Steam Client Service through the service manager and waits until
+it runs (30 s bound, then a 2 s settle; `ceg-service-start`), because under
+emulation the client's own demand start was still in progress when the
+request failed with 55 (RemoteCallFailed). A request that still fails with 55
+is sent again, up to 3 times 1.5 s apart (`ceg-request-retry`). When the
+client answers that it started no job, because it already produced this
+account's executables (every launch after the first, until a repair or
+update replaces the files), the game starts at once (`ceg-already-prepared=1`,
+`ceg-result=1`); after a retried request such an answer still stops the
+launch with 49. `env.MADEIRA_DOCK_CEG = 0` never asks. The preparation is
+Valve's; Dock does not touch the files.
 
 ## Switches
 
@@ -438,6 +448,7 @@ never asks. The preparation is Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_COMPACT_POOL` | **off** | `1` starts the sheet's "Smaller JIT pool" toggle on |
 | `MADEIRA_DOCK_CLEAR_STEAM_ID` | on | `0`: a Dock session keeps the fixed Steam game identity every other launch publishes |
 | `MADEIRA_DOCK_CEG` | on | `0`: never ask the client to prepare per-user executables |
+| `MADEIRA_DOCK_CEG_SERVICE_START` | on | `0`: do not start Valve's client service before the request |
 | `MADEIRA_DOCK_IMAGE_RETIRE` | on | `0`: a Dock launch does not turn on the engine's `MADEIRA_JIT_IMAGE_RETIRE` (an explicit `env.MADEIRA_JIT_IMAGE_RETIRE` still wins) |
 | `MADEIRA_DOCK_IMAGE_MAP_GUARD` | on | `0`: a Dock launch does not turn on Wine's `MADEIRA_IMAGE_MAP_GUARD` |
 | `MADEIRA_DOCK_CLIENT_202601` | on | read by the host: `0` disables its January 2026 client adapter |

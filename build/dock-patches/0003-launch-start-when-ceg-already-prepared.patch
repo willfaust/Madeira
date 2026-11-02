@@ -1,0 +1,72 @@
+diff --git a/src/launch.c b/src/launch.c
+index b00eba2..4e888f3 100644
+--- a/src/launch.c
++++ b/src/launch.c
+@@ -160,8 +160,9 @@ static bool wide_flag(const wchar_t *name, wchar_t expected)
+     return GetEnvironmentVariableW(name, value, 4) == 1 && value[0] == expected;
+ }
+ 
+-/* Returns 0 once every started job reported success, otherwise 49 (or 12
+- * for a malformed callback). Only numeric results are reported: no paths.
++/* Returns 0 once every started job reported success, or at once when the
++ * first request started none (already prepared), otherwise 49 (or 12 for a
++ * malformed callback). Only numeric results are reported: no paths.
+  */
+ static int prepare_custom_binaries(HMODULE module, void *client_user,
+                                    const struct sh_api *api, const struct sh_observer *o,
+@@ -196,6 +197,14 @@ static int prepare_custom_binaries(HMODULE module, void *client_user,
+             } else {
+                 o->event("ceg-request-result", status);
+                 o->event("ceg-request", jobs == UINT32_MAX ? -1 : (int32_t)jobs);
++                /* Already prepared (OK, no job started). Trusted only from a
++                 * first request: after a failed job (the retry below) the
++                 * files were not prepared, so no job then still fails. */
++                if (step == SH_CEG_DONE && !remote_retries) {
++                    o->event("ceg-already-prepared", 1);
++                    o->event("ceg-result", 1);
++                    return 0;
++                }
+                 if (step != SH_CEG_WAIT) {
+                     o->event("ceg-result", progress.failure);
+                     return 49;
+diff --git a/src/validation.c b/src/validation.c
+index 41f02d9..f147bec 100644
+--- a/src/validation.c
++++ b/src/validation.c
+@@ -137,12 +137,17 @@ enum sh_ceg_step sh_ceg_request_step(int32_t result, uint32_t jobs, struct sh_ce
+ {
+     if (!progress) return SH_CEG_FAIL;
+     if (result == 10) return SH_CEG_RETRY;
+-    if (result != 1 || !jobs || jobs > SH_CEG_MAX_JOBS) {
++    if (result != 1 || jobs > SH_CEG_MAX_JOBS) {
+         progress->failure = result == 1 ? 0 : result;
+         return SH_CEG_FAIL;
+     }
+     *progress = (struct sh_ceg_progress){jobs, 0, 0};
+-    return SH_CEG_WAIT;
++    /* OK with no job started: Valve's client found nothing left to prepare.
++     * It answers so once it has produced this account's executables (every
++     * request after the first successful one, until the files are replaced
++     * again); the game's own check of them is untouched. An unset count
++     * (UINT32_MAX) still fails above. */
++    return jobs ? SH_CEG_WAIT : SH_CEG_DONE;
+ }
+ 
+ enum sh_ceg_step sh_ceg_record_job(struct sh_ceg_progress *progress, int32_t result)
+diff --git a/tests/test-validation.c b/tests/test-validation.c
+index b788658..770eaf3 100644
+--- a/tests/test-validation.c
++++ b/tests/test-validation.c
+@@ -106,7 +106,11 @@ int main(void)
+     assert(!sh_decode_ceg_reply(job, 8, 29, &ceg));
+     struct sh_ceg_progress progress = {0};
+     assert(sh_ceg_request_step(10, 0, &progress) == SH_CEG_RETRY);
+-    assert(sh_ceg_request_step(1, 0, &progress) == SH_CEG_FAIL && progress.failure == 0);
++    /* OK with no job started: already prepared. */
++    progress = (struct sh_ceg_progress){5, 3, 7};
++    assert(sh_ceg_request_step(1, 0, &progress) == SH_CEG_DONE && progress.expected == 0 &&
++           progress.finished == 0 && progress.failure == 0);
++    assert(sh_ceg_record_job(&progress, 1) == SH_CEG_FAIL);
+     assert(sh_ceg_request_step(2, 0, &progress) == SH_CEG_FAIL && progress.failure == 2);
+     assert(sh_ceg_request_step(55, 3, &progress) == SH_CEG_FAIL && progress.failure == 55);
+     assert(sh_ceg_request_step(1, UINT32_MAX, &progress) == SH_CEG_FAIL);

@@ -129,6 +129,8 @@ echo "== installed ${#TARGETS[@]} Wine modules into app/Madeira/i386-windows =="
 # through its own table (virtual_ios.c, the d3d9shim branch).
 if [ -z "${SKIP_DXMT:-}" ] && [ $# -eq 0 ]; then
     D="$R/dxmt"
+    # This repository's DXMT changes (build/dxmt-patches/README.md) go in first.
+    bash "$R/build/dxmt-patches/apply.sh"
     X="$B/dxmt-cross-i386.txt"
     cat > "$X" <<EOF
 [binaries]

@@ -78,13 +78,13 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
-                        'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'borderlands-2',
+                        'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2',
                         'standard'} | MERGED, \
     sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,\n'
         '                      ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,\n'
         '                      crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,\n'
-        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, borderlands2, standard]\n'
+        '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]\n'
         '        + steamTitles.map(\\.list)') in lists_src
 # The Rockstar Games Launcher outside Steam (logs 91-93, 2026-10-28): Launcher.exe in its own folder gets the
 # launcher chain's lines, its installer the standard line; both start in the Wine desktop with Windows services.
@@ -167,7 +167,7 @@ for ident, p in presets.items():
         p['tested'], p['fork'] = [line for line in p['lines'][2:] if not line.startswith('#')], []
         continue
     # The Fallout lists are the standard one plus a switch: the games ran with it.
-    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-2', 'borderlands-2'):
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the standard list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -202,7 +202,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: seventy-four lists (twenty-five plus 49 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
+print('PASS: seventy-five lists (twenty-six plus 49 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -295,6 +295,11 @@ assert bl2['tested'] == ['env.MADEIRA_EC_HOOK_TRACE = 0'] and bl2['switches'] ==
 # which kept BatmanAC.exe from handing over to its .NET launcher and exiting.
 bac = presets['batman-arkham-city-goty']
 assert bac['switches'] == 'olderNvidia: true' and bac['version'] == 2, bac
+# Black Ops (owner's test, 2026-11-01): the standard list it ran with, Direct3D 9
+# naming a GeForce 7900 GS (the card picked for it) and 1280x720.
+bo1 = presets['black-ops-1']
+assert bo1['tested'] == ['env.MADEIRA_EC_HOOK_TRACE = 0'] and bo1['switches'] == 'olderNvidia: true, resolution: "1280x720"' \
+    and bo1['version'] == 1, bo1
 assert 'if size != GameRecommendation.screen720 { entry.resolution = size }\n            else if let lines720 = ResolutionChoices.screen720Value { entry.resolution = lines720 }' in apply_src
 gta = presets['gta5e-steam']
 assert 'env.MADEIRA_CHILD_ARGS = PlayGTAV.exe -nobattleye' in gta['lines']
@@ -789,7 +794,11 @@ check(id(steam + #"\Batman Arkham City GOTY"#, 200260) == "batman-arkham-city-go
       && id(steam + #"\Batman Arkham City"#, 57400) == "batman-arkham-city-goty"
       && id(steam + #"\Batman Arkham City GOTY\Binaries\Win32\BatmanAC.exe"#) == "batman-arkham-city-goty", "Arkham City by App ID, folder and program")
 check(R.batmanArkhamCityGoty.switchSummary == "older NVIDIA card on", R.batmanArkhamCityGoty.switchSummary)
-check(R.steamTitles.count == 49 && R.all.count == 74, "49 merged titles, 74 lists")
+check(id(steam + #"\Call of Duty Black Ops"#, 42700) == "black-ops-1" && id(steam + #"\Call of Duty Black Ops"#) == "black-ops-1"
+      && id(steam + #"\Call of Duty Black Ops\BlackOps.exe"#) == "black-ops-1", "the first Black Ops by App ID, folder and program")
+check(id(steam + #"\Call of Duty Black Ops"#, 42710) == "none" && id(steam + #"\Call of Duty Black Ops\BlackOpsMP.exe"#) == "none",
+      "the first Black Ops' multiplayer shares the folder and has no list")
+check(R.steamTitles.count == 49 && R.all.count == 75, "49 merged titles, 75 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 49 merged Steam titles, others none")
@@ -801,7 +810,7 @@ for rec in R.all {
     let settingLines = rec.config.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
     check(GameProfile.parse(rec.config).count == settingLines.count, "\(rec.id): every line but the comments parses")
 }
-check(R.gta5EnhancedSteam.switchSummary == "AVX off, NVIDIA on, Wine's C++ runtime off, fast semaphore waits on, FPS limit 40",
+check(R.gta5EnhancedSteam.switchSummary == "AVX off, NVIDIA on, Wine's C++ runtime off, fast semaphore waits on, FPS limit 30",
       R.gta5EnhancedSteam.switchSummary)
 check(R.note(R.ghostOfTsushima).contains("1280x720") && R.note(R.ghostOfTsushima).contains("fast semaphore waits off"),
       R.note(R.ghostOfTsushima))
@@ -873,7 +882,7 @@ check(!R.prepare(&gtaEntry) && file(gta) == "vram-mb = 4096\n" && mark(gta) == "
 GameProfile(windowsPath: gta).text = ""
 check(!R.prepare(&gtaEntry) && file(gta).isEmpty, "and is not filled in later")
 check(R.reset(&gtaEntry)?.id == "gta5e-steam" && file(gta) == R.gta5EnhancedSteam.fileText, "GTA V Enhanced Reset")
-check(gtaEntry.fpsMode == 4 && gtaEntry.semaphoreFastPath == true && LibraryPrefs.nvidia(gta) && !LibraryPrefs.avx(gta), "its switches")
+check(gtaEntry.fpsMode == 3 && gtaEntry.semaphoreFastPath == true && LibraryPrefs.nvidia(gta) && !LibraryPrefs.avx(gta), "its switches")
 let gowExe = #"C:\Games\God of War\GoW.exe"#
 var gow = LibraryEntry(title: "God of War", windowsPath: gowExe)
 gow.config = "dxmt = d3d11.mipClampBC=1"

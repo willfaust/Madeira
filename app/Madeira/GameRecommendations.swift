@@ -884,6 +884,24 @@ enum GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
 
+    /// Call of Duty: Black Ops (Steam 42700, BlackOps.exe; tested on an iPhone 17 Pro
+    /// Max, 2026-11-01). Steam's custom-executable (CEG) step needed the empty
+    /// system32\mui and syswow64\mui folders (the wine.inf system folders), and every
+    /// start after the first needed Madeira Dock to take Steam's "nothing left to
+    /// prepare" (build/dock-patches/0003). The game drew at 2 to 20 FPS until DXMT
+    /// stopped copying its whole index buffer before each draw (build/dxmt-patches/0001).
+    /// It then ran with the standard list's line, Direct3D 9 naming a GeForce 7900 GS
+    /// with NVIDIA's driver file (the card the owner picked for it) and 1280x720.
+    /// Multiplayer (42710, BlackOpsMP.exe) shares the folder and is untested, so it
+    /// gets nothing here.
+    static let blackOps1 = GameRecommendation(
+        id: "black-ops-1", title: "Call of Duty: Black Ops", version: 1,
+        config: """
+        # Madeira's recommended settings for Call of Duty: Black Ops.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        olderNvidia: true, resolution: "1280x720")
     /// Horizon Forbidden West (Complete Edition, Steam 2420110), community builds
     /// 517-534 (2026-10-13/14). The game needs AVX. Memory it frees is released at
     /// once (with the free delay it reserved the same aligned addresses again and
@@ -1219,7 +1237,7 @@ enum GameRecommendations {
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
                       ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,
                       crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,
-                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, borderlands2, standard]
+                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]
         + steamTitles.map(\.list)
 
     // MARK: Recognising a game
@@ -1233,6 +1251,8 @@ enum GameRecommendations {
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
     static let borderlands2AppID = 49520
+    /// The first Black Ops (its untested multiplayer, 42710, shares the folder).
+    static let blackOps1AppID = 42700
     /// GTA V Legacy, the edition every Steam copy of GTA V also carries.
     static let gta5LegacyAppID = 271590
     /// Grand Theft Auto IV: The Complete Edition.
@@ -1268,6 +1288,7 @@ enum GameRecommendations {
                 || installFolder == "fallout 3 goty" { return fallout3 }
             if blackOps2AppIDs.contains(steamAppID ?? 0) || installFolder == "call of duty black ops ii" { return blackOps2 }
             if steamAppID == borderlands2AppID || installFolder == "borderlands 2" { return borderlands2 }
+            if steamAppID == blackOps1AppID || (steamAppID == nil && installFolder == "call of duty black ops") { return blackOps1 }
             if steamAppID == horizonForbiddenWestAppID || installFolder == "horizon forbidden west complete edition" {
                 return horizonForbiddenWest
             }
@@ -1321,6 +1342,8 @@ enum GameRecommendations {
             return blackOps2
         case "borderlands2.exe":
             return borderlands2
+        case "blackops.exe":
+            return blackOps1
         case "horizonforbiddenwest.exe":
             return horizonForbiddenWest
         case "riftapart.exe":

@@ -6,6 +6,7 @@
     "inputs": [
       "tools/build/runtime-components.json",
       "build/madeira-dock/**",
+      "build/dock-patches/**",
       "tools/build/setup-llvm-mingw.sh",
       "tools/build/build-runtime-component.sh"
     ],
@@ -41,6 +42,7 @@
       "tools/build/build-shader-headers.sh",
       "tools/build/build-llvm-ios.sh",
       "build/dxmt-ios/build.sh",
+      "build/dxmt-patches/**",
       "madeira-d3d12/third_party/**",
       "app/Madeira/d3d12/**",
       "tools/build/build-runtime-component.sh",

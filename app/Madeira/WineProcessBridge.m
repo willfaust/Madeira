@@ -754,6 +754,45 @@ static void madeira_link_wbem(NSFileManager *fm, NSString *prefix, NSString *sys
             linked, sizeof(wbem) / sizeof(wbem[0]));
 }
 
+/* The empty system directories wine.inf creates in every Wine prefix
+ * ([FakeDlls] for system32, [FakeDllsWow64] for syswow64) that the shipped
+ * template and the runtime farms leave out. Madeira's syswow64 is a farm built
+ * at session start, not a wineboot result, so it never got wine.inf's mui
+ * folder, and the template's system32 has no mui, catroot or spool\printers.
+ *
+ * Valve's Steam service checks a few fixed Windows folders while it prepares a
+ * per-account (CEG) executable. A trace of Black Ops's CEG job (build 34) shows
+ * C:\windows\system32\mui (syswow64\mui for the 32-bit service) answering
+ * c0000034 on Madeira, where every Wine, Proton and Windows install has it;
+ * Valve's server then refuses the job (Fail) for Black Ops and Borderlands 2
+ * alike. Empty folders only, the same ones stock Wine makes; nothing else
+ * changes. Idempotent: an existing folder is left alone. */
+static void madeira_ensure_wine_inf_dirs(NSFileManager *fm, NSString *prefix, BOOL wow64)
+{
+    static const char * const sys32[] = { "mui", "catroot", "spool/printers" };
+    static const char * const wow[]   = { "mui" };
+    NSString *windows = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    int made = 0, present = 0, failed = 0;
+
+    for (int pass = 0; pass < (wow64 ? 2 : 1); pass++)
+    {
+        NSString *base = [windows stringByAppendingPathComponent:pass ? @"syswow64" : @"system32"];
+        const char * const *names = pass ? wow : sys32;
+        size_t count = pass ? sizeof(wow) / sizeof(wow[0]) : sizeof(sys32) / sizeof(sys32[0]);
+
+        for (size_t i = 0; i < count; i++)
+        {
+            NSString *dir = [base stringByAppendingPathComponent:[NSString stringWithUTF8String:names[i]]];
+            BOOL isDir = NO;
+            if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) { present++; continue; }
+            if ([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) made++;
+            else failed++;
+        }
+    }
+    dprintf(STDERR_FILENO, "[WineProc] wine.inf system folders: %d made, %d already there, %d failed\n",
+            made, present, failed);
+}
+
 static void madeira_link_syswow64_wbem(NSFileManager *fm, NSString *prefix, NSString *bundle)
 {
     madeira_link_wbem(fm, prefix, @"syswow64", [bundle stringByAppendingPathComponent:@"i386-windows"]);
@@ -2155,6 +2194,7 @@ static void *wine_process_thread(void *arg) {
                 madeira_seed_winsxs_x86(fm, prefix, bundlePath);
                 madeira_overlay_vcruntime32(fm, prefix);   /* VCRedist.swift's Microsoft x86 runtime */
             }
+            madeira_ensure_wine_inf_dirs(fm, prefix, has_i386_set);
             madeira_link_wine_mono(fm, prefix, bundlePath);
             madeira_link_wine_gecko(fm, prefix);
             if (madeira_d3d9_wined3d_wanted())
