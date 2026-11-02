@@ -48,6 +48,8 @@ enum LibraryGridFixed: Hashable {
     case note(id: String, text: String)
     case notInstalledToggle(count: Int, shown: Bool)
     case emptyLibrary
+    /// A store's own section (ItchGamesSection, EpicGamesSection, EAGamesSection); `signature` is what its height follows.
+    case store(LibraryGridStore, signature: String)
 
     var id: String {
         switch self {
@@ -59,8 +61,67 @@ enum LibraryGridFixed: Hashable {
         case .note(let id, _): return "note." + id
         case .notInstalledToggle: return "toggle.notInstalled"
         case .emptyLibrary: return "empty"
+        case .store(let store, _): return "store." + store.rawValue
         }
     }
+}
+
+/// The store sections the original page shows after Other games and Steam (itch.io, Epic Games, EA app). On the grid each one is
+/// a fixed element hosting the store's own section, its cards laid out by the section as on the original page.
+enum LibraryGridStore: String, CaseIterable {
+    case itch, epic, ea
+
+    @MainActor var enabled: Bool {
+        switch self {
+        case .itch: return ItchLibrary.enabled
+        case .epic: return EpicLibrary.enabled
+        case .ea: return EALibrary.enabled
+        }
+    }
+
+    /// What each shown section's height follows: its games (the search's and the installed or downloading ones), the sign-in,
+    /// the loaded library, its collapsed and Not installed switches and the layout. A change is a new element, measured again.
+    @MainActor static func signatures(search: String, layout: String) -> [LibraryGridStore: String] {
+        let defaults = UserDefaults.standard
+        func signature(signedIn: Bool, refreshing: Bool, loaded: Bool, mine: Int, all: Int, hide: String, shown: String) -> String {
+            "\(signedIn) \(refreshing) \(loaded) \(mine) \(all - mine) \(search.isEmpty) \(layout) "
+                + "\(defaults.bool(forKey: hide)) \(defaults.object(forKey: shown) as? Bool ?? true)"
+        }
+        var result: [LibraryGridStore: String] = [:]
+        if ItchLibrary.enabled {
+            let itch = ItchLibrary.shared, items = ItchGamesRules.items(itch, search: search)
+            result[.itch] = signature(signedIn: itch.signedIn, refreshing: itch.refreshing, loaded: itch.libraryUpdated != nil,
+                                      mine: items.filter { $0.installed != nil || itch.downloads[$0.id] != nil }.count, all: items.count,
+                                      hide: "madeiraLibraryHideItch", shown: "madeiraItchShowUninstalled")
+        }
+        if EpicLibrary.enabled {
+            let epic = EpicLibrary.shared, items = EpicGamesRules.items(epic, search: search)
+            result[.epic] = signature(signedIn: epic.signedIn, refreshing: epic.refreshing, loaded: epic.libraryUpdated != nil,
+                                      mine: items.filter { $0.installed != nil || epic.downloads[$0.id] != nil }.count, all: items.count,
+                                      hide: "madeiraLibraryHideEpic", shown: "madeiraEpicShowUninstalled")
+        }
+        if EALibrary.enabled {
+            let ea = EALibrary.shared, items = EAGamesRules.items(ea, search: search)
+            result[.ea] = signature(signedIn: ea.signedIn, refreshing: ea.refreshing, loaded: ea.libraryUpdated != nil,
+                                    mine: items.filter { $0.installed != nil || ea.downloads[$0.id] != nil }.count, all: items.count,
+                                    hide: "madeiraLibraryHideEA", shown: "madeiraEAShowUninstalled")
+        }
+        return result
+    }
+}
+
+/// The store sections' sheets, shared by the section that asks for one and the page that presents it (ItchSheets, EpicSheets,
+/// EASheets): the section itself on the original page, LibraryGridPage on the grid.
+@MainActor final class LibraryStoreSheets: ObservableObject {
+    static let shared = LibraryStoreSheets()
+    struct Game<ID: Hashable>: Identifiable { let id: ID }
+    @Published var itchGame: Game<Int>?
+    @Published var itchSignIn = false
+    @Published var itchFind = false
+    @Published var epicGame: Game<String>?
+    @Published var epicSignIn = false
+    @Published var eaGame: Game<String>?
+    @Published var eaSignIn = false
 }
 
 /// SteamGamesRules.items over the account's whole library, computed once per change of its inputs. A page build asks for it up
@@ -125,6 +186,8 @@ struct LibraryGridPageModel: Equatable {
         var hideInstalled: Bool
         var showUninstalled: Bool
         var collapsedGroups: String
+        /// The shown store sections and their signatures (LibraryGridStore.signatures).
+        var stores: [LibraryGridStore: String] = [:]
     }
 
     @MainActor static func build(_ inputs: Inputs) -> LibraryGridPageModel {
@@ -138,10 +201,17 @@ struct LibraryGridPageModel: Equatable {
             if LibraryGridSteamItems.shown {
                 page.othersSection(inputs)
                 if MadeiraDock.enabled { page.steamSection(inputs, part: steamFirst ? .notInstalled : .all) }
-            } else if LibraryModel.shared.entries.filter({ $0.desktop != true && $0.steamAppID == nil }).isEmpty {
+            } else if LibraryModel.shared.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil
+                                                            && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
                 page.append(.fixed(.emptyLibrary), spacing: LibraryGridGeometry.blockSpacing)
             } else {
                 page.grid("others", inputs.others, spacing: LibraryGridGeometry.blockSpacing)
+            }
+            // The stores' sections follow, as on the original page.
+            for store in LibraryGridStore.allCases {
+                if let signature = inputs.stores[store] {
+                    page.append(.fixed(.store(store, signature: signature)), spacing: LibraryGridGeometry.blockSpacing)
+                }
             }
         }
         return page
@@ -350,6 +420,7 @@ struct LibraryGridInputsKey: Hashable {
     var search: String, sort: String, group: String
     var hideOthers: Bool, hideInstalled: Bool, showUninstalled: Bool
     var collapsedGroups: String
+    var stores: [LibraryGridStore: String]
     var otherIDs: [UUID]
     var switches: [Bool]
     /// Sort by size reads the metadata, and sort by added orders by the entries a metadata change can create, so a
@@ -360,6 +431,7 @@ struct LibraryGridInputsKey: Hashable {
         search = i.search; sort = i.sort; group = i.group
         hideOthers = i.hideOthers; hideInstalled = i.hideInstalled; showUninstalled = i.showUninstalled
         collapsedGroups = i.collapsedGroups
+        stores = i.stores
         otherIDs = i.others.map(\.id)
         switches = [SteamGamesSection.collapsible, MadeiraDock.enabled, LibraryGridSteamItems.shown, SteamOwnedLibrary.enabled]
         metadataMovesCards = i.sort == "size" || i.sort == "added"
@@ -396,6 +468,16 @@ struct LibraryGridPage: View {
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var steamGames = SteamGamesModel.shared
     @ObservedObject private var steam = SteamOwnedLibrary.shared
+    // The store sections' models and switches: what LibraryGridStore.signatures reads, so a change rebuilds the page.
+    @ObservedObject private var itch = ItchLibrary.shared
+    @ObservedObject private var epic = EpicLibrary.shared
+    @ObservedObject private var ea = EALibrary.shared
+    @AppStorage("madeiraLibraryHideItch") private var hideItch = false
+    @AppStorage("madeiraItchShowUninstalled") private var showItch = true
+    @AppStorage("madeiraLibraryHideEpic") private var hideEpic = false
+    @AppStorage("madeiraEpicShowUninstalled") private var showEpic = true
+    @AppStorage("madeiraLibraryHideEA") private var hideEA = false
+    @AppStorage("madeiraEAShowUninstalled") private var showEA = true
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("madeiraLibraryHideInstalled") private var hideInstalled = false
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
@@ -409,11 +491,12 @@ struct LibraryGridPage: View {
     var body: some View {
         let inputs = LibraryGridPageModel.Inputs(search: search, sort: sort, group: group, others: others,
                                                  hideOthers: hideOthers, hideInstalled: hideInstalled,
-                                                 showUninstalled: showUninstalled, collapsedGroups: collapsedGroups)
+                                                 showUninstalled: showUninstalled, collapsedGroups: collapsedGroups,
+                                                 stores: group == "platform" ? LibraryGridStore.signatures(search: search, layout: layout) : [:])
         LibraryGridHostView(
             build: { LibraryGridPageModel.build(inputs) }, inputsKey: LibraryGridInputsKey(inputs),
             otherRevision: LibraryGridOtherChanges.shared.revision, layout: layout, position: position, focused: focused,
-            fixed: { fixedView($0) },
+            fixed: { fixedView($0, width: $1) },
             open: { card, page in activate(card, page) },
             landed: { newPosition, cardWidth in
                 position = newPosition
@@ -436,6 +519,10 @@ struct LibraryGridPage: View {
                 }
             }
             .sheet(isPresented: $showSignIn) { SteamSignInView() }
+            // The store sections' starts, sheets and alerts (their sections sit in the grid's cells).
+            .modifier(ItchSheets(open: open))
+            .modifier(EpicSheets(open: open))
+            .modifier(EASheets(open: open))
             .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
                 Button("OK", role: .cancel) { steam.error = nil }
             } message: { Text(steam.error ?? "") }
@@ -454,7 +541,7 @@ struct LibraryGridPage: View {
         }
     }
 
-    private func fixedView(_ fixed: LibraryGridFixed) -> AnyView {
+    private func fixedView(_ fixed: LibraryGridFixed, width: CGFloat) -> AnyView {
         switch fixed {
         case .desktop:
             return desktop()
@@ -474,6 +561,12 @@ struct LibraryGridPage: View {
             return AnyView(LibraryGridNotInstalledToggle(count: count))
         case .emptyLibrary:
             return AnyView(ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")))
+        case .store(.itch, _):
+            return AnyView(ItchGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
+        case .store(.epic, _):
+            return AnyView(EpicGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
+        case .store(.ea, _):
+            return AnyView(EAGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
         }
     }
 }

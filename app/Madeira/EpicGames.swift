@@ -63,13 +63,11 @@ struct EpicGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var epic = EpicLibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("madeiraLibraryHideEpic") private var hidden = false
     @AppStorage("madeiraEpicShowUninstalled") private var showUninstalled = true
-    @State private var selected: EpicSelection?
-    @State private var showSignIn = false
-
-    private struct EpicSelection: Identifiable { let id: String }
+    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EpicSheets (LibraryGridPage.swift).
+    var inGrid = false
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
         let items = EpicGamesRules.items(epic, search: search)
@@ -82,7 +80,7 @@ struct EpicGamesSection: View {
             }
             if !(hidden && collapsible) {
                 if !epic.signedIn {
-                    EpicSignInCard { showSignIn = true }
+                    EpicSignInCard { sheets.epicSignIn = true }
                 }
                 if !mine.isEmpty {
                     LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
@@ -109,19 +107,7 @@ struct EpicGamesSection: View {
                 }
             }
         }
-        // The library reappears after every session: downloads continue then.
-        .onAppear { epic.start(); epic.reconcileSession() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { epic.reconcileSession() } }
-        .sheet(item: $selected) { selection in
-            EpicGameSheet(appName: selection.id) { entry in
-                // Let the download sheet finish dismissing before presenting the details page.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-            }
-        }
-        .sheet(isPresented: $showSignIn) { EpicSignInView() }
-        .alert("Epic Games", isPresented: Binding(get: { epic.error != nil }, set: { if !$0 { epic.error = nil } })) {
-            Button("OK", role: .cancel) { epic.error = nil }
-        } message: { Text(epic.error ?? "") }
+        .modifier(EpicSheets(open: open, attached: !inGrid))
     }
 
     private func cell(_ item: EpicItem, list: Bool, dense: Bool) -> some View {
@@ -129,10 +115,42 @@ struct EpicGamesSection: View {
             if let installed = item.installed, epic.downloads[item.id] == nil {
                 open(library.epicEntry(installed))
             } else {
-                selected = EpicSelection(id: item.id)
+                sheets.epicGame = .init(id: item.id)
             }
         } label: { EpicGameCell(item: item, list: list, dense: dense) }
             .libraryCardButtonStyle(grid: !list)
+    }
+}
+
+/// What the Epic Games section's page owns: the library's start and its reconcile after every session, the download and
+/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
+/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+struct EpicSheets: ViewModifier {
+    let open: (LibraryEntry) -> Void
+    var attached = true
+    @ObservedObject private var epic = EpicLibrary.shared
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
+    @Environment(\.scenePhase) private var scenePhase
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if attached {
+            content
+            // The library reappears after every session: downloads continue then.
+            .onAppear { if EpicLibrary.enabled { epic.start(); epic.reconcileSession() } }
+            .onChange(of: scenePhase) { _, phase in if phase == .active && EpicLibrary.enabled { epic.reconcileSession() } }
+            .sheet(item: $sheets.epicGame) { selection in
+                EpicGameSheet(appName: selection.id) { entry in
+                    // Let the download sheet finish dismissing before presenting the details page.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
+                }
+            }
+            .sheet(isPresented: $sheets.epicSignIn) { EpicSignInView() }
+            .alert("Epic Games", isPresented: Binding(get: { epic.error != nil }, set: { if !$0 { epic.error = nil } })) {
+                Button("OK", role: .cancel) { epic.error = nil }
+            } message: { Text(epic.error ?? "") }
+        } else {
+            content
+        }
     }
 }
 

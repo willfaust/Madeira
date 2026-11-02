@@ -332,7 +332,7 @@ final class LibraryGridZoomStage {
     /// A stand-in in two halves: this makes the hosting controller and returns what loads and sets up the view, so the halves can run in different steps.
     private func makeHosting(_ item: Int, frame: CGRect) -> (() -> UIView)? {
         guard let host, let props = host.props, case .fixed(let id) = host.items[item], let fixed = host.fixedByID[id] else { return nil }
-        let hosting = UIHostingController(rootView: props.fixed(fixed).frame(width: frame.width, height: frame.height, alignment: .topLeading))
+        let hosting = UIHostingController(rootView: props.fixed(fixed, frame.width).frame(width: frame.width, height: frame.height, alignment: .topLeading))
         return {
             hosting.view.backgroundColor = .clear
             hosting.safeAreaRegions = []

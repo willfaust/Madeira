@@ -53,14 +53,11 @@ struct ItchGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var itch = ItchLibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("madeiraLibraryHideItch") private var hidden = false
     @AppStorage("madeiraItchShowUninstalled") private var showUninstalled = true
-    @State private var selected: ItchSelection?
-    @State private var showSignIn = false
-    @State private var showFind = false
-
-    private struct ItchSelection: Identifiable { let id: Int }
+    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches ItchSheets (LibraryGridPage.swift).
+    var inGrid = false
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
         let items = ItchGamesRules.items(itch, search: search)
@@ -73,7 +70,7 @@ struct ItchGamesSection: View {
             }
             if !(hidden && collapsible) {
                 if !itch.signedIn {
-                    Button { showSignIn = true } label: {
+                    Button { sheets.itchSignIn = true } label: {
                         HStack(spacing: 14) {
                             Image(systemName: "person.crop.circle.badge.plus").font(.system(size: 30)).foregroundStyle(.tint)
                             VStack(alignment: .leading, spacing: 4) {
@@ -95,7 +92,7 @@ struct ItchGamesSection: View {
                         .foregroundStyle(.secondary)
                 }
                 if itch.signedIn {
-                    Button { showFind = true } label: {
+                    Button { sheets.itchFind = true } label: {
                         HStack(spacing: 14) {
                             Image(systemName: "magnifyingglass.circle.fill").font(.system(size: 30)).foregroundStyle(.tint)
                             VStack(alignment: .leading, spacing: 4) {
@@ -128,23 +125,7 @@ struct ItchGamesSection: View {
                 }
             }
         }
-        .onAppear { itch.start(); itch.reconcileSession() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { itch.reconcileSession() } }
-        .sheet(item: $selected) { selection in
-            ItchGameSheet(gameID: selection.id) { entry in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-            }
-        }
-        .sheet(isPresented: $showSignIn) { ItchSignInView() }
-        .sheet(isPresented: $showFind) {
-            ItchFindView { id in
-                showFind = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { selected = ItchSelection(id: id) }
-            }
-        }
-        .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
-            Button("OK", role: .cancel) { itch.error = nil }
-        } message: { Text(itch.error ?? "") }
+        .modifier(ItchSheets(open: open, attached: !inGrid))
     }
 
     private func cell(_ item: ItchItem, list: Bool, dense: Bool) -> some View {
@@ -152,10 +133,48 @@ struct ItchGamesSection: View {
             if let installed = item.installed, itch.downloads[item.id] == nil {
                 open(library.itchEntry(installed))
             } else {
-                selected = ItchSelection(id: item.id)
+                sheets.itchGame = .init(id: item.id)
             }
         } label: { ItchGameCell(item: item, list: list, dense: dense) }
             .libraryCardButtonStyle(grid: !list)
+    }
+}
+
+/// What the itch.io section's page owns: the library's start and its reconcile after every session, the download and
+/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
+/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+struct ItchSheets: ViewModifier {
+    let open: (LibraryEntry) -> Void
+    var attached = true
+    @ObservedObject private var itch = ItchLibrary.shared
+    @ObservedObject private var sheets = LibraryStoreSheets.shared
+    @Environment(\.scenePhase) private var scenePhase
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if attached {
+            content
+            // The library reappears after every session: downloads continue then.
+            .onAppear { if ItchLibrary.enabled { itch.start(); itch.reconcileSession() } }
+            .onChange(of: scenePhase) { _, phase in if phase == .active && ItchLibrary.enabled { itch.reconcileSession() } }
+            .sheet(item: $sheets.itchGame) { selection in
+                ItchGameSheet(gameID: selection.id) { entry in
+                    // Let the download sheet finish dismissing before presenting the details page.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
+                }
+            }
+            .sheet(isPresented: $sheets.itchSignIn) { ItchSignInView() }
+            .sheet(isPresented: $sheets.itchFind) {
+                ItchFindView { id in
+                    sheets.itchFind = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheets.itchGame = .init(id: id) }
+                }
+            }
+            .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
+                Button("OK", role: .cancel) { itch.error = nil }
+            } message: { Text(itch.error ?? "") }
+        } else {
+            content
+        }
     }
 }
 

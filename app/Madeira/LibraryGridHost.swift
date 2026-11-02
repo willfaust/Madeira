@@ -21,7 +21,8 @@ struct LibraryGridHostView: UIViewControllerRepresentable {
     let layout: String
     let position: Double
     let focused: UUID?
-    let fixed: (LibraryGridFixed) -> AnyView
+    /// An element's view at the width it is laid out at (a store section lays its own cards out for it).
+    let fixed: (LibraryGridFixed, CGFloat) -> AnyView
     let open: (LibraryGridCard, LibraryGridPageModel) -> Void
     let landed: (Double, CGFloat) -> Void
 
@@ -135,7 +136,7 @@ final class LibraryGridHostController: UIViewController, UICollectionViewDelegat
         let fixedRegistration = UICollectionView.CellRegistration<LibraryGridHeldCell, String> { [weak self] cell, _, id in
             guard let self, let props = self.props, let fixed = self.fixedByID[id] else { return }
             cell.contentConfiguration = UIHostingConfiguration {
-                props.fixed(fixed).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                props.fixed(fixed, self.contentWidth).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }.margins(.all, 0)
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { collection, path, item in
@@ -777,7 +778,7 @@ final class LibraryGridHostController: UIViewController, UICollectionViewDelegat
         // handed the page's size (else a notice kept its old height and truncated).
         var typeSize = DynamicTypeSize.large
         if let category = DynamicTypeSize(traitCollection.preferredContentSizeCategory) { typeSize = category }
-        sizing.rootView = AnyView(props.fixed(fixed).environment(\.dynamicTypeSize, typeSize).frame(width: width, alignment: .leading))
+        sizing.rootView = AnyView(props.fixed(fixed, width).environment(\.dynamicTypeSize, typeSize).frame(width: width, alignment: .leading))
         let size = sizing.sizeThatFits(in: CGSize(width: width, height: 10_000))
         let height = ceil(max(1, size.height))
         fixedHeights[fixed] = (width, height)
