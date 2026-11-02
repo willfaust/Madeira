@@ -165,6 +165,14 @@ assert(LogSummary.facts(fromFileAt: logFile)!.processes.first?.exitCode == 1)
 assert(LogSummary.write(from: logFile, source: "madeira-log.txt (this session)"))
 let written = try! String(contentsOf: dir.appendingPathComponent(LogSummary.fileName), encoding: .utf8)
 assert(written.hasPrefix("=== Madeira session summary ===") && written.contains("v8.dll could not be loaded"))
+// Get Help from Claude: a summarized game session is also kept as madeira-last-game-log.txt,
+// and a later run with no game leaves it alone.
+let kept = dir.appendingPathComponent(LogSummary.gameLogName)
+assert(FileManager.default.contentsEqual(atPath: kept.path, andPath: logFile.path))
+try! "[10:00:00.000] [INFO] [build] v0.1.3 (5)\n".write(to: logFile, atomically: true, encoding: .utf8)
+assert(!LogSummary.write(from: logFile, source: "madeira-log.txt (no game)"))
+assert((try! String(contentsOf: kept, encoding: .utf8)).contains("v8.dll"))
+assert(LogSummary.write(from: kept, source: "kept") && FileManager.default.fileExists(atPath: kept.path))
 print("PASS: log summary finds fatal startup failures, the small JIT pool, the pool running out, out-of-memory and wrong-architecture DLLs, exit codes per program, Quit and Force close, and Madeira Dock's result")
 '''
 if not Path(SWIFTC).exists():

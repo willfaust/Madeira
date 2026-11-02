@@ -120,6 +120,7 @@
 		B1000061 /* AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000061 /* AppleSignIn.swift */; };
 		B1000041 /* libmadeira_rppairing.a in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000041 /* libmadeira_rppairing.a */; };
 		B1000004 /* madeira-jit.js in Resources */ = {isa = PBXBuildFile; fileRef = B2000004 /* madeira-jit.js */; };
+		B100CA02 /* Give-to-Claude-with-log-and-cfg.txt in Resources */ = {isa = PBXBuildFile; fileRef = B200CA02 /* Give-to-Claude-with-log-and-cfg.txt */; };
 		B1000051 /* Madeira JIT.shortcut in Resources */ = {isa = PBXBuildFile; fileRef = B2000051 /* Madeira JIT.shortcut */; };
 		B1000005 /* ExtensionFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000010 /* ExtensionFoundation.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 		B1000010 /* MadeiraJITHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000020 /* MadeiraJITHelper.swift */; };
@@ -178,6 +179,7 @@
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1009C01 /* GameSetupShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C01 /* GameSetupShare.swift */; };
 		A1009C04 /* SteamAchievements.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C04 /* SteamAchievements.swift */; };
+		A100CA01 /* ClaudeHelp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA01 /* ClaudeHelp.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
@@ -398,6 +400,7 @@
 		B2000041 /* libmadeira_rppairing.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libmadeira_rppairing.a; sourceTree = "<group>"; };
 		B2000042 /* MadeiraRPPairing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MadeiraRPPairing.h; sourceTree = "<group>"; };
 		B2000004 /* madeira-jit.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "madeira-jit.js"; sourceTree = "<group>"; };
+		B200CA02 /* Give-to-Claude-with-log-and-cfg.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Give-to-Claude-with-log-and-cfg.txt"; sourceTree = "<group>"; };
 		B2000051 /* Madeira JIT.shortcut */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Madeira JIT.shortcut"; sourceTree = "<group>"; };
 		B2000010 /* ExtensionFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ExtensionFoundation.framework; path = System/Library/Frameworks/ExtensionFoundation.framework; sourceTree = SDKROOT; };
 		B2000020 /* MadeiraJITHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraJITHelper.swift; sourceTree = "<group>"; };
@@ -460,6 +463,7 @@
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2009C01 /* GameSetupShare.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSetupShare.swift; sourceTree = "<group>"; };
 		A2009C04 /* SteamAchievements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamAchievements.swift; sourceTree = "<group>"; };
+		A200CA01 /* ClaudeHelp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHelp.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
@@ -691,6 +695,7 @@
 				A2000990 /* GameIniFiles.swift */,
 				A2009C01 /* GameSetupShare.swift */,
 				A2009C04 /* SteamAchievements.swift */,
+				A200CA01 /* ClaudeHelp.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
@@ -735,6 +740,7 @@
 				B2000061 /* AppleSignIn.swift */,
 				B2000042 /* MadeiraRPPairing.h */,
 				B2000004 /* madeira-jit.js */,
+				B200CA02 /* Give-to-Claude-with-log-and-cfg.txt */,
 				B2000051 /* Madeira JIT.shortcut */,
 				A2000021 /* nls */,
 				A2000033 /* aarch64-windows */,
@@ -972,6 +978,7 @@
 				A1009C03 /* Localizable.xcstrings in Resources */,
 				A1000910 /* Assets.xcassets in Resources */,
 				B1000004 /* madeira-jit.js in Resources */,
+				B100CA02 /* Give-to-Claude-with-log-and-cfg.txt in Resources */,
 				B1000051 /* Madeira JIT.shortcut in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1139,6 +1146,7 @@
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1009C01 /* GameSetupShare.swift in Sources */,
 				A1009C04 /* SteamAchievements.swift in Sources */,
+				A100CA01 /* ClaudeHelp.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,

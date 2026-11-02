@@ -383,11 +383,28 @@ enum LogSummary {
         let out = log.deletingLastPathComponent().appendingPathComponent(fileName)
         do {
             try text(f, source: source).write(to: out, atomically: true, encoding: .utf8)
+            keepGameLog(log)
             return true
         } catch {
             fputs("[log-summary] could not write \(fileName): \(error.localizedDescription)\n", stderr)
             return false
         }
+    }
+
+    /// Documents/madeira-last-game-log.txt: a copy of the last log that had a game
+    /// session in it, which Get Help from Claude shares (ClaudeHelp.swift). Without
+    /// it, opening Madeira twice after a game leaves only logs with no game in them.
+    static let gameLogName = "madeira-last-game-log.txt"
+    static func keepGameLog(_ log: URL) {
+        guard log.lastPathComponent != gameLogName else { return }
+        let fm = FileManager.default
+        let target = log.deletingLastPathComponent().appendingPathComponent(gameLogName)
+        let temp = log.deletingLastPathComponent().appendingPathComponent(gameLogName + ".part")
+        try? fm.removeItem(at: temp)
+        guard (try? fm.copyItem(at: log, to: temp)) != nil else { return }
+        // The copy is complete before it takes the old one's place.
+        try? fm.removeItem(at: target)
+        if (try? fm.moveItem(at: temp, to: target)) == nil { try? fm.removeItem(at: temp) }
     }
 
     /// In the background: logs never block the UI.

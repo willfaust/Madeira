@@ -1,0 +1,354 @@
+MADEIRA HELP GUIDE FOR CLAUDE
+Give this file to Claude together with your log and your cfg.
+Updated 2026-11-02.
+
+==========================================================================
+0. FOR THE PERSON
+==========================================================================
+Right after the game goes wrong, open its page in Madeira and tap "Get
+Help from Claude" at the bottom. Pick the Claude app, start a new chat
+and say what went wrong. That's it.
+
+==========================================================================
+1. FOR CLAUDE: READ THIS FIRST
+==========================================================================
+The person is NOT technical. They tapped one button and want their game
+to work. Everything after this section is reference for you, not for
+them. Never paste it, explain it, or use its words (JIT pool, FEX, Wine,
+DXMT, bitness, prefix, env lines) unless they ask.
+
+How to reply, every time:
+- Short. Under about 120 words. No headings, no tables, no theory.
+- First reply: one sentence saying what you think is wrong, in plain
+  words ("The game runs out of memory while it loads."). Then ONE fix.
+- A fix is numbered tap-by-tap steps in Madeira: which page, which
+  button, what to pick. If it needs config lines, give them in one code
+  block and say: "Open your game's page > Advanced > This game's config,
+  paste these lines at the end, tap Done, then play again."
+- End with: "Try it and tap Get Help from Claude again if it still
+  fails." Then wait for the new log.
+- One change per try. Never give a list of options to choose from.
+- Never ask them to read the log, find a file or type commands, unless
+  there is no other way.
+
+When settings can't fix it:
+- The cause is in Madeira's code, the game is known broken (section 7),
+  or 3 tries have failed. Then stop suggesting settings.
+- Tell them in one or two sentences: "This needs a fix inside Madeira.
+  I've written a note for the Madeira team. Post it in the Madeira
+  Discord (https://discord.gg/4t5mNjwCn7) with your log files." Then
+  give the DEVELOPER HANDOFF from section 10, in one code block they
+  can copy. Never give the person code to change themselves, and never
+  tell them to change Madeira's code or open pull requests.
+
+Never suggest: deleting or reinstalling Madeira (their games and saves
+are inside it and would be lost), cracking or removing DRM, or editing
+Steam's files. Don't promise it will work.
+
+Check you have the right logs first. The game file's line "Game in
+the shared summary and last game log" must be this game, and the logs
+must show it starting. If not, reply only: "These logs don't include
+your game. Play it once until it goes wrong, then open its page and
+tap Get Help from Claude again before closing Madeira."
+
+How to work it out (for you):
+- Read madeira-summary.txt first, then search madeira-last-game-log.txt
+  (the last run with a game) or madeira-log.txt (this run) for the tags
+  in section 6. The
+  "[build] ..." line near the top says which build they have; an older
+  build may lack a fix listed here (section 8).
+- Check whether the game is 32- or 64-bit (the game file says "Bits")
+  before choosing memory lines (section 5).
+- Start from the closest working game in section 7. Keep the lines that
+  are already in their config unless one of them is the problem.
+- A madeira.cfg change only applies after closing Madeira from the app
+  switcher and opening it again; the game's own config applies at the
+  game's next start. Prefer the game's own config.
+
+==========================================================================
+2. HOW SETTINGS WORK (three layers, later wins)
+==========================================================================
+1. Documents/madeira.cfg: global. "key = value", "# comment", last line
+   wins. "env.NAME = value" is exported as an environment variable before
+   Wine starts. "dxmt = a=b;c=d" is DXMT's option string. Settings screens
+   write this file; Settings > All settings lists every key (~670).
+2. The game's switches on Game details (Display, Controls, Launch,
+   Compatibility, Steam pages). Exported for that launch only.
+3. This game's config (Game details > Advanced). Same syntax as
+   madeira.cfg; its keys and env lines win over both layers above.
+- About 114 keys are app-side and only read from madeira.cfg ("global" in
+  All settings): desktop-size, real-suspend, every env.MADEIRA_DOCK_*
+  switch, env.MADEIRA_PROMOTE, store switches. Put those in madeira.cfg.
+- Many games get a built-in recommended list the first time (matched by
+  Steam App ID, folder or exe). "Reset to Recommended" at the bottom of
+  Game details puts it back. Games without a list get the standard line
+  "env.MADEIRA_EC_HOOK_TRACE = 0"; keep it (with the hook trace on, many
+  games closed at start).
+- Confirm a setting took effect in the log: "[game-cfg] key=value" (the
+  game's lines), "[madeira-env] game NAME=value", "[madeira-env] ml1062
+  NAME=value" (from madeira.cfg), "JIT pool overridden to N MB via ...".
+
+==========================================================================
+3. LAUNCH MODES (Game details > Launch, Steam page)
+==========================================================================
+- Directly (default): the game is Wine's first process, no desktop. Right
+  for one DirectX game exe that draws its own 3D window.
+- In the Wine desktop: needed for launchers, installers, Chromium/CEF
+  clients, .NET/Java UI tools, .bat files, and any launcher that starts
+  the game and exits. BLACK SCREEN "Directly" but fine on the desktop is
+  the classic sign: direct mode never draws full-size ordinary windows.
+- Wine ends when its first process exits. A launcher stub that starts the
+  real game and quits ends the session when started Directly: use the
+  desktop, or env.MADEIRA_WAIT_CHILDREN = 1 (direct mode only).
+- Start Windows services first: for Rockstar, Ubisoft Connect, Battle.net
+  and installers with services or msiexec actions, or when the log shows
+  \pipe\svcctl missing / RPC error 1722. Only works with the desktop.
+- Steam games: Steam page > Start with: Madeira Dock (default, needed for
+  DRM/Steamworks games) or The game (DRM-free only). If the summary says
+  "The game started Steam and closed itself", use Madeira Dock.
+- A small window stays small on the desktop: pick fullscreen or a higher
+  resolution in the game; env.MADEIRA_DIRECT_WINDOW_SIZE = 1 resizes a
+  direct-mode window to the chosen resolution.
+
+==========================================================================
+4. GAME DETAILS SWITCHES WORTH KNOWING
+==========================================================================
+Compatibility page:
+- AVX and AVX2: for 64-bit games that quit with c000001d (illegal
+  instruction). 32-bit games have no AVX at all.
+- Reduced-precision x87: Automatic by default; old 32-bit games run at
+  full speed with it.
+- Older NVIDIA card (Direct3D 9): D3D9 sees a GeForce 7900 GS. Fixed
+  Fallout 3/New Vegas saves not loading, Batman Arkham City's launcher
+  hand-off, Black Ops 1.
+- Graphics card the game sees / Report an NVIDIA GPU: for games that
+  reject the Apple GPU or need NVIDIA extensions.
+- Pause threads fully: Automatic turns it on for Unity IL2CPP games
+  (GameAssembly.dll); On fixes some loading crashes.
+- CPU cores reported, Large memory reservations (64 GB+ requests),
+  Wine's C++ runtime instead of the game's.
+Steam page: Smaller JIT pool for Dock, One-time installs (Run / Skip;
+Skip fixes a hang on the .NET 3.5 web installer), Steam starts (pick the
+exe Steam launches), game version (betas), Steam Cloud.
+Display: resolution, FPS limit, MetalFX (D3D11/12), frame generation.
+Controls: controller mode, touch controls, gyro. Audio crackle:
+env.MADEIRA_AUDIO_LEAD_MS = 150 (default 60).
+Global Settings > Graphics: Direct3D 9 = DXMT / native frontend for
+32-bit (d3d9 = native) / wined3d; D3D11 DXMT or DXVK; D3D12
+madeira-d3d12 or vkd3d (experimental); Vulkan driver. Memory: JIT pool
+size (pool), video memory (vram-mb), swap tier (swap-mb).
+
+==========================================================================
+5. MEMORY AND THE JIT POOL (read the bitness first)
+==========================================================================
+The JIT pool is the memory all running code comes from. Default 896 MB,
+but iOS often gives less (300-630 MB) because the main thread's stack
+splits the free space. Summary: "The JIT pool ... got N MB". Log: "SMALL JIT
+POOL" / "no hole fits". Full pool: "[jit-pool] ... EXHAUSTED want=" and
+then a DLL fails with c0000017 (out of memory).
+
+64-bit games (pill "64", PE machine 0x8664). The standard fix set:
+  pool = 896
+  pool-split = 1
+  env.MADEIRA_X64_IMAGE_NOCOPY = 1
+  env.MADEIRA_EC_HOOK_TRACE = 0
+pool-split joins the space above the stack (~880 MB). NOCOPY runs x64
+images in place instead of copying them into the pool (frees hundreds of
+MB). Bigger worlds that hit the iOS memory kill: swap tier, e.g.
+  swap-mb = 8192
+  swap-mode = 2
+  env.MADEIRA_SWAP_MIN_KB = 64
+  swap-images = 1
+  vram-mb = 1024
+A late Steam DLL (steamclient64.dll) failing with no memory: try
+env.MADEIRA_POOL_HEAD_RESERVE_MB = 192.
+
+32-bit games (pill "32", PE 0x14c; also .NET "AnyCPU" exes). Each 32-bit
+process gets its own 4 GB window; 32-bit code never copies into the pool.
+- NOCOPY, pool-low, POOL_*_IMAGES, AVX: no effect. SC_PA_POOLS and
+  RDR2_VA_HOLD are HARMFUL (they take the space 32-bit windows need).
+- "Madeira can start only one 32-bit program per session" or
+  "[exec-recover] ... mprotect_rx=-1(errno=13)": iOS refused a second
+  32-bit program's code. Launchers that start a 32-bit game are fragile;
+  try starting the game exe itself.
+- "[wow-window] refused: map too small" / "no free 4GB-aligned slot": no
+  room for another 32-bit window; remove any 64-bit Chromium lines.
+- Unity/old Mono 32-bit games with their own mono.dll that loop or crash
+  in Mono: env.MADEIRA_WOW_RWX_PLAIN = 1.
+
+Managed runtimes:
+- .NET Framework (mscoree): needs Wine Mono (Settings > .NET Framework).
+- .NET 7+ self-contained (coreclr.dll):
+    env.DOTNET_GCRegionRange = 400000000
+    env.DOTNET_EnableWriteXorExecute = 0
+- Java: env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC (ZGC needs terabytes)
+- IE engine pages (mshtml/ieframe, e.g. FFXIV launcher, EA installer):
+  needs Wine Gecko (Settings > Web pages in programs).
+
+Chromium/CEF (libcef.dll, *webhelper*.exe, --type= children): check the
+Chromium's own bitness. 64-bit: desktop (+ services for store launchers)
+and the 64-bit set plus pool-low = 1, pool-page-fit = 1,
+env.MADEIRA_SC_PA_POOLS = 2, env.MADEIRA_LOCK_ORPHAN = stamped. 32-bit
+(Ubisoft Connect): none of those; env.MADEIRA_WOW_PLACEHOLDERS = 1.
+Never set env.MADEIRA_FREE_DELAY_MS for Chromium programs, never put them
+in env.MADEIRA_SMALL_STACK_EXES.
+
+==========================================================================
+6. READING THE LOG
+==========================================================================
+[build]                  which build is installed
+[library] ml1163 start=direct/desktop ...   how the game page launched it
+[game-cfg], [madeira-env]   which settings applied (section 2)
+JIT pool: RX=... size=   pool actually reserved
+[jit-pool] EXHAUSTED     pool full: pool-split / NOCOPY (sec 5)
+[dll-missing] status=c0000017   out of memory loading a DLL
+[dll-missing] other status   DLL not found (summary hides harmless ones)
+[dock-launch] [dock-report] k=v [dock-start-program] [steam-env]
+                         Madeira Dock and Steam's answer
+[WineProc] the main process exited while ... (steam.exe)
+                         the game needs Steam: use Madeira Dock
+[exit-report] status=    Windows exit status of the first program
+wine: Unhandled page fault ... at address X   a crash (summary names it)
+c000001d                 illegal instruction: try AVX and AVX2 (64-bit)
+c0000005                 access violation; read the lines before it
+c0000018 "failed to create main module"   the exe must load at a fixed
+                         address that is taken (see Persona 4 Golden)
+[wow-window] [exec-recover]   32-bit window / 2nd 32-bit program (sec 5)
+[x64-image] [wow-rwx]   NOCOPY and RWX-as-plain-memory paths
+[redeliv] 2000           a fault repeated until it was unrecoverable
+[swap]                   swap tier fired
+[thermal] [thermal-cap]  device heat; FPS drops after minutes = heat
+[bg-run]                 background running
+[wine-mono] [wine-gecko] Wine Mono / Gecko installs
+Usually harmless: thousands of [xp] lines, fixme: lines, missing
+winemac.drv / winex11.drv / kerberos.dll / renderdoc.dll / video64.dll.
+
+Steam / Dock results:
+- "Steam launch: refused, error N" in the summary, or code 49 on every
+  launch after the first: Repair installed files once.
+- CEG (old Activision/2K Steam DRM) "Fail=2": the prefix lacks empty
+  folders C:\windows\system32\mui and C:\windows\syswow64\mui. Make
+  them (Desktop > Start > Run: cmd, then "mkdir C:\windows\system32\mui"
+  and "mkdir C:\windows\syswow64\mui"). Code 53 afterwards = data
+  corruption: Repair installed files.
+- Stuck on a black Steam window when a game starts another game
+  (campaign <-> zombies): needs a build with the Dock steam://run
+  hand-off.
+- "Steam Cloud full" blocking Play, HTTP 401 on downloads, DLC missing,
+  Steam re-installing redistributables before every launch: fixed in
+  newer builds; ask them to update Madeira.
+
+==========================================================================
+7. GAMES: STATUS AND WHAT WORKED (device-tested unless noted)
+==========================================================================
+Format: game (Steam App ID, bits): status. What to set.
+- Counter-Strike 2 (730, 64): works. 64-bit set (sec 5); launch option
+  -insecure.
+- Slay the Spire 2 (2868840, 64, .NET 9): works. 64-bit set + both
+  DOTNET lines.
+- Stardew Valley (413150, 64): works with defaults.
+- Terraria (105600, 32): works with defaults.
+- Project Zomboid (108600, 64, Java): works (menu ~2.5 min).
+  env._JAVA_OPTIONS = -XX:-UseZGC -XX:+UseG1GC; built-in list v4.
+- The Escapists 2 (641990, 32 Unity): works. env.MADEIRA_WOW_RWX_PLAIN = 1
+- Megabonk (Unity IL2CPP): works; Pause threads fully Automatic/On.
+- Fallout: New Vegas (22380, 32, D3D9): works full speed. Older NVIDIA
+  card ON. Slow (~15 FPS) or bad gunshot audio = an older build without
+  x87 Automatic. Fallout 3: same list.
+- Call of Duty: Black Ops (42700, 32, D3D9): works through Dock. Older
+  NVIDIA card ON, resolution 1280x720, needs the CEG mui folders (sec 6).
+  2 FPS = a build without the D3D9 index copy fix (code fix, handoff).
+- Call of Duty: Black Ops II (202970 / 212910 zombies / 202990 MP, 32):
+  works incl. campaign <-> Zombies switch. env.MADEIRA_AUDIO_LEAD_MS = 150
+- Modern Warfare 2 (2009) (10180, 32): campaign works, defaults.
+- Black Ops III (64): starts, then dies on int3 in a syscall stub table.
+  Needs a loader fix in Madeira (handoff).
+- Batman: Arkham City GOTY (200260, 32): works. Older NVIDIA card ON
+  (stops the BmLauncher hand-off); if the session still closes,
+  env.MADEIRA_WAIT_CHILDREN = 1. Stuck at Dock: One-time installs: Skip.
+- Garry's Mod (4000): multiplayer works on Steam version (beta) x86-64,
+  64-bit set, launch option -nochromium. Default 32-bit branch's Chromium
+  menu is broken.
+- Grounded (64, UE4): main menu works; world load can hit the 8 GB memory
+  kill. 64-bit set + swap lines (sec 5), Low graphics.
+- Dark Souls III (64): built-in list (pool-split, NOCOPY,
+  env.MADEIRA_LOCK_ORPHAN = stamped, early pad slot). Seamless Co-op mod
+  launcher: not supported yet (handoff).
+- Borderlands 2 (49520): CEG code 53 even with the mui folders comes
+  from a Steam download bug fixed in newer builds; update Madeira, then
+  Repair installed files. Launch option -NoLauncher.
+- Persona 4 Golden (1113000, 64): cannot start. The ~889 MB exe has no
+  relocations and must sit where iOS puts the main stack (c0000018). No
+  settings fix; don't lower pool. Known Madeira issue.
+- GTA V Enhanced (Epic): Rockstar launcher draws, then a "buy" page.
+  Desktop + services, gta5e-other list. Not solved yet.
+- Red Dead Redemption 2, Ghost of Tsushima, God of War, Horizon Zero Dawn,
+  GTA V Enhanced (Steam), Dark Souls Remastered: built-in lists from the
+  Madeira team; Reset to Recommended first.
+- itch.io zips that hold a .7z ("could not tell which program starts
+  this game"): unpack the .7z by hand and add the exe with +.
+- Xbox Game Pass PC games: no path (DRM). Use the Steam version.
+- Reported broken by players (untested; check the Discord for news):
+  Silksong cutscenes, Portal 2 pad, NFS Most Wanted 2012,
+  Outlast, Minecraft Dungeons, BeamNG, TF2, Kingdom Hearts 1.5+2.5,
+  Astroneer, BF Bad Company 2, Dark Souls II, Undertale, Cyberpunk 2077,
+  MapleStory, Civ VI, Burnout Paradise, Diablo II Resurrected.
+
+Stores and launchers:
+- Steam via Madeira Dock: works (DLC, betas, Workshop, Cloud). Epic:
+  works. itch.io: works. Other stores' games: install them in the Wine
+  desktop and add the exe with +.
+- Battle.net: home page works on its built-in list (desktop + services).
+- Ubisoft Connect (32-bit Chromium!), Rockstar, FFXIV launchers: built-in
+  lists where present, still being fixed.
+
+==========================================================================
+8. BUILDS AND WHERE TO GET HELP
+==========================================================================
+- The "[build]" line says which Madeira build they run. If a fix above
+  is missing in it, the first step is updating Madeira to the newest
+  release.
+- Problems settings can't fix go to the Madeira Discord:
+  https://discord.gg/4t5mNjwCn7 . The person posts the handoff
+  (section 10) and the files from Get Help from Claude there. Don't
+  send them anywhere else (no GitHub issues, no email).
+- Other projects run Windows games on phones and their notes can help
+  you reason, but only give settings that exist in Madeira (sections
+  2-5); never point the person to another app.
+
+==========================================================================
+9. FIRST QUESTIONS FOR AN UNKNOWN GAME
+==========================================================================
+1. Bitness (pill or PE header) and every program in the chain.
+2. Graphics API (d3d9/d3d11/d3d12/opengl/vulkan imports).
+3. Does it need the desktop (launcher, installer, black screen directly)?
+   Services (store launcher, installer)?
+4. Chromium/CEF or IE engine? .NET, Java, Unity IL2CPP or Mono?
+5. Start from the closest working game in section 7, change one thing at
+   a time, and check [game-cfg] in the next log before drawing
+   conclusions.
+6. If nothing works, or the cause is in Madeira's code, write the
+   developer handoff in section 10.
+
+==========================================================================
+10. DEVELOPER HANDOFF (when a code fix is needed)
+==========================================================================
+Write it as one block the person can copy, with exact log lines. The
+developer reads it with no other context. The person posts it in the
+Madeira Discord (https://discord.gg/4t5mNjwCn7) together with the files
+from Get Help from Claude. Template:
+
+  MADEIRA HANDOFF
+  Game: <title>, store <Steam/GOG/Epic/itch/EA>, App ID <id>
+  Exe: <C:\path\game.exe>, <32/64>-bit, API <d3d9/d3d11/d3d12/gl/vk>
+  Build: <the [build] line>   Device: <model>, iOS <version>
+  Symptom: <what the person sees, and when>
+  Settings tried: <each change and its result, in order>
+  Cfg now: <this game's config lines>
+  Evidence: <3-10 exact log lines with their tags, and summary lines>
+  Diagnosis: <what you think fails, which layer (Wine/ntdll, FEX,
+    DXMT/madeira-d3d12, Dock/Steam, app), and how sure you are>
+  Similar known fix: <a fix from sections 6-7, if any>
+  Suggested change: <where in the code and what, in words; mark it as a
+    guess when it is one>
+  Next test: <what log line would prove the fix worked>
