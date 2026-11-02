@@ -84,8 +84,14 @@ check(library.count('ClaudeHelpButton(entry: entry)') == 1 and library.count('Cl
       'Game details (with the game) and Settings > Diagnostics (without one) offer Get Help from Claude')
 check('GameProfile(windowsPath: entry.windowsPath).text' in helper and 'LibraryPrefs.sharedSwitches(entry.windowsPath)' in helper,
       "the game's file holds its own config and its Game details switches")
-for log in ('LogSummary.fileName', '"madeira-log.txt"', '"madeira-log.prev.txt"', 'MadeiraConfig.fileName'):
+for log in ('LogSummary.fileName', 'LogSummary.gameLogName', '"madeira-log.txt"', 'MadeiraConfig.fileName'):
     check(log in helper, f'the share includes {log}')
+summary = (app / 'LogSummary.swift').read_text(encoding='utf-8')
+check('static let gameLogName = "madeira-last-game-log.txt"' in summary and
+      summary.index('keepGameLog(log)') < summary.index('static func writeLater'),
+      'every summary of a game session also keeps that log as madeira-last-game-log.txt')
+check('Game in the shared summary and last game log' in helper and 'Game in' in guide,
+      "the game file says which game the shared logs are from, and the guide checks it")
 check('"controls", "zones"' in helper, 'touch layouts are left out of the game file (long, unrelated)')
 
 print('PASS' if failures == 0 else f'FAIL ({failures})')

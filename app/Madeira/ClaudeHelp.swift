@@ -78,7 +78,9 @@ enum ClaudeHelp {
             out.append(cfgCopy)
         }
         // The logs are shared where they are: they can be tens of MB.
-        for log in [LogSummary.fileName, "madeira-log.txt", "madeira-log.prev.txt"] {
+        // The last log with a game in it, then this run's log (a session may be
+        // running or just ended). madeira-log.prev.txt is often a run with no game.
+        for log in [LogSummary.fileName, LogSummary.gameLogName, "madeira-log.txt"] {
             let url = docs.appendingPathComponent(log)
             if fm.fileExists(atPath: url.path) { out.append(url) }
         }
@@ -95,6 +97,7 @@ enum ClaudeHelp {
         ]
         if let appID = entry.steamAppID { lines.append("# Steam App ID: \(appID)") }
         lines.append("# Madeira build: \(BuildStamp.text)")
+        lines.append("# Game in the shared summary and last game log: \(lastProgram() ?? "none yet")")
         lines.append("")
         lines.append("## This game's config (Game details > Advanced > This game's config)")
         let config = GameProfile(windowsPath: entry.windowsPath).text
@@ -110,6 +113,13 @@ enum ClaudeHelp {
             lines.append(json(fields.filter { !skippedEntryKeys.contains($0.key) }) ?? "(could not be read)")
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// The "Program:" line of madeira-summary.txt: which game the shared logs are from.
+    static func lastProgram() -> String? {
+        guard let docs = documents,
+              let text = try? String(contentsOf: docs.appendingPathComponent(LogSummary.fileName), encoding: .utf8) else { return nil }
+        return text.split(separator: "\n").first { $0.hasPrefix("Program: ") }.map { String($0.dropFirst("Program: ".count)) }
     }
 
     private static func json(_ value: [String: Any]) -> String? {

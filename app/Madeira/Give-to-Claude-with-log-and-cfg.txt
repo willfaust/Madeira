@@ -5,8 +5,9 @@ Updated 2026-11-02.
 ==========================================================================
 0. FOR THE PERSON
 ==========================================================================
-Tap "Get Help from Claude" at the bottom of your game's page in Madeira,
-send everything to a new Claude chat, and say what went wrong. That's it.
+Right after the game goes wrong, open its page in Madeira and tap "Get
+Help from Claude" at the bottom. Pick the Claude app, start a new chat
+and say what went wrong. That's it.
 
 ==========================================================================
 1. FOR CLAUDE: READ THIS FIRST
@@ -42,9 +43,16 @@ Never suggest: deleting or reinstalling Madeira (their games and saves
 are inside it and would be lost), cracking or removing DRM, or editing
 Steam's files. Don't promise it will work.
 
+Check you have the right logs first. The game file's line "Game in
+the shared summary and last game log" must be this game, and the logs
+must show it starting. If not, reply only: "These logs don't include
+your game. Play it once until it goes wrong, then open its page and
+tap Get Help from Claude again before closing Madeira."
+
 How to work it out (for you):
-- Read madeira-summary.txt first, then search madeira-log.txt (or
-  madeira-log.prev.txt after a crash) for the tags in section 6. The
+- Read madeira-summary.txt first, then search madeira-last-game-log.txt
+  (the last run with a game) or madeira-log.txt (this run) for the tags
+  in section 6. The
   "[build] ..." line near the top says which build they have; several
   forks exist (section 8), so a fix listed here may not be in theirs.
 - Check whether the game is 32- or 64-bit (the game file says "Bits")
