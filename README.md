@@ -89,7 +89,6 @@ and some inputs that are not in the repository, such as the toolchains.
 git clone --recurse-submodules <this repo>
 cd Madeira
 ./tools/build-ipa.sh   # produces dist/Madeira.ipa
-```
 
 See [`BUILDING.md`](BUILDING.md) for prerequisites, timing, and re-run notes.
 
