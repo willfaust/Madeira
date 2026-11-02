@@ -50,7 +50,7 @@ library entries but have no EA app section.
 EA serves a build as one zip archive on its CDN, often tens of gigabytes.
 Madeira reads the archive's table of contents from its tail with range requests
 (Zip64 included), then fetches each file's bytes with its own range request and
-inflates them straight into `drive_c/Program Files/EA Games/<folder>`, checking
+inflates them (with Madeira's own DEFLATE decoder, `EAInflate`) straight into `drive_c/Program Files/EA Games/<folder>`, checking
 the CRC-32 the archive records. Nothing of the archive is stored whole. Paths
 are checked against the game's folder. Each file is written to a temporary name
 and then renamed into place. Free space is checked before any file is fetched.
@@ -132,7 +132,8 @@ and the EA app's environment come from the account.
 and checks it: AES against Python's `cryptography`, the service's session key
 against the C runtime's `rand()`, the machine hash against `hashlib` for every
 version, `pc_sign`'s signature, LSX documents, installerdata.xml, licence files
-and zip directories (plain and Zip64) written by Python.
+zip directories (plain and Zip64) written by Python, and the DEFLATE decoder
+against zlib for every block type, fed whole and a few bytes at a time.
 
 `python3 tests/host/check-ea-store.py` runs static checks: licence headers,
 every EA source in the Xcode project, the device-only Keychain item, no token or

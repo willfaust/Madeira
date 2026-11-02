@@ -206,6 +206,26 @@ case "zip":
         let headerLength = EAZipDirectory.localHeaderLength(data.subdata(in: Int(entry.localHeaderOffset)..<Int(entry.localHeaderOffset) + 30)) ?? -1
         print("\(entry.name)\t\(entry.crc32)\t\(entry.method)\t\(entry.compressedSize)\t\(entry.uncompressedSize)\t\(entry.localHeaderOffset)\t\(headerLength)")
     }
+case "inflate":
+    // inflate <raw deflate file> <piece size> <output file>: feeds the stream in pieces,
+    // writes what came out, prints "finished=<0|1>" or "error=<reason>".
+    let input = try! Data(contentsOf: URL(fileURLWithPath: args.dropFirst().first!))
+    let piece = max(1, Int(args.dropFirst(2).first!)!)
+    var inflate = EAInflate()
+    var output = Data()
+    var offset = 0
+    do {
+        repeat {
+            let end = min(input.count, offset + piece)
+            output.append(contentsOf: try inflate.feed(input[offset..<end]))
+            offset = end
+        } while offset < input.count
+        try! output.write(to: URL(fileURLWithPath: args.dropFirst(3).first!))
+        print("finished=\(inflate.finished ? 1 : 0)")
+    } catch {
+        try! output.write(to: URL(fileURLWithPath: args.dropFirst(3).first!))
+        print("error=\(error)")
+    }
 default:
     print("unknown command"); exit(2)
 }

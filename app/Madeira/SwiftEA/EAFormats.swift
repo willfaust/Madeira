@@ -572,6 +572,208 @@ struct EACRC32 {
     var checksum: UInt32 { value ^ 0xFFFF_FFFF }
 }
 
+/// A raw DEFLATE decoder (RFC 1951) that takes its input in pieces as they arrive:
+/// each `feed` decodes what it can and keeps the unfinished symbol or block header for
+/// the next piece. Madeira's own, so a zip entry inflates the same way on the device
+/// and in the host checks. Build 64 showed the system decoder (Compression,
+/// COMPRESSION_ZLIB, fed in pieces) returning some entries short.
+struct EAInflate {
+    enum Failure: Error, Equatable { case bad(String) }
+
+    /// A canonical Huffman code as a lookup on its next `bits` input bits, bit-reversed:
+    /// each entry is symbol << 5 | code length (length 0: no such code).
+    private struct Table {
+        var entries: [UInt32]
+        var bits: Int
+        init(lengths: [Int]) throws {
+            let maxLength = lengths.max() ?? 0
+            bits = max(maxLength, 1)
+            entries = [UInt32](repeating: 0, count: 1 << bits)
+            var count = [Int](repeating: 0, count: 16)
+            for length in lengths where length > 0 { count[length] += 1 }
+            var next = [Int](repeating: 0, count: 16)
+            var code = 0
+            for length in 1...15 {
+                code = (code + count[length - 1]) << 1
+                next[length] = code
+                if count[length] > 0, next[length] + count[length] > 1 << length { throw Failure.bad("over-subscribed code") }
+            }
+            for (symbol, length) in lengths.enumerated() where length > 0 {
+                let code = next[length]; next[length] += 1
+                var reversed = 0
+                for i in 0..<length where code & (1 << i) != 0 { reversed |= 1 << (length - 1 - i) }
+                var r = reversed
+                while r < 1 << bits {
+                    entries[r] = UInt32(symbol) << 5 | UInt32(length)
+                    r += 1 << length
+                }
+            }
+        }
+    }
+
+    private enum Mode { case header, stored(Int), codes(Table, Table), done }
+
+    private static let lengthBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+    private static let lengthExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+    private static let distanceBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
+                                       1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+    private static let distanceExtra = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+    private static let codeLengthOrder = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+    private static let fixed: (Table, Table) = {
+        var lit = [Int](repeating: 8, count: 288)
+        for i in 144..<256 { lit[i] = 9 }
+        for i in 256..<280 { lit[i] = 7 }
+        return (try! Table(lengths: lit), try! Table(lengths: [Int](repeating: 5, count: 32)))
+    }()
+
+    private var mode = Mode.header
+    private var lastBlock = false
+    private var input: [UInt8] = []
+    private var bit = 0
+    private var window = [UInt8](repeating: 0, count: 1 << 15)
+    private var position = 0
+    private var total = 0
+    /// The final block has ended.
+    var finished: Bool { if case .done = mode { return true }; return false }
+
+    private var available: Int { input.count * 8 - bit }
+
+    /// The next `n` bits (n <= 24), zero beyond the input.
+    private func peek(_ n: Int) -> Int {
+        var value = 0, got = 0, p = bit
+        while got < n {
+            let index = p >> 3
+            guard index < input.count else { break }
+            let offset = p & 7
+            let take = min(8 - offset, n - got)
+            value |= ((Int(input[index]) >> offset) & ((1 << take) - 1)) << got
+            got += take; p += take
+        }
+        return value
+    }
+
+    private mutating func take(_ n: Int) -> Int? {
+        guard available >= n else { return nil }
+        let value = peek(n); bit += n
+        return value
+    }
+
+    private mutating func symbol(_ table: Table) throws -> Int? {
+        let entry = table.entries[peek(table.bits)]
+        let length = Int(entry & 31)
+        guard length > 0 else {
+            // Not a code, unless the input simply ran out before its last bits.
+            if available >= table.bits { throw Failure.bad("invalid code") }
+            return nil
+        }
+        guard available >= length else { return nil }
+        bit += length
+        return Int(entry >> 5)
+    }
+
+    private mutating func emit(_ byte: UInt8, _ out: inout [UInt8]) {
+        window[position] = byte
+        position = (position + 1) & 0x7FFF
+        total += 1
+        out.append(byte)
+    }
+
+    /// The code tables of a dynamic block, or nil when the input ends inside them.
+    private mutating func dynamicTables() throws -> (Table, Table)? {
+        guard let hlit = take(5), let hdist = take(5), let hclen = take(4) else { return nil }
+        let literals = hlit + 257, distances = hdist + 1
+        guard literals <= 286, distances <= 30 else { throw Failure.bad("too many codes") }
+        var codeLengths = [Int](repeating: 0, count: 19)
+        for i in 0..<(hclen + 4) {
+            guard let length = take(3) else { return nil }
+            codeLengths[Self.codeLengthOrder[i]] = length
+        }
+        let codeTable = try Table(lengths: codeLengths)
+        var lengths: [Int] = []
+        lengths.reserveCapacity(literals + distances)
+        while lengths.count < literals + distances {
+            guard let code = try symbol(codeTable) else { return nil }
+            switch code {
+            case 0...15: lengths.append(code)
+            case 16:
+                guard let previous = lengths.last else { throw Failure.bad("repeat with no length") }
+                guard let extra = take(2) else { return nil }
+                lengths.append(contentsOf: repeatElement(previous, count: 3 + extra))
+            case 17:
+                guard let extra = take(3) else { return nil }
+                lengths.append(contentsOf: repeatElement(0, count: 3 + extra))
+            default:
+                guard let extra = take(7) else { return nil }
+                lengths.append(contentsOf: repeatElement(0, count: 11 + extra))
+            }
+        }
+        guard lengths.count == literals + distances else { throw Failure.bad("lengths overrun") }
+        guard lengths[256] > 0 else { throw Failure.bad("no end-of-block code") }
+        return (try Table(lengths: Array(lengths[0..<literals])), try Table(lengths: Array(lengths[literals...])))
+    }
+
+    /// Decodes what `data` completes; the bytes it produced.
+    mutating func feed<Bytes: Sequence>(_ data: Bytes) throws -> [UInt8] where Bytes.Element == UInt8 {
+        input.append(contentsOf: data)
+        var out: [UInt8] = []
+        out.reserveCapacity(input.count * 4)
+        run: while true {
+            switch mode {
+            case .done:
+                break run
+            case .header:
+                let start = bit
+                guard let last = take(1), let type = take(2) else { bit = start; break run }
+                lastBlock = last == 1
+                switch type {
+                case 0:
+                    let aligned = (bit + 7) & ~7
+                    guard input.count * 8 - aligned >= 32 else { bit = start; break run }
+                    bit = aligned
+                    let length = take(16)!, inverse = take(16)!
+                    guard length == ~inverse & 0xFFFF else { throw Failure.bad("stored length") }
+                    mode = length == 0 ? (lastBlock ? .done : .header) : .stored(length)
+                case 1:
+                    mode = .codes(Self.fixed.0, Self.fixed.1)
+                case 2:
+                    guard let tables = try dynamicTables() else { bit = start; break run }
+                    mode = .codes(tables.0, tables.1)
+                default:
+                    throw Failure.bad("block type 3")
+                }
+            case .stored(let remaining):
+                let index = bit >> 3
+                let count = min(remaining, input.count - index)
+                guard count > 0 else { break run }
+                for byte in input[index..<index + count] { emit(byte, &out) }
+                bit += count * 8
+                mode = remaining == count ? (lastBlock ? .done : .header) : .stored(remaining - count)
+            case .codes(let literals, let distances):
+                while true {
+                    let start = bit
+                    guard let code = try symbol(literals) else { break run }
+                    if code < 256 { emit(UInt8(code), &out); continue }
+                    if code == 256 { mode = lastBlock ? .done : .header; continue run }
+                    let index = code - 257
+                    guard index < 29 else { throw Failure.bad("length code") }
+                    guard let lengthExtra = take(Self.lengthExtra[index]) else { bit = start; break run }
+                    let length = Self.lengthBase[index] + lengthExtra
+                    guard let distanceCode = try symbol(distances) else { bit = start; break run }
+                    guard distanceCode < 30 else { throw Failure.bad("distance code") }
+                    guard let distanceExtra = take(Self.distanceExtra[distanceCode]) else { bit = start; break run }
+                    let distance = Self.distanceBase[distanceCode] + distanceExtra
+                    guard distance <= min(total, 1 << 15) else { throw Failure.bad("distance too far") }
+                    for _ in 0..<length { emit(window[(position - distance) & 0x7FFF], &out) }
+                }
+            }
+        }
+        // Keep only what is not decoded yet.
+        let used = bit >> 3
+        if used > 0 { input.removeFirst(used); bit -= used * 8 }
+        return out
+    }
+}
+
 // MARK: - installerdata.xml
 
 /// What a build's `__Installer/installerdata.xml` says about starting the game.

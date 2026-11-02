@@ -2,7 +2,6 @@
 // Copyright 2026 Madeira contributors
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 
-import Compression
 import Foundation
 
 // Installing an EA build (docs/EA.md, "A download"): EA's CDN serves each build
@@ -148,63 +147,32 @@ final class EARangeClient: @unchecked Sendable {
     }
 }
 
-/// Raw DEFLATE to a file, with the CRC-32 and size of what came out.
+/// Raw DEFLATE (or a stored entry) to a file, with the CRC-32 and size of what came out.
+/// The decoder is EAInflate (EAFormats.swift), host-tested against zlib.
 private final class EAInflater {
     /// The decoder, nil for a stored (uncompressed) entry.
-    private let stream: UnsafeMutablePointer<compression_stream>?
-    private static let bufferSize = 1 << 20
-    private let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: EAInflater.bufferSize)
+    private var inflate: EAInflate?
     private let handle: FileHandle
     private(set) var crc = EACRC32()
     private(set) var written: Int64 = 0
-    private var ended = false
+    /// The DEFLATE stream reached its final block's end (always true for a stored entry).
+    var ended: Bool { inflate?.finished ?? true }
 
-    init(handle: FileHandle, inflate: Bool) throws {
+    init(handle: FileHandle, inflate: Bool) {
         self.handle = handle
-        if inflate {
-            let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
-            guard compression_stream_init(stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
-                stream.deallocate(); throw EADownloadError.file("inflater")
-            }
-            self.stream = stream
-        } else {
-            stream = nil
-        }
-    }
-
-    deinit {
-        if let stream { compression_stream_destroy(stream); stream.deallocate() }
-        buffer.deallocate()
+        self.inflate = inflate ? EAInflate() : nil
     }
 
     func write(_ data: Data, last: Bool) throws {
-        guard !ended else { return }
-        guard let stream else {
-            handle.write(data)
-            crc.update(data); written += Int64(data.count)
-            return
+        let out: Data
+        if inflate != nil {
+            do { out = Data(try inflate!.feed(data)) } catch { throw EADownloadError.file("inflate") }
+        } else {
+            out = data
         }
-        // An empty final write still runs the decoder once, to flush it.
-        let bytes = data.isEmpty ? Data([0]) : data
-        try bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            stream.pointee.src_ptr = raw.bindMemory(to: UInt8.self).baseAddress!
-            stream.pointee.src_size = data.count
-            repeat {
-                stream.pointee.dst_ptr = buffer
-                stream.pointee.dst_size = Self.bufferSize
-                let status = compression_stream_process(stream, last ? Int32(COMPRESSION_STREAM_FINALIZE.rawValue) : 0)
-                let produced = Self.bufferSize - stream.pointee.dst_size
-                if produced > 0 {
-                    let out = Data(bytesNoCopy: buffer, count: produced, deallocator: .none)
-                    handle.write(out)
-                    crc.update(out); written += Int64(produced)
-                }
-                switch status {
-                case COMPRESSION_STATUS_END: ended = true; return
-                case COMPRESSION_STATUS_ERROR: throw EADownloadError.file("inflate")
-                default: break
-                }
-            } while stream.pointee.src_size > 0 || stream.pointee.dst_size == 0
+        if !out.isEmpty {
+            handle.write(out)
+            crc.update(out); written += Int64(out.count)
         }
     }
 }
@@ -454,7 +422,7 @@ final class EADownloader: @unchecked Sendable {
             var counted: UInt64 = 0
             do {
                 try handle.truncate(atOffset: 0)
-                let inflater = try EAInflater(handle: handle, inflate: entry.method == 8)
+                let inflater = EAInflater(handle: handle, inflate: entry.method == 8)
                 // The local header (30 bytes, its own name and extra field) then the data; the
                 // expected header length comes from the central directory, with a little room.
                 let nameLength = Int64(entry.name.utf8.count)
@@ -513,7 +481,7 @@ final class EADownloader: @unchecked Sendable {
                 guard inflater.written == entry.uncompressedSize, inflater.crc.checksum == entry.crc32 else {
                     EALog.event("[ea-download] checksum name=\(parts.last!) method=\(entry.method) size=\(inflater.written)/\(entry.uncompressedSize)"
                                 + " crc=\(String(inflater.crc.checksum, radix: 16))/\(String(entry.crc32, radix: 16)) header=\(headerLength ?? -1)/\(guess)"
-                                + " first-chunk=\(firstChunk) compressed=\(entry.compressedSize)")
+                                + " first-chunk=\(firstChunk) compressed=\(entry.compressedSize) ended=\(inflater.ended ? 1 : 0)")
                     throw EADownloadError.file("checksum " + parts.last!)
                 }
                 try handle.close(); closed = true

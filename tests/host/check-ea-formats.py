@@ -206,6 +206,52 @@ def main():
     check(rc == 0 and row[0] == "big/file.bin" and int(row[2]) == 8 and int(row[3]) == len(body) and int(row[4]) == 0 and int(row[5]) == 0
           and int(row[6]) == len(small), "Zip64 directory: sizes and offset from the extra field, Zip64 end records")
 
+    # The DEFLATE decoder against zlib: every block type and strategy, fed whole and in pieces
+    # (a piece of 1 byte stops inside every code, length, distance and block header).
+    import random
+    rng = random.Random(7)
+    text = b"".join(rng.choice([b"the ", b"quick ", b"brown ", b"fox ", b"jumps\n", b"over ", b"lazy ", b"dogs "]) for _ in range(60000))
+    samples = {
+        "empty": b"",
+        "one byte": b"x",
+        "text": text,
+        "random": rng.randbytes(300000),
+        "runs": b"A" * 70000 + b"B" * 3 + bytes(range(256)) * 300 + b"\0" * 140000,
+        "far copies": (rng.randbytes(20000) * 12)[:240000],
+        "mixed": text[:200000] + rng.randbytes(150000) + text[:150000] + b"\0" * 90000,
+    }
+    strategies = [("default", zlib.Z_DEFAULT_STRATEGY, 6), ("best", zlib.Z_DEFAULT_STRATEGY, 9), ("stored", zlib.Z_DEFAULT_STRATEGY, 0),
+                  ("fixed", zlib.Z_FIXED, 6), ("huffman", zlib.Z_HUFFMAN_ONLY, 6), ("rle", zlib.Z_RLE, 6), ("fast", zlib.Z_DEFAULT_STRATEGY, 1)]
+    for sample, plain in samples.items():
+        for label, strategy, level in strategies:
+            c = zlib.compressobj(level, zlib.DEFLATED, -15, 9, strategy)
+            raw = c.compress(plain) + c.flush()
+            src, dst = work / "in.deflate", work / "out.bin"
+            src.write_bytes(raw)
+            pieces = [len(raw) or 1, 4096, 997, 3] + ([1] if len(raw) <= 40000 else [])
+            ok = True
+            for piece in pieces:
+                rc, out = run(driver, "inflate", str(src), str(piece), str(dst))
+                if rc != 0 or out.strip() != "finished=1" or dst.read_bytes() != plain:
+                    ok = False
+                    print(f"      {sample}/{label} piece={piece}: {out.strip()} got={len(dst.read_bytes()) if dst.exists() else -1} want={len(plain)}")
+            check(ok, f"inflate {sample} ({label}) in pieces {pieces}")
+    # A zlib stream with flushes in it (sync and full flush blocks, empty stored blocks).
+    c = zlib.compressobj(6, zlib.DEFLATED, -15)
+    raw = c.compress(text[:50000]) + c.flush(zlib.Z_SYNC_FLUSH) + c.compress(text[50000:120000]) + c.flush(zlib.Z_FULL_FLUSH) + c.compress(b"end") + c.flush()
+    (work / "in.deflate").write_bytes(raw)
+    rc, out = run(driver, "inflate", str(work / "in.deflate"), "5", str(work / "out.bin"))
+    check(out.strip() == "finished=1" and (work / "out.bin").read_bytes() == text[:120000] + b"end", "inflate with sync and full flush blocks")
+    # Cut short: no error, not finished, and only correct bytes so far.
+    (work / "in.deflate").write_bytes(raw[:len(raw) // 2])
+    rc, out = run(driver, "inflate", str(work / "in.deflate"), "100", str(work / "out.bin"))
+    got = (work / "out.bin").read_bytes()
+    check(out.strip() == "finished=0" and (text[:120000] + b"end").startswith(got) and len(got) > 0, "inflate of a cut stream: not finished, correct so far")
+    # Block type 3 is refused.
+    (work / "in.deflate").write_bytes(bytes([0b111]))
+    rc, out = run(driver, "inflate", str(work / "in.deflate"), "1", str(work / "out.bin"))
+    check(out.strip().startswith("error="), "inflate refuses block type 3")
+
     print("\nAll EA format checks passed." if failures == 0 else f"\n{failures} EA format check(s) failed.")
     shutil.rmtree(work, ignore_errors=True)
     sys.exit(1 if failures else 0)
