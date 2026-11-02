@@ -13,6 +13,9 @@ the submodule commits (FEX, its nested rpmalloc fork, wine branch
 (all under github.com/willfaust) do not yet carry them, so a recipient's
 recursive clone fails at the first submodule until every fork is pushed. This document is the
 remediation; steps marked UNVERIFIED have not yet been re-run from scratch.
+A build without `app/Madeira/x86_64-vcruntime` still gets the Visual C++ runtime
+on the device: setup and Settings take the DLLs out of Microsoft's own installers
+there, for 64-bit and 32-bit games (`app/Madeira/VCRedist.swift`, docs/LIBRARY.md).
 
 ## Inputs that are not in the repository
 

@@ -48,8 +48,15 @@ final class MetalHostView: UIView {
         // silently dropping them (presentedTime==0 on all but occasional
         // frames) at our sub-1Hz game present cadence. MeloNX (shipping
         // Switch emulator) sets exactly this pair on its layer.
+        // ml2021 A/B (env.MADEIRA_DISPLAY_SYNC = 1): leave the layer in display-sync
+        // scheduling. Log 74 ran a 32-bit title with the 120 Hz link honoured (the link
+        // itself ticked at 120 Hz) and still parked 18-72 ms a frame in nextDrawable with
+        // the GPU idle; a layer taken OUT of display sync is one of the two remaining
+        // suspects for drawables that come back late (the other is MADEIRA_PROMOTE_KICK).
         let syncSel = NSSelectorFromString("setDisplaySyncEnabled:")
-        if metalLayer.responds(to: syncSel) {
+        if MadeiraConfig.flag("MADEIRA_DISPLAY_SYNC", fallback: false) {
+            LogStore.shared.log("MetalLayer: displaySyncEnabled left on (env.MADEIRA_DISPLAY_SYNC = 1)")
+        } else if metalLayer.responds(to: syncSel) {
             metalLayer.perform(syncSel, with: NSNumber(value: false))
             LogStore.shared.log("MetalLayer: displaySyncEnabled=false (private API, MeloNX pattern)")
         }
@@ -2619,6 +2626,11 @@ struct ContentView: View {
             }
             return
         }
+        // ml2021: Big Picture's batch exists only once written; the preflight checks the file.
+        if entry.bigPicture == true, !LibraryEntry.writeBigPictureBatch() {
+            library.error = "Big Picture needs Madeira Dock's Steam components (Settings › Steam) to start from."
+            return
+        }
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
@@ -2688,6 +2700,7 @@ struct ContentView: View {
         // Steam downloads wait for the session, and the app's own Steam connection closes
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)
+        ItchLibrary.shared.sessionChanged(active: true)
         EpicLibrary.shared.sessionChanged(active: true)
         /* ml1095: one config file. Written once from any legacy madeira-*.txt. */
         MadeiraConfig.migrateLegacy { self.logStore.log($0) }
@@ -3528,11 +3541,54 @@ struct ContentView: View {
             } else {
                 unsetenv("MADEIRA_DOCK_INSTALLS_SESSION")
             }
-            // Only a start that runs installers turns madsync off, for its own session
-            // (build/madsync/madsync.c reads MADEIRA_MADSYNC_SESSION once, when the server starts).
-            if DockInstallers.serverSync {
+            // ml2020: a launcher's own automatic-start service needs a service manager in the
+            // game session, which the host starts when asked (DockGameSession: the game's
+            // MADEIRA_DOCK_GAME_SCM, else the prefix's system.reg decides). Decided here, before
+            // the session, because such a session must also leave madsync (below).
+            let scm = DockGameSession.decide(prefix: MadeiraDock.prefix,
+                                             gameConfig: profile.map { GameProfile(windowsPath: $0.windowsPath).text },
+                                             thirdPartyInstalls: DockInstallers.thirdPartyInstalls)
+            setenv("MADEIRA_DOCK_GAME_SCM", scm.exported, 1)
+            logStore.log(scm.logLine)
+            let scmServerSync = DockGameSession.serverSyncOff(scm, madsyncConfigured: DockInstallers.madsyncConfigured)
+            // ml2020: a 32-bit program behind a 64-bit launcher chain needs its 4 GB guest window
+            // late in the session, when the launcher's browser helper has taken most of the map
+            // (two device runs found no slot). ntdll holds one placeholder at session start.
+            // env.MADEIRA_WOW_HOLD_WINDOWS in madeira.cfg or the game's file, exported after this, wins.
+            let gameFolder = MadeiraDock.drive.appendingPathComponent(game.library + "/common/" + game.installDir, isDirectory: true)
+            if DockGameSession.has32BitProgram(in: gameFolder, machine: DockInstallers.machine) {
+                setenv("MADEIRA_WOW_HOLD_WINDOWS", "1", 1)
+                logStore.log("[dock-wow] the game's folder holds a 32-bit program: one guest-window placeholder is held from session start (MADEIRA_WOW_HOLD_WINDOWS=1)")
+            } else {
+                unsetenv("MADEIRA_WOW_HOLD_WINDOWS")
+            }
+            // A 64-bit title beside its 32-bit helpers: its memory takes donor RAM first even while
+            // a 32-bit program is in the session (virtual_ios.c ios_swap_x64_policy, swap-x64 unset).
+            // env.MADEIRA_DOCK_X64_TITLE = 0 leaves the swap file first, as before 2026-10-28.
+            if MadeiraConfig.flag("MADEIRA_DOCK_X64_TITLE"),   // 0: a 32-bit helper in the game's folder keeps the 64-bit title's memory on the swap file first
+               DockGameSession.largestProgramMachine(in: gameFolder, machine: DockInstallers.machine) == 0x8664 {
+                setenv("MADEIRA_SWAP_X64_TITLE", "1", 1)
+                logStore.log("[dock-wow] the game's largest program is 64-bit: its memory takes donor RAM first, then the swap file (MADEIRA_SWAP_X64_TITLE=1; env.MADEIRA_DOCK_X64_TITLE = 0 keeps the file first)")
+            } else {
+                unsetenv("MADEIRA_SWAP_X64_TITLE")
+            }
+            // Only a start that runs installers, or one that starts the service manager, turns
+            // madsync off, for its own session (build/madsync/madsync.c reads
+            // MADEIRA_MADSYNC_SESSION once, when the server starts).
+            if DockInstallers.serverSync || scmServerSync {
                 setenv("MADEIRA_MADSYNC_SESSION", "0", 1)
-                logStore.log("[dock-installers] this session runs one-time installs: madsync off for this session only (MADEIRA_MADSYNC_SESSION=0)")
+                logStore.log(DockInstallers.serverSync
+                    ? "[dock-installers] this session runs one-time installs: madsync off for this session only (MADEIRA_MADSYNC_SESSION=0)"
+                    : "[dock-game-scm] this session starts the service manager: madsync off for this session only (MADEIRA_MADSYNC_SESSION=0; env.MADEIRA_DOCK_GAME_SCM_SERVER_SYNC = 0 keeps madsync)")
+                // A game session that gives madsync up for the service manager runs fastsync, which
+                // leaves every object's state with the server, instead of Wine's standard sync: a
+                // job-system game otherwise sent ~33,000 waits and wakes a second to the server
+                // (device log 2026-10-28). A game's own fastsync switch, when set, is kept.
+                if scmServerSync, !DockInstallers.serverSync, getenv("MADEIRA_FASTSYNC") == nil,
+                   MadeiraConfig.flag("MADEIRA_DOCK_GAME_SCM_FASTSYNC") {   // 0: such a session runs Wine's standard sync, as before 2026-10-28
+                    setenv("MADEIRA_FASTSYNC", "auto", 1)
+                    logStore.log("[dock-game-scm] fastsync for this session in madsync's place (MADEIRA_FASTSYNC=auto; env.MADEIRA_DOCK_GAME_SCM_FASTSYNC = 0 keeps Wine's standard sync)")
+                }
             } else {
                 unsetenv("MADEIRA_MADSYNC_SESSION")
             }

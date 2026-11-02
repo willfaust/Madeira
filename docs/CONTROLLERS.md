@@ -182,6 +182,45 @@ when the app resigns active, everything the mode holds is released.
 `MADEIRA_PAD_KBM=0` removes the choice; `[pad-kbm]` logs the mode switching on
 and off and its releases.
 
+## Gyro aim and turbo
+
+Game details › Controls › **Gyro aim & turbo**, and the same page in the
+in-game Session menu, where a change applies at once (`PadAssist.swift`). Both
+are per game, off until turned on, and apply to player 1 only.
+
+**Gyro aim** adds the controller's rotation to the right stick, so the camera
+follows the pad while the stick still works on top of it.
+
+- *Gyro*: **Controller** (any pad GameController reports motion for:
+  DualSense, DualShock 4, Switch Pro, Joy-Con), **This device** (the iPhone or
+  iPad's own gyro, for touch play with the screen held upright), or
+  **Automatic**, the controller's when it has one and the device's otherwise.
+  Pads whose sensors are off until asked have them switched on only while a
+  session uses gyro aim.
+- *Active*: always, or only while holding LT, LB or RB.
+- *Moves*: the **Right stick**, the **Mouse** (8 pixels a degree at 1×), or
+  **Automatic**: the mouse while the game sees no controller from the pad (no
+  controller and no touch controller, or keyboard-and-mouse mode) and the
+  right stick otherwise. With no controller there is nothing to hold, so only
+  *Always* moves the mouse.
+- *Turn with*: twisting the pad flat (yaw) or tilting it like a wheel (roll).
+- *Sensitivity* 0.25× to 4×; 1× is full deflection at 150 degrees a second.
+- *Anti-dead zone* (default 25%, XInput's standard right-stick dead zone):
+  the least deflection any gyro movement gives, so slow aim passes the game's
+  own dead zone. Rotation under 2 degrees a second is ignored, so a still pad
+  does not drift.
+- *Invert* up and down, left and right.
+
+**Turbo** repeats chosen buttons (A, B, X, Y, LB, RB, LT, RT) 5 to 30 times a
+second while they are held, starting pressed. It applies to touch buttons too.
+
+Player 1's sample passes through both after the touch merge, so XInput and the
+HID controller see the result; in keyboard-and-mouse mode it passes through
+before the key feed. Neither applies
+while the library or the Session menu has the pad. Touch play with either on
+keeps the 4 ms poll running without a physical pad. `[pad-assist]` log lines
+record each session's choices and the sensors switching on and off.
+
 ## Player 1 as a HID controller (DualSense, DirectInput)
 
 XInput stays the default and is unchanged. A game can instead see player 1 as
@@ -207,7 +246,10 @@ What the game gets, with `hid`:
   others read as zeros. Sony's libScePad (God of War, other Sony PC ports)
   and SDL's HIDAPI driver see a PS5 pad; DirectInput shows it as Windows does
   (X/Y left stick, Z/Rz right stick, Rx/Ry the triggers, a hat, 15 buttons).
-- Any other pad: a **generic HID gamepad**, pid.codes 1209:4D47, with the
+- Any other pad: stays on **XInput** (`[hid-pad] ... is not a PlayStation pad`),
+  since an XInput game that does not also enumerate DirectInput never sees the
+  generic HID gamepad. `generic` (or `env.MADEIRA_HIDPAD_AUTO_GENERIC = 1` with
+  `hid`) makes it a **generic HID gamepad**, pid.codes 1209:4D47, with the
   object set of the opt-in DirectInput pad below: X/Y and Rx/Ry sticks, Z =
   LT - RT, an 8-way hat, buttons A B X Y LB RB Back Start L3 R3 Guide.
 
@@ -345,7 +387,7 @@ user sees are opt-in (only `1` enables); the others are on unless set to `0`:
 | `MADEIRA_HIDPAD_XINPUT` | **off** | `1`: in HID mode, player 1 stays an XInput pad as well |
 | `MADEIRA_PAD_OUTPUT` | on | `0`: no rumble/trigger/lightbar output to the pad; `hid` / `xinput`: only that half |
 | `MADEIRA_XINPUT_BATTERY` | on | `0`: XInput reports an unknown battery and no wireless flag (ml2170) |
-| `MADEIRA_XINPUT_WGI` | on | `0`: Windows.Gaming.Input lists no controllers (ml2171) |
+| `MADEIRA_WGI_HOST_PADS` | on | `0`: Windows.Gaming.Input lists no controllers (ml2171) |
 | `MADEIRA_XINPUT_ENABLE_FOREGROUND` | on | `0`: a game's XInputEnable(FALSE) zeroes the pad even while its window is in front (ml2115) |
 | `MADEIRA_XINPUT_SLOT0_RECONNECT` | on | `0`: a reconnected player 1 stays in the slot it landed in (ml2172) |
 | `MADEIRA_CLICK_FOCUS` | on | `0`: a tap or click on an already active window leaves its keyboard focus as it is (ml2181, "Keyboard focus" below) |
@@ -389,7 +431,7 @@ slot (so a game's XInputEnable does not affect it) and rescanned once a second
 for pads that come and go. Gamepad.Vibration's two motors go to the slot's
 rumble; the trigger motors have no path on iOS and are dropped. Logged as
 `[wgi] ml2171 host pad N listed as a Gamepad` / `removed` (16 lines per
-process, only in games that use the API). `env.MADEIRA_XINPUT_WGI = 0` turns it
+process, only in games that use the API). `env.MADEIRA_WGI_HOST_PADS = 0` turns it
 off.
 
 A stale XInputEnable(FALSE) (ml2115): many games call XInputEnable(FALSE) when
@@ -519,6 +561,7 @@ python3 tests/host/check-touch-gamepad.py
 python3 tests/host/check-control-presets.py
 python3 tests/host/check-hidpad.py      # needs the wine submodule or WINE_SRC
 python3 tests/host/check-pad-output.py
+python3 tests/host/check-pad-assist.py
 ```
 
 `wine/tools/tests/xinput-host.c` and `wine/tools/tests/wgi-host-pads.c` are

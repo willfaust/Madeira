@@ -729,7 +729,7 @@ static void mad_sc_store(uint64_t key, const struct madeira_ir_convert_args *a,
  * instead of loudly. Until the matching is proven correct per shader, the safe
  * default is the behaviour that got further.
  *
- * Toggle with Documents/madeira-vsps-fill.txt = 1, no rebuild required. Both
+ * Toggle with madeira.cfg vsps-fill = 1, no rebuild required. Both
  * settings can coexist in the shader cache, because the key only folds in the
  * vertex bytecode when this is enabled. */
 static int mad_vsps_fill_enabled(void)
@@ -1902,10 +1902,17 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * mad_ir_compat_flags. */
     g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)mad_ir_compat_flags());
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
+    /* the tessellation reflection too: a conversion that does not fill it must not hand back the caller's bytes */
+    a->ret_hs_patches_per_tg = a->ret_hs_threads_per_patch = a->ret_hs_input_cps = a->ret_hs_output_cps = 0;
+    a->ret_hs_output_cp_size = a->ret_hs_patch_const_size = a->ret_hs_out_prim = a->ret_hs_max_factor_bits = 0;
+    a->ret_ds_prims_per_mesh_tg = a->ret_ds_input_cps = a->ret_ds_input_cp_size = a->ret_ds_patch_const_size = 0;
     if (a->gs_emulation) {   /* ml927 */
         IRInputTopology topo = IRInputTopologyTriangle;
         if (a->input_topology == 1) topo = IRInputTopologyPoint;
         else if (a->input_topology == 2) topo = IRInputTopologyLine;
+        /* experiment, sent only with madeira.cfg dxil-tess-patch-topology = 1: the
+         * converter has a patch input topology the tessellation stages were never given */
+        else if (a->input_topology == MADEIRA_IR_TOPOLOGY_PATCH_STRICT) topo = (IRInputTopology)4;   /* IRInputTopologyPatch */
         g_ir.IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
         g_ir.IRCompilerSetInputTopology(compiler, topo);
         if (a->layout) g_ir.IRCompilerSetStageInGenerationMode(compiler, IRStageInCodeGenerationModeUseSeparateStageInFunction);

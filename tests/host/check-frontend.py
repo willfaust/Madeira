@@ -179,11 +179,12 @@ game.configureLaunch()
 expect(env("MADEIRA_STEAM_APPID") == nil && env("MADEIRA_STEAM_APPPATH") == nil && env("MADEIRA_WORKDIR") == nil,
        "any other launch clears the direct start's identity and folder")
 
-// Both x87 choices must override the WOW64 backend's reduced-precision default.
-expect(!game.reducedX87, "reduced-precision x87 is off for new entries")
+// x87: Automatic (every saved entry) leaves the engine's default, which is reduced
+// precision for 32-bit games (FEX WOW64 ml950); only an explicit choice is exported.
+expect(!game.reducedX87 && game.fullX87 == nil && game.x87Precision == .automatic, "x87 precision is Automatic for new entries")
 setenv("FEX_X87REDUCEDPRECISION", "1", 1)
 game.applyEnvironment()
-expect(env("FEX_X87REDUCEDPRECISION") == "0", "x87 off explicitly requests full precision, clearing a previous reduced-precision launch")
+expect(env("FEX_X87REDUCEDPRECISION") == nil, "Automatic x87 exports nothing, clearing a previous game's choice")
 expect(env("MADEIRA_CPU_COUNT") == nil && env("DXMT_D9_ANISO_LIMIT") == nil, "no other engine switches are exported")
 expect(env("MADEIRA_FASTSYNC") == "auto" && env("MADEIRA_FASTSYNC_SEM") == nil,
        "no sync keys (Fastsync, the default): fastsync exported, semaphore waits left to madeira.cfg")
@@ -202,11 +203,12 @@ MadeiraConfig.values = ["inproc-sync": "1", "env.MADEIRA_FASTSYNC": "auto"]
 unsetenv("MADEIRA_FASTSYNC"); unsetenv("MADEIRA_FASTSYNC_SEM"); game.applyEnvironment()
 expect(env("MADEIRA_FASTSYNC") == nil && env("MADEIRA_FASTSYNC_SEM") == nil, "Madsync on: the game's fastsync switches are not exported")
 MadeiraConfig.values = [:]; game.fastSync = nil; game.semaphoreFastPath = nil
-game.reducedX87 = true; game.applyEnvironment()
-expect(env("FEX_X87REDUCEDPRECISION") == "1", "reduced x87 exported when chosen")
-game.reducedX87 = false
-game.applyEnvironment()
-expect(env("FEX_X87REDUCEDPRECISION") == "0", "switching x87 off restores full precision")
+game.x87Precision = .reduced; game.applyEnvironment()
+expect(env("FEX_X87REDUCEDPRECISION") == "1" && game.reducedX87, "reduced x87 exported when chosen")
+game.x87Precision = .full; game.applyEnvironment()
+expect(env("FEX_X87REDUCEDPRECISION") == "0" && !game.reducedX87 && game.fullX87 == true, "full x87 exported when chosen")
+game.x87Precision = .automatic; game.applyEnvironment()
+expect(env("FEX_X87REDUCEDPRECISION") == nil && game.fullX87 == nil, "back to Automatic: nothing exported")
 // This game's own config lines: handed over at every launch, nil when there are none.
 game.config = "fence-chain = 6"; game.applyEnvironment()
 expect(MadeiraConfig.game == "fence-chain = 6", "the game's own config is applied at launch")
@@ -244,6 +246,7 @@ MadeiraConfig.values["env.MADEIRA_DINPUT_PAD"] = nil; unsetenv("MADEIRA_DINPUT_P
 // Library files written before the controller choices decode with none.
 let older = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"Old","relativePath":"a/b.exe","bits":64,"arguments":"","resolution":"944x656","fpsMode":1,"reducedX87":false,"liveLogs":false,"performance":false,"touchControls":false}"#
 let decodedOld = try? JSONDecoder().decode(LibraryEntry.self, from: Data(older.utf8))
+expect(decodedOld?.x87Precision == .automatic, "a saved reducedX87 = false is Automatic, not full precision (the 32-bit slow path)")
 expect(decodedOld != nil && decodedOld?.controllerMode == nil && decodedOld?.controllerBinds == nil && decodedOld?.padMouseVertical == nil
        && decodedOld?.launchMode == nil, "an entry without controller or ml1163 keys decodes")
 

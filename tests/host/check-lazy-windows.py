@@ -54,7 +54,8 @@ harness = r"""
 #include <pthread.h>
 #include <time.h>
 #include <sys/mman.h>
-typedef int BOOL;
+typedef int BOOL;   /* this fork: ios_wow_force_exec_set_current */
+unsigned long long ios_layerkit_lo, ios_layerkit_hi;   /* this fork: the measured CoreAnimation span */
 typedef uintptr_t ULONG_PTR; typedef unsigned int ULONG; typedef int NTSTATUS; typedef struct { int x; } PEB;
 #define STATUS_SUCCESS 0
 #define STATUS_NO_MEMORY ((NTSTATUS)0xc0000017)
@@ -133,6 +134,9 @@ static void *ios_jit_current_peb( void ) { return NULL; }
 """ + block + r"""
 static int teardowns;
 int ios_thread_registry_range_busy( uintptr_t base, uintptr_t size ) { (void)base; (void)size; return 0; }
+/* [wow-reap] (signal_arm64_ios.c): no leftover threads here, so a refused reservation is not retried */
+int ios_thread_registry_end_dead_range( uintptr_t base, uintptr_t size, void *dead_peb, int *kept )
+{ (void)base; (void)size; (void)dead_peb; *kept = 0; return 0; }
 static int ios_wow_window_teardown( ULONG_PTR base, void *dead_peb, unsigned guard_owned )
 { (void)base; (void)dead_peb; (void)guard_owned; teardowns++; return 1; }
 

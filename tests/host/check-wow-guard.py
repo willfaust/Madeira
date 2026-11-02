@@ -162,6 +162,10 @@ static struct ios_wow_window *ios_wow_slot_at_base(ULONG_PTR addr)
 { assert(addr == base); return have_slot ? &slot : NULL; }
 static struct ios_wow_placeholder *ios_wow_placeholder_find(ULONG_PTR addr)
 { assert(addr == base); return have_placeholder ? &placeholder : NULL; }
+/* ml2020 MADEIRA_WOW_GUARD_INSIDE (default 1 in production): the guard is the window's own top
+ * page. The cases below cover its =0 form (a guard page above the window) and then it on. */
+static int guard_inside;
+static int ios_wow_guard_inside(void) { return guard_inside; }
 """ + production + r"""
 
 static void reset(void)
@@ -171,7 +175,7 @@ static void reset(void)
     trace[0] = logs[0] = 0;
     refuse_combined = refuse_guard = refuse_body = refuse_unmap = 0;
     reserved_count = 0; reserved_size = 0;
-    have_slot = have_placeholder = ios_wow_spill_walk = 0;
+    have_slot = have_placeholder = ios_wow_spill_walk = guard_inside = 0;
     memset(&slot, 0, sizeof(slot)); memset(&placeholder, 0, sizeof(placeholder));
 }
 
@@ -266,7 +270,18 @@ int main(void)
     assert(!ios_wow_window_try(base, &owned) && !owned && !trace_len);
     assert(!ios_wow_window_try_separate_guard(base, UINTPTR_MAX) && !trace_len);
 
-    puts("PASS: combined/split/borrowed guards, collision cleanup, ownership, placeholders and band bounds");
+    /* guard inside: exactly 4 GB is reserved and no page above it; a taken top page refuses */
+    reset(); guard_inside = 1;
+    assert(ios_wow_window_try(base, &owned) && !owned && !strcmp(trace, "BR"));
+    assert(region_count == 1 && reserved_count == 1 && reserved_size == IOS_WOW_WINDOW_SIZE);
+    reset(); guard_inside = 1;
+    seed(base + IOS_WOW_WINDOW_SIZE - host_page_size, host_page_size, PROT_NONE, 0);
+    assert(!ios_wow_window_try(base, &owned) && !owned && !strcmp(trace, "B") && !reserved_count);
+    reset(); guard_inside = 1; have_placeholder = 1; placeholder.guard_owned = 1;
+    assert(ios_wow_window_try(base, &owned) && owned == 1 && placeholder.adopted && !trace_len);
+
+    puts("PASS: combined/split/borrowed guards, collision cleanup, ownership, placeholders and band bounds; "
+         "the guard inside the window (MADEIRA_WOW_GUARD_INSIDE)");
     return 0;
 }
 """

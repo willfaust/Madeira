@@ -331,7 +331,8 @@ need('#import "PadOutput.h"' in bridge, 'bridging header must import PadOutput.h
 swift = (root / 'app/Madeira/GamepadInput.swift').read_text()
 need('madeira_pad_output_configure(' in swift and 'madeira_pad_output_set_slot(Int32(i), controllers[i])' in swift
      and 'madeira_pad_output_set_active(' in swift, 'GamepadInput.swift must drive PadOutput')
-need(swift.count('beginPadOutput(') == 4, 'every beginPadSession exit configures the output once')
+# four exits (the HID mode's non-PlayStation pad takes XInput, ml2100) and the definition
+need(swift.count('beginPadOutput(') == 5, 'every beginPadSession exit configures the output once')
 need('MadeiraConfig.get("env.MADEIRA_PAD_OUTPUT")' in swift, 'the switch must be readable by the config catalog')
 
 driver = (root / 'build/win32u-unix/driver_ios.c').read_text()
@@ -340,6 +341,12 @@ need('last handle closed' in hidpad and 'hidpad_output_log' in hidpad,
      'hidpad_ios.c must log [hidpad-out] and reset rumble/triggers when the game lets go')
 need('case 2:' in driver and 'winios_gamepad_set_vibration( index, motors[0], motors[1] )' in driver,
      'driver_ios.c must store XInput vibration (op 2)')
+# ml2190: a slot re-reads its controller's live extendedGamepad profile (env.MADEIRA_XINPUT_PROFILE_CHECK).
+check_src = swift
+assert 'static let profileCheck: Bool = flag("MADEIRA_XINPUT_PROFILE_CHECK")' in check_src
+assert 'if Self.profileCheck, let i = controllers.firstIndex(where: { $0 === controller }) {' in check_src
+assert 'if profiles[i] !== profile {' in check_src and 'attach(profile, slot: i)' in check_src
+assert 'Timer.scheduledTimer(withTimeInterval: 2, repeats: true)' in check_src
 print('PASS: DualSense output decoder (USB v1/v2 rumble, triggers-only, LEDs, power, Bluetooth 0x31 + CRC), '
       'trigger effects -> GameController modes (Nielk1 encodings), levels and player LEDs, notify transport, '
       'PadOutput/Xcode/bridging/GamepadInput/driver wiring')

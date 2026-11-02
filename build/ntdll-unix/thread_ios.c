@@ -1274,6 +1274,66 @@ void ios_eco_native_self( const char *who )
     dprintf( 2, "[eco-native] madeira-bcd %s thread at utility QoS%s (MADEIRA_ECO_NATIVE)\n", who, r ? ": refused" : "" );
 }
 
+/* eco-prio: env.MADEIRA_ECO_PRIO = 1 or 2 (opt-in). With eco on
+ * (madeira.cfg eco = 1, the ECO pill, the power governor) every guest thread
+ * runs at the eco QoS class, which keeps it on the efficiency cores. Horizon
+ * Forbidden West on build 531 (2026-10-14) ran that way with 6-8 threads waiting
+ * for a core on a full efficiency cluster while the performance cores did
+ * 0.4-0.5 of a core of work ([xp] P= / E= / run=), and the threads a frame waits
+ * on most directly -- madeira-d3d12's fence worker, which advances a fence once
+ * the GPU is done, and its submission workers (async-submit = 1) -- queued for
+ * the same cores as the game's job workers. With the switch, a thread that sets
+ * ITS OWN priority (SetThreadPriority on itself) to THREAD_PRIORITY_TIME_CRITICAL
+ * (1), or to THREAD_PRIORITY_HIGHEST and above (2), keeps the user-interactive
+ * QoS while eco is on; setting a lower priority later returns it to the eco
+ * class. madeira-d3d12's own worker threads ask for TIME_CRITICAL when the
+ * switch is set. Another thread's priority is never touched (its pthread could
+ * be gone by then), and a thread raised before eco came on is not moved. The
+ * next ECO switch re-applies the eco class to every thread, these included.
+ * Unset or 0: nothing changes. [eco-prio] names the first 32 threads moved. */
+static int ios_eco_prio_level( void )
+{
+    static int lvl = -1;
+    if (lvl < 0)
+    {
+        const char *e = getenv( "MADEIRA_ECO_PRIO" );   /* 1: under eco, a thread that raises itself to TIME_CRITICAL keeps user-interactive QoS; 2: HIGHEST and above; unset/0: off */
+        int v = e && *e ? atoi( e ) : 0;
+        lvl = v < 0 ? 0 : v > 2 ? 2 : v;
+    }
+    return lvl;
+}
+
+static __thread int ios_eco_prio_raised;   /* this thread holds user-interactive QoS through eco-prio */
+
+static void ios_eco_prio_note( HANDLE handle, LONG priority )
+{
+    extern int madeira_get_eco( void );
+    extern void ios_eco_apply_self( void );
+    static int said;
+    int lvl = ios_eco_prio_level(), raise, r;
+    char name[64] = "";
+
+    if (!lvl) return;
+    raise = priority >= (lvl >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_TIME_CRITICAL) && priority < 16;
+    if (raise == ios_eco_prio_raised) return;   /* nothing to change for the calling thread */
+    if (raise && !madeira_get_eco()) return;   /* eco off: every guest thread is user-interactive already */
+    if (handle != GetCurrentThread())
+    {
+        THREAD_BASIC_INFORMATION tbi;
+        if (NtQueryInformationThread( handle, ThreadBasicInformation, &tbi, sizeof(tbi), NULL ) ||
+            HandleToULong( tbi.ClientId.UniqueThread ) != GetCurrentThreadId())
+            return;   /* another thread: never touched */
+    }
+    if (raise) r = pthread_set_qos_class_self_np( QOS_CLASS_USER_INTERACTIVE, 0 );
+    else { ios_eco_apply_self(); r = 0; }   /* back to whatever eco says now */
+    ios_eco_prio_raised = raise && !r;
+    pthread_getname_np( pthread_self(), name, sizeof(name) );
+    if (__atomic_fetch_add( &said, 1, __ATOMIC_RELAXED ) < 32)
+        dprintf( 2, "[eco-prio] thread %04x '%s' set itself to priority %d: %s (MADEIRA_ECO_PRIO=%d)\n",
+                 (unsigned)GetCurrentThreadId(), name, (int)priority,
+                 !raise ? "back to the eco QoS class" : r ? "user-interactive QoS REFUSED" : "user-interactive QoS while eco is on", lvl );
+}
+
 /* thread-qos: env.MADEIRA_THREAD_QOS = "GXWorker*=user-initiated;FD4JobWorker*=utility"
  * (opt-in). Every guest thread runs at USER_INTERACTIVE, so the scheduler cannot
  * tell a game's main thread from its worker pools: in Dark Souls III the five
@@ -1803,6 +1863,30 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
  *
  * Update the output attributes.
  */
+/* ml2210: wow64's PS_ATTRIBUTE_GROUP_AFFINITY thunk widens the pointer but keeps the
+ * 32-bit caller's 12-byte GROUP_AFFINITY (a 32-bit mask). Read as the 16-byte native
+ * struct, the group and reserved words were the next fields' bytes, NtCreateThreadEx
+ * failed with c000000d and a 32-bit Chromium's thread pool threw. Each field is
+ * decoded; the usual validation still applies. env.MADEIRA_WOW_AFFINITY32=0: as before. */
+static int ios_wow_affinity32( const PS_ATTRIBUTE *attribute, GROUP_AFFINITY *out )
+{
+    static int on = -1;
+    unsigned int mask;
+    unsigned short tail[4];
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_WOW_AFFINITY32" );
+        on = !(e && e[0] == '0');
+    }
+    if (!on || attribute->Size != 12 || !attribute->ValuePtr) return 0;
+    memcpy( &mask, attribute->ValuePtr, 4 );
+    memcpy( tail, (const char *)attribute->ValuePtr + 4, 8 );
+    out->Mask = mask;
+    out->Group = tail[0];
+    memcpy( out->Reserved, tail + 1, 6 );
+    return 1;
+}
+
 static NTSTATUS update_attr_list( PS_ATTRIBUTE_LIST *attr, HANDLE thread, const CLIENT_ID *id, TEB *teb )
 {
     SIZE_T i, count = (attr->TotalLength - sizeof(attr->TotalLength)) / sizeof(PS_ATTRIBUTE);
@@ -1824,7 +1908,8 @@ static NTSTATUS update_attr_list( PS_ATTRIBUTE_LIST *attr, HANDLE thread, const 
         }
         else if (attr->Attributes[i].Attribute == PS_ATTRIBUTE_GROUP_AFFINITY)
         {
-            GROUP_AFFINITY *aff = attr->Attributes[i].ValuePtr;
+            GROUP_AFFINITY *aff = attr->Attributes[i].ValuePtr, converted;
+            if (get_wow_teb( teb ) && ios_wow_affinity32( &attr->Attributes[i], &converted )) aff = &converted;
             status = NtSetInformationThread( thread, ThreadGroupInformation, aff, sizeof(*aff) );
             if (status) break;
         }
@@ -2139,7 +2224,29 @@ static DECLSPEC_NORETURN void exit_thread( int status )
 
     if (InterlockedDecrement( &nb_threads ) <= 0) exit_process( status );
 
-    if ((teb = InterlockedExchangePointer( &prev_teb, NtCurrentTeb() )))
+    /* Opt-in, env.MADEIRA_EA_CEF = 1: 32-bit helper processes started one after
+     * another can be given the same WoW window again, TEB addresses included.
+     * prev_teb is a raw pointer, so it can then name the thread that is exiting
+     * right now: joining itself fails and the old path frees the caller's own
+     * stack. With the switch the hand-off goes through
+     * ios_ea_reap_exited_thread (virtual_ios.c), which checks the identity of
+     * the previous thread first. Unset: the upstream prev_teb hand-off.
+     *
+     * ml2290 (testers' log, 2026-10-31): the checked hand-off is the default.
+     * A launcher installer ran its 32-bit VC++ redistributables one after the
+     * other; the second got the first's window and TEB, its worker thread freed
+     * its own kernel stack at exit (unregister_view+4, the fault waiting for the
+     * virtual_mutex it held) and the installer waited on that thread forever.
+     * env.MADEIRA_THREAD_REAP_CHECKED = 0 restores the upstream hand-off
+     * (MADEIRA_EA_CEF = 1 still selects the checked one). */
+    const char *ea_cef = getenv( "MADEIRA_EA_CEF" );
+    const char *checked = getenv( "MADEIRA_THREAD_REAP_CHECKED" );
+    if (!(checked && checked[0] == '0') || (ea_cef && !strcmp( ea_cef, "1" )))
+    {
+        extern void ios_ea_reap_exited_thread( TEB *current );
+        ios_ea_reap_exited_thread( NtCurrentTeb() );
+    }
+    else if ((teb = InterlockedExchangePointer( &prev_teb, NtCurrentTeb() )))
     {
         struct ntdll_thread_data *thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
 
@@ -2245,6 +2352,279 @@ NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_c
 }
 
 
+#ifdef WINE_IOS
+/* [steam-api], log only: what a process can see of the Steam client at the moment steam_api says none is running.
+ *
+ * A launcher or game that loads steam_api(64).dll and is told "SteamAPI_IsSteamRunning() did not locate a running
+ * instance of Steam" stops, although the Dock host has published the client and started the program; in other sessions
+ * the same call loads steamclient64.dll. A log cannot tell which of the values steam_api reads is missing, so the failing
+ * process reports them itself, from NtRaiseException, when the text arrives as an OutputDebugString exception (the path
+ * a 32-bit process takes; a 64-bit process handles OutputDebugString inside the PE ntdll and is not seen here). Reads only:
+ *   HKCU\Software\Valve\Steam\ActiveProcess  pid, ActiveUser (only zero / not zero), SteamClientDll64
+ *   HKCU\Software\Valve\Steam                SteamPath
+ *   HKLM\Software\Valve\Steam (32- and 64-bit view)  SteamPID, InstallPath
+ *   OpenProcess(pid) and its exit status (259 = still running); the named objects STEAM_DIPC_CONSUME / _PRODUCE.
+ * At most twice per process; one checked read of the debug string, and only for strings of 80-200 bytes. Nothing is
+ * written and nothing changes for any other debug string. */
+#define SD_ERR( ... ) ERR_(seh)( __VA_ARGS__ )
+static NTSTATUS ios_sd_key( const char *path, ACCESS_MASK wow, HANDLE *key )
+{
+    WCHAR wide[128];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    size_t i;
+
+    for (i = 0; path[i] && i < 127; i++) wide[i] = (unsigned char)path[i];
+    wide[i] = 0;
+    name.Buffer = wide;
+    name.Length = name.MaximumLength = (USHORT)(i * sizeof(WCHAR));
+    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+    return NtOpenKey( key, KEY_QUERY_VALUE | wow, &attr );
+}
+
+/* One value of an open key. dword: the value when it is a DWORD (else untouched); hide: report a DWORD only as zero or
+ * not zero (the account id). */
+static NTSTATUS ios_sd_value( const char *path, ACCESS_MASK wow, const char *vname, const char *label, int hide,
+                              ULONG *dword )
+{
+    union { KEY_VALUE_PARTIAL_INFORMATION info; char raw[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + 520]; } buf;
+    WCHAR wide[64];
+    UNICODE_STRING name;
+    HANDLE key = 0;
+    ULONG len = 0, i, n;
+    NTSTATUS status = ios_sd_key( path, wow, &key );
+
+    if (status)
+    {
+        SD_ERR( "[steam-api]   %s: key not opened, status %#x\n", label, (unsigned int)status );
+        return status;
+    }
+    for (i = 0; vname[i] && i < 63; i++) wide[i] = (unsigned char)vname[i];
+    wide[i] = 0;
+    name.Buffer = wide;
+    name.Length = name.MaximumLength = (USHORT)(i * sizeof(WCHAR));
+    memset( &buf, 0, sizeof(buf) );
+    status = NtQueryValueKey( key, &name, KeyValuePartialInformation, &buf, sizeof(buf), &len );
+    NtClose( key );
+    if (status)
+        SD_ERR( "[steam-api]   %s: no value, status %#x\n", label, (unsigned int)status );
+    else if (buf.info.Type == REG_DWORD && buf.info.DataLength == sizeof(ULONG))
+    {
+        ULONG v;
+        memcpy( &v, buf.info.Data, sizeof(v) );
+        if (dword) *dword = v;
+        if (hide) SD_ERR( "[steam-api]   %s: DWORD, %s\n", label, v ? "not zero" : "zero" );
+        else SD_ERR( "[steam-api]   %s: DWORD %u\n", label, (unsigned int)v );
+    }
+    else if (buf.info.Type == REG_SZ || buf.info.Type == REG_EXPAND_SZ)
+    {
+        char text[96];
+        const WCHAR *w = (const WCHAR *)buf.info.Data;
+
+        n = min( buf.info.DataLength / sizeof(WCHAR), (ULONG)(sizeof(text) - 1) );
+        for (i = 0; i < n && w[i]; i++) text[i] = (w[i] >= 32 && w[i] < 127) ? (char)w[i] : '?';
+        text[i] = 0;
+        SD_ERR( "[steam-api]   %s: %s \"%s\"\n", label, buf.info.Type == REG_SZ ? "SZ" : "EXPAND_SZ", text );
+    }
+    else
+        SD_ERR( "[steam-api]   %s: type %u, %u bytes\n", label, (unsigned int)buf.info.Type,
+                   (unsigned int)buf.info.DataLength );
+    return status;
+}
+
+static void ios_sd_object( const char *name )
+{
+    WCHAR wide[96];
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE h = 0;
+    NTSTATUS status;
+    size_t i;
+
+    for (i = 0; name[i] && i < 95; i++) wide[i] = (unsigned char)name[i];
+    wide[i] = 0;
+    us.Buffer = wide;
+    us.Length = us.MaximumLength = (USHORT)(i * sizeof(WCHAR));
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, NULL, NULL );
+    status = NtOpenSemaphore( &h, SYNCHRONIZE, &attr );
+    if (status) status = NtOpenEvent( &h, SYNCHRONIZE, &attr );
+    if (!status)
+    {
+        SD_ERR( "[steam-api]   %s: opens\n", name );
+        NtClose( h );
+    }
+    else SD_ERR( "[steam-api]   %s: not opened, status %#x\n", name, (unsigned int)status );
+}
+
+static void ios_steam_api_diag( void )
+{
+    static LONG told;
+    static const char active[] = "\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Valve\\Steam\\ActiveProcess";
+    static const char user_steam[] = "\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Valve\\Steam";
+    static const char machine_steam[] = "\\Registry\\Machine\\Software\\Valve\\Steam";
+    ULONG pid = 0;
+
+    if (InterlockedIncrement( &told ) > 2) return;
+    SD_ERR( "[steam-api] steam_api found no running Steam; process %04x sees:\n",
+               (unsigned int)HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess ) );
+    ios_sd_value( active, 0, "pid", "HKCU ActiveProcess pid", 0, &pid );
+    ios_sd_value( active, 0, "ActiveUser", "HKCU ActiveProcess ActiveUser", 1, NULL );
+    ios_sd_value( active, 0, "SteamClientDll64", "HKCU ActiveProcess SteamClientDll64", 0, NULL );
+    ios_sd_value( user_steam, 0, "SteamPath", "HKCU Steam SteamPath", 0, NULL );
+    ios_sd_value( machine_steam, KEY_WOW64_32KEY, "SteamPID", "HKLM(32) Steam SteamPID", 0, NULL );
+    ios_sd_value( machine_steam, KEY_WOW64_32KEY, "InstallPath", "HKLM(32) Steam InstallPath", 0, NULL );
+    ios_sd_value( machine_steam, KEY_WOW64_64KEY, "InstallPath", "HKLM(64) Steam InstallPath", 0, NULL );
+    if (pid)
+    {
+        OBJECT_ATTRIBUTES attr;
+        CLIENT_ID id;
+        HANDLE process = 0;
+        NTSTATUS status;
+
+        InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+        id.UniqueProcess = ULongToHandle( pid );
+        id.UniqueThread = 0;
+        status = NtOpenProcess( &process, PROCESS_QUERY_LIMITED_INFORMATION, &attr, &id );
+        if (status)
+            SD_ERR( "[steam-api]   OpenProcess(%u): status %#x\n", (unsigned int)pid, (unsigned int)status );
+        else
+        {
+            PROCESS_BASIC_INFORMATION pbi;
+
+            memset( &pbi, 0, sizeof(pbi) );
+            status = NtQueryInformationProcess( process, ProcessBasicInformation, &pbi, sizeof(pbi), NULL );
+            if (status)
+                SD_ERR( "[steam-api]   OpenProcess(%u): opens, query status %#x\n", (unsigned int)pid,
+                           (unsigned int)status );
+            else
+                SD_ERR( "[steam-api]   OpenProcess(%u): opens, exit status %u (259 = still running)\n",
+                           (unsigned int)pid, (unsigned int)pbi.ExitStatus );
+            NtClose( process );
+        }
+    }
+    ios_sd_object( "\\BaseNamedObjects\\STEAM_DIPC_CONSUME" );
+    ios_sd_object( "\\BaseNamedObjects\\STEAM_DIPC_PRODUCE" );
+}
+
+/* Whether this OutputDebugString exception carries steam_api's "no Steam running" text. */
+static int ios_steam_api_message( const EXCEPTION_RECORD *rec )
+{
+    char text[208];
+    SIZE_T got = 0, len;
+
+    if (rec->ExceptionCode != DBG_PRINTEXCEPTION_C || rec->NumberParameters < 2 || !rec->ExceptionInformation[1])
+        return 0;
+    len = rec->ExceptionInformation[0];
+    if (len < 80 || len > 200) return 0;
+    if (NtReadVirtualMemory( NtCurrentProcess(), (const void *)rec->ExceptionInformation[1], text, len, &got ) || got != len)
+        return 0;
+    text[len - 1] = 0;
+    if (text[0] != '[' || text[1] != 'S' || text[2] != '_') return 0;
+    if (strstr( text, "SteamAPI_IsSteamRunning() did not locate a running instance" )) return 1;
+    /* the older steam_api wording ("[S_API FAIL] SteamAPI_Init() failed; unable to locate a running instance of Steam, or a
+     * local steamclient.dll."), still printed by older SteamStub-wrapped programs */
+    return !strncmp( text, "[S_API FAIL]", 12 ) && strstr( text, "unable to locate a running instance of Steam" ) != NULL;
+}
+
+/* [cxx-type], log only: the type name of a C++ exception (code 0xE06D7363) as it is thrown.
+ *
+ * A program that ends in __fastfail after a C++ throw no handler frame accepts leaves a PE-side line with the code and the
+ * parameters, but not WHAT was thrown, so nobody can say which catch should have taken it. The record's third parameter
+ * is the _ThrowInfo; its CatchableTypeArray lists the thrown type first, then the types it converts to (base classes), each with a
+ * type_info whose name is the decorated type (".?AVruntime_error@std@@"). Layouts:
+ *   64-bit (4 parameters: magic, object, ThrowInfo, image base): ThrowInfo { attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray }
+ *     as 32-bit RVAs from the image base; CatchableTypeArray { nCatchableTypes, RVA[] }; CatchableType { properties, pType RVA, ... };
+ *     type_info { vtable (8), runtime data (8), name[] } = name at +16.
+ *   32-bit (3 parameters: magic, object, ThrowInfo): the same with 32-bit pointers; name at +8. A WoW process's pointers are guest addresses.
+ * Every read is NtReadVirtualMemory on this process, which reports an unreadable address instead of faulting. It reports at most 12 throws
+ * (two lines each), each ThrowInfo once; nothing is written and the record is left as the fix-up above made it. */
+static int ios_cxx_read( ULONG_PTR addr, void *buf, SIZE_T len, int guest32 )
+{
+    SIZE_T got = 0;
+
+    if (guest32) addr = (ULONG_PTR)ios_wow_host_ptr( (ULONG)addr );
+    if (addr < 0x10000) return 0;
+    return !NtReadVirtualMemory( NtCurrentProcess(), (const void *)addr, buf, len, &got ) && got == len;
+}
+
+static void ios_cxx_type_name( ULONG_PTR type_info, int is64, int guest32, char *out, size_t outsz )
+{
+    char raw[72];
+    size_t i;
+
+    out[0] = '?'; out[1] = 0;
+    memset( raw, 0, sizeof(raw) );
+    if (!ios_cxx_read( type_info + (is64 ? 16 : 8), raw, sizeof(raw) - 1, guest32 )) return;
+    for (i = 0; i < sizeof(raw) - 1 && raw[i] && i < outsz - 1; i++)
+        out[i] = (raw[i] >= 0x20 && raw[i] < 0x7f) ? raw[i] : '?';
+    out[i] = 0;
+    if (!i) { out[0] = '?'; out[1] = 0; }
+}
+
+static void ios_cxx_throw_diag( const EXCEPTION_RECORD *rec )
+{
+    static LONG lines;
+    static ULONG_PTR seen[12];
+    static int nseen;
+    int is64 = rec->NumberParameters >= 4, guest32 = !is64 && ios_wow_base() != 0, i;
+    ULONG_PTR throw_info = rec->ExceptionInformation[2], base = is64 ? rec->ExceptionInformation[3] : 0;
+    ULONG attrs = 0, count = 0, ti[4], refs[8], ct[7];
+    char first[72] = "? (ThrowInfo or its type list not readable)", list[240];
+    size_t len = 0;
+
+    if (!throw_info) return;
+    for (i = 0; i < nseen; i++) if (seen[i] == throw_info) return;
+    if (nseen >= 12 || InterlockedIncrement( &lines ) > 12) return;
+    seen[nseen++] = throw_info;
+
+    list[0] = 0;
+    if (ios_cxx_read( throw_info, ti, sizeof(ti), guest32 ))   /* { attributes, pmfnUnwind, pForwardCompat, pCatchableTypeArray } */
+    {
+        ULONG_PTR cta = is64 ? base + ti[3] : (ULONG_PTR)ti[3];
+
+        attrs = ti[0];
+        if (ti[3] && ios_cxx_read( cta, &count, 4, guest32 ))
+        {
+            ULONG k, want = count > 8 ? 8 : count;
+
+            if (want && ios_cxx_read( cta + 4, refs, want * 4, guest32 ))
+                for (k = 0; k < want; k++)
+                {
+                    ULONG_PTR ctp = is64 ? base + refs[k] : (ULONG_PTR)refs[k], type;
+                    char name[72];
+
+                    if (!refs[k] || !ios_cxx_read( ctp, ct, sizeof(ct), guest32 )) continue;   /* { properties, pType, PMD x3, size, copy } */
+                    type = is64 ? base + ct[1] : (ULONG_PTR)ct[1];
+                    ios_cxx_type_name( type, is64, guest32, name, sizeof(name) );
+                    if (!k) strcpy( first, name );
+                    else if (len < sizeof(list) - 80) len += snprintf( list + len, sizeof(list) - len, " %s", name );
+                }
+        }
+    }
+    ERR_(seh)( "[cxx-type] %d-bit throw at %p: thrown %s; also catchable as:%s (%u catchable type(s), ThrowInfo %p attributes %#x, "
+               "object %p, magic %#lx)\n",
+               is64 ? 64 : 32, rec->ExceptionAddress, first, list[0] ? list : " nothing", (unsigned)count, (void *)throw_info,
+               (unsigned)attrs, (void *)rec->ExceptionInformation[1], (unsigned long)rec->ExceptionInformation[0] );
+    ERR_(seh)( "[cxx-type]   exception parameters (%u): p0=%#lx p1=%#lx p2=%#lx p3=%#lx\n", (unsigned)rec->NumberParameters,
+               (unsigned long)rec->ExceptionInformation[0], (unsigned long)rec->ExceptionInformation[1],
+               (unsigned long)rec->ExceptionInformation[2], (unsigned long)(rec->NumberParameters > 3 ? rec->ExceptionInformation[3] : 0) );
+    /* The HRESULT an ATL or COM exception carries, read from the thrown object: an installer that dies on an uncaught
+     * ATL::CAtlException otherwise leaves no trace of which call failed. CAtlException is { HRESULT m_hr; }; _com_error is
+     * { vtable; HRESULT m_hresult; ... }. Log only. */
+    {
+        ULONG hr = 0;
+        ULONG_PTR obj = rec->ExceptionInformation[1];
+        int ptr = is64 ? 8 : 4;
+
+        if (strstr( first, "CAtlException@ATL" ) && ios_cxx_read( obj, &hr, 4, guest32 ))
+            ERR_(seh)( "[cxx-type]   ATL::CAtlException hr=%#lx\n", (unsigned long)hr );
+        else if (strstr( first, "_com_error@@" ) && ios_cxx_read( obj + ptr, &hr, 4, guest32 ))
+            ERR_(seh)( "[cxx-type]   _com_error hr=%#lx\n", (unsigned long)hr );
+    }
+}
+
+#endif
+
 /*******************************************************************
  *		NtRaiseException (NTDLL.@)
  */
@@ -2252,6 +2632,13 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
 {
     NTSTATUS status;
 #ifdef WINE_IOS
+    /* ml845: the engine's thread-naming exception is where a bogus "stack base"
+     * reaches its per-thread state. Watch the slot across this dispatch. */
+    if (rec && rec->ExceptionCode == 0x406D1388)
+    {
+        extern void ios_tlswatch_arm( const char * );
+        ios_tlswatch_arm( "raise 0x406D1388" );
+    }
     /* madeira-bcd: a 64-bit C++ throw carries the image base its ThrowInfo
      * RVAs are relative to (parameter 3, from RtlPcToFileHeader(ThrowInfo)).
      * When the ThrowInfo pointer is a JIT-pool alias of the image (native code
@@ -2295,13 +2682,9 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
             ERR_(seh)( "[cxx-throw] ok ThrowInfo %p base %p (addr %p)\n",
                        (void *)info, (void *)base, rec->ExceptionAddress );
     }
-    /* ml845: the engine's thread-naming exception is where a bogus "stack base"
-     * reaches its per-thread state. Watch the slot across this dispatch. */
-    if (rec && rec->ExceptionCode == 0x406D1388)
-    {
-        extern void ios_tlswatch_arm( const char * );
-        ios_tlswatch_arm( "raise 0x406D1388" );
-    }
+    /* [cxx-type], after the ThrowInfo above has been put right (log only) */
+    if (rec && rec->ExceptionCode == 0xE06D7363 && (rec->NumberParameters == 4 || rec->NumberParameters == 3))
+        ios_cxx_throw_diag( rec );
     /* madeira-bcd: Chromium's out-of-memory exit (SocialClubHelper.exe died of
      * it on the first launch of build 442, on four threads at once). The PE
      * [exc] line names the code only; PartitionAlloc passes { size of the
@@ -2329,6 +2712,10 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         }
     }
 #endif
+#ifdef WINE_IOS
+    /* [steam-api] (see ios_steam_api_diag): reads only, logs at most twice per process. */
+    if (rec && first_chance && ios_steam_api_message( rec )) ios_steam_api_diag();
+#endif
     status = send_debug_event( rec, context, first_chance, !(is_win64 || is_wow64() || is_old_wow64()) );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
@@ -2348,16 +2735,30 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
      *
      * So swallow it and continue, exactly as the DBG_CONTINUE path above does. This
      * does not paper over the stuck unwind (task #38) -- it stops a benign event from
-     * being fatal while that is fixed. Real faults still terminate. */
+     * being fatal while that is fixed. Real faults still terminate.
+     *
+     * The thread-naming exception (MS_VC_EXCEPTION, 0x406D1388) is the same kind
+     * of event: a hint for a debugger that a program raises inside its own
+     * __try. When it reaches second chance anyway, a continuable one is
+     * swallowed too. env.MADEIRA_THREADNAME_SWALLOW = 0 lets it end the process
+     * as before. */
+    static int threadname_swallow = -1;
+    if (threadname_swallow < 0)
+    {
+        const char *e = getenv( "MADEIRA_THREADNAME_SWALLOW" );
+        threadname_swallow = !(e && e[0] == '0');
+    }
     if (rec->ExceptionCode == DBG_PRINTEXCEPTION_C ||
-        rec->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C)
+        rec->ExceptionCode == DBG_PRINTEXCEPTION_WIDE_C ||
+        (threadname_swallow && rec->ExceptionCode == 0x406D1388 && !(rec->ExceptionFlags & EXCEPTION_NONCONTINUABLE)))
     {
         static int swallowed;
         if (swallowed++ < 8)
             ERR_(seh)("[dbgprint] swallowing %s that reached second chance "
                       "(flags=%x addr=%p) -- continuing instead of dying\n",
-                      rec->ExceptionCode == DBG_PRINTEXCEPTION_C ? "DBG_PRINTEXCEPTION_C"
-                                                                : "DBG_PRINTEXCEPTION_WIDE_C",
+                      rec->ExceptionCode == 0x406D1388 ? "MS_VC_EXCEPTION (0x406D1388)"
+                      : (rec->ExceptionCode == DBG_PRINTEXCEPTION_C ? "DBG_PRINTEXCEPTION_C"
+                                                                    : "DBG_PRINTEXCEPTION_WIDE_C"),
                       rec->ExceptionFlags, rec->ExceptionAddress );
         return NtContinue( context, FALSE );
     }
@@ -3377,6 +3778,7 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
             status = wine_server_call( req );
         }
         SERVER_END_REQ;
+        if (!status) ios_eco_prio_note( handle, (LONG)*base_priority );   /* eco-prio (opt-in) */
         return status;
     }
 

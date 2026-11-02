@@ -46,6 +46,7 @@ static kern_return_t mach_vm_region( task_t t, mach_vm_address_t *a, mach_vm_siz
     *s = used_hi - *a; return KERN_SUCCESS; }
 static ULONG_PTR ios_usable_va_floor = 0x7038000000ULL, ios_furniture_ceiling = 0x73ffff0000ULL;
 static void *user_space_limit = (void *)0x7fffffff0000ULL;
+unsigned long long ios_layerkit_lo, ios_layerkit_hi;   /* no CoreAnimation range measured */
 #define dprintf(fd, ...) fprintf( stderr, __VA_ARGS__ )
 """ + band + r"""
 int main( int argc, char **argv ) {

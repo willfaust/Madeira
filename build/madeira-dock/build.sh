@@ -38,7 +38,7 @@ trap 'rm -rf "$TMP"' EXIT
 # stripped. -Wl,--no-insert-timestamp keeps the output reproducible.
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -Wno-cast-function-type \
     -static -Wl,--strip-all -Wl,--no-insert-timestamp \
-    -o "$TMP/dockhost.exe" "$SRC"/src/*.c -ladvapi32
+    -o "$TMP/dockhost.exe" "$SRC"/src/*.c -ladvapi32 -luser32
 
 section() { printf '\n\n==== %s ====\n\n' "$1"; }
 {

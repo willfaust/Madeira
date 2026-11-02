@@ -18,10 +18,12 @@ struct MadeiraApp: App {
         // default Resolution comes from it, are also made on other threads.
         _ = ResolutionChoices.screen
         // A sign-in an installer left goes into the Keychain before anything else runs
-        // (SigningRefresh.swift).
-        SigningAccountStore.takeIn()
+        // (SigningRefresh.swift), only while the refresh is switched on.
+        if SigningRefresh.enabled { SigningAccountStore.takeIn() }
         // Use one profile before Wine or Steam Cloud reads the prefix.
         ProfileUnification.run()
+        // Games and downloads keep going when Madeira leaves the screen (BackgroundRun.swift).
+        BackgroundRun.shared.start()
         // Read the cached library before the first grid page is built.
         if LibraryGridArm.enabled, SteamOwnedLibrary.enabled { SteamOwnedLibrary.shared.start() }
     }
@@ -36,6 +38,7 @@ struct MadeiraApp: App {
                     GamepadInput.shared.start()
                     HardwareInput.shared.start()
                     JITNetworkShortcut.shared.restoreLeftover()   // also starts its network path monitor
+                    WineGeckoModel.shared.installAutomatically()  // on Wi-Fi, so Wine never asks (WineGecko.swift)
                 }
                 // madeira://jit-network/... (the Madeira JIT shortcut returning, JITNetwork.swift),
                 // else madeira://play?exe=... (Home Screen shortcuts, SavesAndShortcuts.swift).

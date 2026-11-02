@@ -92,16 +92,22 @@ check("build.sh compiles server_ios.c and loader_ios.c (no new translation unit)
       'compile_one "$BUILD_DIR/server_ios.c" "server"' in build and 'compile_one "$BUILD_DIR/loader_ios.c" "loader"' in build)
 region = server[server.index("/* hw-registry-test:begin"):server.index("/* hw-registry-test:end */")]
 pub = func(server, "void ios_hw_registry_publish(void)")
-check("MADEIRA_HW_REGISTRY read once, through hwreg_enabled",
-      server.count('getenv( "MADEIRA_HW_REGISTRY" )') == 1 and 'if (!hwreg_enabled( getenv( "MADEIRA_HW_REGISTRY" ) ))' in pub)
+check("MADEIRA_HW_REGISTRY read once, through hwreg_mode (0 returns before anything is written)",
+      server.count('getenv( "MADEIRA_HW_REGISTRY" )') == 1 and 'mode = hwreg_mode( getenv( "MADEIRA_HW_REGISTRY" ) );' in pub
+      and pub.index("if (!mode)") < pub.index("ios_hw_key( machine, "))
 check("MADEIRA_FEX_AVX mirrored without a catalog site of its own (FEX owns the switch)",
       'getenv( fex_avx )' in pub and 'static const char fex_avx[] = "MADEIRA_FEX_AVX";' in pub
       and 'getenv( "MADEIRA_FEX_AVX" )' not in server and 'getenv("MADEIRA_FEX_AVX")' not in server)
-check("AVX only for a 64-bit main image (FEX's WOW64 module has none)",
-      "hwreg_fex_cpu( &cpu, avx && avx[0] == '1' && !ios_main_image_i386, ios_hw_cntfrq() );" in pub)
+check("AVX only for a 64-bit main image (FEX's WOW64 module has none); '1...' AVX+AVX2, exactly '2' AVX only",
+      "hwreg_fex_cpu( &cpu, (!avx || ios_main_image_i386) ? 0 : avx[0] == '1' ? 1 :\n"
+      "                         (avx[0] == '2' && !avx[1]) ? 2 : 0, ios_hw_cntfrq() );" in pub)
 check("every HARDWARE key is made by the volatile level-by-level helper",
       len(re.findall(r"ios_hw_key\( machine, ", pub)) == 4 and "NtCreateKey" not in pub)
-check("Session Manager\\Environment is not touched", "Environment" not in pub and "NtOpenKey" not in pub)
+env_block = pub[pub.index("if (mode == 2)"):pub.index('wine_log_write( "[hw-registry] HKLM')] if "if (mode == 2)" in pub else ""
+check("Session Manager\\Environment is touched only with MADEIRA_HW_REGISTRY=2 (default 1 leaves it alone)",
+      env_block and pub.count("NtOpenKey") == 1 and "NtOpenKey" in env_block
+      and pub.count("ios_hw_env_value(") == 1 and "ios_hw_env_value(" in env_block
+      and pub.count("hwreg_environment(") == 1 and "hwreg_environment(" in env_block)
 hk = func(server, "static HANDLE ios_hw_key( const char *base, const char *subpath )")
 check("ios_hw_key creates each missing level REG_OPTION_VOLATILE (inside the test region)",
       "NtCreateKey( &key, KEY_ALL_ACCESS, &attr, 0, NULL, REG_OPTION_VOLATILE, NULL )" in hk and hk in region)
@@ -127,11 +133,14 @@ int main( void )
 {
     show( "plain", 0, 24000000 );
     show( "avx", 1, 24000000 );
+    show( "avx2off", 2, 24000000 );
     show( "1ghz", 0, 1000000000 );
     show( "19.2", 0, 19200000 );
     show( "zero", 0, 0 );
     printf( "enabled %d %d %d %d %d\n", hwreg_enabled( NULL ), hwreg_enabled( "" ), hwreg_enabled( "0" ),
             hwreg_enabled( "1" ), hwreg_enabled( "yes" ) );
+    printf( "mode %d %d %d %d %d %d\n", hwreg_mode( NULL ), hwreg_mode( "" ), hwreg_mode( "0" ),
+            hwreg_mode( "1" ), hwreg_mode( "2" ), hwreg_mode( "yes" ) );
     printf( "count %u %u %u %u\n", hwreg_cpu_count( 0 ), hwreg_cpu_count( 6 ), hwreg_cpu_count( 64 ),
             hwreg_cpu_count( 200 ) );
     printf( "base %08x\n", (unsigned)HWREG_FEX_FEATURES );
@@ -146,10 +155,14 @@ int main( void )
     check("FeatureSet 0x2379ffff (FEX baseline + SSE4.2), 0xe3f9ffff with AVX (+XSAVE, AVX, AVX2)",
           "plain|Intel64 Family 6 Model 166 Stepping 1|GenuineIntel|Unknown ARM CPU|6|a601|2379ffff|1536\n" in out
           and "|e3f9ffff|1536\n" in out.split("avx|", 1)[-1])
+    check("FeatureSet with MADEIRA_FEX_AVX=2: XSAVE and AVX, no AVX2 (0x63f9ffff)",
+          "|63f9ffff|1536\n" in out.split("avx2off|", 1)[-1].split("\n")[0] + "\n")
     check("~MHz = FEX's scaled TSC: 24 MHz -> 1536, 1 GHz -> 1000, 19.2 MHz -> 1228, 0 -> 0",
           out.split("1ghz|")[-1].split("\n")[0].endswith("|1000") and out.split("19.2|")[-1].split("\n")[0].endswith("|1228")
           and out.split("zero|")[-1].split("\n")[0].endswith("|0"))
     check("MADEIRA_HW_REGISTRY: 0 -> off, unset/empty/1/other -> on", "enabled 1 1 0 1 1\n" in out)
+    check("MADEIRA_HW_REGISTRY mode: unset/empty/1/other -> 1 (keys only), 0 -> 0, 2 -> 2 (also Environment)",
+          "mode 1 1 0 1 2 1\n" in out)
     check("one key per processor, clamped to 1..64", "count 1 6 64 64\n" in out)
     base = int(re.search(r"base ([0-9a-f]+)", out).group(1), 16) if "base " in out else -1
 
@@ -216,11 +229,11 @@ int main( void )
               and "(CTX->HostFeatures.SupportsCRC << 20) |         // SSE4.2" in cpp
               and "(SupportsAVX() << 27) |                         // OSXSAVE" in cpp
               and "(SupportsAVX() << 28) |                         // AVX" in cpp
-              and "(SupportsAVX() << 5) |                   // AVX2 support" in cpp
+              and "(SupportsAVX2() << 5) |                  // AVX2 support" in cpp
               and "if (CTX->HostFeatures.SupportsAVX) {\n    XCR0 |= XCR0_AVX;" in cpp)
-        check("FEX: MADEIRA_FEX_AVX starting with '1' sets SupportsAVX, ARM64EC module only (what server_ios.c mirrors)",
+        check("FEX: MADEIRA_FEX_AVX starting with '1', or exactly '2', sets SupportsAVX, ARM64EC module only (what server_ios.c mirrors)",
               'getenv("MADEIRA_FEX_AVX")' in ios
-              and "Avx && Avx[0] == '1' && HostType != FEXCore::HostFeatures::HostTypeEnum::Wow64" in ios
+              and "Avx && (Avx[0] == '1' || (Avx[0] == '2' && Avx[1] == '\\0')) && HostType != FEXCore::HostFeatures::HostTypeEnum::Wow64" in ios
               and "HostFeatures.SupportsAVX = true;" in ios)
         check("FEX: level/revision formulas and AMD64 for the ARM64EC module",
               "CpuInfo.ProcessorLevel = ((FamilyIdentifier >> 8) & 0xf) + ((FamilyIdentifier >> 20) & 0xff);" in cf
@@ -886,6 +899,17 @@ int main( void )
     ios_hw_registry_publish();
     assert( !creates && !sets && !fw_queries && log_lines == 1 && strstr( last_log, "MADEIRA_HW_REGISTRY=0, no" ) );
     assert( !find( "\\Registry\\Machine\\HARDWARE" ) );
+
+    /* 2: the keys, and the differing Session Manager\Environment processor values */
+    reset( 6 );
+    setenv( "MADEIRA_HW_REGISTRY", "2", 1 );
+    ios_hw_registry_publish();
+    assert( !open_handles && !strcmp( vals( SYS "\\CentralProcessor\\0" ), CPU0 ) );
+    assert( !strcmp( vals( "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager\\Environment" ),
+                     "NUMBER_OF_PROCESSORS=sz:6;OS=sz:Windows_NT;PROCESSOR_ARCHITECTURE=sz:AMD64;"
+                     "PROCESSOR_IDENTIFIER=sz:Intel64 Family 6 Model 166 Stepping 1, GenuineIntel;PROCESSOR_LEVEL=sz:6;"
+                     "PROCESSOR_REVISION=sz:a601;" ) );
+    assert( strstr( last_log, "; Session Manager\\Environment: 3 of 5 processor values rewritten" ) );
 
     /* AVX, no SMBIOS table, no counter frequency, one processor */
     reset( 1 );

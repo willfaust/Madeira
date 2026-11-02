@@ -440,7 +440,27 @@ struct ios_child_args {
  * as long as the game and used to end with it. */
 #define IOS_CHILD_SLOTS 32
 static pthread_mutex_t ios_child_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct { char name[64]; double started; int used; } ios_child_slots[IOS_CHILD_SLOTS];
+/* Madeira child-exit: peb = the child's PEB once it registered with the wineserver (ios_child_slot_bind_peb);
+ * exited = its process ended (ios_child_slot_exited, from process_exit_wrapper, the chokepoint every exit
+ * reaches). A child whose process ended on a thread other than its boot thread never returns from
+ * wine_ios_child_main, so ios_child_slot_release below never ran for it and its slot stayed "used" for good:
+ * the launcher wait in WineProcessBridge.m then waited for a program that was long dead (an abort_process
+ * 0xc0000005 on a worker thread, "still running ... 60 s", and the session never ended). Used only to decide
+ * whether anything still runs; the slot itself is released as before. env.MADEIRA_CHILD_EXIT_TRACK=0 counts an
+ * ended child as running until its boot thread returns, as before. */
+#define IOS_CHILD_PATH 260
+static struct { char name[64]; char path[IOS_CHILD_PATH]; double started; int used; void *peb; int exited; double exited_at; int noted; } ios_child_slots[IOS_CHILD_SLOTS];
+/* Madeira child-exit: the last processes that ended, with the status each ended with. The slots above are
+ * released when a child's boot thread returns (milliseconds after a healthy exit), so the status has to live
+ * elsewhere: this ring keeps the last IOS_CHILD_ENDED ends (process_exit_wrapper, through
+ * ios_child_slot_note_exit). Read by madeira_child_report, for an app-side game-end watch. */
+#define IOS_CHILD_ENDED 64
+static struct { char name[64]; char path[IOS_CHILD_PATH]; double started; double ended_at; int status; } ios_child_ended[IOS_CHILD_ENDED];
+static unsigned ios_child_ended_count;   /* ends ever noted; the ring holds the last IOS_CHILD_ENDED */
+/* spawns that found no free slot: processes this table cannot see (madeira_live_user_processes counts them as running) */
+static unsigned ios_child_untracked;
+/* the slot of the child whose boot thread this is (set by ios_child_thread_entry) */
+static _Thread_local int ios_child_slot_current = -1;
 
 static double ios_child_now(void)
 {
@@ -449,12 +469,71 @@ static double ios_child_now(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* A child whose process ended and whose boot thread has not released the slot for this long never will (its
+ * ExitProcess ran on another thread). A child that ends on its boot thread releases it within milliseconds, so a
+ * healthy session sees no change: the slot counts until then, as it always did. */
+#define IOS_CHILD_EXIT_SETTLE 2.0
+static int ios_child_switch_off( const char *name, int *cache )
+{
+    if (*cache < 0)
+    {
+        const char *e = getenv( name );
+        *cache = (e && e[0] == '0' && !e[1]) ? 1 : 0;
+    }
+    return *cache;
+}
+
+static int ios_child_slot_gone( int i, double now )
+{
+    static int off = -1;   /* env.MADEIRA_CHILD_EXIT_TRACK=0: an ended child counts until its boot thread returns */
+    if (ios_child_switch_off( "MADEIRA_CHILD_EXIT_TRACK", &off )) return 0;
+    return ios_child_slots[i].exited && now - ios_child_slots[i].exited_at >= IOS_CHILD_EXIT_SETTLE;
+}
+
+/* Madeira child-helper-names: the bare substring "crash" made a game whose file name begins with "crash" a
+ * "crash reporter", so the program-end watch and the launcher-stub wait never saw the game, and the session
+ * stayed "running" long after the game died. "handler", "report" and "helper" still match as substrings, as
+ * before (the real helpers seen in logs have one of them: crashpad_handler, UnityCrashHandler32/64,
+ * crs-handler, steamerrorreporter(64), launcher error handlers and helpers, CrashReportClient). "crash" alone
+ * now counts only when a helper word follows it (crashpad, crash_service, crash-sender, crashdump, crashrpt ...)
+ * or when it is the whole name (crash.exe, foo_crash.exe): never as the beginning of a program's name. The
+ * names are lower case, as ios_child_slot_take stores them. env.MADEIRA_CHILD_HELPER_NAMES=0 brings back the
+ * bare "crash" substring. */
 static int ios_child_is_helper( const char *name )
 {
-    static const char *const parts[] = { "crash", "crs-handler", "handler", "report", "helper" };
+    static int legacy = -1;
+    static const char *const parts[] = { "crs-handler", "handler", "report", "helper" };
+    static const char *const after_crash[] = { "pad", "rpt", "send", "dump", "log", "monitor", "service", "submit",
+                                               "upload", "client", "server", "collect", "watch", "guard", "daemon",
+                                               "catch", "notif", "telemetry", "analy", "diag", "trace", "detect",
+                                               "util", "tool", "info", "manage", "process" };
+    const char *p;
     unsigned i;
     for (i = 0; i < ARRAY_SIZE(parts); i++) if (strstr( name, parts[i] )) return 1;
+    if (ios_child_switch_off( "MADEIRA_CHILD_HELPER_NAMES", &legacy )) return strstr( name, "crash" ) != NULL;
+    for (p = name; (p = strstr( p, "crash" )); p += 5)
+    {
+        const char *q = p + 5;
+        if (*q == '.' || !*q) { if (p == name || p[-1] == '_' || p[-1] == '-' || p[-1] == ' ') return 1; continue; }
+        if (*q == '_' || *q == '-' || *q == ' ') q++;
+        for (i = 0; i < ARRAY_SIZE(after_crash); i++)
+            if (!strncmp( q, after_crash[i], strlen( after_crash[i] ))) return 1;
+    }
     return 0;
+}
+
+/* The image path as the process was spawned (a Windows path), printable ASCII only, cut to IOS_CHILD_PATH - 1. Never logged:
+ * an app-side game-end watch reads it (madeira_child_report) to tell where a program lives. */
+static void ios_child_path_text( char *out, const UNICODE_STRING *image )
+{
+    unsigned i, len = image->Length / sizeof(WCHAR), n = 0;
+
+    for (i = 0; i < len && n < IOS_CHILD_PATH - 1; i++)
+    {
+        WCHAR c = image->Buffer[i];
+        out[n++] = (c >= 32 && c < 127 && c != '\t') ? (char)c : '?';
+    }
+    out[n] = 0;
 }
 
 static int ios_child_slot_take( const UNICODE_STRING *image )
@@ -477,10 +556,13 @@ static int ios_child_slot_take( const UNICODE_STRING *image )
         if (ios_child_slots[i].used) continue;
         ios_child_slots[i].used = 1;
         ios_child_slots[i].started = ios_child_now();
+        ios_child_slots[i].noted = 0;
         memcpy( ios_child_slots[i].name, name, n + 1 );
+        ios_child_path_text( ios_child_slots[i].path, image );
         slot = i;
         break;
     }
+    if (slot < 0) ios_child_untracked++;
     pthread_mutex_unlock( &ios_child_lock );
     return slot;
 }
@@ -490,7 +572,91 @@ static void ios_child_slot_release( int slot )
     if (slot < 0 || slot >= IOS_CHILD_SLOTS) return;
     pthread_mutex_lock( &ios_child_lock );
     ios_child_slots[slot].used = 0;
+    ios_child_slots[slot].peb = NULL;
+    ios_child_slots[slot].exited = 0;
+    ios_child_slots[slot].exited_at = 0;
+    ios_child_slots[slot].noted = 0;
     pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* The child whose boot thread this is has registered its PEB with the wineserver (server_init_process_child). */
+void ios_child_slot_bind_peb( void *peb )
+{
+    int slot = ios_child_slot_current;
+    if (slot < 0 || slot >= IOS_CHILD_SLOTS || !peb) return;
+    pthread_mutex_lock( &ios_child_lock );
+    if (ios_child_slots[slot].used) { ios_child_slots[slot].peb = peb; ios_child_slots[slot].exited = 0; ios_child_slots[slot].exited_at = 0; }
+    pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* The child process with this PEB ended (process_exit_wrapper). Marks the slot that holds it, whichever thread
+ * ended it; the slot itself is released when the child's boot thread returns, if it ever does. */
+void ios_child_slot_exited( void *peb )
+{
+    unsigned i;
+    double now = ios_child_now();
+    if (!peb) return;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+        if (ios_child_slots[i].used && !ios_child_slots[i].exited && ios_child_slots[i].peb == peb)
+        {
+            ios_child_slots[i].exited = 1;
+            ios_child_slots[i].exited_at = now;
+        }
+    pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* Madeira storm-end: the file name (lower case) of the child process with this PEB, for the one log line that says which Windows
+ * process the redelivery storm guard ended (server_ios.c, ios_end_child_process_async). 1 and the name in `out`, or 0 (the table has no such process: out is "?"). Never the path. */
+int ios_child_slot_name( void *peb, char *out, size_t len )
+{
+    unsigned i;
+    int found = 0;
+
+    if (!out || !len) return 0;
+    out[0] = '?'; if (len > 1) out[1] = 0;
+    if (!peb) return 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS && !found; i++)
+        if (ios_child_slots[i].used && ios_child_slots[i].peb == peb)
+        {
+            size_t n = strlen( ios_child_slots[i].name );
+
+            if (n > len - 1) n = len - 1;
+            memcpy( out, ios_child_slots[i].name, n );
+            out[n] = 0;
+            found = 1;
+        }
+    pthread_mutex_unlock( &ios_child_lock );
+    return found;
+}
+
+/* Madeira child-exit: the child process with this PEB ended with this status (process_exit_wrapper, any thread,
+ * right after ios_child_slot_exited). Kept in the ring of ended processes with the slot's file name, image path, start
+ * and end time. Once per slot: a second call for the same process is ignored. No allocation, no logging. Returns 1 when
+ * the status was noted, 0 when no slot holds this PEB (the caller says so for a crash status: the watch would miss it). */
+int ios_child_slot_note_exit( void *peb, int status )
+{
+    unsigned i;
+    int noted = 0;
+    double now = ios_child_now();
+    if (!peb) return 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+        if (ios_child_slots[i].used && !ios_child_slots[i].noted && ios_child_slots[i].peb == peb)
+        {
+            unsigned at = ios_child_ended_count++ % IOS_CHILD_ENDED;
+            memcpy( ios_child_ended[at].name, ios_child_slots[i].name, sizeof(ios_child_ended[at].name) );
+            memcpy( ios_child_ended[at].path, ios_child_slots[i].path, sizeof(ios_child_ended[at].path) );
+            ios_child_ended[at].started = ios_child_slots[i].started;
+            ios_child_ended[at].ended_at = now;
+            ios_child_ended[at].status = status;
+            ios_child_slots[i].noted = 1;
+            noted = 1;
+            break;
+        }
+    pthread_mutex_unlock( &ios_child_lock );
+    return noted;
 }
 
 /* Children still running that are not helpers, started at most max_age
@@ -506,7 +672,7 @@ int madeira_live_game_children( char *buf, int len, double max_age )
     pthread_mutex_lock( &ios_child_lock );
     for (i = 0; i < IOS_CHILD_SLOTS; i++)
     {
-        if (!ios_child_slots[i].used || ios_child_is_helper( ios_child_slots[i].name )) continue;
+        if (!ios_child_slots[i].used || ios_child_slot_gone( i, now ) || ios_child_is_helper( ios_child_slots[i].name )) continue;
         if (max_age >= 0 && now - ios_child_slots[i].started > max_age) continue;
         count++;
         if (buf && len - used > 1)
@@ -515,6 +681,98 @@ int madeira_live_game_children( char *buf, int len, double max_age )
     }
     pthread_mutex_unlock( &ios_child_lock );
     return count;
+}
+
+/* Madeira child-exit: Wine's own processes (and the Dock host). They start with the desktop or the first
+ * program and end with the session; a program that has ended (WineProcessBridge.m "Session end") is not kept
+ * alive by them. Wine's own names, not any game's. */
+static int ios_child_is_system( const char *name )
+{
+    static const char *const names[] = { "explorer.exe", "services.exe", "winedevice.exe", "conhost.exe",
+                                         "plugplay.exe", "rpcss.exe", "svchost.exe", "dockhost.exe" };
+    unsigned i;
+    for (i = 0; i < ARRAY_SIZE(names); i++) if (!strcmp( name, names[i] )) return 1;
+    return 0;
+}
+
+/* How many processes the program started still run, besides Wine's own and the helpers (any age); their file
+ * names go to buf. A child the table could not track counts as running: with an unknown tree the library never
+ * ends a session by itself. For an app-side program-end watch (same binary, through the bridging header, as
+ * madeira_live_game_children is for WineProcessBridge.m); nothing in this tree calls it yet. */
+int madeira_live_user_processes( char *buf, int len )
+{
+    double now = ios_child_now();
+    int count = 0, used = 0;
+    unsigned i;
+
+    if (buf && len > 0) buf[0] = 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+    {
+        if (!ios_child_slots[i].used || ios_child_slot_gone( i, now )) continue;
+        if (ios_child_is_helper( ios_child_slots[i].name ) || ios_child_is_system( ios_child_slots[i].name )) continue;
+        count++;
+        if (buf && len - used > 1)
+            used += snprintf( buf + used, len - used, "%s%s", used ? " " : "", ios_child_slots[i].name );
+        if (used >= len) used = len - 1;
+    }
+    if (ios_child_untracked)
+    {
+        count += (int)ios_child_untracked;
+        if (buf && len - used > 1)
+            used += snprintf( buf + used, len - used, "%s(%u untracked)", used ? " " : "", ios_child_untracked );
+        if (used >= len) used = len - 1;
+    }
+    pthread_mutex_unlock( &ios_child_lock );
+    return count;
+}
+
+/* Madeira child-exit: a text snapshot of this table for an app-side game-end watch of a Dock session (nothing
+ * in this tree calls it yet): one line per process, fields separated by tabs, the image path last.
+ *   R <helper> <seconds since start> <path>                              still runs
+ *   E <helper> <status in hex> <seconds since the end> <seconds it lived> <path>   ended (the last IOS_CHILD_ENDED ends)
+ *   U <count>                                                            spawns this table could not track
+ *   T                                                                    the text was cut: the snapshot is incomplete
+ * <helper> is 1 for a crash reporter or helper by the file-name rule above; where a program lives is judged by the
+ * library from its path. Returns the number of process lines. Paths go nowhere else (no log line carries them). */
+int madeira_child_report( char *buf, int len )
+{
+    double now = ios_child_now();
+    int used = 0, lines = 0, cut = 0;
+    unsigned i, first;
+
+    if (!buf || len < 8) return 0;
+    buf[0] = 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS && !cut; i++)
+    {
+        int room = len - used - 4, n;   /* 4 bytes stay free for the cut mark */
+        if (!ios_child_slots[i].used || ios_child_slots[i].exited) continue;   /* an ended one is in the ring */
+        n = room > 0 ? snprintf( buf + used, room, "R\t%d\t%.1f\t%s\n", ios_child_is_helper( ios_child_slots[i].name ),
+                                 now - ios_child_slots[i].started, ios_child_slots[i].path ) : -1;
+        if (n < 0 || n >= room) { cut = 1; break; }
+        used += n; lines++;
+    }
+    first = ios_child_ended_count > IOS_CHILD_ENDED ? ios_child_ended_count - IOS_CHILD_ENDED : 0;
+    for (i = first; i < ios_child_ended_count && !cut; i++)
+    {
+        int room = len - used - 4, n;
+        unsigned at = i % IOS_CHILD_ENDED;
+        n = room > 0 ? snprintf( buf + used, room, "E\t%d\t%x\t%.1f\t%.1f\t%s\n", ios_child_is_helper( ios_child_ended[at].name ),
+                                 (unsigned)ios_child_ended[at].status, now - ios_child_ended[at].ended_at,
+                                 ios_child_ended[at].ended_at - ios_child_ended[at].started, ios_child_ended[at].path ) : -1;
+        if (n < 0 || n >= room) { cut = 1; break; }
+        used += n; lines++;
+    }
+    if (ios_child_untracked && !cut)
+    {
+        int room = len - used - 4, n = room > 0 ? snprintf( buf + used, room, "U\t%u\n", ios_child_untracked ) : -1;
+        if (n < 0 || n >= room) cut = 1; else used += n;
+    }
+    if (cut) { memcpy( buf + used, "T\n", 3 ); used += 2; }
+    buf[used] = 0;
+    pthread_mutex_unlock( &ios_child_lock );
+    return lines;
 }
 
 /* the machine of the child's main image, published to
@@ -550,6 +808,7 @@ static void *ios_child_thread_entry( void *arg )
     /* Set up exit handling for this child thread */
     wine_ios_main_thread = pthread_self();
     wine_ios_exit_initialized = 1;
+    ios_child_slot_current = args->slot;   /* child-exit: server_init_process_child binds the PEB to it */
 
     if (setjmp(wine_ios_exit_jmpbuf) == 0) {
         /* Change working directory if requested */
@@ -657,8 +916,12 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 
     if (winedebug) putenv( winedebug );
 
-    ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d)\n",
-        madeira_debugstr_cmdline_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
+    /* Madeira (log only): the Windows current directory the child is given. A game that looks up its data
+     * relative to the current directory ended on its own "Asset could not be found" box, and no line of any
+     * log said what directory a Steam-launched child has; this one does. */
+    ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d) cwd=%s\n",
+        madeira_debugstr_cmdline_us(&params->CommandLine), socketfd, unixdir, args->unixdir,
+        debugstr_us(&params->CurrentDirectory.DosPath));
 
     ret = pthread_create( &child_thread, NULL, ios_child_thread_entry, args );
     if (ret) {
@@ -994,6 +1257,20 @@ static int ec_conhost_refuse( int arm64ec_session, const char *env, const WCHAR 
     return arm64ec_session && !(env && env[0] == '1') && ios_image_name_is( image, image_len, "conhost.exe" );
 }
 
+/* ml2280 (testers' log, 2026-10-28): every aarch64 program in an ARM64EC session, for
+ * the reason conhost is refused above. A launcher installer's service helper made
+ * sechost start services.exe (aarch64) on demand; it faulted at 0x38 at its first
+ * executable allocation, its exception path faulted 2000 times until the storm
+ * handler ended it, twice, and the installer waited 20 s for its pipe each time.
+ * Refused, CreateProcess fails at once. A program that needs one (a launcher that
+ * registers a service) starts in the Wine desktop, an aarch64 session, where its
+ * aarch64 children run on the session's ntdll. MADEIRA_EC_NATIVE_CHILD=1 starts
+ * them anyway (and MADEIRA_EC_CONHOST=1 still lets conhost.exe through). */
+static int ec_native_child_refuse( int arm64ec_session, const char *env, USHORT machine )
+{
+    return arm64ec_session && machine == IMAGE_FILE_MACHINE_ARM64 && !(env && env[0] == '1');
+}
+
 /* madeira-bcd: the JIT pool's variables in every child's environment. The app
  * exports WINE_IOS_JIT_RX/SIZE/RW (ContentView.swift) before Wine starts; the
  * first process imports the Unix environment and children inherit it. The
@@ -1107,9 +1384,9 @@ static void madeira_steam_session_log( const UNICODE_STRING *image )
     name[n] = 0;
     if (!n) return;
     /* Helpers a game spawns (a shader compiler such as fxc.exe, installers,
-     * crash reporters) are not the game. */
+     * crash reporters such as Nixxes' crs-handler.exe) are not the game. */
     {
-        static const char * const helpers[] = { "fxc", "redist", "dxsetup", "crash", "setup", "install" };
+        static const char * const helpers[] = { "fxc", "redist", "dxsetup", "crash", "crs-handler", "setup", "install" };
         char lower[64];
         for (i = 0; i <= n; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
         for (i = 0; i < sizeof(helpers) / sizeof(helpers[0]); i++) if (strstr( lower, helpers[i] )) return;
@@ -1186,11 +1463,54 @@ static int sc_switch_end( const WCHAR *cl, int cl_len, const char *sw )
     return last;
 }
 
+/* ml2210: with env.MADEIRA_STEAM_ALLOW_CRASHPAD=1 (the Big Picture list), a web helper
+ * command line whose one --type= switch is exactly crashpad-handler may start. */
+static int ios_webhelper_crashpad_allowed( const WCHAR *cl, int len )
+{
+    static const char prefix[] = "--type=", type[] = "crashpad-handler";
+    const char *e = getenv( "MADEIRA_STEAM_ALLOW_CRASHPAD" );
+    int found = 0, value = -1, k, j;
+    if (!e || strcmp( e, "1" ) || !cl) return 0;
+    for (k = 0; k + 7 <= len; k++)
+    {
+        if (k && cl[k - 1] != ' ' && cl[k - 1] != '\t' && cl[k - 1] != '"') continue;
+        for (j = 0; j < 7; j++) if (cl[k + j] != (WCHAR)prefix[j]) break;
+        if (j == 7) { found++; value = k + 7; }
+    }
+    if (found != 1 || value + (int)sizeof(type) - 1 > len) return 0;
+    for (j = 0; type[j]; j++) if (cl[value + j] != (WCHAR)type[j]) return 0;
+    return value + j == len || cl[value + j] == ' ' || cl[value + j] == '\t' || cl[value + j] == '"';
+}
+
 /* What kind of Social Club process `image` with command line `cl` is. */
 static int sc_helper_kind( const WCHAR *image, int image_len, const WCHAR *cl, int cl_len )
 {
     if (!ios_image_name_is( image, image_len, "socialclubhelper.exe" )) return SC_NOT_HELPER;
     return sc_switch_end( cl, cl_len, "--type=" ) >= 0 ? SC_CHILD : SC_BROWSER;
+}
+
+/* Madeira: the EA app's Chromium (opt-in: env.MADEIRA_EA_CEF = 1, in the EA app's own configuration lines).
+ *
+ * EADesktop.exe is CEF's browser process (CEF 109); it starts EACefSubProcess.exe --type=gpu-process (and, for
+ * the pages, renderers and utility processes). Every CEF process of this Chromium needs four 16 GB
+ * PartitionAlloc pools and the band has four slots (virtual_ios.c, "the EA app's Chromium"), so, as for Social
+ * Club's helper and Steam's webhelper:
+ *   - the browser gets --single-process: renderer and GPU become its threads;
+ *   - a --type= child of EADesktop.exe or EACefSubProcess.exe it still starts is refused;
+ *   - the rest of the command line is Social Club's (sc_browser_cmdline): PartitionAllocBackupRefPtr off where the
+ *     switch is honoured, V8 --jitless unless MADEIRA_JITLESS=0, --no-proxy-server unless it names a proxy,
+ *     and env.MADEIRA_EA_CEF_FLAGS appended verbatim.
+ * env.MADEIRA_EA_CEF_CMDLINE = 0 leaves the browser's command line alone (the children are still refused): the
+ * EA app parses its own command line before CEF sees it and may not take a switch it does not know. */
+enum { EA_NOT_CEF = 0, EA_BROWSER = 1, EA_CHILD = 2 };
+
+static int ea_cef_kind( const WCHAR *image, int image_len, const WCHAR *cl, int cl_len )
+{
+    int browser = ios_image_name_is( image, image_len, "eadesktop.exe" );
+
+    if (!browser && !ios_image_name_is( image, image_len, "eacefsubprocess.exe" )) return EA_NOT_CEF;
+    if (sc_switch_end( cl, cl_len, "--type=" ) >= 0) return EA_CHILD;
+    return browser ? EA_BROWSER : EA_NOT_CEF;
 }
 
 /* madeira-bcd: env.MADEIRA_CHILD_ARGS = "<exe name> <arguments>" appends the
@@ -1755,6 +2075,16 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
             }
             if (j == hl) is_helper = 1;
         }
+        if (is_helper && ios_webhelper_crashpad_allowed( params->CommandLine.Buffer,
+                                                         params->CommandLine.Length / sizeof(WCHAR) ))
+        {
+            /* ml2210: a 32-bit web helper (cef.win7) ends itself at start when its crash
+             * reporter cannot launch ("crash server failed to launch, self-terminating").
+             * The handler is a small process in a guest window of its own and never holds
+             * the browser's pools. Only exactly --type=crashpad-handler, command line unchanged. */
+            dprintf(2, "[proc-gate] ml2210 allowing steamwebhelper --type=crashpad-handler (env.MADEIRA_STEAM_ALLOW_CRASHPAD=1)\n");
+            is_helper = 0;
+        }
         if (is_helper)
         {
             const WCHAR *cl = params->CommandLine.Buffer;
@@ -1974,16 +2304,27 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                  * Interpreted V8 costs 5-20x on all of Steam's UI JavaScript, so
                  * this is the largest single startup lever we have.
                  * MADEIRA_JITLESS=0 turns it off; default stays ON (unchanged). */
+                /* ml2230 (device logs 111-112, Big Picture): CEF's verbose file log (--v=1) writes a line for most
+                 * of what the UI does, from the threads that draw it. env.MADEIRA_CEF_VERBOSE=0 leaves Steam's own
+                 * logging level (WARNING); default 1 keeps the verbose log, as before. */
                 static const char sp_jitless[] = " --single-process --enable-logging=file --v=1 --log-severity=verbose"
                                                  " --no-proxy-server --winhttp-proxy-resolver --js-flags=--jitless";
                 static const char sp_jit[]     = " --single-process --enable-logging=file --v=1 --log-severity=verbose"
                                                  " --no-proxy-server --winhttp-proxy-resolver";
+                static const char sp_quiet_jitless[] = " --single-process --no-proxy-server --winhttp-proxy-resolver"
+                                                       " --js-flags=--jitless";
+                static const char sp_quiet_jit[]     = " --single-process --no-proxy-server --winhttp-proxy-resolver";
                 const char *jl = getenv( "MADEIRA_JITLESS" );
+                const char *cv = getenv( "MADEIRA_CEF_VERBOSE" );   /* 0: Steam's web helper keeps its own log level, no verbose CEF file log */
                 int jitless_on = !(jl && jl[0] == '0');
-                const char *sp = jitless_on ? sp_jitless : sp_jit;
+                int verbose_on = !(cv && cv[0] == '0');
+                const char *sp = verbose_on ? (jitless_on ? sp_jitless : sp_jit)
+                                            : (jitless_on ? sp_quiet_jitless : sp_quiet_jit);
                 dprintf(2, "[proc-gate] V8 %s (MADEIRA_JITLESS=%s) rev=ml526\n",
                         jitless_on ? "JITLESS (interpreted)" : "JIT ENABLED — #82 retest",
                         jl ? jl : "unset");
+                if (!verbose_on)
+                    dprintf(2, "[proc-gate] ml2230 CEF verbose log off (env.MADEIRA_CEF_VERBOSE=0)\n");
                 static const char dfs[] = "--disable-features=";
                 /* ml426 (#70): + segmentation-platform features. Four CreateBrowser
                  * runs died C00000FD in the CreateResponse→BrowserReady gap, and
@@ -2182,6 +2523,74 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
             }
         }
     }
+
+    /* Madeira: the EA app's Chromium -- see ea_cef_kind. Nothing below is read unless env.MADEIRA_EA_CEF is 1. */
+    {
+        const char *ea = getenv( "MADEIRA_EA_CEF" );
+        int kind = (ea && ea[0] == '1' && !ea[1])
+                 ? ea_cef_kind( params->ImagePathName.Buffer, params->ImagePathName.Length / sizeof(WCHAR),
+                                params->CommandLine.Buffer, params->CommandLine.Length / sizeof(WCHAR) )
+                 : EA_NOT_CEF;
+        if (kind == EA_CHILD)
+        {
+            dprintf( 2, "[ea-cef] REFUSING a --type= child of the EA app's Chromium (%s): its browser runs "
+                        "--single-process, one CEF process is all the address space holds "
+                        "(env.MADEIRA_EA_CEF=0 allows it)\n", debugstr_us( &params->ImagePathName ) );
+            return STATUS_ACCESS_DENIED;
+        }
+        if (kind == EA_BROWSER)
+        {
+            const char *cmd = getenv( "MADEIRA_EA_CEF_CMDLINE" );
+            if (cmd && cmd[0] == '0' && !cmd[1])
+                dprintf( 2, "[ea-cef] EADesktop.exe browser: command line left as it is (env.MADEIRA_EA_CEF_CMDLINE=0)\n" );
+            else
+            {
+                const char *jl = getenv( "MADEIRA_JITLESS" );
+                const char *extra = getenv( "MADEIRA_EA_CEF_FLAGS" );
+                int cl_len = params->CommandLine.Length / sizeof(WCHAR), how = 0, o = -1;
+                int cap = cl_len + 160 + (extra ? (int)strlen( extra ) : 0);
+                WCHAR *nbuf = malloc( cap * sizeof(WCHAR) );   /* leaks once per launch, as above */
+
+                if (nbuf)
+                    o = sc_browser_cmdline( params->CommandLine.Buffer, cl_len, !(jl && jl[0] == '0'), extra,
+                                            nbuf, cap, &how );
+                if (o >= 0)
+                {
+                    char tail[136];
+                    int tstart = o > 128 ? o - 128 : 0, ti;
+
+                    params->CommandLine.Buffer = nbuf;
+                    params->CommandLine.Length = o * sizeof(WCHAR);
+                    params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
+                    for (ti = 0; ti + tstart < o && ti < 135; ti++)
+                    {
+                        WCHAR c = nbuf[tstart + ti];
+                        tail[ti] = (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+                    }
+                    tail[ti] = 0;
+                    dprintf( 2, "[ea-cef] EADesktop.exe browser: %s; BackupRefPtr off (%s); V8 %s; %s; "
+                                "MADEIRA_EA_CEF_FLAGS %s\n",
+                             (how & SC_SINGLE_ADDED) ? "--single-process added" : "already --single-process",
+                             (how & SC_BRP_SPLICED) ? "spliced into its --disable-features list"
+                                                    : "new --disable-features switch",
+                             (how & SC_JITLESS_ADDED) ? "--jitless (MADEIRA_JITLESS=0 turns it off)"
+                             : (how & SC_JITLESS_MERGED) ? "--jitless put first in MADEIRA_EA_CEF_FLAGS' --js-flags "
+                                                           "(Chromium keeps only the last one)"
+                             : (how & SC_OWN_JS_FLAGS) ? "flags left as the app set them"
+                                                       : "JIT (MADEIRA_JITLESS=0)",
+                             (how & SC_NOPROXY_ADDED) ? "--no-proxy-server added" : "its own proxy switch kept",
+                             (how & SC_EXTRA_ADDED) ? "appended" : "unset" );
+                    dprintf( 2, "[ea-cef] cmdline-tail: ...%s\n", tail );
+                }
+                else
+                {
+                    free( nbuf );
+                    dprintf( 2, "[ea-cef] EADesktop.exe browser: command line NOT rewritten "
+                                "(no memory) -- it runs multi-process\n" );
+                }
+            }
+        }
+    }
 #endif
 
 #ifdef WINE_IOS
@@ -2237,6 +2646,25 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         if (ios_is_arm64ec_cur() && pe_info.is_hybrid && machine == IMAGE_FILE_MACHINE_ARM64)
             machine = ios_cur_image_info()->Machine;
     }
+#ifdef WINE_IOS
+    /* an aarch64 program is refused in an ARM64EC session (see ec_native_child_refuse) */
+    {
+        const char *ec_conhost = getenv( "MADEIRA_EC_CONHOST" );
+        int conhost_on = ec_conhost && ec_conhost[0] == '1' &&
+                         ios_image_name_is( params->ImagePathName.Buffer,
+                                            params->ImagePathName.Length / sizeof(WCHAR), "conhost.exe" );
+
+        if (!conhost_on && ec_native_child_refuse( is_arm64ec(), getenv( "MADEIRA_EC_NATIVE_CHILD" ), machine ))
+        {
+            dprintf(2, "[proc-gate] ml2280 REFUSING spawn of %s (an aarch64 program in an ARM64EC session: "
+                    "the session's ntdll loads the emulator into it and its threads have no CPU area, so it "
+                    "would crash; start this game in the Wine desktop; env.MADEIRA_EC_NATIVE_CHILD=1 starts it)\n",
+                    debugstr_us( &params->ImagePathName ));
+            status = STATUS_ACCESS_DENIED;
+            goto done;
+        }
+    }
+#endif
 #ifdef WINE_IOS
     /* a 32-bit child is about to need a guest window (see ios_wow_session_arm) */
     if (machine == IMAGE_FILE_MACHINE_I386 && !(pe_info.image_flags & IMAGE_FLAGS_ComPlusNativeReady))
@@ -4103,7 +4531,31 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
         len = sizeof(ULONG_PTR);
         if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
         if (handle == GetCurrentProcess())
-            *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)peb : (ULONG_PTR)wow_peb;
+        {
+            /* Madeira wow64-peb-self: wow_peb is a session global that init_peb()
+             * sets for a 32-bit child and loader_ios.c temporarily clears while a
+             * 64-bit child runs unix_init_startup_info().  A 32-bit thread querying
+             * ProcessWow64Information during that window read NULL and faulted in
+             * wow64.dll at [0+0x480], while a 64-bit process querying itself after
+             * any 32-bit child had booted read the child's wow_peb.  Derive this
+             * process's PEB32 from its own PEB and guest window
+             * ((char *)cur_peb + page_size), matching init_peb().
+             * env.MADEIRA_WOW64_PEB_SELF=0 answers the session global as before. */
+            static int self_off = -1;
+            if (self_off < 0)
+            {
+                const char *e = getenv( "MADEIRA_WOW64_PEB_SELF" );
+                self_off = (e && e[0] == '0' && !e[1]) ? 1 : 0;
+            }
+            if (self_off)
+                *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)peb : (ULONG_PTR)wow_peb;
+            else
+            {
+                PEB *cur_peb = NtCurrentTeb() ? NtCurrentTeb()->Peb : peb;
+                *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)cur_peb
+                    : (ios_wow_base_for_peb( cur_peb ) ? (ULONG_PTR)((char *)cur_peb + page_size) : 0);
+            }
+        }
         else
         {
             ULONG_PTR val = 0;
@@ -4727,3 +5179,5 @@ NTSTATUS WINAPI NtDebugContinue( HANDLE handle, CLIENT_ID *client, NTSTATUS stat
     SERVER_END_REQ;
     return ret;
 }
+
+

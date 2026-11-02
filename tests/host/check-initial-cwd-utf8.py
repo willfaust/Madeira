@@ -79,6 +79,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-initial-cwd-') as directory:
     src = Path(directory) / 'test.c'
     exe = Path(directory) / 'test'
     src.write_text(program)
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
+    # Wine's decode_utf8_char falls through its switch on purpose; GCC's -Wextra warns on that.
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-implicit-fallthrough',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer', str(src), '-o', str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

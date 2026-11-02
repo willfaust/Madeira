@@ -16,8 +16,9 @@ Checks:
   * the bridge exports madeira.cfg env.* entries with setenv(..., 1) when the session
     starts, i.e. after startDock, so env.MADEIRA_GDI_SHARED_SECTION = 0 still wins;
   * when the wine submodule is checked out: gdi_shared_use_section(), compiled
-    verbatim, returns TRUE for "1", FALSE for "0", and falls back to the session
-    being armed when the variable is unset or empty.
+    verbatim, returns TRUE for "1", FALSE for "0", and when the variable is unset or
+    empty section-backs the table by default (ml1352), or follows the session being
+    armed with MADEIRA_GDI_SECTION_ALWAYS=0.
 Source checks and one small host compile: no Wine, iOS or device.
 """
 from pathlib import Path
@@ -66,23 +67,31 @@ if gdiobj.exists():
     CC = os.environ.get('CC') or shutil.which('cc') or 'cc'
     with tempfile.TemporaryDirectory() as tmp:
         c = Path(tmp) / 't.c'
-        c.write_text('#include <stdio.h>\n#include <stdlib.h>\ntypedef int BOOL;\n'
+        c.write_text('#include <stdio.h>\n#include <stdlib.h>\ntypedef int BOOL;\n#define TRUE 1\n#define FALSE 0\n'
                      'static int armed;\nstatic int ios_wow_session_armed(void) { return armed; }\n'
                      + func.replace('ios_wow_session_armed && ', '') +
                      'int main(int c, char **v) { armed = atoi(v[1]); printf("%d\\n", gdi_shared_use_section()); return 0; }\n')
         exe = Path(tmp) / 't'
         subprocess.run([CC, '-O1', '-o', str(exe), str(c)], check=True)
 
-        def run(value, armed):
-            env = {k: v for k, v in os.environ.items() if k != 'MADEIRA_GDI_SHARED_SECTION'}
+        def run(value, armed, always=None):
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ('MADEIRA_GDI_SHARED_SECTION', 'MADEIRA_GDI_SECTION_ALWAYS')}
             if value is not None:
                 env['MADEIRA_GDI_SHARED_SECTION'] = value
+            if always is not None:
+                env['MADEIRA_GDI_SECTION_ALWAYS'] = always
             return subprocess.run([str(exe), str(armed)], env=env, capture_output=True, text=True).stdout.strip()
 
         require(run('1', 0) == '1', 'wine: "1" section-backs the table in an unarmed (64-bit start) session')
-        require(run('0', 1) == '0', 'wine: "0" keeps the private table even in an armed session')
-        require(run(None, 0) == '0' and run(None, 1) == '1', 'wine: unset follows the session being armed')
-        require(run('', 1) == '1', 'wine: empty follows the session being armed')
+        require(run('0', 1) == '0' and run('0', 1, '1') == '0',
+                'wine: "0" keeps the private table even in an armed session')
+        require(run(None, 0) == '1' and run(None, 1) == '1' and run('', 0) == '1',
+                'wine: unset or empty section-backs the table by default (ml1352)')
+        require(run(None, 0, '0') == '0' and run(None, 1, '0') == '1',
+                'wine: MADEIRA_GDI_SECTION_ALWAYS=0, unset follows the session being armed')
+        require(run('', 0, '0') == '0' and run('', 1, '0') == '1',
+                'wine: MADEIRA_GDI_SECTION_ALWAYS=0, empty follows the session being armed')
 else:
     print('SKIP: wine submodule not checked out; gdi_shared_use_section not compiled')
 

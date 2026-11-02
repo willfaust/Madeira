@@ -491,6 +491,12 @@ struct DeveloperPortal {
 @MainActor final class SigningRefresh: ObservableObject {
     static let shared = SigningRefresh()
 
+    /// Off by default: no Settings section, no refresh or offer over the library and no
+    /// sign-in taken from an installer. A refresh asks Apple's portal for a profile on the
+    /// Apple ID that signs other apps too, so the installer that signed Madeira renews it.
+    /// `env.MADEIRA_SIGNING_REFRESH = 1` brings all of it back.
+    nonisolated static var enabled: Bool { MadeiraConfig.flag("MADEIRA_SIGNING_REFRESH", fallback: false) }
+
     /// Madeira refreshes by itself from this many days before the signing runs out, and
     /// offers it from `offerDays`.
     static let automaticDays = 5
@@ -848,10 +854,11 @@ struct SigningRefreshOffer: ViewModifier {
     }
 
     func body(content: Content) -> some View {
+        // Switched off (SigningRefresh.enabled), nothing starts a refresh or sets a prompt.
         content
-            .onAppear { signing.libraryAppeared() }
+            .onAppear { if SigningRefresh.enabled { signing.libraryAppeared() } }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                signing.libraryAppeared()
+                if SigningRefresh.enabled { signing.libraryAppeared() }
             }
             .alert(title, isPresented: Binding(get: { signing.prompt != nil }, set: { if !$0 { signing.prompt = nil } })) {
                 if needsSignIn {
