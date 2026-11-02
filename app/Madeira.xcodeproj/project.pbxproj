@@ -30,6 +30,7 @@
 		A1006B07 /* SwiftEA/EAService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006B07 /* EAService.swift */; };
 		A1000900 /* LiquidMetal.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000900 /* LiquidMetal.metal */; };
 		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
+		A1009C03 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2009C03 /* Localizable.xcstrings */; };
 		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
 		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
 		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
@@ -171,6 +172,7 @@
 		A1000201 /* LogTail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000201 /* LogTail.swift */; };
 		A1000202 /* FPSOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000202 /* FPSOverlay.swift */; };
 		A1000213 /* LibraryBCD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000213 /* LibraryBCD.swift */; };
+		A1007C01 /* GPUCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007C01 /* GPUCards.swift */; };
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
@@ -289,6 +291,7 @@
 		A2006B07 /* EAService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftEA/EAService.swift"; sourceTree = "<group>"; };
 		A2000900 /* LiquidMetal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetal.metal"; sourceTree = "<group>"; };
 		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A2009C03 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
 		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
 		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
@@ -447,6 +450,7 @@
 		A2000201 /* LogTail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogTail.swift; sourceTree = "<group>"; };
 		A2000202 /* FPSOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FPSOverlay.swift; sourceTree = "<group>"; };
 		A2000213 /* LibraryBCD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryBCD.swift; sourceTree = "<group>"; };
+		A2007C01 /* GPUCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUCards.swift; sourceTree = "<group>"; };
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
@@ -594,6 +598,7 @@
 				A2006B06 /* EALicense.swift */,
 				A2006B07 /* EAService.swift */,
 				A2000900 /* LiquidMetal.metal */,
+				A2009C03 /* Localizable.xcstrings */,
 				A2000910 /* Assets.xcassets */,
 				A2000902 /* GlassSkin.swift */,
 				A2000903 /* LiquidMetalSkin.metal */,
@@ -672,6 +677,7 @@
 				A2000201 /* LogTail.swift */,
 				A2000202 /* FPSOverlay.swift */,
 				A2000213 /* LibraryBCD.swift */,
+				A2007C01 /* GPUCards.swift */,
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
 				A2000208 /* GameProfiles.swift */,
@@ -915,6 +921,11 @@
 			knownRegions = (
 				en,
 				Base,
+				de,
+				es,
+				ko,
+				"pt-BR",
+				ru,
 			);
 			mainGroup = A4000001;
 			productRefGroup = A4000003 /* Products */;
@@ -947,6 +958,7 @@
 				A1000082 /* x86_64-opengl in Resources */,
 				A1000040 /* prefix-template.tar.gz in Resources */,
 				A1000094 /* cacert.pem in Resources */,
+				A1009C03 /* Localizable.xcstrings in Resources */,
 				A1000910 /* Assets.xcassets in Resources */,
 				B1000004 /* madeira-jit.js in Resources */,
 				B1000051 /* Madeira JIT.shortcut in Resources */,
@@ -1110,6 +1122,7 @@
 				A1000201 /* LogTail.swift in Sources */,
 				A1000202 /* FPSOverlay.swift in Sources */,
 				A1000213 /* LibraryBCD.swift in Sources */,
+				A1007C01 /* GPUCards.swift in Sources */,
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,

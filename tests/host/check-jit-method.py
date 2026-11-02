@@ -161,7 +161,7 @@ require("if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) 
 # (an alert inside the Library page waited until that tab came back).
 body = library_source[library_source.index('struct LibraryView: View {'):]
 body = body[body.index('    var body: some View {'):body.index('    @ToolbarContentBuilder private var libraryToolbar')]
-require('.alert(jitProblem == nil ? "Library" : "Couldn\'t Enable JIT"' in body,
+require('.alert(jitProblem == nil ? L("Library") : L("Couldn\'t Enable JIT")' in body,
         "the library's error alert is on the tab view, shown on the Settings tab as well")
 require('URL(string: "localdevvpn://enable?scheme=madeira")' in setup
         and "localdevvpn" in app_plist["LSApplicationQueriesSchemes"]

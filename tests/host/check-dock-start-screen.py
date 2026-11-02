@@ -72,8 +72,8 @@ require(poll.index('if dockStart.holding {') < poll.index('showGameView(reason: 
 row = library[library.index("The starting screen's controls are one row of glyph-only buttons"):]
 row = row[:row.index('if model.launchSlow')]
 require('HStack(spacing: 14)' in row, 'one row of glyph buttons')
-order = [row.index('"Close session", "stop.circle"'), row.index('"Hide live log" : "Show live log", "text.alignleft"'),
-         row.index('"Show desktop", "macwindow"')]
+order = [row.index('L("Close session"), "stop.circle"'), row.index('L("Hide live log") : L("Show live log"), "text.alignleft"'),
+         row.index('L("Show desktop"), "macwindow"')]
 require(order == sorted(order), 'glyph order: close session, live log, show desktop')
 require('if dockStart.failure != nil {' in row and 'if dockStart.holding {' in row and 'dockStart.showDesktop(model)' in row,
         'close session only once the Dock stopped; show desktop only while the desktop is held back')

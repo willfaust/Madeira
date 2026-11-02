@@ -112,7 +112,8 @@ check("registry GPU: switch LUID, else a fresh one; switch size, else 4096 MB",
       and "if (kmt)\n    {" in reg and "madeira_kmt_driver_version_qword( driver_vendor_to_version( pci.vendor ) )" in reg)
 ident = func(sp, "void madeira_kmt_identity( struct madeira_kmt_identity *id )")
 check("identity = the registry GPU (ids, name, DriverVersion, path)",
-      "ios_virtual_gpu_ids( &pci.vendor, &pci.device );" in ident and "gpu_device_name( pci.vendor, pci.device" in ident
+      "ios_virtual_gpu_ids( &pci.vendor, &pci.device );" in ident
+      and "ios_virtual_gpu_name( pci.vendor, pci.device )" in ident and "ios_virtual_gpu_name( pci.vendor, pci.device )" in reg
       and "driver_vendor_to_version( pci.vendor )" in ident
       and 'PCI\\\\VEN_%04X&DEV_%04X&SUBSYS_00000000&REV_00\\\\%08X' in ident)
 

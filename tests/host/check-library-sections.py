@@ -45,7 +45,7 @@ body = between(section, '    var body: some View {', '    private func cell(')
 
 # ------------------------------------------------------------------ order of the page
 steam_at = page.index('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,')
-others_at = page.index('LibrarySectionHeader(title: "Other games"')
+others_at = page.index('LibrarySectionHeader(title: L("Other games")')
 # The Desktop button is LibraryView.desktopButton (both grids show it).
 require(page.index('desktopButton') < steam_at < others_at and 'Label("Desktop", systemImage: "desktopcomputer")' in view,
         'page order: Desktop, then Steam, then Other games')
@@ -62,13 +62,13 @@ require('ContentUnavailableView("Make yourself at home"' in single and single.co
 require('.refreshable { await SteamGamesSection.refresh() }' in page, 'pull down on the library refreshes the Steam section')
 
 # ------------------------------------------------------------------ Other games
-others = between(page, 'LibrarySectionHeader(title: "Other games"', '} else if model.entries.filter(')
+others = between(page, 'LibrarySectionHeader(title: L("Other games")', '} else if model.entries.filter(')
 require('count: entries.count' in others and 'collapsed: SteamGamesSection.collapsible ? $hideOthers : nil' in others,
         'Other games: count and a collapsible title (MADEIRA_LIBRARY_COLLAPSE)')
 require('Label("Add a game"' not in others and '{ EmptyView() }' in others and 'browser = true' in page,
         'Other games: no Add a game button of its own; the + in the navigation bar opens the executable browser')
 require('"Copy a game\'s folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."' in others
-        and '"No other games match your search."' in others, 'Other games: empty and no-match texts')
+        and 'L("No other games match your search.")' in others, 'Other games: empty and no-match texts')
 require(others.index('if hideOthers && SteamGamesSection.collapsible {') < others.index('} else if entries.isEmpty {')
         < others.index('cells(entries, width: viewport.size.width)'), 'Other games: collapsed, empty, then the games')
 require('@AppStorage("madeiraLibraryHideOthers") private var hideOthers = false' in view, 'Other games: remembered collapsed state')

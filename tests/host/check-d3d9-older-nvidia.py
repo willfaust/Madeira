@@ -34,12 +34,12 @@ check('static let olderNvidiaName = "NVIDIA GeForce 7900 GS"' in bcd, 'the prefs
 m = re.search(r'if nvidia \{.*?\n        \}(.*?)// The game\'s own settings', bcd, re.S)
 check(m is not None and 'if olderNvidia { dxmtExtra += D3D9Identity.olderNvidia.options }' in m.group(1),
       'after the NVIDIA ids, so its Direct3D 9 ids win')
-check('olderNvidia: olderNvidia, profile: profile)' in bcd and 'D3D9Identity.syncGamePrefs(appID: appID, olderNvidia: olderNvidia)' in bcd,
+check('olderNvidia: olderNvidia, card: card, profile: profile)' in bcd and 'D3D9Identity.syncGamePrefs(appID: appID, olderNvidia: olderNvidia)' in bcd,
       'a library launch passes the switch and keeps the prefs in step')
 
 # The switch.
 check('olderNvidiaKey = "madeira.library.olderNvidia"' in prefs and 'func setOlderNvidia(' in prefs, 'LibraryPrefs keeps it per game')
-check('compatLabel("Older NVIDIA card (Direct3D 9)"' in library and 'LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath)' in library,
+check('compatLabel(L("Older NVIDIA card (Direct3D 9)")' in library and 'LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath)' in library,
       'Game details > Compatibility shows it')
 check('olderNvidia = LibraryPrefs.olderNvidia(windowsPath)' in library, 'the settings page reads it')
 

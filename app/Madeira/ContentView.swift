@@ -2682,12 +2682,26 @@ struct ContentView: View {
         var on: [String] = []
         if LibraryPrefs.avx(path) { setenv("MADEIRA_FEX_AVX", "1", 1); on.append("avx") }
         if LibraryPrefs.wineVCRT(path) { setenv("MADEIRA_WINE_VCRT", "1", 1); on.append("wine-vcrt") }
-        if LibraryPrefs.nvidia(path) {
+        let card = GPUCards.card(LibraryPrefs.gpuCard(path))
+        if LibraryPrefs.nvidia(path), card == nil {
             setenv("DXMT_ENABLE_NVEXT", "1", 1)
             setenv("DXMT_WSI_MONITOR_IDENTITY", "1", 1)
             setenv("DXMT_WSI_MODE_TABLE", "1", 1)
             if entry.desktop == true, getenv("MADEIRA_DXMT_EXTRA") == nil { setenv("MADEIRA_DXMT_EXTRA", "dxgi.customDeviceId=2544", 1) }
             on.append("nvidia")
+        }
+        // "Graphics card the game sees" replaces the NVIDIA switch (BCDLaunch.applyExtras);
+        // applyEnvironment unset its NVAPI and monitor switches. The Desktop entry gets
+        // the card's DXMT options here, as it gets the switch's device id above.
+        if let card {
+            let metalName = MTLCreateSystemDefaultDevice()?.name
+            for (name, value) in GPUCards.environment(card, metalName: metalName) {
+                if let value { setenv(name, value, 1) } else { unsetenv(name) }
+            }
+            if entry.desktop == true {   // applyLibrary left the Desktop entry without any
+                setenv("MADEIRA_DXMT_EXTRA", GPUCards.dxmtOptions(card, metalName: metalName).joined(separator: ";"), 1)
+            }
+            on.append("gpu-card=\(card.id)")
         }
         if !on.isEmpty { LogStore.shared.log("[bcd] game switches: \(on.joined(separator: " "))") }
     }
@@ -2993,6 +3007,16 @@ struct ContentView: View {
                     dxmtOptions.append(option)
                 }
                 if !extra.isEmpty { logStore.log("DXMT config: \(extra.joined(separator: ";")) via the game's settings") }
+            }
+            // Past DXMT's limit (below) every option is lost; the adapter names (a chosen
+            // graphics card's, GPUCards.swift) go first, as the ids are what a game's table
+            // reads: DXGI's, then Direct3D 9's (older games read the name more often).
+            for key in GPUCards.nameKeys where dxmtOptions.joined(separator: ";").utf16.count > 259 {
+                let before = dxmtOptions.count
+                dxmtOptions.removeAll { GPUCards.optionKey($0) == key }
+                if dxmtOptions.count != before {
+                    logStore.log("DXMT config: \(key) left out, to stay within DXMT's 259 characters", level: .error)
+                }
             }
             // Unset otherwise, so a previous session's options in this app process do not apply.
             if !dxmtOptions.isEmpty { setenv("DXMT_CONFIG", dxmtOptions.joined(separator: ";"), 1) } else { unsetenv("DXMT_CONFIG") }
