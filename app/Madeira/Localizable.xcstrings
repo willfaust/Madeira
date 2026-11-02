@@ -851,6 +851,40 @@
         }
       }
     },
+    "Achievements and stats": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erfolge und Statistiken"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Logros y estadísticas"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "도전 과제 및 통계"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conquistas e estatísticas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Достижения и статистика"
+          }
+        }
+      }
+    },
     "AVX and AVX2": {
       "localizations": {
         "de": {
@@ -2411,6 +2445,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "CAP"
+          }
+        }
+      }
+    },
+    "Checks every installed file against GOG's current build and downloads what is missing or changed.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüft jede installierte Datei gegen den aktuellen Build von GOG und lädt herunter, was fehlt oder sich geändert hat."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comprueba cada archivo instalado con la versión actual de GOG y descarga lo que falte o haya cambiado."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "설치된 모든 파일을 GOG의 현재 빌드와 비교하고 없거나 바뀐 파일을 다운로드합니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confere cada arquivo instalado com a versão atual da GOG e baixa o que falta ou mudou."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сверяет каждый установленный файл с текущей сборкой GOG и скачивает недостающее или изменённое."
           }
         }
       }
@@ -4349,6 +4417,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "DLC"
+          }
+        }
+      }
+    },
+    "DLC installed": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DLC installiert"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DLC instalado"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "설치된 DLC"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DLC instalado"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DLC установлено"
           }
         }
       }
@@ -7753,6 +7855,74 @@
         }
       }
     },
+    "Games download directly from GOG with your account into C:\\GOG Games, with the DLC you own. Keep Madeira open while it downloads: in the background iOS allows only a short time, then the download pauses and continues when you return. A download also pauses while a game is running.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiele werden mit deinem Konto direkt von GOG nach C:\\GOG Games geladen, mit den DLCs, die du besitzt. Lass Madeira während des Downloads geöffnet: Im Hintergrund erlaubt iOS nur kurze Zeit, dann pausiert der Download und geht weiter, wenn du zurückkommst. Ein Download pausiert auch, während ein Spiel läuft."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los juegos se descargan directamente de GOG con tu cuenta en C:\\GOG Games, con los DLC que tienes. Mantén Madeira abierta mientras descarga: en segundo plano iOS solo permite poco tiempo, luego la descarga se pausa y sigue cuando vuelves. Una descarga también se pausa mientras se ejecuta un juego."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임은 보유한 DLC와 함께 계정으로 GOG에서 직접 C:\\GOG Games에 다운로드됩니다. 다운로드하는 동안 Madeira를 열어 두세요. 백그라운드에서는 iOS가 짧은 시간만 허용하므로 다운로드가 일시 정지되고 돌아오면 이어집니다. 게임이 실행 중일 때도 다운로드가 일시 정지됩니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Os jogos são baixados direto da GOG com sua conta em C:\\GOG Games, com os DLCs que você tem. Mantenha o Madeira aberto durante o download: em segundo plano o iOS permite só pouco tempo, depois o download pausa e continua quando você volta. Um download também pausa enquanto um jogo roda."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игры скачиваются напрямую из GOG с вашей учётной записью в C:\\GOG Games, вместе с вашими DLC. Держите Madeira открытой во время загрузки: в фоне iOS даёт лишь немного времени, потом загрузка ставится на паузу и продолжается, когда вы вернётесь. Загрузка также ставится на паузу, пока идёт игра."
+          }
+        }
+      }
+    },
+    "GOG": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG"
+          }
+        }
+      }
+    },
     "GPU sync": {
       "localizations": {
         "de": {
@@ -8637,6 +8807,40 @@
         }
       }
     },
+    "https://embed.gog.com/on_login_success?…": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://embed.gog.com/on_login_success?…"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://embed.gog.com/on_login_success?…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://embed.gog.com/on_login_success?…"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://embed.gog.com/on_login_success?…"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://embed.gog.com/on_login_success?…"
+          }
+        }
+      }
+    },
     "If this file is an installer, Play runs it once in the Wine desktop, into C:\\itch; after that, Play starts the game.": {
       "localizations": {
         "de": {
@@ -8973,6 +9177,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Установлено"
+          }
+        }
+      }
+    },
+    "Installed before Madeira added GOG's redistributables. Repair installed files adds them.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Installiert, bevor Madeira GOGs Laufzeitkomponenten hinzugefügt hat. „Installierte Dateien reparieren“ fügt sie hinzu."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Instalado antes de que Madeira añadiera los redistribuibles de GOG. Reparar archivos instalados los añade."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira가 GOG 재배포 패키지를 추가하기 전에 설치되었습니다. 설치된 파일 복구를 하면 추가됩니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Instalado antes de o Madeira adicionar os redistribuíveis do GOG. Reparar arquivos instalados os adiciona."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Установлено до того, как Madeira добавила распространяемые компоненты GOG. «Восстановить установленные файлы» добавит их."
           }
         }
       }
@@ -10027,6 +10265,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "KosmicKrisp нет в этой сборке (нет gl/libvulkan_kosmickrisp.dylib)."
+          }
+        }
+      }
+    },
+    "Language": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sprache"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Idioma"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "언어"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Idioma"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Язык"
           }
         }
       }
@@ -11217,6 +11489,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Madeira построена на Wine, FEX-Emu, DXMT от Feifan He (3Shain) с фронтендом Direct3D 9 от David Acevedo (dacevedo12), rpmalloc от Mattias Jansson, StikDebug, StikJIT и idevice. Спасибо всем, кто вносит вклад в эти проекты."
+          }
+        }
+      }
+    },
+    "Madeira keeps a GOG sign-in token in this device's Keychain, for this device only. Signing out removes it; installed games stay and still play.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira speichert ein GOG-Anmeldetoken im Schlüsselbund dieses Geräts, nur für dieses Gerät. Abmelden entfernt es; installierte Spiele bleiben und laufen weiter."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira guarda un token de inicio de sesión de GOG en el llavero de este dispositivo, solo para este dispositivo. Cerrar sesión lo elimina; los juegos instalados se quedan y siguen funcionando."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira는 GOG 로그인 토큰을 이 기기의 키체인에 이 기기 전용으로 보관합니다. 로그아웃하면 제거되며, 설치된 게임은 남아 있고 계속 플레이할 수 있습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O Madeira guarda um token de login da GOG nas Chaves deste dispositivo, só para este dispositivo. Sair o remove; os jogos instalados ficam e continuam rodando."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira хранит токен входа GOG в Связке ключей этого устройства, только для этого устройства. Выход удаляет его; установленные игры остаются и продолжают работать."
           }
         }
       }
@@ -13635,6 +13941,40 @@
         }
       }
     },
+    "Open the login page in Safari and sign in. GOG then opens a page whose address starts with embed.gog.com/on_login_success. Copy that whole address and paste it here.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne die Anmeldeseite in Safari und melde dich an. GOG öffnet dann eine Seite, deren Adresse mit embed.gog.com/on_login_success beginnt. Kopiere die ganze Adresse und füge sie hier ein."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abre la página de inicio de sesión en Safari e inicia sesión. GOG abrirá una página cuya dirección empieza por embed.gog.com/on_login_success. Copia la dirección completa y pégala aquí."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Safari에서 로그인 페이지를 열고 로그인하세요. 그러면 GOG가 embed.gog.com/on_login_success로 시작하는 주소의 페이지를 엽니다. 그 주소 전체를 복사해 여기에 붙여넣으세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abra a página de login no Safari e entre. A GOG então abre uma página cujo endereço começa com embed.gog.com/on_login_success. Copie o endereço inteiro e cole aqui."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Откройте страницу входа в Safari и войдите. Затем GOG откроет страницу, адрес которой начинается с embed.gog.com/on_login_success. Скопируйте весь адрес и вставьте сюда."
+          }
+        }
+      }
+    },
     "Open the Workshop in Safari": {
       "localizations": {
         "de": {
@@ -14451,6 +14791,40 @@
         }
       }
     },
+    "Paste the sign-in address": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anmeldeadresse einfügen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pegar la dirección de inicio de sesión"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그인 주소 붙여넣기"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Colar o endereço de login"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вставить адрес входа"
+          }
+        }
+      }
+    },
     "Pause download": {
       "localizations": {
         "de": {
@@ -14893,6 +15267,40 @@
         }
       }
     },
+    "Product ID": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Produkt-ID"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ID de producto"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "제품 ID"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ID do produto"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ID продукта"
+          }
+        }
+      }
+    },
     "Program": {
       "localizations": {
         "de": {
@@ -15331,6 +15739,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Обновите библиотеку Epic Games и повторите попытку."
+          }
+        }
+      }
+    },
+    "Refresh your GOG library and try again.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktualisiere deine GOG-Bibliothek und versuche es erneut."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actualiza tu biblioteca de GOG y vuelve a intentarlo."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG 라이브러리를 새로 고친 뒤 다시 시도하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Atualize sua biblioteca da GOG e tente de novo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Обновите библиотеку GOG и повторите попытку."
           }
         }
       }
@@ -17409,6 +17851,40 @@
         }
       }
     },
+    "See your GOG games here and install them without leaving Madeira.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sieh hier deine GOG-Spiele und installiere sie, ohne Madeira zu verlassen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mira aquí tus juegos de GOG e instálalos sin salir de Madeira."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG 게임을 여기에서 보고 Madeira를 떠나지 않고 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Veja aqui seus jogos da GOG e instale-os sem sair do Madeira."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Здесь видны ваши игры GOG; устанавливайте их, не выходя из Madeira."
+          }
+        }
+      }
+    },
     "See your Steam games here and install them without leaving Madeira.": {
       "localizations": {
         "de": {
@@ -17953,6 +18429,108 @@
         }
       }
     },
+    "Sign in to GOG": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei GOG anmelden"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Iniciar sesión en GOG"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG에 로그인"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entrar na GOG"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войти в GOG"
+          }
+        }
+      }
+    },
+    "Sign in to GOG in Settings › GOG to update this game. It plays without a sign-in.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Melde dich unter Einstellungen › GOG bei GOG an, um dieses Spiel zu aktualisieren. Es läuft auch ohne Anmeldung."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en GOG en Ajustes › GOG para actualizar este juego. Se juega sin iniciar sesión."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 게임을 업데이트하려면 설정 › GOG에서 GOG에 로그인하세요. 로그인 없이도 플레이할 수 있습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre na GOG em Ajustes › GOG para atualizar este jogo. Ele roda sem login."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в GOG в Настройки › GOG, чтобы обновлять эту игру. Играть можно и без входа."
+          }
+        }
+      }
+    },
+    "Sign in with an address": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit Adresse anmelden"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Iniciar sesión con una dirección"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "주소로 로그인"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entrar com um endereço"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войти по адресу"
+          }
+        }
+      }
+    },
     "Sign In…": {
       "localizations": {
         "de": {
@@ -18425,6 +19003,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Выйти из Epic Games?"
+          }
+        }
+      }
+    },
+    "Sign out of GOG": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von GOG abmelden"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cerrar sesión en GOG"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG에서 로그아웃"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sair da GOG"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выйти из GOG"
+          }
+        }
+      }
+    },
+    "Sign out of GOG?": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von GOG abmelden?"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "¿Cerrar sesión en GOG?"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG에서 로그아웃할까요?"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sair da GOG?"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выйти из GOG?"
           }
         }
       }
@@ -20499,6 +21145,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "Синхронизирует при запуске Madeira и при открытии этой страницы, но не во время игры. Закончив, нажмите «Загрузить сохранения». Заменённые сохранения попадают в Файлы › Madeira › Steam Cloud Backups."
+          }
+        }
+      }
+    },
+    "The game starts its own program in Wine, as GOG Galaxy would. Madeira stands in for GOG Galaxy while the game runs, so a game that uses Galaxy gets its achievements and stats. Galaxy cloud saves are not available yet.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Spiel startet sein eigenes Programm in Wine, wie es GOG Galaxy tun würde. Madeira übernimmt die Rolle von GOG Galaxy, solange das Spiel läuft, daher erhält ein Spiel, das Galaxy nutzt, seine Erfolge und Statistiken. Galaxy-Cloud-Spielstände sind noch nicht verfügbar."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El juego inicia su propio programa en Wine, como lo haría GOG Galaxy. Madeira hace las veces de GOG Galaxy mientras el juego se ejecuta, así que un juego que usa Galaxy obtiene sus logros y estadísticas. Las partidas en la nube de Galaxy aún no están disponibles."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임은 GOG Galaxy처럼 Wine에서 자체 프로그램을 시작합니다. 게임이 실행되는 동안 Madeira가 GOG Galaxy 역할을 하므로, Galaxy를 사용하는 게임은 도전 과제와 통계를 받을 수 있습니다. Galaxy 클라우드 저장은 아직 사용할 수 없습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O jogo inicia o próprio programa no Wine, como o GOG Galaxy faria. O Madeira faz o papel do GOG Galaxy enquanto o jogo roda, então um jogo que usa o Galaxy recebe suas conquistas e estatísticas. Saves na nuvem do Galaxy ainda não estão disponíveis."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игра запускает собственную программу в Wine, как это сделал бы GOG Galaxy. Пока игра запущена, Madeira заменяет GOG Galaxy, поэтому игра, использующая Galaxy, получает свои достижения и статистику. Облачные сохранения Galaxy пока недоступны."
+          }
+        }
+      }
+    },
+    "This GOG game is no longer installed. Install it again from the GOG section.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses GOG-Spiel ist nicht mehr installiert. Installiere es erneut im Bereich GOG."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este juego de GOG ya no está instalado. Vuelve a instalarlo desde la sección GOG."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 GOG 게임은 더 이상 설치되어 있지 않습니다. GOG 섹션에서 다시 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este jogo da GOG não está mais instalado. Instale de novo na seção GOG."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Эта игра GOG больше не установлена. Установите её снова в разделе GOG."
           }
         }
       }
@@ -23593,6 +24307,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Если LocalDevVPN не достигает устройства, «Включить JIT» запускает вашу быструю команду «%1$@»: она выключает сотовые данные, когда нет Wi-Fi, подключает LocalDevVPN и возвращает всё обратно после запуска игры. Каждый запуск ненадолго открывает «Команды»."
+          }
+        }
+      }
+    },
+    "Which program Play starts. Pick the game itself when its launcher closes without starting it.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Welches Programm „Spielen“ startet. Wähle das Spiel selbst, wenn sich sein Launcher schließt, ohne es zu starten."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qué programa inicia Jugar. Elige el propio juego cuando su lanzador se cierra sin iniciarlo."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "플레이가 시작할 프로그램입니다. 런처가 게임을 시작하지 않고 닫히면 게임 자체를 선택하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Qual programa o Jogar inicia. Escolha o próprio jogo quando o inicializador fechar sem iniciá-lo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Какую программу запускает «Играть». Выберите саму игру, если её лаунчер закрывается, не запустив её."
           }
         }
       }

@@ -1,0 +1,7 @@
+Portions copyright the Playport authors.
+Source: https://github.com/playportdev/playport/tree/412de5f8c0bdd26d84e0127eb5776ba992e3b152
+Playport-authored additions are GPL-3.0-or-later with the Madeira Converter
+Exception, version 1 (LICENSE-EXCEPTION.md). Original source headers and
+attribution are preserved. This covers the GOG Galaxy game service in
+app/Madeira/SwiftGOG/Galaxy (from Playport's app/Packages/GOGClient, as
+carried in willfaust/Madeira #479).

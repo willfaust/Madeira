@@ -48,7 +48,7 @@ enum LibraryGridFixed: Hashable {
     case note(id: String, text: String)
     case notInstalledToggle(count: Int, shown: Bool)
     case emptyLibrary
-    /// A store's own section (ItchGamesSection, EpicGamesSection, EAGamesSection); `signature` is what its height follows.
+    /// A store's own section (GOGGamesSection, ItchGamesSection, EpicGamesSection, EAGamesSection); `signature` is what its height follows.
     case store(LibraryGridStore, signature: String)
 
     var id: String {
@@ -66,13 +66,14 @@ enum LibraryGridFixed: Hashable {
     }
 }
 
-/// The store sections the original page shows after Other games and Steam (itch.io, Epic Games, EA app). On the grid each one is
+/// The store sections the original page shows after Other games and Steam (GOG, itch.io, Epic Games, EA app). On the grid each one is
 /// a fixed element hosting the store's own section, its cards laid out by the section as on the original page.
 enum LibraryGridStore: String, CaseIterable {
-    case itch, epic, ea
+    case gog, itch, epic, ea
 
     @MainActor var enabled: Bool {
         switch self {
+        case .gog: return GOGLibrary.enabled
         case .itch: return ItchLibrary.enabled
         case .epic: return EpicLibrary.enabled
         case .ea: return EALibrary.enabled
@@ -88,6 +89,12 @@ enum LibraryGridStore: String, CaseIterable {
                 + "\(defaults.bool(forKey: hide)) \(defaults.object(forKey: shown) as? Bool ?? true)"
         }
         var result: [LibraryGridStore: String] = [:]
+        if GOGLibrary.enabled {
+            let gog = GOGLibrary.shared, items = GOGGamesRules.items(gog, search: search)
+            result[.gog] = signature(signedIn: gog.signedIn, refreshing: gog.refreshing, loaded: gog.libraryUpdated != nil,
+                                     mine: items.filter { $0.installed != nil || gog.downloads[$0.id] != nil }.count, all: items.count,
+                                     hide: "madeiraLibraryHideGOG", shown: "madeiraGOGShowUninstalled")
+        }
         if ItchLibrary.enabled {
             let itch = ItchLibrary.shared, items = ItchGamesRules.items(itch, search: search)
             result[.itch] = signature(signedIn: itch.signedIn, refreshing: itch.refreshing, loaded: itch.libraryUpdated != nil,
@@ -110,11 +117,13 @@ enum LibraryGridStore: String, CaseIterable {
     }
 }
 
-/// The store sections' sheets, shared by the section that asks for one and the page that presents it (ItchSheets, EpicSheets,
+/// The store sections' sheets, shared by the section that asks for one and the page that presents it (GOGSheets, ItchSheets, EpicSheets,
 /// EASheets): the section itself on the original page, LibraryGridPage on the grid.
 @MainActor final class LibraryStoreSheets: ObservableObject {
     static let shared = LibraryStoreSheets()
     struct Game<ID: Hashable>: Identifiable { let id: ID }
+    @Published var gogGame: Game<String>?
+    @Published var gogSignIn = false
     @Published var itchGame: Game<Int>?
     @Published var itchSignIn = false
     @Published var itchFind = false
@@ -202,7 +211,7 @@ struct LibraryGridPageModel: Equatable {
                 page.othersSection(inputs)
                 if MadeiraDock.enabled { page.steamSection(inputs, part: steamFirst ? .notInstalled : .all) }
             } else if LibraryModel.shared.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil
-                                                            && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
+                                                            && $0.gogProductID == nil && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
                 page.append(.fixed(.emptyLibrary), spacing: LibraryGridGeometry.blockSpacing)
             } else {
                 page.grid("others", inputs.others, spacing: LibraryGridGeometry.blockSpacing)
@@ -469,9 +478,12 @@ struct LibraryGridPage: View {
     @ObservedObject private var steamGames = SteamGamesModel.shared
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     // The store sections' models and switches: what LibraryGridStore.signatures reads, so a change rebuilds the page.
+    @ObservedObject private var gog = GOGLibrary.shared
     @ObservedObject private var itch = ItchLibrary.shared
     @ObservedObject private var epic = EpicLibrary.shared
     @ObservedObject private var ea = EALibrary.shared
+    @AppStorage("madeiraLibraryHideGOG") private var hideGOG = false
+    @AppStorage("madeiraGOGShowUninstalled") private var showGOG = true
     @AppStorage("madeiraLibraryHideItch") private var hideItch = false
     @AppStorage("madeiraItchShowUninstalled") private var showItch = true
     @AppStorage("madeiraLibraryHideEpic") private var hideEpic = false
@@ -520,6 +532,7 @@ struct LibraryGridPage: View {
             }
             .sheet(isPresented: $showSignIn) { SteamSignInView() }
             // The store sections' starts, sheets and alerts (their sections sit in the grid's cells).
+            .modifier(GOGSheets(open: open))
             .modifier(ItchSheets(open: open))
             .modifier(EpicSheets(open: open))
             .modifier(EASheets(open: open))
@@ -561,6 +574,8 @@ struct LibraryGridPage: View {
             return AnyView(LibraryGridNotInstalledToggle(count: count))
         case .emptyLibrary:
             return AnyView(ContentUnavailableView("Make yourself at home", systemImage: "gamecontroller", description: Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")))
+        case .store(.gog, _):
+            return AnyView(GOGGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
         case .store(.itch, _):
             return AnyView(ItchGamesSection(search: search, layout: layout, width: width, open: open, inGrid: true))
         case .store(.epic, _):

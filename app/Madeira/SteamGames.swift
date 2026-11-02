@@ -503,6 +503,10 @@ struct SteamGamesSection: View {
         if SteamOwnedLibrary.enabled && SteamOwnedLibrary.shared.signedIn {
             await SteamOwnedLibrary.shared.refreshLibrary(interactive: true)
         }
+        // The GOG section refreshes with the same pull (GOGGames.swift).
+        if GOGLibrary.enabled && GOGLibrary.shared.signedIn {
+            await GOGLibrary.shared.refreshLibrary(interactive: true)
+        }
         // The itch.io section refreshes with the same pull (ItchGames.swift).
         if ItchLibrary.enabled && ItchLibrary.shared.signedIn {
             await ItchLibrary.shared.refreshLibrary(interactive: true)
