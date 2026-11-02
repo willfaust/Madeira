@@ -7311,40 +7311,6 @@
         }
       }
     },
-    "For older games that crash with this GPU, like Fallout 3 and New Vegas": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Für ältere Spiele, die mit dieser GPU abstürzen, wie Fallout 3 und New Vegas"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Para juegos antiguos que se cierran con esta GPU, como Fallout 3 y New Vegas"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fallout 3, New Vegas처럼 이 GPU에서 충돌하는 오래된 게임용"
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Para jogos antigos que travam com esta GPU, como Fallout 3 e New Vegas"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Для старых игр, которые вылетают с этим GPU, например Fallout 3 и New Vegas"
-          }
-        }
-      }
-    },
     "For older games that read the pad through DirectInput.": {
       "localizations": {
         "de": {
@@ -13291,40 +13257,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Выключено: игры не находят Vulkan, а DXVK и vkd3d-proton не используются, даже если выбраны выше."
-          }
-        }
-      }
-    },
-    "Older NVIDIA card (Direct3D 9)": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ältere NVIDIA-Karte (Direct3D 9)"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tarjeta NVIDIA antigua (Direct3D 9)"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "구형 NVIDIA 카드(Direct3D 9)"
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Placa NVIDIA antiga (Direct3D 9)"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Старая карта NVIDIA (Direct3D 9)"
           }
         }
       }

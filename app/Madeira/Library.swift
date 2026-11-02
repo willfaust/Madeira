@@ -4083,7 +4083,7 @@ struct LibraryDetail: View {
                 compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
             }
             Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
-                compatLabel(L("Older NVIDIA card (Direct3D 9)"), L("For older games that crash with this GPU, like Fallout 3 and New Vegas"))
+                compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
             }
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel(L("Wine's C++ runtime"), L("Instead of the game's msvcp/vcruntime"))
