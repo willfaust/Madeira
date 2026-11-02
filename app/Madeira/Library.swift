@@ -1478,8 +1478,11 @@ final class LibraryModel: ObservableObject {
     static func relativeToDrive(_ url: URL) -> String? {
         let path = url.resolvingSymlinksInPath().standardizedFileURL.path
         if path.hasPrefix(drive.path + "/") { return String(path.dropFirst(drive.path.count + 1)) }
-        for root in ExternalDrives.shared.roots where path.hasPrefix(root.path + "/") {
-            return "External/" + root.name + "/" + path.dropFirst(root.path.count + 1)
+        for root in ExternalDrives.shared.roots {
+            if path == root.path { return "External/" + root.name }
+            if path.hasPrefix(root.path + "/") {
+                return "External/" + root.name + "/" + path.dropFirst(root.path.count + 1)
+            }
         }
         return nil
     }
