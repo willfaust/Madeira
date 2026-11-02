@@ -89,6 +89,13 @@ def check_binary(path, data):
             expected = {0x8664}
         if machine not in expected:
             raise ValueError(f'wrong PE architecture 0x{machine:x}: {path}')
+        if path.startswith(('arm64ec-windows/', 'aarch64-windows/')) and PurePosixPath(path).name in {'ucrtbase.dll', 'msvcrt.dll'}:
+            spec = importlib.util.spec_from_file_location('wine_pe', ROOT / 'tools/check-wine-media-dlls.py')
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            eager = reader.PE(data, machines=tuple(expected)).imports() & {'advapi32.dll', 'user32.dll'}
+            if eager:
+                raise ValueError(f'{path}: CRT startup dependency must stay delayed: {sorted(eager)}')
     elif path.endswith('.dylib'):
         if len(data) < 32 or struct.unpack_from('<II', data) != (0xfeedfacf, 0x100000c):
             raise ValueError(f'not an arm64 Mach-O dylib: {path}')
