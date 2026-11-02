@@ -47,7 +47,7 @@ else:
     print("note: swiftc unavailable; Swift type-check will run in macOS CI")
 for what, cond in [
     ("swap sizes include 3072", "swapChoices = [0, 1024, 2048, 3072, 4096]" in lib),
-    ("coverage picker: large-only default, blocks, wide", '("", "Large allocations (8 MB+)")' in lib and '("blocks"' in lib and '("wide"' in lib),
+    ("coverage picker: large-only default, blocks, wide", '("", L("Large allocations (8 MB+)"))' in lib and '("blocks"' in lib and '("wide"' in lib),
     ("JIT pool and video memory pickers in Memory & sync", 'key: "pool"' in lib and 'key: "vram-mb"' in lib),
     ("eco mode toggle in Memory & sync, off unless set", 'MadeiraConfig.set("eco", on ? "1" : nil)' in lib and 'MadeiraConfig.bool("eco", default: false)' in lib),
     ("catalog lists swap-mb with a 3 GB choice", re.search(r'key: "swap-mb".*\("3072", "3 GB"\)', gen) is not None),

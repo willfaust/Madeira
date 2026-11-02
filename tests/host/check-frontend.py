@@ -72,6 +72,7 @@ def block(text, header):
 
 swift = r'''
 import Foundation
+func L(_ text: String) -> String { text }   // Library.swift's lookup; English here
 #if canImport(CoreGraphics)
 import CoreGraphics   // CGRect.width and friends: Foundation alone no longer re-exports them on macOS (Swift 6.4)
 #endif
@@ -617,8 +618,8 @@ launch = block(hud, 'private func launchColumnView(')
 wide = block(hud, 'private func launchWideView(')
 glyph = block(hud, 'private func launchGlyph(')
 row = block(launch, 'HStack(spacing: 14)')
-check('launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs)' in row
-      and 'launchGlyph(showLogs ? "Hide live log" : "Show live log", "text.alignleft", on: showLogs)' in wide
+check('launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs)' in row
+      and 'launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs)' in wide
       and 'Button(showLogs ?' not in launch and 'Button(showLogs ?' not in wide,
       'starting screen: the live-log control is a glyph in one row')
 check('Image(systemName: symbol)' in glyph and '.accessibilityLabel(label)' in glyph and 'Text(' not in glyph
