@@ -3846,7 +3846,7 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, itch, library, iniFiles, advanced
+        case display, controls, launch, compatibility, steam, cloud, achievements, itch, library, iniFiles, advanced
         var title: String {
             switch self {
             case .display: return "Display"
@@ -3857,6 +3857,7 @@ struct LibraryDetail: View {
             case .cloud: return "Steam Cloud"
             case .workshop: return "Steam Workshop"
             case .itch: return "itch.io"
+            case .achievements: return "Achievements"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
             case .advanced: return "Advanced"
@@ -3872,6 +3873,7 @@ struct LibraryDetail: View {
             case .cloud: return "icloud"
             case .workshop: return "square.stack.3d.up"
             case .itch: return "bag"
+            case .achievements: return "trophy"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
             case .advanced: return "wrench.and.screwdriver"
@@ -3886,7 +3888,7 @@ struct LibraryDetail: View {
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || entry.desktop != true
         let steam: [Page] = entry.steamAppID == nil ? (entry.itchGameID != nil ? [.itch] : [])
-            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud] : [.steam])
+            : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
         let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
@@ -3927,6 +3929,7 @@ struct LibraryDetail: View {
                     SteamWorkshopSections(appID: UInt32(appID), title: entry.title)
                 }
             case .itch: ItchEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .achievements: if let appID = entry.steamAppID { SteamAchievementsSection(appID: appID) }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .advanced: advancedPage
