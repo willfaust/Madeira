@@ -242,6 +242,17 @@ final class EAMeter: @unchecked Sendable {
         if due { publish(copy) }
     }
 
+    /// Takes back the bytes of a failed attempt.
+    func remove(_ bytes: UInt64) {
+        guard bytes > 0 else { return }
+        lock.lock()
+        progress.doneBytes -= min(bytes, progress.doneBytes)
+        samples.removeAll()
+        let copy = progress
+        lock.unlock()
+        publish(copy)
+    }
+
     func finish() { lock.lock(); let copy = progress; lock.unlock(); publish(copy) }
 }
 
@@ -438,6 +449,9 @@ final class EADownloader: @unchecked Sendable {
         var attempt = 0
         while true {
             attempt += 1
+            // Bytes this attempt added to the progress; a failed attempt takes them back, so
+            // retries do not push the count past the total (build 58: 39.2 MB of 32.4 MB).
+            var counted: UInt64 = 0
             do {
                 try handle.truncate(atOffset: 0)
                 let inflater = try EAInflater(handle: handle, inflate: entry.method == 8)
@@ -475,7 +489,7 @@ final class EADownloader: @unchecked Sendable {
                     if Int64(data.count) > remaining { data = Data(data.prefix(Int(remaining))) }
                     remaining -= Int64(data.count)
                     fetched += UInt64(data.count)
-                    meter.add(UInt64(data.count))
+                    meter.add(UInt64(data.count)); counted += UInt64(data.count)
                     try inflater.write(data, last: remaining == 0)
                     if remaining == 0 { break }
                 }
@@ -489,7 +503,7 @@ final class EADownloader: @unchecked Sendable {
                         if Int64(data.count) > remaining { data = Data(data.prefix(Int(remaining))) }
                         remaining -= Int64(data.count)
                         fetched += UInt64(data.count)
-                        meter.add(UInt64(data.count))
+                        meter.add(UInt64(data.count)); counted += UInt64(data.count)
                         try inflater.write(data, last: remaining == 0)
                         if remaining == 0 { break }
                     }
@@ -511,6 +525,7 @@ final class EADownloader: @unchecked Sendable {
             } catch let error as URLError where error.code == .cancelled {
                 throw CancellationError()
             } catch {
+                meter.remove(counted)
                 if Task.isCancelled { throw CancellationError() }
                 guard attempt < 4 else { throw error }
                 EALog.event("[ea-download] retry file attempt=\(attempt) reason=\((error as? EADownloadError)?.errorDescription?.prefix(60) ?? "\(type(of: error))")")
