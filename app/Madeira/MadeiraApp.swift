@@ -41,8 +41,12 @@ struct MadeiraApp: App {
                     WineGeckoModel.shared.installAutomatically()  // on Wi-Fi, so Wine never asks (WineGecko.swift)
                 }
                 // madeira://jit-network/... (the Madeira JIT shortcut returning, JITNetwork.swift),
+                // else a shared game setup (a .madeirasetup file or madeira://setup?d=..., GameSetupShare.swift),
                 // else madeira://play?exe=... (Home Screen shortcuts, SavesAndShortcuts.swift).
-                .onOpenURL { url in if !JITNetworkShortcut.shared.handle(url) { ShortcutRouter.shared.handle(url) } }
+                .onOpenURL { url in
+                    if JITNetworkShortcut.shared.handle(url) || GameSetupInbox.shared.handle(url) { return }
+                    ShortcutRouter.shared.handle(url)
+                }
         }
     }
 }
