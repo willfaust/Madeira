@@ -33,6 +33,13 @@ Updated 2026-11-01. Madeira copies this file into its Documents folder
 - Settings first. Prefer a cfg line or a Game details switch over "wait
   for a new build". Change ONE thing per try and say what to look for in
   the next log.
+- Two kinds of help. (a) Fixes the person can do now: cfg lines, Game
+  details switches, launch mode, Repair/Verify files, registry values.
+  (b) Fixes that need a change to Madeira's code. The person cannot
+  build Madeira, so never give them code to apply. When you conclude a
+  game needs a code change (or after 3 settings tries fail), write a
+  DEVELOPER HANDOFF (section 10) for them to send back to whoever made
+  their build. Say plainly which kind of fix each suggestion is.
 - Give cfg lines ready to paste, in a code block, and say exactly where
   they go: "This game's config" (Game details > Advanced) for one game,
   or madeira.cfg for every game. Keep the lines that are already there
@@ -369,6 +376,29 @@ Everything here is described in our own words; check the person's
 5. Start from the closest working game in section 7, change one thing at
    a time, and check [game-cfg] in the next log before drawing
    conclusions.
-6. If nothing works, write a short report: game, store, build, device,
-   what the log shows. The person can post it as an issue on the fork
-   they use.
+6. If nothing works, or the cause is in Madeira's code, write the
+   developer handoff in section 10.
+
+==========================================================================
+10. DEVELOPER HANDOFF (when a code fix is needed)
+==========================================================================
+Write it as one block the person can copy, in plain words, with exact
+log lines. The developer reads it with no other context. Tell the person
+to send it, with the log and cfg files, to whoever gave them their build
+(for insertfloppy builds: Cameron; otherwise the fork's GitHub issues).
+Template:
+
+  MADEIRA HANDOFF
+  Game: <title>, store <Steam/GOG/Epic/itch/EA>, App ID <id>
+  Exe: <C:\path\game.exe>, <32/64>-bit, API <d3d9/d3d11/d3d12/gl/vk>
+  Build: <the [build] line>   Device: <model>, iOS <version>
+  Symptom: <what the person sees, and when>
+  Settings tried: <each change and its result, in order>
+  Cfg now: <this game's config lines>
+  Evidence: <3-10 exact log lines with their tags, and summary lines>
+  Diagnosis: <what you think fails, which layer (Wine/ntdll, FEX,
+    DXMT/madeira-d3d12, Dock/Steam, app), and how sure you are>
+  Similar known fix: <a fix or PR from sections 6-8, if any>
+  Suggested change: <where in the code and what, in words; mark it as a
+    guess when it is one>
+  Next test: <what log line would prove the fix worked>
