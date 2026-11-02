@@ -1,0 +1,374 @@
+diff --git a/src/d3d9/d3d9_buffer.cpp b/src/d3d9/d3d9_buffer.cpp
+index 565a69f..5c2fc19 100644
+--- a/src/d3d9/d3d9_buffer.cpp
++++ b/src/d3d9/d3d9_buffer.cpp
+@@ -10,6 +10,8 @@
+ #include "d3d9_census.hpp"
+ #include "util_env.hpp"
+ 
++#include <algorithm>
++#include <cstdint>
+ #include <cstring>
+ 
+ namespace dxmt {
+@@ -66,6 +68,37 @@ wantsDirectMap(MTLD3D9Device *device, D3DPOOL pool, DWORD usage) {
+   return directMapEnabled() && pool == D3DPOOL_DEFAULT && (usage & D3DUSAGE_DYNAMIC) && !device->canOnlySWVP();
+ }
+ 
++// MTLD3D9IndexBuffer::refreshRange: an indexed draw stores only the index bytes
++// it reads. MADEIRA_D3D9_INDEX_RANGE=0 keeps the whole-buffer refresh before
++// every draw. Read once.
++bool
++indexRangeEnabled() {
++  static const bool enabled = env::getEnvVar("MADEIRA_D3D9_INDEX_RANGE") != "0";
++  return enabled;
++}
++
++// What refreshRange saved, logged now and then so a session log shows it.
++// Calling thread under the device lock; a second device only mixes its counts in.
++struct IndexRangeStats {
++  uint64_t stores = 0, stored = 0, whole = 0, renames = 0;
++};
++
++void
++noteIndexRangeStore(IndexRangeStats &stats, uint64_t stored, uint64_t whole) {
++  ++stats.stores;
++  stats.stored += stored;
++  stats.whole += whole;
++  if (stats.stores != 1 && stats.stores != 4096 && (stats.stores & ((1u << 18) - 1)) != 0)
++    return;
++  Logger::info(
++      "[d3d9-index-range] " + std::to_string(stats.stores) + " index stores, " + std::to_string(stats.stored >> 10) +
++      " KB stored where the whole-buffer refresh would have stored " + std::to_string(stats.whole >> 10) + " KB, " +
++      std::to_string(stats.renames) + " renames (MADEIRA_D3D9_INDEX_RANGE=0 restores the whole-buffer refresh)"
++  );
++}
++
++IndexRangeStats g_indexRangeStats;
++
+ // A direct-mapped buffer's allocations keep the default CPU cache mode rather
+ // than write-combined: the application may read what it locked, and
+ // ProcessVertices and the strip and fan index scans read it too
+@@ -531,6 +564,122 @@ MTLD3D9IndexBuffer::refreshWholeMirror() {
+   m_dirty = m_writeLocked;
+ }
+ 
++bool
++MTLD3D9IndexBuffer::renameBeforeStore() {
++  // refreshWholeMirror's rename and its madeira-bcd out-of-memory fallback, the
++  // same steps in the same order: wait for the GPU and try again, and with
++  // nothing to recycle store into the current generation, which no unfinished
++  // draw reads once the GPU is idle.
++  if (SUCCEEDED(renameDynamicBuffer(
++          m_device, m_dynamic.ptr(), m_device->m_currentCmdSeq,
++          m_device->m_cachedSignaled.load(std::memory_order_acquire)
++      )))
++    return true;
++  if (m_device->drainForDynamicRename()) {
++    if (FAILED(renameDynamicBuffer(
++            m_device, m_dynamic.ptr(), m_device->m_currentCmdSeq,
++            m_device->m_cachedSignaled.load(std::memory_order_acquire)
++        )))
++      m_device->noteRenameInPlace();
++    return true;
++  }
++  static bool warned = false;
++  if (!warned) {
++    warned = true;
++    Logger::warn("d3d9: out of video memory refreshing a dynamic buffer; the draw reads stale contents");
++  }
++  return false;
++}
++
++// refreshWholeMirror stores the whole mirror before every draw that follows a
++// write lock, and before every draw while a lock is held. An engine that keeps
++// one large index buffer mapped while it draws from it, or locks a little of it
++// before each draw, then copies the whole buffer per draw: a Call of Duty
++// engine's render thread spent nearly all its time in that copy (memmove under
++// refreshWholeMirror) on an A19 Pro, at 12-20 fps with the GPU 22% busy.
++//
++// An indexed draw reads exactly its StartIndex .. StartIndex + count indices,
++// so only those bytes have to be current when it is recorded. What keeps this
++// as safe as the whole-buffer refresh:
++// - The range comes from the draw, never from the window a lock announced, so
++//   a write past a lock's window still reaches the draw that reads it.
++// - A write lock makes every byte of the current allocation suspect (Lock), so
++//   each later draw stores its own range from the mirror again, and while a
++//   lock is held every draw does: the application may write at any time.
++// - A store goes into the allocation earlier draws were recorded against only
++//   while every write lock since that allocation was installed carried
++//   NOOVERWRITE. The application then promises not to change the bytes those
++//   draws read, so the store rewrites them with the values they already hold,
++//   which is what a draw on Windows reads from a directly mapped buffer. After
++//   any other write lock (plain or DISCARD) the store renames first, and for as
++//   long as such a lock is held every store does, so the recorded draws keep
++//   the contents they were recorded with.
++// - The bytes known to be current are one interval, grown together with the
++//   gap to a new range when the gap is no larger than that range, so between
++//   two write locks no byte is stored twice and a draw whose range is current
++//   stores nothing.
++void
++MTLD3D9IndexBuffer::refreshRange(UINT begin, UINT end) {
++  if (!indexRangeEnabled()) {
++    refreshWholeMirror();
++    return;
++  }
++  if (!m_dirty || m_direct || !m_hostPtr)
++    return;
++  end = std::min(end, m_size);
++  if (begin >= end)
++    return;
++  if (!m_writeLocked && begin >= m_currentBegin && end <= m_currentEnd)
++    return;
++  if (m_renameDue) {
++    if (!renameBeforeStore())
++      return;
++    ++g_indexRangeStats.renames;
++    // While a lock without NOOVERWRITE is held, the application may still
++    // change the bytes this draw reads, so the next store renames again: each
++    // draw keeps its own copy, as with refreshWholeMirror.
++    m_renameDue = m_renameEachStore;
++    m_currentBegin = m_currentEnd = 0;
++  }
++  // The bytes to store: the new range, plus the gap to the current interval
++  // when that keeps it one piece, minus what is current already.
++  UINT lo = begin, hi = end;
++  bool grow = m_currentBegin < m_currentEnd && !m_writeLocked;
++  if (grow) {
++    const UINT gap = begin > m_currentEnd ? begin - m_currentEnd : (m_currentBegin > end ? m_currentBegin - end : 0);
++    grow = gap <= end - begin;
++  }
++  const uint32_t sub = m_dynamic->immediateSuballocation();
++  const char *mirror = static_cast<const char *>(m_hostPtr);
++  uint64_t stored = 0;
++  if (grow) {
++    lo = std::min(begin, m_currentBegin);
++    hi = std::max(end, m_currentEnd);
++    if (lo < m_currentBegin) {
++      m_dynamic->immediateName()->updateContents(lo, mirror + lo, m_currentBegin - lo, sub);
++      stored += m_currentBegin - lo;
++    }
++    if (hi > m_currentEnd) {
++      m_dynamic->immediateName()->updateContents(m_currentEnd, mirror + m_currentEnd, hi - m_currentEnd, sub);
++      stored += hi - m_currentEnd;
++    }
++  } else {
++    m_dynamic->immediateName()->updateContents(begin, mirror + begin, end - begin, sub);
++    stored = end - begin;
++  }
++  noteIndexRangeStore(g_indexRangeStats, stored, m_size);
++  // Still mapped: nothing is current past this draw (see m_writeLocked). Else
++  // keep the larger of the two intervals when they did not join.
++  if (m_writeLocked)
++    return;
++  if (grow || hi - lo >= m_currentEnd - m_currentBegin) {
++    m_currentBegin = lo;
++    m_currentEnd = hi;
++  }
++  if (m_currentBegin == 0 && m_currentEnd == m_size)
++    m_dirty = false;
++}
++
+ void
+ MTLD3D9IndexBuffer::markLosable() {
+   if (!m_isLosable) {
+@@ -681,6 +830,14 @@ MTLD3D9IndexBuffer::Lock(UINT OffsetToLock, UINT SizeToLock, void **ppbData, DWO
+   if (buffer_lock_updates_dirty(Flags)) {
+     m_dirty = true;
+     m_writeLocked = true;
++    // refreshRange: so no byte of the current allocation is known to be current
++    // any more. Only a lock without NOOVERWRITE (after sanitisation, every lock
++    // outside the DEFAULT pool) allows changing bytes a recorded draw reads.
++    m_currentBegin = m_currentEnd = 0;
++    if (!(Flags & D3DLOCK_NOOVERWRITE)) {
++      m_renameDue = true;
++      m_renameEachStore = true;
++    }
+   }
+   m_lockCount.increment();
+   *ppbData = static_cast<char *>(m_hostPtr) + OffsetToLock;
+@@ -692,8 +849,11 @@ MTLD3D9IndexBuffer::Unlock() {
+   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9IndexBuffer_Unlock);
+   D9DeviceLock lock = m_device->LockDevice();
+   // See MTLD3D9VertexBuffer::Unlock: the draw refreshes, not this.
+-  if (m_lockCount.decrement() == 0)
++  if (m_lockCount.decrement() == 0) {
+     m_writeLocked = false;
++    // refreshRange: no lock without NOOVERWRITE is held any more.
++    m_renameEachStore = false;
++  }
+   return D3D_OK;
+ }
+ 
+diff --git a/src/d3d9/d3d9_buffer.hpp b/src/d3d9/d3d9_buffer.hpp
+index 62bd9f3..28a164d 100644
+--- a/src/d3d9/d3d9_buffer.hpp
++++ b/src/d3d9/d3d9_buffer.hpp
+@@ -211,6 +211,11 @@ public:
+     return m_dirty;
+   }
+   void refreshWholeMirror();
++  // Bring only the bytes [begin, end) of the current allocation up to date: the
++  // index range one draw reads (DrawIndexedPrimitive's StartIndex and index
++  // count). An empty range stores nothing. See the definition for why this is
++  // as safe as refreshWholeMirror; MADEIRA_D3D9_INDEX_RANGE=0 makes it one.
++  void refreshRange(UINT begin, UINT end);
+   // Host-mapped pointer to the current index data: the allocation draws read
+   // when the buffer is direct-mapped, else the host mirror, which is then
+   // authoritative. The index fan-remap path in d3d9_device.cpp reads the
+@@ -247,6 +252,20 @@ private:
+   // then leave every later write unpublished. While this is set, a refresh
+   // re-uploads unconditionally.
+   bool m_writeLocked = false;
++  // refreshRange only. A write lock without NOOVERWRITE since the current
++  // allocation was installed: the application may then have changed bytes a
++  // recorded draw reads, so the next store renames first.
++  bool m_renameDue = false;
++  // refreshRange only. Such a lock is still held, so every store renames.
++  bool m_renameEachStore = false;
++  // refreshRange only. The bytes of the current allocation known to equal the
++  // mirror, [m_currentBegin, m_currentEnd); empty after every write lock, since
++  // which bytes the application writes is not known.
++  UINT m_currentBegin = 0;
++  UINT m_currentEnd = 0;
++  // refreshWholeMirror's rename with its out-of-memory fallback, for
++  // refreshRange: false when the store has to be skipped.
++  bool renameBeforeStore();
+   // See MTLD3D9VertexBuffer::m_direct.
+   bool m_direct = false;
+   D3D9BufferLockCount m_lockCount;
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index afd8c4d..38a0c9e 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -7447,7 +7447,7 @@ MTLD3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, U
+     if (ib_handle == 0)
+       return D3D_OK;
+     BatchedDraw draw{};
+-    draw.cap = BuildDrawCapture();
++    draw.cap = BuildDrawCapture(0, 0);
+     draw.type = BatchedDraw::kIndexed;
+     draw.primitive_type = D3DPT_TRIANGLELIST;
+     draw.vertex_or_index_count = PrimitiveCount * 3;
+@@ -7461,7 +7461,7 @@ MTLD3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, U
+   }
+   UINT vertex_count = prim_to_vertex_count(PrimitiveType, PrimitiveCount);
+   BatchedDraw draw{};
+-  draw.cap = BuildDrawCapture();
++  draw.cap = BuildDrawCapture(0, 0);
+   draw.type = BatchedDraw::kNonIndexed;
+   draw.primitive_type = PrimitiveType;
+   draw.vertex_or_index_count = vertex_count;
+@@ -7525,7 +7525,7 @@ MTLD3D9Device::DrawIndexedPrimitive(
+     if (ib_handle == 0)
+       return D3D_OK;
+     BatchedDraw draw{};
+-    draw.cap = BuildDrawCapture();
++    draw.cap = BuildDrawCapture(0, 0);
+     draw.type = BatchedDraw::kIndexed;
+     draw.primitive_type = D3DPT_TRIANGLELIST;
+     draw.vertex_or_index_count = fan_prim_count * 3;
+@@ -7571,7 +7571,7 @@ MTLD3D9Device::DrawIndexedPrimitive(
+         if (ib_handle == 0)
+           return D3D_OK;
+         BatchedDraw draw{};
+-        draw.cap = BuildDrawCapture();
++        draw.cap = BuildDrawCapture(0, 0);
+         draw.type = BatchedDraw::kIndexed;
+         draw.primitive_type = PrimitiveType;
+         draw.vertex_or_index_count = strip_count;
+@@ -7585,8 +7585,14 @@ MTLD3D9Device::DrawIndexedPrimitive(
+     }
+   }
+   UINT index_count = prim_to_vertex_count(PrimitiveType, PrimitiveCount);
++  // The bytes of the bound index buffer this draw reads, clamped to the buffer
++  // (MTLD3D9IndexBuffer::refreshRange); the GPU reads nothing else of it.
++  const uint64_t ib_index_size = m_indexBuffer->indexFormat() == D3DFMT_INDEX32 ? 4u : 2u;
++  const uint64_t ib_size = m_indexBuffer->size();
++  const uint64_t ib_begin = std::min<uint64_t>(uint64_t(StartIndex) * ib_index_size, ib_size);
++  const uint64_t ib_end = std::min<uint64_t>(ib_begin + uint64_t(index_count) * ib_index_size, ib_size);
+   BatchedDraw draw{};
+-  draw.cap = BuildDrawCapture();
++  draw.cap = BuildDrawCapture(static_cast<UINT>(ib_begin), static_cast<UINT>(ib_end));
+   draw.type = BatchedDraw::kIndexed;
+   draw.primitive_type = PrimitiveType;
+   draw.vertex_or_index_count = index_count;
+@@ -7601,7 +7607,7 @@ MTLD3D9Device::DrawIndexedPrimitive(
+ // Validation gate reads from capture (caller-provided or UP-built at queue time).
+ // UP build at queue time ensures validation sees shader/RT bindings from draw thread, not FlushDrawBatch thread.
+ MTLD3D9Device::D3D9DrawCapture
+-MTLD3D9Device::BuildDrawCapture() {
++MTLD3D9Device::BuildDrawCapture(UINT ib_begin, UINT ib_end) {
+   // Bring every bound buffer's device copy up to date before the record timer
+   // starts. The refresh charges itself to the staging axis, so timing it here as
+   // well would count it on two axes that the frontend total adds together, and
+@@ -7613,8 +7619,14 @@ MTLD3D9Device::BuildDrawCapture() {
+     if (auto *vb = m_vertexBuffers[s].ptr())
+       vb->refreshWholeMirror();
+   }
+-  if (m_indexBuffer.ptr() != nullptr)
+-    m_indexBuffer->refreshWholeMirror();
++  // The index buffer stores only the bytes the draw reads, nothing for a draw
++  // that reads none of it (the declaration's comment).
++  if (m_indexBuffer.ptr() != nullptr) {
++    if (ib_begin == 0 && ib_end == UINT_MAX)
++      m_indexBuffer->refreshWholeMirror();
++    else
++      m_indexBuffer->refreshRange(ib_begin, ib_end);
++  }
+ 
+   // POD state read by Resolve from D9EncodingState; setter-flush invariant ensures batch shares one snapshot.
+   // Ref-counted state via setter ops into m_encodeSideRefs.
+@@ -11365,7 +11377,7 @@ MTLD3D9Device::DrawPrimitiveUP(
+     if (ib_handle == 0)
+       return D3D_OK;
+     BatchedDraw draw{};
+-    draw.cap = BuildDrawCapture();
++    draw.cap = BuildDrawCapture(0, 0);
+     draw.type = BatchedDraw::kIndexed;
+     draw.primitive_type = D3DPT_TRIANGLELIST;
+     draw.vertex_or_index_count = PrimitiveCount * 3;
+@@ -11383,7 +11395,7 @@ MTLD3D9Device::DrawPrimitiveUP(
+   }
+ 
+   BatchedDraw draw{};
+-  draw.cap = BuildDrawCapture();
++  draw.cap = BuildDrawCapture(0, 0);
+   draw.type = BatchedDraw::kNonIndexed;
+   draw.primitive_type = PrimitiveType;
+   draw.vertex_or_index_count = vertex_count;
+@@ -11482,7 +11494,7 @@ MTLD3D9Device::DrawIndexedPrimitiveUP(
+     if (ib_handle == 0)
+       return D3D_OK;
+     BatchedDraw draw{};
+-    draw.cap = BuildDrawCapture();
++    draw.cap = BuildDrawCapture(0, 0);
+     draw.type = BatchedDraw::kIndexed;
+     draw.primitive_type = D3DPT_TRIANGLELIST;
+     draw.vertex_or_index_count = PrimitiveCount * 3;
+@@ -11526,7 +11538,7 @@ MTLD3D9Device::DrawIndexedPrimitiveUP(
+   }
+ 
+   BatchedDraw draw{};
+-  draw.cap = BuildDrawCapture();
++  draw.cap = BuildDrawCapture(0, 0);
+   draw.type = BatchedDraw::kIndexed;
+   draw.primitive_type = PrimitiveType;
+   draw.vertex_or_index_count = index_count;
+diff --git a/src/d3d9/d3d9_device.hpp b/src/d3d9/d3d9_device.hpp
+index 1fdd62a..ca4d316 100644
+--- a/src/d3d9/d3d9_device.hpp
++++ b/src/d3d9/d3d9_device.hpp
+@@ -1079,7 +1079,11 @@ private:
+   // currentOffset snapshot at queue time).
+   // Ref-counted state travels via setters to D9EncodingState on encode thread;
+   // override_* args are per-call, not device state.
+-  D3D9DrawCapture BuildDrawCapture();
++  // [ib_begin, ib_end) is the byte range of the bound index buffer the draw
++  // reads (MTLD3D9IndexBuffer::refreshRange): an empty range for a draw that
++  // reads none (non-indexed, or with an index buffer of its own); the default
++  // refreshes the whole buffer, as every draw did before.
++  D3D9DrawCapture BuildDrawCapture(UINT ib_begin = 0, UINT ib_end = UINT_MAX);
+ 
+   // Op-stream queue helpers. QueueBatchedDraw appends to m_pendingDraws
+   // *and* records its position in m_pendingOps; QueueBlitOp does the

@@ -29,6 +29,7 @@ cases = {
     'fex': ('pin:FEX', {'fex', 'ipa'}),
     'wine': ('pin:wine', {'wine-host', 'i386', 'dxmt', 'ipa'}),
     'dxmt': ('pin:dxmt', {'i386', 'dxmt', 'ipa'}),
+    'dxmt-patches': ('build/dxmt-patches/0001-d3d9-index-range-per-draw.patch', {'i386', 'dxmt', 'ipa'}),
     'llvm': ('tools/build/build-llvm-ios.sh', {'llvm', 'dxmt', 'ipa'}),
     'mingw': ('tools/build/setup-llvm-mingw.sh', {'mingw', 'wine-host', 'i386', 'ipa'}),
     'crypto': ('build/gnutls-ios/build.sh', {'gnutls', 'ipa'}),

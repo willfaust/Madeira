@@ -1,0 +1,43 @@
+diff --git a/src/launch.c b/src/launch.c
+index 425f6dc..a816c82 100644
+--- a/src/launch.c
++++ b/src/launch.c
+@@ -80,6 +80,9 @@ static BOOL WINAPI on_control(DWORD control)
+  */
+ #define SH_CEG_WAIT_MS (5ULL * 60 * 1000)
+ #define SH_CEG_BUSY_RETRY_MS 10000
++#define SH_CEG_REMOTE_CALL_FAILED 55
++#define SH_CEG_REMOTE_RETRIES 3
++#define SH_CEG_REMOTE_RETRY_MS 1500
+ typedef int32_t (__thiscall *ceg_request_fn)(void *, uint32_t, bool, bool, uint32_t *);
+ 
+ static bool wide_flag(const wchar_t *name, wchar_t expected)
+@@ -104,7 +107,7 @@ static int prepare_custom_binaries(HMODULE module, void *client_user,
+     struct sh_ceg_progress progress = {0};
+     uint64_t begin = o->now_ms(), retry_at = begin;
+     bool waiting = false;
+-    unsigned busy = 0, logged_jobs = 0;
++    unsigned busy = 0, logged_jobs = 0, remote_retries = 0;
+     int32_t logged_reply = INT32_MIN;
+     while (!InterlockedCompareExchange(&interrupted, 0, 0)) {
+         uint64_t now = o->now_ms();
+@@ -154,6 +157,19 @@ static int prepare_custom_binaries(HMODULE module, void *client_user,
+                 o->event("ceg-result", 1);
+                 return 0;
+             }
++            if (step == SH_CEG_FAIL && progress.failure == SH_CEG_REMOTE_CALL_FAILED &&
++                remote_retries < SH_CEG_REMOTE_RETRIES) {
++                /* 55 (RemoteCallFailed): Valve's client found no running
++                 * service, demand-started it and failed this request before
++                 * the emulated service was up; the service may also have
++                 * ended between an earlier start and the request. Its next
++                 * request finds it running. */
++                o->event("ceg-request-retry", ++remote_retries);
++                progress = (struct sh_ceg_progress){0};
++                waiting = false;
++                retry_at = o->now_ms() + SH_CEG_REMOTE_RETRY_MS;
++                continue;
++            }
+             if (step == SH_CEG_FAIL) {
+                 o->event("ceg-finished-jobs", (int32_t)progress.finished);
+                 o->event("ceg-result", progress.failure);

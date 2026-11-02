@@ -19,6 +19,8 @@ python3 "$R/build/windows-runtime/targets.py" aarch64 install
 DEST="$R/app/Madeira/vulkan/arm64ec-windows" \
     bash "$R/build/wine-pe/build-modules.sh" winevulkan vulkan-1
 
+# This repository's DXMT changes (build/dxmt-patches/README.md) go into these DLLs too.
+bash "$R/build/dxmt-patches/apply.sh"
 for arch in arm64ec aarch64; do
     W="$R/wine/build-arm64ec"
     [ "$arch" != aarch64 ] || W="$R/wine/build-macos"

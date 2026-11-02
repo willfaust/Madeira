@@ -1,0 +1,108 @@
+diff --git a/src/scm.c b/src/scm.c
+index 089f1bb..c8bf279 100644
+--- a/src/scm.c
++++ b/src/scm.c
+@@ -7,8 +7,9 @@
+  * service manager may not be running; desktop routes start it themselves.
+  * This file starts only Wine's standard service manager and checks, read-only,
+  * that Valve's service is registered; if not, it runs Valve's own service
+- * installer as Valve's client would. Dock itself never creates, registers,
+- * configures or starts any service, and logs only numeric results.
++ * installer as Valve's client would. Dock itself never creates, registers or
++ * configures any service, starts only Valve's registered one through the
++ * service manager (start_client_service), and logs only numeric results.
+  */
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+@@ -23,6 +24,9 @@
+ #define SH_SERVICE_CONTROL_RETRY_MS 1000ULL
+ #define SH_PROCESS_EXIT_MS 5000
+ #define SH_SERVICE_INSTALL_MS 60000
++#define SH_SERVICE_START_MS 30000ULL
++#define SH_SERVICE_SETTLE_MS 2000
++#define SH_SERVICE_UPDATE_GRACE_MS 20000ULL
+ 
+ static const wchar_t steam_service[] = L"Steam Client Service";
+ /* Wine's include/wine/svcctl.idl SVCCTL_STARTED_EVENT: services.exe sets this
+@@ -171,6 +175,72 @@ static bool wide_flag(const wchar_t *name, wchar_t expected)
+     return GetEnvironmentVariableW(name, value, 4) == 1 && value[0] == expected;
+ }
+ 
++static bool query_state(SC_HANDLE service, SERVICE_STATUS_PROCESS *status);
++
++/* Valve's client connects to its service's pipe first and demand-starts the
++ * service only when that fails. On device the 32-bit service needs well over
++ * a second to start under emulation, and the client's request had already
++ * failed by then: service_log.txt "Failed to create Service pipe (GLE 2)",
++ * then ceg-job-result=55 (RemoteCallFailed) while the service was still
++ * starting. On a desktop the service is normally already running when a game
++ * is launched, so it is started here through the service manager, as Valve's
++ * client would start it, and the request waits until it reports running plus
++ * a short settle for its pipe. Returns 0 (running), a Win32 error, or -1 when
++ * it stopped again after one more start. MADEIRA_DOCK_CEG_SERVICE_START=0 skips this.
++ */
++static int32_t start_client_service(const struct sh_observer *o, SC_HANDLE manager)
++{
++    SC_HANDLE service = OpenServiceW(manager, steam_service, SERVICE_START | SERVICE_QUERY_STATUS);
++    if (!service) return (int32_t)GetLastError();
++    SERVICE_STATUS_PROCESS status = {0};
++    int32_t result = 0;
++    bool restarted = false;
++    if (!query_state(service, &status) || status.dwCurrentState != SERVICE_RUNNING) {
++        /* 1053: the service process ended before it reached the manager. A
++         * first start after a Steam update does that: the service copies its
++         * new files, runs SteamServiceTmp.exe /Update and is restarted by it
++         * (seen on device), so the wait below still applies. */
++        uint64_t grace = 2000;
++        if (!StartServiceW(service, 0, NULL)) {
++            DWORD error = GetLastError();
++            if (error == ERROR_SERVICE_REQUEST_TIMEOUT) {
++                /* give the updater time to copy and restart it itself */
++                grace = SH_SERVICE_UPDATE_GRACE_MS;
++                o->event("ceg-service-start-retry", (int32_t)error);
++            } else if (error != ERROR_SERVICE_ALREADY_RUNNING) result = (int32_t)error;
++        }
++        uint64_t begin = o->now_ms();
++        while (!result) {
++            if (query_state(service, &status)) {
++                if (status.dwCurrentState == SERVICE_RUNNING) break;
++                /* STOPPED right after the start is the manager not having
++                 * updated it yet; later it means the service ended. */
++                if (status.dwCurrentState == SERVICE_STOPPED && o->now_ms() - begin >= grace) {
++                    /* still stopped: one more start of our own */
++                    if (!restarted) {
++                        restarted = true;
++                        if (StartServiceW(service, 0, NULL) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING) {
++                            grace = 2000;
++                            begin = o->now_ms();
++                            continue;
++                        }
++                    }
++                    result = -1;
++                    break;
++                }
++            }
++            if (!sh_remaining_ms(o->now_ms(), begin, SH_SERVICE_START_MS)) {
++                result = ERROR_TIMEOUT;
++                break;
++            }
++            o->sleep_ms(100);
++        }
++        if (!result) o->sleep_ms(SH_SERVICE_SETTLE_MS);
++    }
++    CloseServiceHandle(service);
++    return result;
++}
++
+ int32_t sh_ceg_scm_prepare(const struct sh_observer *o, HMODULE client)
+ {
+     SC_HANDLE manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+@@ -190,6 +260,8 @@ int32_t sh_ceg_scm_prepare(const struct sh_observer *o, HMODULE client)
+         o->event("ceg-service-install", install_client_service(o, client));
+         registered = service_registered(o, manager, &missing);
+     }
++    if (registered && !wide_flag(L"MADEIRA_DOCK_CEG_SERVICE_START", L'0'))
++        o->event("ceg-service-start", start_client_service(o, manager));
+     CloseServiceHandle(manager);
+     return sh_ceg_scm_result(true, registered);
+ }
