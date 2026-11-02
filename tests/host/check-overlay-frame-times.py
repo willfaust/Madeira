@@ -100,8 +100,8 @@ check('case "row":' in lib and 'case "column":' in lib and 'let split = all.coun
       'layouts: one row, a column, and the grid of up to five cells a row as before')
 check('guard tick % max(1, Int((refresh / 0.5).rounded())) == 0 else { return }' in lib,
       'the figures change every 0.5, 1 or 2 s')
-check('.frame(maxWidth: isMenu ? 48 : max(48, viewport.width - insets.leading - insets.trailing - 16))' in lib,
-      'the floating overlay may be as wide as the screen (one long row)')
+check('.frame(maxWidth: isMenu ? 48 : nil)' in lib and '.fixedSize(horizontal: !isMenu, vertical: true)' in lib,
+      'the floating overlay takes its own width (one long row may be wider than the screen), so it moves sideways too')
 check('OverlayStyleSettings()' in lib and 'Button("Reset overlay style")' in lib,
       'the style settings sit under the figures in the in-game menu, with a reset')
 

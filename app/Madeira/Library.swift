@@ -5233,9 +5233,11 @@ struct LibraryFloatingItem: View {
                     .accessibilityLabel(L("Game menu")).accessibilityHint(L("Drag to move"))
             } else { LibraryMetrics().accessibilityHint(L("Drag to move")) }
         }
-        // The overlay's cells have fixed widths; its One row layout can be wider than the old 390 pt cap.
-        .frame(maxWidth: isMenu ? 48 : max(48, viewport.width - insets.leading - insets.trailing - 16))
-        .fixedSize(horizontal: false, vertical: true)
+        // The overlay's cells have fixed widths, so it takes its own size. A frame with a
+        // maxWidth takes all the width it is offered: the overlay measured the screen's width,
+        // and the drag could only centre it (the Column layout showed it most).
+        .frame(maxWidth: isMenu ? 48 : nil)
+        .fixedSize(horizontal: !isMenu, vertical: true)
         .background(GeometryReader { proxy in
             Color.clear.onAppear { measured = proxy.size }.onChange(of: proxy.size) { _, size in measured = size }
         })
