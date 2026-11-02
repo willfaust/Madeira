@@ -252,6 +252,14 @@ require('AppleSignIn.swift in Sources' in project and project.count('/* AppleSig
         'the Xcode project compiles AppleSignIn.swift into the app')
 require('SigningSettingsSection()' in library and '.modifier(SigningRefreshOffer())' in library,
         'the library shows the Signing section, refreshes and offers')
+app_entry = (app / 'MadeiraApp.swift').read_text()
+require('nonisolated static var enabled: Bool { MadeiraConfig.flag("MADEIRA_SIGNING_REFRESH", fallback: false) }' in signing
+        and 'if SigningRefresh.enabled, settingsShow("signing"' in library
+        and 'if SigningRefresh.enabled { SigningAccountStore.takeIn() }' in app_entry
+        and offer.count('if SigningRefresh.enabled { signing.libraryAppeared() }') == 2
+        and block(signing, 'func libraryAppeared()').count('SigningAccountStore.takeIn()') <= 1,
+        'off by default (env.MADEIRA_SIGNING_REFRESH = 1 turns it on): no Settings section, no refresh, '
+        'offer or sign-in taken in from an installer')
 require('sideinstaller' not in [s.lower() for s in plist['LSApplicationQueriesSchemes']] and 'sideinstaller://' not in signing,
         'the refresh needs no other app: SideInstaller is neither looked for nor opened')
 require('Library/Application Support/SigningAccount.plist' in docs and 'Library/Application Support/SigningAccount.plist' in signing

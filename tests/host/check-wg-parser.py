@@ -67,6 +67,14 @@ for n in enum_names:
         continue
     if n[len("unix_"):] in x64:
         assert wow64[n].startswith("wow64_"), ("pointer-carrying entry needs a wow64 thunk", n, wow64[n])
+    elif n == "unix_wg_parser_create":
+        # The 64-bit table's create is wgp_create behind MADEIRA_WG_64BIT=1 (a 64-bit caller has
+        # the table for the WMA decoder; its parser stays refused unless the switch is on).
+        assert wow64[n] == "wgp_create" and native[n] == "wgp_create64", (n, native[n], wow64[n])
+        create64 = glue[glue.index("static NTSTATUS wgp_create64( void *args )"):]
+        create64 = create64[:create64.index("\n}\n")]
+        assert ('getenv( "MADEIRA_WG_64BIT" )' in create64 and "return STATUS_NOT_IMPLEMENTED;" in create64
+                and create64.index("return STATUS_NOT_IMPLEMENTED;") < create64.index("return wgp_create( args );")), create64
     else:
         assert wow64[n] == native[n], ("scalar-only entry should share the 64-bit entry", n)
 create = glue[glue.index("static NTSTATUS wgp_create( void *args )"):]

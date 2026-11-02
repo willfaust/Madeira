@@ -34,6 +34,17 @@ final class ProMotionIntent {
     /// The opt-in above; read when a session's pacing is applied.
     static var holdMaximum: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE", fallback: false) }
 
+    /// ml2020: hold the panel at 60 Hz under the 60 and 30 caps too. Without any
+    /// display link a ProMotion iPhone lets the panel idle once nothing drives
+    /// it: a 32-bit title under the 60 cap presented at a steady 9.9 FPS with
+    /// the GPU 1% busy, every frame parked 80 ms in nextDrawable (the compositor
+    /// handing drawables back at the idle rate), 43 FPS while the user's touches
+    /// kept the panel up (device logs 2026-10-25, `[gpu-perf] ml1254`). A 60 Hz
+    /// range is the smallest intent that keeps the compositor at the cap's own
+    /// grid. `env.MADEIRA_PANEL_IDLE = 1` restores the old behaviour (no link
+    /// under the 60 and 30 caps).
+    static var panelFloor: Bool { !MadeiraConfig.flag("MADEIRA_PANEL_IDLE", fallback: false) }
+
     /// Whether DXMT has the 30 FPS cap (vsync mode 3) and the display-rate
     /// hook. Both arrive with willfaust/dxmt#1; without it mode 3 would run
     /// uncapped, so the 30 choice is offered only when this is true.
@@ -72,9 +83,13 @@ final class ProMotionIntent {
             l.add(to: .main, forMode: .common)
             link = l
             activeMax = want
+            displaySyncApplied = false; armedAt = 0; tickStart = 0   // ml2021: per arming
             fputs("[promote] display link armed preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz\n", stderr)
+            // ml2020: stderr written before Wine starts is not in the exported log; say it there too
+            LogStore.shared.log("[promote] display link armed min=\(Int(lo))Hz preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz")
         } else {
             if link != nil { fputs("[promote] display link released\n", stderr) }
+            if link != nil { LogStore.shared.log("[promote] display link released") }
             link?.invalidate()
             link = nil
             activeMax = 0
@@ -83,19 +98,94 @@ final class ProMotionIntent {
 
     /// The intent that belongs to a given pacing mode (0 = none). See the type comment.
     static func maxHz(for mode: Int32) -> Int {
-        if mode == 3 { return holdMaximum ? min(60, panelMaxFPS) : 0 }   // 30 cap
-        if mode == 1 { return holdMaximum ? panelMaxFPS : 0 }            // 60 cap
-        return panelMaxFPS                                                // MAX, RAW, 40 cap
+        let floor = panelFloor ? min(60, panelMaxFPS) : 0                 // ml2020: see panelFloor
+        if mode == 3 { return holdMaximum ? min(60, panelMaxFPS) : floor }   // 30 cap
+        if mode == 1 { return holdMaximum ? panelMaxFPS : floor }            // 60 cap
+        return panelMaxFPS                                                    // MAX, RAW, 40 cap
     }
 
     /// Arms or releases the link for `mode` and publishes the rates to DXMT.
     static func apply(mode: Int32) {
         let hz = maxHz(for: mode)
+        LogStore.shared.log("[promote] pacing mode \(mode): display intent \(hz) Hz (panel max \(panelMaxFPS), hold-maximum \(holdMaximum), floor \(panelFloor))")
         shared.setActive(hz > 0, maxHz: hz)
         madeira_set_display_max_fps(Int32(panelMaxFPS), Int32(hz))
     }
 
-    @objc private func tick(_ sender: CADisplayLink) {}
+    /// ml2021: what the link actually runs at. Log 71 ran with the 120 Hz link armed and
+    /// the title still parked 80 ms a frame in nextDrawable, so whether the panel follows
+    /// the intent at all is the open question; every 10 s the exported log gets the tick
+    /// count, the mean interval and the longest one.
+    private var tickCount = 0
+    private var tickStart: CFTimeInterval = 0
+    private var tickLast: CFTimeInterval = 0
+    private var tickMaxGap: CFTimeInterval = 0
+    /// ml2021 (opt-in, env.MADEIRA_PROMOTE_KICK = 1): a one-pixel layer whose opacity
+    /// alternates every tick, so each tick commits a CoreAnimation transaction. The
+    /// DXMT note of 2026-07-03 found that this device's compositor completes our
+    /// layer's presentations only when something else makes it composite; if the
+    /// drawable waits fall with this on, that is what the display link alone does not do.
+    private var kickLayer: CALayer?
+    private var kickOn = false
+    static var kickEnabled: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE_KICK", fallback: false) }
+
+    /// ml2021: env.MADEIRA_DISPLAY_SYNC applied to the game's layer once the session's
+    /// environment is exported (the link is armed a few ms BEFORE the game's config lines
+    /// are, so log 77's "= 1" run never saw it: the layer kept displaySyncEnabled=false from
+    /// app start). Applied from the first tick a second after arming, once per arming.
+    private var displaySyncApplied = false
+    private var armedAt: CFTimeInterval = 0
+    private func applyDisplaySync(now: CFTimeInterval) {
+        guard !displaySyncApplied, now - armedAt >= 1 else { return }
+        displaySyncApplied = true
+        let layer = MetalHostView.shared.metalLayer
+        let sel = NSSelectorFromString("setDisplaySyncEnabled:")
+        guard layer.responds(to: sel) else { return }
+        let on = MadeiraConfig.flag("MADEIRA_DISPLAY_SYNC", fallback: false)
+        layer.perform(sel, with: NSNumber(value: on))
+        LogStore.shared.log("[promote] game layer displaySyncEnabled=\(on ? "true (env.MADEIRA_DISPLAY_SYNC = 1)" : "false (default; env.MADEIRA_DISPLAY_SYNC = 1 keeps display sync)")")
+    }
+
+    @objc private func tick(_ sender: CADisplayLink) {
+        let now = sender.timestamp
+        if armedAt == 0 { armedAt = now }
+        applyDisplaySync(now: now)
+        if tickStart == 0 { tickStart = now; tickLast = now; tickCount = 0; tickMaxGap = 0 }
+        else {
+            tickMaxGap = max(tickMaxGap, now - tickLast)
+            tickLast = now
+        }
+        tickCount += 1
+        let span = now - tickStart
+        if span >= 10 {
+            let hz = Double(tickCount - 1) / span
+            LogStore.shared.log(String(format: "[promote] link ran %d ticks in %.1f s = %.1f Hz (mean %.1f ms, longest gap %.1f ms, target %.0f ms)",
+                                       tickCount, span, hz, span * 1000 / Double(max(1, tickCount - 1)), tickMaxGap * 1000,
+                                       (sender.targetTimestamp - sender.timestamp) * 1000))
+            tickStart = now; tickCount = 1; tickMaxGap = 0
+        }
+        if ProMotionIntent.kickEnabled { kick() }
+    }
+
+    private func kick() {
+        if kickLayer == nil {
+            guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+                .flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) ?? UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first else { return }
+            let l = CALayer()
+            l.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+            l.backgroundColor = UIColor.black.cgColor
+            l.opacity = 0.01
+            window.layer.addSublayer(l)
+            kickLayer = l
+            LogStore.shared.log("[promote] kick layer added (env.MADEIRA_PROMOTE_KICK = 1): a transaction per tick")
+        }
+        kickOn.toggle()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        kickLayer?.opacity = kickOn ? 0.02 : 0.01
+        CATransaction.commit()
+    }
 }
 
 /// Opt-in `env.MADEIRA_THERMAL_CAP = 1`: when iOS reports the device as
@@ -426,7 +516,7 @@ struct FPSOverlay: View {
     private func startTimers() {
         stopTimers()
         let now = CFAbsoluteTimeGetCurrent()
-        let c = madeira_frame_count()
+        let c = madeira_shown_frame_count()
         samples = [(now, c)]
         presentCount = c
         vsyncMode = madeira_get_vsync_locked()
@@ -435,7 +525,7 @@ struct FPSOverlay: View {
         // 100ms sampling — keeps the buffer fresh
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             let t = CFAbsoluteTimeGetCurrent()
-            let cur = madeira_frame_count()
+            let cur = madeira_shown_frame_count()
             samples.append((t, cur))
             if samples.count > bufferCapacity { samples.removeFirst() }
             presentCount = cur

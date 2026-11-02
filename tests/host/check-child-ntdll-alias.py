@@ -74,6 +74,8 @@ int ios_subfloor_enum( int idx, unsigned long long *low, unsigned long long *rea
 void ios_push_subfloor_window( unsigned long long a, unsigned long long b, unsigned long long c, void *owner )
 { (void)a; (void)b; (void)c; (void)owner; }
 static void ios_resolve_fex_exports( void ) { }
+/* The modelled images are not mapped here; none of them is FEX's own module. */
+static unsigned char ios_image_is_fex( const void *pe_base, size_t size ) { (void)pe_base; (void)size; return 0; }
 '''
 code += between(native, '#define IOS_JIT_MAX_MAPPINGS', '\n};')
 code += 'static struct ios_jit_mapping ios_jit_mappings[IOS_JIT_MAX_MAPPINGS];\n'

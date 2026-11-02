@@ -888,7 +888,7 @@ static double g_text_ready_at;
 static unsigned int g_text_paced_generation;
 
 int winios_try_post_text(unsigned int scalar, int vk, int shift, int interval_ms) {
-    if (interval_ms < 5) interval_ms = 5;
+    if (interval_ms < 1) interval_ms = 1;
     if (interval_ms > 100) interval_ms = 100;
     int accepted = 0;
     pthread_mutex_lock(&g_input_q.lock);
@@ -1617,9 +1617,30 @@ static unsigned long long winios_hidden_present_interval_ns(void) {
     return (unsigned long long)ns;
 }
 
+/* Frames a HIDDEN desktop window's layer took a drawable for. DXMT's present
+ * counter (madeira_frame_count) counts the presents of every window in the
+ * session, and the launcher's hidden Chromium layer keeps presenting at
+ * MADEIRA_HIDDEN_LAYER_FPS (10) for the whole game: the FPS readouts showed the
+ * cap plus 10 (30 read 40, 60 read 70; owner, 2026-10-26). The readouts use
+ * madeira_shown_frame_count, which leaves those frames out;
+ * MADEIRA_FPS_COUNT_HIDDEN=1 counts them again. The launch checks keep
+ * madeira_frame_count (any window's first frame). */
+static _Atomic unsigned long long g_hidden_layer_frames;
+extern uint64_t madeira_frame_count(void);
+uint64_t madeira_shown_frame_count(void) {
+    static _Atomic unsigned long long last;   /* never goes back: a hidden drawable is counted before its present */
+    const char *e = getenv("MADEIRA_FPS_COUNT_HIDDEN");   /* 1: the FPS readouts count hidden windows' presents too (as before 2026-10-26) */
+    unsigned long long n = madeira_frame_count();
+    unsigned long long h = (e && e[0] == '1') ? 0 : atomic_load_explicit(&g_hidden_layer_frames, memory_order_relaxed);
+    unsigned long long r = n > h ? n - h : 0, l = atomic_load_explicit(&last, memory_order_relaxed);
+    while (r > l && !atomic_compare_exchange_weak_explicit(&last, &l, r, memory_order_relaxed, memory_order_relaxed)) ;
+    return r > l ? r : l;
+}
+
 @interface MadeiraWindowMetalLayer : CAMetalLayer
 @property (nonatomic) uintptr_t madeiraHwnd;
 - (void)madeiraSetWindowHidden:(BOOL)hidden;
+- (BOOL)madeiraWindowHidden;
 @end
 
 @implementation MadeiraWindowMetalLayer {
@@ -1629,6 +1650,9 @@ static unsigned long long winios_hidden_present_interval_ns(void) {
 }
 - (void)madeiraSetWindowHidden:(BOOL)hidden {
     __atomic_store_n(&_windowHidden, hidden ? 1 : 0, __ATOMIC_RELAXED);
+}
+- (BOOL)madeiraWindowHidden {
+    return __atomic_load_n(&_windowHidden, __ATOMIC_RELAXED) != 0;
 }
 - (nullable id<CAMetalDrawable>)nextDrawable {
     if (!__atomic_exchange_n(&_firstDrawableSaid, 1, __ATOMIC_RELAXED)) {
@@ -1656,9 +1680,62 @@ static unsigned long long winios_hidden_present_interval_ns(void) {
         }
         __atomic_store_n(&_lastDrawableNs, now, __ATOMIC_RELAXED);
     }
-    return [super nextDrawable];
+    id<CAMetalDrawable> drawable = [super nextDrawable];
+    if (drawable && __atomic_load_n(&_windowHidden, __ATOMIC_RELAXED))
+        atomic_fetch_add_explicit(&g_hidden_layer_frames, 1, memory_order_relaxed);   /* madeira_shown_frame_count */
+    return drawable;
 }
 @end
+
+/* FRAME TIMES for the performance overlay's graph and 1% figures (owner,
+ * 2026-10-28). DXMT's present path (winemetal) and the OpenGL present
+ * (WiniosGL.m) mark each present with its layer; a hidden desktop window's
+ * layer is left out, as in madeira_shown_frame_count. The ring keeps the last
+ * 2048 marks, and madeira_frame_times_us gives the overlay the intervals of
+ * the layer that presented last (another window's presents between them would
+ * halve them). MADEIRA_FRAME_TIMES=0: no marks, the graph and 1% cells stay empty. */
+#define MADEIRA_FRAME_RING 2048
+static struct { _Atomic(uintptr_t) key; _Atomic unsigned long long ns; } g_frame_ring[MADEIRA_FRAME_RING];
+static _Atomic unsigned long long g_frame_claim, g_frame_head;
+void madeira_frame_mark(const void *layer) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("MADEIRA_FRAME_TIMES"); on = !(e && e[0] == '0'); }   /* 0: no frame-time marks; the overlay's graph and 1% cells stay empty */
+    if (!on || !layer) return;
+    id l = (__bridge id)layer;
+    if ([l isKindOfClass:[MadeiraWindowMetalLayer class]] && [(MadeiraWindowMetalLayer *)l madeiraWindowHidden]) return;
+    unsigned long long i = atomic_fetch_add_explicit(&g_frame_claim, 1, memory_order_relaxed);
+    unsigned slot = (unsigned)(i % MADEIRA_FRAME_RING);
+    atomic_store_explicit(&g_frame_ring[slot].key, (uintptr_t)layer, memory_order_relaxed);
+    atomic_store_explicit(&g_frame_ring[slot].ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW), memory_order_relaxed);
+    atomic_store_explicit(&g_frame_head, i + 1, memory_order_release);
+}
+/* Up to `max` frame intervals in microseconds, oldest first, of the frames in
+ * the last `window_ms`; *since_last_us is the time since the newest present
+ * (a frame still being made). */
+int madeira_frame_times_us(uint32_t *out, int max, uint32_t window_ms, uint32_t *since_last_us) {
+    unsigned long long head = atomic_load_explicit(&g_frame_head, memory_order_acquire);
+    unsigned long long now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), window = (unsigned long long)window_ms * 1000000ULL;
+    unsigned long long depth = head < MADEIRA_FRAME_RING - 1 ? head : MADEIRA_FRAME_RING - 1, prev = 0;
+    uintptr_t key = 0;
+    int n = 0;
+    if (since_last_us) *since_last_us = 0;
+    for (unsigned long long back = 1; back <= depth && n < max; back++) {
+        unsigned slot = (unsigned)((head - back) % MADEIRA_FRAME_RING);
+        uintptr_t k = atomic_load_explicit(&g_frame_ring[slot].key, memory_order_relaxed);
+        unsigned long long t = atomic_load_explicit(&g_frame_ring[slot].ns, memory_order_relaxed);
+        if (!key) {
+            key = k; prev = t;
+            if (since_last_us) *since_last_us = now > t ? (uint32_t)MIN((now - t) / 1000, UINT32_MAX) : 0;
+            continue;
+        }
+        if (k != key) continue;
+        if (!t || t > prev || now - t > window) break;   /* overwritten, or older than the window */
+        out[n++] = (uint32_t)MIN((prev - t) / 1000, UINT32_MAX);
+        prev = t;
+    }
+    for (int a = 0, b = n - 1; a < b; a++, b--) { uint32_t s = out[a]; out[a] = out[b]; out[b] = s; }
+    return n;
+}
 
 /* madeira-bcd: ONE METAL HUD LAYER (opt-in). Apple's Metal Performance HUD
  * (Settings › Developer › Graphics HUD) is drawn per CAMetalLayer that
@@ -2661,4 +2738,44 @@ void winios_pSetCursor(HWND hwnd, HCURSOR cursor) {
 
 void winios_pDestroyCursorIcon(HCURSOR cursor) {
     /* nothing to release; we never allocated anything for the cursor */
+}
+
+/* Hooks the engine's win32u / wineserver look up as weak symbols for features
+ * this app does not implement: a direct-cursor clip rectangle and warp report,
+ * the raw-input cursor reader, the tiny-swapchain-window table and the desktop
+ * compositor's window lineage. Mach-O still needs a definition at link time, so
+ * each one here answers "nothing": no swapchain slots, no lineage, and the
+ * cursor calls do nothing beyond the plain position report the engine already
+ * makes. MADEIRA_WINDOW_LINEAGE=0 skips the lineage walk entirely. */
+void winios_direct_cursor_clip(int left, int top, int right, int bottom) {
+    (void)left; (void)top; (void)right; (void)bottom;
+}
+
+void winios_direct_cursor_warp(int x, int y) {
+    winios_direct_cursor_pos(x, y);
+}
+
+void winios_direct_cursor_reader(unsigned int flags) {
+    (void)flags;
+}
+
+void *winios_swapchain_hwnd_at(int index) {
+    (void)index;
+    return NULL;
+}
+
+int winios_swapchain_drawable(void *hwnd, int *width, int *height) {
+    (void)hwnd;
+    if (width) *width = 0;
+    if (height) *height = 0;
+    return 0;
+}
+
+unsigned winios_swapchain_slot_generation(int index) {
+    (void)index;
+    return 0;
+}
+
+void winios_window_lineage(HWND hwnd, HWND root, int depth) {
+    (void)hwnd; (void)root; (void)depth;
 }

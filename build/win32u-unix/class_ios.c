@@ -200,6 +200,48 @@ static WNDPROC ios_winproc_handle_arg( WNDPROC proc )
     return enabled ? (WNDPROC)(value - base) : proc;
 }
 
+/* A 32-bit program's ATOM can reach win32u with its guest window base added, the same way as its winproc handles above: dlls/wow64win
+ * (the prebuilt aarch64-windows/wow64win.dll, which no build step compiles) converts every non-zero 32-bit value like a pointer, and an atom
+ * is a value below 64 KB that win32u tells from a string with IS_INTRESOURCE().  A class given as a MAKEINTATOM (CreateWindowEx's `class`
+ * and UNICODE_STRING Buffer, UnregisterClass, GetClassInfoEx) or a property name given as an atom (GetProp, SetProp, RemoveProp) arrived as
+ * B + 0x8002 or B + 0xC023 in several 32-bit titles: IS_INTRESOURCE failed, the
+ * string branch read the reserved low megabyte of the guest window, and the process ended in the host on `ldrh w9,[x8],#2` (wine_dbgstr_wn
+ * or lstrlenW) with "Exception frame is not in stack limits".  The first 64 KB of a 32-bit address space are never mapped, so a value inside
+ * [B + 1, B + 0xffff] is the atom, not a pointer: it is given back as the atom.  Everything else is returned as it came (a 64-bit program
+ * has no window base, a real string pointer is far above B + 64 KB).  MADEIRA_ATOM_ARG=0 turns it off. */
+static int ios_atom_arg_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *env = getenv( "MADEIRA_ATOM_ARG" );
+        enabled = !env || strcmp( env, "0" );
+    }
+    return enabled;
+}
+
+static ULONG_PTR ios_atom_unrebase( ULONG_PTR value, ULONG_PTR base )
+{
+    if (!(value >> 32)) return value;
+    if (!base || value <= base || value - base >= 0x10000) return value;
+    return value - base;
+}
+
+const WCHAR *ios_atom_arg( const WCHAR *ptr )
+{
+    static unsigned int reported;
+    ULONG_PTR value = (ULONG_PTR)ptr, atom;
+
+    if (!(value >> 32)) return ptr;
+    atom = ios_atom_unrebase( value, ios_wow_base() );
+    if (atom == value || !ios_atom_arg_enabled()) return ptr;
+    if (__atomic_load_n( &reported, __ATOMIC_RELAXED ) < 8 &&
+        __atomic_fetch_add( &reported, 1, __ATOMIC_RELAXED ) < 8)
+        fprintf( stderr, "[atom-arg] guest=%#lx atom=%#lx\n", (unsigned long)value, (unsigned long)atom );
+    return (const WCHAR *)atom;
+}
+
 /* return the window proc for a given handle, or NULL for an invalid handle,
  * or WINPROC_PROC16 for a handle to a 16-bit proc. */
 static WINDOWPROC *get_winproc_ptr( WNDPROC handle )
@@ -442,7 +484,7 @@ NTSTATUS WINAPI NtUserInitializeClientPfnArrays( const ntuser_client_func_ptr *c
  */
 static ATOM get_int_atom_value( UNICODE_STRING *name )
 {
-    const WCHAR *ptr = name->Buffer;
+    const WCHAR *ptr = ios_atom_arg( name->Buffer );   /* an atom that arrived with the guest window base added */
     const WCHAR *end = ptr + name->Length / sizeof(WCHAR);
     UINT ret = 0;
 

@@ -110,6 +110,7 @@ enum SteamRuntimeFiles {
     static let relativeRoot = "Program Files (x86)/Steam"
     static let windowsRoot = "C:\\Program Files (x86)\\Steam"
 }
+enum ExternalDrives { static var steamLibraries: [String] { [] } }   /* no external drive opened */
 '''
 checks = r'''
 import Foundation

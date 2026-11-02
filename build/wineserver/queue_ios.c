@@ -2270,6 +2270,33 @@ static void dispatch_rawinput_message( struct desktop *desktop, struct rawinput_
         queue_rawinput_message( desktop, process, raw_msg );
 }
 
+/* Madeira mouse-reader: what the foreground program reads the mouse with,
+ * for the app (app/Madeira/Winios/WiniosCursor.c, HardwareInput.swift). A
+ * program that registered raw mouse input without legacy messages or capturing
+ * it (DirectInput 8 in exclusive mode), or that installed a low-level mouse hook
+ * (older DirectInput), reads MOTION: on an iPad whose pointer iPadOS does not
+ * lock, the app keeps giving it relative moves. A program that draws its own
+ * cursor at Wine's cursor gets the pointer's position instead. Reporting only;
+ * nothing here changes what any program receives. The app function is weak: a
+ * build without it reports nothing. */
+extern void winios_direct_cursor_reader( unsigned int flags ) __attribute__((weak));
+
+static void madeira_report_mouse_reader( struct desktop *desktop, struct thread *foreground )
+{
+    const struct rawinput_device *raw;
+    struct thread *hook;
+    unsigned int flags = 0;
+
+    if (!winios_direct_cursor_reader) return;
+    /* RIDEV_NOLEGACY is two bits (RIDEV_EXCLUDE | RIDEV_PAGEONLY): both must be set. */
+    if ((raw = foreground->process->rawinput_mouse) &&
+        ((raw->flags & RIDEV_NOLEGACY) == RIDEV_NOLEGACY || (raw->flags & RIDEV_CAPTUREMOUSE)))
+        flags |= 1;   /* WINIOS_READER_RAW_CAPTURE */
+    if ((hook = get_first_global_hook( desktop, WH_MOUSE_LL )) && hook->process == foreground->process)
+        flags |= 2;   /* WINIOS_READER_LL_HOOK */
+    winios_direct_cursor_reader( flags );
+}
+
 /* queue a hardware message for a mouse event */
 static int queue_mouse_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
                                 unsigned int origin, struct msg_queue *sender )
@@ -2344,6 +2371,7 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
                        raw_msg.flags, input->mouse.data, input->mouse.info );
 
         dispatch_rawinput_message( desktop, &raw_msg );
+        madeira_report_mouse_reader( desktop, foreground );   /* mouse-reader: reporting only, see above */
         release_object( foreground );
     }
 
@@ -3171,9 +3199,11 @@ DECL_HANDLER(set_queue_mask)
     if (!queue) return;
     queue_shm = queue->shared;
 
-    if (req->poll_events)
+    /* Winios drains an app-side ring without a driver fd. Still install the
+     * wait masks after that drain; otherwise a message waiter can sleep with
+     * zero masks while WM_INPUT accumulates without signalling its queue. */
+    if (req->poll_events && queue->fd)
     {
-        if (!queue->fd) return;
         clear_queue_bits( queue, QS_DRIVER );
         set_fd_events( queue->fd, POLLIN );
     }

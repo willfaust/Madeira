@@ -6,6 +6,7 @@
 // author's permission (see docs/STEAM_SIGNIN.md, "Provenance"). The sign-in
 // errors are the ones sign-in raises; the connection, library and download
 // errors belong to the owned library and downloads (docs/STEAM_LIBRARY.md).
+// Transport error policy adapted from kuscholar/iDeck; see docs/STEAM_LIBRARY.md.
 
 import Foundation
 
@@ -29,6 +30,8 @@ enum SteamError: LocalizedError, Equatable {
     // Connection
     case noServersAvailable
     case connectionFailed(String)
+    /// Safe transport identity only; no URL, headers or credential-bearing error payload.
+    case transportFailed(domain: String, code: Int)
     case connectionTimeout
     case disconnected
     /// The CM refused the logon with this EResult. Lets callers tell a revoked
@@ -43,6 +46,11 @@ enum SteamError: LocalizedError, Equatable {
     // Content
     case manifestFetchFailed(String)
     case chunkDownloadFailed(String)
+    /// A content server answered with this HTTP status.
+    case contentHTTP(Int)
+    /// Every content server refused a depot's file list (HTTP 401 or 403),
+    /// also with fresh authorization and a fresh request code.
+    case contentRefused(Int)
     case decryptionFailed(String)
     case decompressionFailed
     /// A downloaded chunk could not be decoded; the value names the encoding
@@ -51,6 +59,9 @@ enum SteamError: LocalizedError, Equatable {
     case checksumMismatch
     case depotKeyNotFound(UInt32)
     case insufficientDiskSpace(needed: UInt64, available: UInt64)
+    /// The chosen branch is password-protected and Steam did not accept the
+    /// kept beta code for it (or none is kept).
+    case betaCodeNeeded(String)
 
     var errorDescription: String? {
         switch self {
@@ -74,6 +85,19 @@ enum SteamError: LocalizedError, Equatable {
             return "No Steam servers are available."
         case .connectionFailed(let reason):
             return "Connection failed: \(reason)"
+        case .transportFailed(let domain, let code):
+            if domain == NSURLErrorDomain {
+                switch URLError.Code(rawValue: code) {
+                case .secureConnectionFailed:
+                    return "Steam could not make a secure connection (\(code)). Check your network or VPN and try again."
+                case .serverCertificateHasBadDate, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+                    return "Steam could not verify the server certificate (\(code)). Check your device's date and network settings."
+                case .clientCertificateRejected, .clientCertificateRequired:
+                    return "Steam requested or rejected a client certificate (\(code)). Check your network or VPN settings."
+                default: break
+                }
+            }
+            return "Steam connection failed (\(domain), \(code))."
         case .connectionTimeout:
             return "Steam did not respond in time. Check your internet connection and try again."
         case .disconnected:
@@ -92,6 +116,10 @@ enum SteamError: LocalizedError, Equatable {
             return "Could not read the game's file list: \(reason)"
         case .chunkDownloadFailed(let reason):
             return "Download failed: \(reason)"
+        case .contentHTTP(let status):
+            return "Download failed: Content server returned HTTP \(status)."
+        case .contentRefused(let status):
+            return "Steam's download servers would not hand out this game's file list (HTTP \(status)), even after Madeira asked Steam for new download permission. Wait a few minutes and tap Try again; downloaded parts are kept. If it keeps happening, check that the game still shows in your Steam library and send Madeira's log."
         case .decryptionFailed(let reason):
             return "Decryption failed: \(reason)"
         case .decompressionFailed:
@@ -105,6 +133,8 @@ enum SteamError: LocalizedError, Equatable {
         case .insufficientDiskSpace(let needed, let available):
             return String(format: "Not enough free space: the download needs %.1f GB and %.1f GB is available.",
                           Double(needed) / 1_000_000_000, Double(available) / 1_000_000_000)
+        case .betaCodeNeeded(let branch):
+            return "The \(branch) version needs a beta code Steam accepts. Enter it under Game details › Steam › Version, or pick another version."
         }
     }
 }
@@ -113,4 +143,23 @@ enum SteamError: LocalizedError, Equatable {
 enum SteamGuardType: String, Codable {
     case email = "email"
     case device = "device"          // Steam Mobile Authenticator
+}
+
+/// An endpoint/route negotiation failure can be isolated by trying another CM.
+/// Explicit trust failures and cancellation must not be hidden by retries.
+enum SteamCMTransportPolicy {
+    static func canTryAnotherServer(_ error: Error) -> Bool {
+        let failure = error as NSError
+        guard failure.domain == NSURLErrorDomain else { return false }
+        switch URLError.Code(rawValue: failure.code) {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .secureConnectionFailed: return true
+        default: return false
+        }
+    }
+    static func sanitized(_ error: Error) -> SteamError {
+        let failure = error as NSError
+        let domain = [NSURLErrorDomain, NSPOSIXErrorDomain].contains(failure.domain) ? failure.domain : "other"
+        return .transportFailed(domain: domain, code: failure.code)
+    }
 }

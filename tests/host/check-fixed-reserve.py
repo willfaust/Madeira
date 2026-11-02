@@ -68,6 +68,7 @@ static void ios_slot_probe(const char *s) {}
 static void ios_bigres_report(const char *s) {}
 static uintptr_t ios_usable_va_floor;
 static void ios_oversize_commit_failed(const void *addr, SIZE_T size, NTSTATUS status) {}
+static int ios_jumbo_aligned_enabled(void) { return 1; }   /* ml2020's aligned walk, on as by default */
 static NTSTATUS run(void **ret, SIZE_T *size_ptr, ULONG type, ULONG protect)
 {
     NTSTATUS st = STATUS_NO_MEMORY;

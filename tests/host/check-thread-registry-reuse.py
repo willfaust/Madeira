@@ -62,6 +62,7 @@ harness = r'''
 #include <assert.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,12 @@ typedef unsigned int thread_t, mach_port_t, mach_msg_type_number_t;
 typedef int kern_return_t;
 typedef int *thread_info_t;
 typedef uint64_t mach_vm_address_t, mach_vm_size_t;
+/* [wow-reap] (MADEIRA_WOW_REAP_DEAD): a suspended thread of an exited process does not hold its
+ * range. The fake threads are never suspended (suspend_count 0), so it never applies here. */
+typedef uint64_t vm_address_t, vm_size_t;
+typedef struct { void *Peb; } TEB;
+#define vm_read_overwrite mach_vm_read_overwrite
+int ios_peb_is_dead( const void *peb ) { (void)peb; return 0; }
 #define KERN_SUCCESS 0
 #define KERN_INVALID_ADDRESS 1
 #define KERN_INVALID_ARGUMENT 4
@@ -79,7 +86,7 @@ typedef uint64_t mach_vm_address_t, mach_vm_size_t;
 #define THREAD_BASIC_INFO 3
 #define THREAD_BASIC_INFO_COUNT 10
 #define MACH_PORT_RIGHT_SEND 0
-struct thread_basic_info { int words[10]; };
+struct thread_basic_info { int suspend_count; int words[9]; };
 static mach_port_t mach_task_self(void) { return 1; }
 
 /* fake threads: port FIRST_PORT + n is thread n */
@@ -90,7 +97,8 @@ static unsigned long mod_refs_calls;
 static kern_return_t thread_info(thread_t port, int flavor, thread_info_t info, mach_msg_type_number_t *count)
 {
     unsigned n = port - FIRST_PORT;
-    (void)flavor; (void)info; (void)count;
+    (void)flavor; (void)count;
+    if (info) memset(info, 0, sizeof(struct thread_basic_info));
     if (port < FIRST_PORT || n >= MAX_PORTS) return MACH_SEND_INVALID_DEST;
     switch (__atomic_load_n(&thread_state[n], __ATOMIC_ACQUIRE))
     {

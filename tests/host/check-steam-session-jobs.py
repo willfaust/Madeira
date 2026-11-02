@@ -116,7 +116,9 @@ with tempfile.TemporaryDirectory() as tmp:
     (tmp / 'checks.swift').write_text(checks)
     sources = [tmp / 'session.swift', tmp / 'stubs.swift', tmp / 'checks.swift',
                steam / 'Proto/SteamProtoMessages.swift', steam / 'Core/SteamError.swift', steam / 'Core/SteamProtocol.swift',
-               steam / 'Core/SteamMessageCodec.swift', steam / 'Core/SteamCMSession.swift', steam / 'Core/LicenseListBox.swift']
+               steam / 'Core/SteamMessageCodec.swift', steam / 'Core/SteamCMSession.swift', steam / 'Core/LicenseListBox.swift',
+               steam / 'Content/SteamLANPeer.swift', tmp / 'lan-stub.swift']
+    (tmp / 'lan-stub.swift').write_text('enum ContentDecryptor { static let maximumChunkBytes = 64 * 1024 * 1024 }\n')
     exe = tmp / 'swift-checks'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-o', str(exe)] + [str(s) for s in sources],
                            capture_output=True, text=True)

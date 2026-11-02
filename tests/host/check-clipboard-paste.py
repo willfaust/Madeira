@@ -32,9 +32,10 @@ assert(repeated == [98, 0x4e2d, 67, 100]) // rapid taps retain complete requests
 requests.append("stale"); requests.cancel(); requests.append("Z")
 assert(requests.next?.scalar == 90); requests.advance(); assert(requests.next == nil)
 assert(PasteText.interval(milliseconds: nil) == 0.01)
+assert(PasteText.interval(milliseconds: "1") == 0.001)
 assert(PasteText.interval(milliseconds: "5") == 0.005)
 assert(PasteText.interval(milliseconds: "10") == 0.01)
-assert(PasteText.interval(milliseconds: "0") == 0.005)
+assert(PasteText.interval(milliseconds: "0") == 0.001)
 assert(PasteText.interval(milliseconds: "500") == 0.1)
 assert(PasteText.interval(milliseconds: "nan") == 0.01)
 assert(PasteText.interval(milliseconds: "invalid") == 0.01)
@@ -131,7 +132,9 @@ int main(void) {
     assert(winios_try_post_text('b', 'B', 0, 10)); drain(); assert(n == 2 && sent[0].ki.wVk == 'B');
     // Pacing is checked at the consumer as well as the UI producer: a stalled
     // Wine pump must not flush queued letters into the game in one burst.
-    for (int interval = 5; interval <= 10; interval += 5) {
+    const int intervals[] = {1, 5, 10};
+    for (int j = 0; j < 3; j++) {
+        int interval = intervals[j];
         winios_cancel_text(); n = 0;
         assert(winios_try_post_text(0x4e2d, 0, 0, interval));
         assert(winios_try_post_text(0x6587, 0, 0, interval));
@@ -142,17 +145,19 @@ int main(void) {
         winios_drain_input(); assert(n == 4);
     }
     // Concurrent/reentrant event pumps cannot reorder clipboard characters.
-    winios_cancel_text(); n = 0;
-    for (int i = 0; i < 200; i++) assert(winios_try_post_text(0x400 + i, 0, 0, 5));
-    pthread_mutex_lock(&g_input_drain_lock);
-    assert(!winios_drain_input() && !n); // returns immediately instead of blocking
-    pthread_mutex_unlock(&g_input_drain_lock);
-    pthread_t a, b;
-    pthread_create(&a, NULL, consumer, NULL); pthread_create(&b, NULL, consumer, NULL);
-    pthread_join(a, NULL); pthread_join(b, NULL);
-    assert(n == 400);
-    for (int i = 0; i < 200; i++) expect_unit(i * 2, 0x400 + i);
-    puts("PASS: bounded retry, cancellation, Unicode, ASCII/Caps Lock, actual 5/10ms pacing and concurrent FIFO delivery");
+    for (int j = 0; j < 3; j++) {
+        winios_cancel_text(); n = 0;
+        for (int i = 0; i < 200; i++) assert(winios_try_post_text(0x400 + i, 0, 0, intervals[j]));
+        pthread_mutex_lock(&g_input_drain_lock);
+        assert(!winios_drain_input() && !n); // returns immediately instead of blocking
+        pthread_mutex_unlock(&g_input_drain_lock);
+        pthread_t a, b;
+        pthread_create(&a, NULL, consumer, NULL); pthread_create(&b, NULL, consumer, NULL);
+        pthread_join(a, NULL); pthread_join(b, NULL);
+        assert(n == 400);
+        for (int i = 0; i < 200; i++) expect_unit(i * 2, 0x400 + i);
+    }
+    puts("PASS: bounded retry, cancellation, Unicode, ASCII/Caps Lock, actual 1/5/10ms pacing and concurrent FIFO delivery");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-paste-') as temp:

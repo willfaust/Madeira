@@ -1666,6 +1666,26 @@ void main_loop(void)
                 }
             }
 
+            /* ml2250: a 32-bit process ntdll found hung on an SRW lock past
+             * env.MADEIRA_SRW_HANG_KILL_S (ios_srw_hang_census, signal_arm64_ios.c)
+             * is ended here, on the server's own thread, as a TerminateProcess
+             * from another process would end it. */
+            {
+                extern volatile unsigned int ios_hang_kill_pid;
+                unsigned int hang_pid = __atomic_exchange_n( &ios_hang_kill_pid, 0, __ATOMIC_ACQ_REL );
+                if (hang_pid)
+                {
+                    struct process *hang = get_process_from_id( hang_pid );
+                    fprintf( stderr, "[srw-hang] ml2250 server: ending process %04x (%s)\n", hang_pid,
+                             hang ? "found" : "already gone" );
+                    if (hang)
+                    {
+                        kill_process( hang, 1 );
+                        release_object( hang );
+                    }
+                }
+            }
+
             /* Check for injected client fd (socketpair bypass) */
             {
                 int injected = __atomic_exchange_n(&g_injected_client_fd, -1, __ATOMIC_SEQ_CST);

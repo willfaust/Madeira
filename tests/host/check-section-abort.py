@@ -87,6 +87,15 @@ require('_Thread_local' not in helpers.split('*/', 1)[1], 'no thread-local varia
 x18 = '__asm__ volatile("mov %0, x18" : "=r"(x18_val));'
 require(read_reply.count(x18) == 1, 'the x18 diagnostic read is the only host-specific line replaced')
 read_reply = read_reply.replace(x18, 'x18_val = 0;')
+# wait_reply reads a reply's data part through ios_read_reply_guest (aliased or unwritable guest
+# destinations); the scenarios here write plain memory, which takes read_reply_data as before.
+reply_guest = r'''
+static BOOL ios_read_reply_guest( void *buffer, size_t size, int req, BOOL *fault )
+{
+    (void)req; (void)fault;
+    return read_reply_data( buffer, size );
+}
+'''
 
 harness = r'''
 #define WINE_IOS 1
@@ -313,7 +322,7 @@ int main( int argc, char **argv )
 with tempfile.TemporaryDirectory() as tmp:
     c = Path(tmp) / 'section_abort.c'
     exe = Path(tmp) / 'section_abort'
-    c.write_text(harness + helpers + send_request + read_reply + wait_reply + call_unlocked + enter + leave + harness_main)
+    c.write_text(harness + helpers + send_request + read_reply + reply_guest + wait_reply + call_unlocked + enter + leave + harness_main)
     build = subprocess.run([CC, '-std=gnu11', '-g', '-O1', '-Wall', '-Wno-unused-function', '-Werror=implicit-function-declaration',
                             '-fsanitize=address,undefined', '-fno-sanitize-recover=undefined', '-pthread', str(c), '-o', str(exe)],
                            capture_output=True, text=True)

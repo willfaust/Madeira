@@ -54,9 +54,9 @@ Wine's server runs as a thread instead of a separate program.
   helper. On iOS 27 the built-in helper can pair the iPhone itself, without a
   computer.
 - An **Apple ID** to sideload the app. A free account works; its signing
-  expires after 7 days, so the app needs refreshing weekly. Madeira
-  [refreshes itself](docs/JIT.md#refreshing-the-signing): installed with
-  SideInstaller it needs nothing more, otherwise sign in under Settings → Signing.
+  expires after 7 days, so the app needs refreshing weekly with the installer
+  that signed it. Madeira's own refresh is off by default
+  ([details](docs/JIT.md#refreshing-the-signing)).
   Your games and saves are kept across reinstalls.
 
 Because JIT needs a debugger, Madeira cannot be offered on the App Store.

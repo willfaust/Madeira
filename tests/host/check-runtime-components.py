@@ -19,7 +19,7 @@ runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
 
-def pe(machine, imports=()):
+def pe(machine, imports=(), delayed=()):
     data = bytearray(1024)
     data[:2] = b'MZ'
     struct.pack_into('<I', data, 0x3c, 64)
@@ -34,6 +34,12 @@ def pe(machine, imports=()):
         for index, name in enumerate(imports):
             offset = 256 + index * 64
             struct.pack_into('<I', data, 512 + index * 20 + 12, 0x1000 + offset)
+            data[512 + offset:512 + offset + len(name) + 1] = name.encode() + b'\0'
+    if delayed:
+        struct.pack_into('<II', data, 88 + 112 + 13 * 8, 0x1080, (len(delayed) + 1) * 32)
+        for index, name in enumerate(delayed):
+            offset = 256 + (len(imports) + index) * 64
+            struct.pack_into('<II', data, 640 + index * 32, 1, 0x1000 + offset)
             data[512 + offset:512 + offset + len(name) + 1] = name.encode() + b'\0'
     return bytes(data)
 
@@ -119,6 +125,45 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.missing_imports(files), set())
         del files['apisetschema.dll']
         self.assertEqual(runtime.missing_imports(files), {'api-ms-win-example.dll'})
+
+    def test_crt_startup_dependencies_stay_delayed(self):
+        dependencies = ['advapi32.dll', 'user32.dll']
+        for arch, machine in [('arm64ec', 0xa641), ('aarch64', 0xaa64)]:
+            for name in ['ucrtbase.dll', 'msvcrt.dll']:
+                path = f'{arch}-windows/{name}'
+                runtime.check_binary(path, pe(machine, delayed=dependencies))
+                for dependency in dependencies:
+                    with self.subTest(path=path, dependency=dependency):
+                        with self.assertRaisesRegex(ValueError, 'CRT startup dependency'):
+                            runtime.check_binary(path, pe(machine, [dependency]))
+            runtime.check_binary(f'{arch}-windows/d2d1.dll', pe(machine, dependencies))
+
+    def test_bad_crt_is_rejected_from_cache_and_ipa_with_valid_checksums(self):
+        path = 'arm64ec-windows/ucrtbase.dll'
+        self.write('app/Madeira/' + path, pe(0xa641))
+        self.write('app/Madeira/arm64ec-windows/user32.dll', pe(0xa641))
+        self.snapshots()
+        ipa = self.ipa()
+        bad = pe(0xa641, ['user32.dll'])
+        cache = self.root / '.runtime-cache/windows'
+        (cache / 'files' / path).write_bytes(bad)
+        manifest = json.loads((cache / 'manifest.json').read_text())
+        manifest['files'][path] = runtime.digest(bad)
+        (cache / 'manifest.json').write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, 'CRT startup dependency'):
+            runtime.stage('windows', self.sdk)
+        with zipfile.ZipFile(ipa) as archive:
+            files = {p: archive.read(p) for p in archive.namelist()}
+        prefix = 'Payload/Madeira.app/'
+        manifest = json.loads(files[prefix + runtime.MANIFEST])
+        manifest['components']['windows']['files'][path] = runtime.digest(bad)
+        files[prefix + runtime.MANIFEST] = json.dumps(manifest).encode()
+        files[prefix + path] = bad
+        with zipfile.ZipFile(ipa, 'w') as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        with self.assertRaisesRegex(ValueError, 'CRT startup dependency'):
+            runtime.validate_ipa(ipa, self.sdk)
 
     def test_wine_targets_include_required_dlls_absent_from_old_farms(self):
         spec = importlib.util.spec_from_file_location('targets', ROOT / 'build/windows-runtime/targets.py')
@@ -209,18 +254,37 @@ class RuntimeTests(unittest.TestCase):
         source = self.write('wine/dlls/example/Makefile.in',
                             b'MODULE = example.dll\nIMPORTS = kernel32\nDELAYIMPORTS = kernel32\n# local edit\n')
         original = source.read_bytes()
+        crt_sources = []
+        for name in ['msvcrt', 'ucrtbase', 'msvcr100']:
+            parent = '' if name == 'msvcrt' else 'PARENTSRC = ../msvcrt\n'
+            crt_sources.append(self.write(f'wine/dlls/{name}/Makefile.in',
+                f'MODULE = {name}.dll\nIMPORTS = ntdll\nDELAYIMPORTS = advapi32 user32\n{parent}'.encode()))
+            self.write(f'wine/build-arm64ec/dlls/{name}/arm64ec-windows/{name}.dll', b'old eager link')
+        for name in ['advapi32', 'user32']:
+            self.write(f'app/Madeira/arm64ec-windows/{name}.dll', pe(0x8664))
+        crt_originals = {path: path.read_bytes() for path in crt_sources}
         self.write('wine/build-arm64ec/config.status', b'configured')
         self.write('app/Madeira/arm64ec-windows/kernel32.dll', pe(0x8664))
         strip = self.write('toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/arm64ec-w64-mingw32-strip',
                            b'#!/bin/sh\nexit 0\n')
         strip.chmod(0o755)
-        make = self.write('bin/make', b'#!/bin/sh\nexit 86\n')
+        make = self.write('bin/make', b'''#!/bin/sh
+set -eu
+for name in msvcrt ucrtbase msvcr100; do
+    grep -q '^DELAYIMPORTS = advapi32 user32$' "$WINE_FIXTURE_ROOT/wine/dlls/$name/Makefile.in"
+    test ! -f "$WINE_FIXTURE_ROOT/wine/build-arm64ec/dlls/$name/arm64ec-windows/$name.dll"
+done
+if grep -q '^DELAYIMPORTS' "$WINE_FIXTURE_ROOT/wine/dlls/example/Makefile.in"; then exit 87; fi
+exit 86
+''')
         make.chmod(0o755)
-        result = subprocess.run(['bash', str(script), 'example'], cwd=self.root,
-                                env=dict(os.environ, PATH=str(make.parent) + os.pathsep + os.environ['PATH']),
+        result = subprocess.run(['bash', str(script), 'example', 'msvcrt', 'ucrtbase', 'msvcr100'], cwd=self.root,
+                                env=dict(os.environ, UNDELAY='1', WINE_FIXTURE_ROOT=str(self.root),
+                                         PATH=str(make.parent) + os.pathsep + os.environ['PATH']),
                                 capture_output=True)
         self.assertEqual(result.returncode, 86, result.stderr)
         self.assertEqual(original, source.read_bytes())
+        self.assertEqual(crt_originals, {path: path.read_bytes() for path in crt_sources})
 
     def test_rebuilt_outputs_do_not_change_source_key(self):
         before = runtime.input_key('windows', self.sdk)

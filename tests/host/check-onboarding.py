@@ -80,8 +80,11 @@ opener = block(model, 'private func open(reason: String, since: Int)')
 require('LibraryModel.shared.current == nil' in opener and 'wine_process_is_running() == 0' in opener and 'guard available' in opener,
         'setup never opens over a running session, or with nothing to set up')
 require('OnboardingRules.steps(signIn: SteamSignIn.isEnabled, dock: MadeiraDock.enabled, localDevVPN: offerLocalDevVPN,\n'
-        '                              wineMono: offerWineMono, since: since)' in model,
-        'the pages follow the sign-in and Dock switches, whether LocalDevVPN and Wine Mono are here, and the revision seen')
+        '                              wineMono: offerWineMono, vcRedist: offerVCRedist, since: since)' in model,
+        'the pages follow the sign-in and Dock switches, whether LocalDevVPN, Wine Mono and the VC++ runtime are here, and the revision seen')
+require(block(model, 'private static func vcRedistOffered()').count('VCRedistModel.enabled') == 1
+        and 'offerVCRedist = Self.vcRedistOffered()' in opener,
+        "the Visual C++ page follows its switch and the prefix's registry, decided when setup opens")
 require(opener.index('offerLocalDevVPN = !LocalDevVPN.isInstalled') < opener.index('[onboarding] shown')
         and opener.index('offerWineMono = !WineMonoModel.available') < opener.index('[onboarding] shown'),
         "LocalDevVPN's and Wine Mono's pages are decided once, when setup opens, so installing on the way does not renumber the steps")
@@ -102,7 +105,7 @@ require('if onboarding.available {' in jit_settings_section and 'onboarding.reru
 
 # ------------------------------------------------------------------ static: skippable steps
 view = block(onboarding, 'struct OnboardingView: View')
-for page in ['private var signInPage', 'private var dockClientPage']:
+for page in ['private var signInPage', 'private var dockClientPage', 'private var wineMonoPage', 'private var vcRedistPage']:
     require('secondary("Set up later") { model.next() }' in block(view, page), f'{page.split()[-1]}: Set up later')
 require('secondary("Skip setup") { model.skip() }' in block(view, 'private var welcome'), 'welcome: visible Skip setup')
 jit_page = block(view, 'private var jitPage')
@@ -217,10 +220,22 @@ import Foundation
                "JIT remains when Steam setup is unavailable")
         // Wine Mono (revision 3): offered when this device has none, before done; after an
         // update from revision 2 only it is shown.
-        expect(R.revision == 3 && R.Step.wineMono.rawValue == "wine-mono" && R.Step.wineMono.introduced == 3
+        expect(R.Step.wineMono.rawValue == "wine-mono" && R.Step.wineMono.introduced == 3
                && R.Step.localDevVPN.introduced == 2 && R.Step.jit.introduced == 1, "revision 3 adds Wine Mono")
         expect(R.steps(signIn: true, dock: true, wineMono: true) == [.welcome, .jit, .signIn, .dockClient, .wineMono, .done],
                "Wine Mono's page comes last, before done")
+        // The Visual C++ runtime (revision 4): offered while the prefix lacks it, after Wine
+        // Mono; after an update from revision 3 only it is shown.
+        expect(R.revision == 4 && R.Step.vcRedist.rawValue == "vc-redist" && R.Step.vcRedist.introduced == 4,
+               "revision 4 adds the Visual C++ runtime")
+        expect(R.steps(signIn: true, dock: true, wineMono: true, vcRedist: true)
+                   == [.welcome, .jit, .signIn, .dockClient, .wineMono, .vcRedist, .done]
+               && R.steps(signIn: false, dock: false, vcRedist: true) == [.welcome, .jit, .vcRedist, .done],
+               "the Visual C++ page comes after Wine Mono, before done")
+        expect(R.steps(signIn: true, dock: true, wineMono: true, vcRedist: true, since: 3) == [.welcome, .vcRedist, .done]
+               && R.steps(signIn: true, dock: true, wineMono: true, vcRedist: false, since: 3) == [.welcome, .done]
+               && R.hasSetup([.welcome, .vcRedist, .done]) && !R.hasSetup([.welcome, .done]),
+               "an update from revision 3 shows setup only when the runtime is missing")
         expect(R.steps(signIn: true, dock: true, localDevVPN: true, wineMono: true, since: 2) == [.welcome, .wineMono, .done]
                && R.steps(signIn: true, dock: true, localDevVPN: true, wineMono: true, since: 1) == [.welcome, .localDevVPN, .wineMono, .done],
                "after an update only the pages added since the revision seen")

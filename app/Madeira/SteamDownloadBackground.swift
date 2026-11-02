@@ -17,8 +17,10 @@ import UserNotifications
 // entry of BGTaskSchedulerPermittedIdentifiers in Info.plist.
 //
 // Earlier iOS, or when iOS refuses the request (for example a re-signed bundle
-// whose identifier no longer matches the permitted one): the usual short
-// background grace period, then the download pauses cleanly (every finished
+// whose identifier no longer matches the permitted one): the download keeps
+// going while Madeira keeps itself running (BackgroundRun.swift, madeira.cfg
+// background-download minutes), else for the usual short background grace
+// period; then it pauses cleanly (every finished
 // chunk is journaled) and continues when Madeira is active again. A local
 // notification says so, and reports a download that finished or failed while
 // Madeira was in the background; the permission is asked for when the first
@@ -53,7 +55,7 @@ import UserNotifications
         self.suffix = suffix
     }
 
-    private var graceTask: UIBackgroundTaskIdentifier = .invalid
+    private var graceTask: BackgroundRun.Token?   // BackgroundRun.swift
     private var continued: AnyObject?            // BGContinuedProcessingTask (iOS 26+)
     private var continuedPending = false
     private var registered: String?
@@ -105,6 +107,7 @@ import UserNotifications
     /// A download became active (always a user action or its queue).
     func downloadStarted(appID: Int, name: String) {
         currentName = name
+        lastSource = ""
         requestNotificationPermission()
         if #available(iOS 26.0, *), Self.continuedEnabled { submitContinued() }
         if #available(iOS 26.0, *), let task = continued as? BGContinuedProcessingTask {
@@ -115,6 +118,13 @@ import UserNotifications
 
     func progress(_ progress: SteamDownloadProgress) {
         self.progress(doneBytes: progress.doneBytes, totalBytes: progress.totalBytes)
+        if #available(iOS 26.0, *), let task = continued as? BGContinuedProcessingTask {
+            let source = progress.pcName.map { progress.pcDropped ? "From Steam's servers" : "From \($0) on this network" } ?? "From Steam's servers"
+            if source != lastSource, progress.phase == .downloading {
+                lastSource = source
+                task.updateTitle("Downloading \(currentName)", subtitle: source)
+            }
+        }
     }
 
     func progress(doneBytes: UInt64, totalBytes: UInt64) {
@@ -124,6 +134,8 @@ import UserNotifications
             task.progress.completedUnitCount = Int64(clamping: min(doneBytes, totalBytes))
         }
     }
+    /// The subtitle last shown in iOS's progress UI.
+    private var lastSource = ""
 
     enum Outcome { case completed, failed(String), paused }
 
@@ -194,8 +206,8 @@ import UserNotifications
     // MARK: Short grace period (all iOS versions)
 
     private func beginGrace() {
-        guard graceTask == .invalid, continued == nil, activeDownload?() == true else { return }
-        graceTask = UIApplication.shared.beginBackgroundTask(withName: "Madeira \(source) download") { [weak self] in
+        guard graceTask == nil, continued == nil, activeDownload?() == true else { return }
+        graceTask = BackgroundRun.shared.beginTask("\(source) download") { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 // Continued processing keeps the app running; only pause without it.
@@ -211,9 +223,9 @@ import UserNotifications
     }
 
     private func endGrace() {
-        guard graceTask != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(graceTask)
-        graceTask = .invalid
+        guard let task = graceTask else { return }
+        graceTask = nil
+        BackgroundRun.shared.endTask(task)
     }
 
     // MARK: Notifications

@@ -47,24 +47,38 @@ check("build.sh compiles d3dkmt_ios.c for upstream d3dkmt.c",
       re.search(r'\n        d3dkmt\)\n(?:            #[^\n]*\n)*            compile_one "\$BUILD_DIR/d3dkmt_ios.c" "d3dkmt"\n            continue', build)
       is not None)
 wrapped = ["OpenAdapterFromHdc", "QueryAdapterInfo", "QueryStatistics", "QueryVideoMemoryInfo"]
+# wrapped only for the [vkmt] trace (MADEIRA_KMT_TRACE=0 silences it): upstream's answer, unchanged
+traced = ["OpenAdapterFromLuid", "CloseAdapter", "CreateDevice", "DestroyDevice", "SetQueuedLimit",
+          "SetVidPnSourceOwner", "CheckOcclusion", "CheckVidPnExclusiveOwnership", "Escape"]
 inc = kmt.index('#include "../../wine/dlls/win32u/d3dkmt.c"')
 renamed = re.findall(r"#define NtGdiDdDDI(\w+)\s+upstream_NtGdiDdDDI(\w+)", kmt[:inc])
-check("the wrapper renames exactly the wrapped entry points", sorted(a for a, b in renamed if a == b) == sorted(wrapped)
-      and len(renamed) == len(wrapped))
+check("the wrapper renames exactly the wrapped entry points", sorted(a for a, b in renamed if a == b) == sorted(wrapped + traced)
+      and len(renamed) == len(wrapped + traced))
 check("and undefines every rename after the include",
-      all("#undef NtGdiDdDDI" + n + "\n" in kmt[inc:inc + 600] for n in wrapped))
-for n in wrapped:
+      all("#undef NtGdiDdDDI" + n + "\n" in kmt[inc:inc + 1200] for n in wrapped + traced))
+for n in wrapped + traced:
     f = func(kmt, "NTSTATUS WINAPI NtGdiDdDDI%s(" % n)
     check("NtGdiDdDDI%s calls upstream_NtGdiDdDDI%s" % (n, n), ("upstream_NtGdiDdDDI%s(" % n) in f)
+for n in traced:
+    f = func(kmt, "NTSTATUS WINAPI NtGdiDdDDI%s(" % n)
+    check("NtGdiDdDDI%s only traces: upstream's status returned, nothing written" % n,
+          "NTSTATUS status = upstream_NtGdiDdDDI%s( desc );" % n in f and f.rstrip().endswith("return status;\n}")
+          and f.count("return ") == 1 and not re.search(r"desc->\w+(\.\w+)* = ", f) and "kmt_trace( &calls, status )" in f)
+check("the trace switch is env MADEIRA_KMT_TRACE, on unless 0, read once",
+      'getenv( "MADEIRA_KMT_TRACE" )' in kmt and 'enabled = !v || strcmp( v, "0" );' in kmt
+      and "if (!madeira_kmt_trace_enabled()) return 0;" in func(kmt, "static int kmt_trace("))
 qai = func(kmt, "NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo(")
 check("QueryAdapterInfo answers only with the switch, for a real adapter handle, else upstream",
       "if (madeira_kmt_adapter_enabled() && desc && desc->hAdapter && desc->pPrivateDriverData &&\n"
       "        get_d3dkmt_object( desc->hAdapter, D3DKMT_ADAPTER ))" in qai
-      and "return upstream_NtGdiDdDDIQueryAdapterInfo( desc );" in qai)
+      and "ours = madeira_kmt_answer( desc->Type, desc->pPrivateDriverData, desc->PrivateDriverDataSize, &id, &status );" in qai
+      and "if (!ours) status = upstream_NtGdiDdDDIQueryAdapterInfo( desc );" in qai
+      and qai.count("return ") == 1 and "return status;" in qai)
 hdc = func(kmt, "NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromHdc(")
 check("OpenAdapterFromHdc opens the adapter only with the switch, else the upstream stub",
-      "if (!madeira_kmt_adapter_enabled() || !desc || !madeira_kmt_adapter_luid( &luid ))\n"
-      "        return upstream_NtGdiDdDDIOpenAdapterFromHdc( desc );" in hdc)
+      "if (madeira_kmt_adapter_enabled() && desc && madeira_kmt_adapter_luid( &luid ))" in hdc
+      and "else status = upstream_NtGdiDdDDIOpenAdapterFromHdc( desc );" in hdc
+      and "status = upstream_NtGdiDdDDIOpenAdapterFromLuid( &open )" in hdc)
 vmi = func(kmt, "NTSTATUS WINAPI NtGdiDdDDIQueryVideoMemoryInfo(")
 check("QueryVideoMemoryInfo fills only an empty LOCAL budget, only with the switch",
       "if (!status && madeira_kmt_adapter_enabled() && desc->MemorySegmentGroup == D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL &&\n"
@@ -76,17 +90,20 @@ check("madeira_cfg.h comes before Wine's headers (they poison strncpy)",
 
 e2 = func(sp, "NTSTATUS WINAPI NtGdiDdDDIEnumAdapters2(")
 check("EnumAdapters2 lists the adapter only with the switch and no GPU in `gpus`",
-      "if (!count && madeira_kmt_adapter_enabled() && madeira_kmt_adapter_luid( &open_adapter_from_luid.AdapterLuid ))" in e2
-      and "desc->pAdapters[0].AdapterLuid = open_adapter_from_luid.AdapterLuid;" in e2 and "desc->NumAdapters = 1;" in e2
+      "if (!count && madeira_kmt_adapter_enabled() && madeira_kmt_adapter_luid( &kmt_luid ))" in e2
+      and "open_adapter_from_luid.AdapterLuid = kmt_luid;" in e2
+      and "desc->pAdapters[0].AdapterLuid = kmt_luid;" in e2 and "desc->NumAdapters = 1;" in e2
       and e2.index("madeira_kmt_adapter_enabled()") < e2.index("if (count > desc->NumAdapters)"))
 dn = func(sp, "NTSTATUS WINAPI NtGdiDdDDIOpenAdapterFromDeviceName(")
 check("OpenAdapterFromDeviceName opens the registry GPU's interface only with the switch",
       "if (!found && madeira_kmt_adapter_enabled())" in dn and "!strcmp( name + 4, kmt_id.path )" in dn)
 gdi = sp[sp.index("static NTSTATUS d3dkmt_open_adapter_from_gdi_display_name("):]
 gdi = gdi[:gdi.index("\n}\n")]
+vluid = func(sp, "static void ios_virtual_luid_locked( LUID *out )")
 check("OpenAdapterFromGdiDisplayName's virtual adapter takes the LUID only with the switch",
-      "if (madeira_kmt_adapter_enabled() && madeira_kmt_adapter_luid( &virtual_luid ))" in gdi
-      and "else if (!list_empty( &gpus ) && first)" in gdi)
+      "ios_virtual_luid_locked( &luid_desc.AdapterLuid );" in gdi
+      and "if (madeira_kmt_adapter_enabled() && madeira_kmt_adapter_luid( &ios_virtual_adapter_luid ))" in vluid
+      and "else if (!list_empty( &gpus ) && first)" in vluid)
 reg = func(sp, "static void ios_register_virtual_gpu(void)")
 check("registry GPU: switch LUID, else a fresh one; switch size, else 4096 MB",
       "kmt = madeira_kmt_adapter_enabled() && madeira_kmt_adapter_luid( &gpu.luid );" in reg
@@ -329,7 +346,7 @@ with tempfile.TemporaryDirectory() as t:
         out, err = run(fake, {"MADEIRA_KMT_ADAPTER": "1"})
         check("LUID from MTLCreateSystemDefaultDevice().registryID via dlsym, once, device released",
               "luid=1/1 %08x:%08x created=1 released=1" % (v >> 32, v & 0xffffffff) in out
-              and err.count("[vkmt] MADEIRA_KMT_ADAPTER adapter LUID") == 1)
+              and err.count("[vkmt] adapter LUID") == 1)
         out, err = run(nometal, {"MADEIRA_KMT_ADAPTER": "1"})
         check("no Metal: no LUID, logged, no adapter", "luid=0/0" in out and "no Metal device registryID" in err)
         out, _ = run(fake, {}, cfg=None)

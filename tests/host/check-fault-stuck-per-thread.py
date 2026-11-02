@@ -155,6 +155,15 @@ static int mach_vm_region( mach_port_t task, mach_vm_address_t *a, mach_vm_size_
     return 1;   /* no region: the map dump stops at once */
 }
 void abort_thread( int status ) { }
+/* [fault-progress] (env.MADEIRA_FAULT_LOOP_GUEST_PROGRESS, opt-in): off here, so never evaluated */
+struct ios_fault_progress { uintptr_t thread; uint64_t frame, rip; };
+static struct ios_fault_progress ios_fault_progress_last;
+static int ios_fault_loop_guest_progress_on( void ) { return 0; }
+static int ios_fault_loop_guest_progress( struct ios_fault_progress *last, uintptr_t thread, unsigned exception,
+                                          uintptr_t frame, uintptr_t x28, uint64_t guest_rip, uint64_t *previous )
+{
+    return 0;
+}
 '''
 
 harness_main = r'''
@@ -166,6 +175,10 @@ static void decline( thread_t thread, uintptr_t fault_addr, uint64_t fault_pc_ch
     arm_thread_state64_t state;
     mach_msg_type_number_t count = 68;
     int handled = 0;
+    struct { unsigned exception; } req_value = { 0 }, *req = &req_value;
+    uintptr_t thread_teb = 0;
+    void *fex_state_q = NULL;
+    uint64_t state_rip_q = 0;
 
     memset( &state, 0, sizeof(state) );
     state.__sp = 0x70000ff238;

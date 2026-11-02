@@ -462,6 +462,14 @@ int main(int argc, char **argv)
     stub(image, IOS_SCH_LOOP_DELAYED, (uintptr_t)do_delayed);
     stub(image, IOS_SCH_LOOP_IDLE, (uintptr_t)do_idle);
     stub(image, 0x1728b0, (uintptr_t)run_until_idle);
+    /* The browser's global drain, as a stand-in (the helper's own bytes stay out
+     * of the tree, the image holds the filler): RunUntilIdle on the loop the
+     * process-wide slot holds. mov rcx, [rip + slot]; jmp RunUntilIdle */
+    unsigned char global_drain[12] = {0x48,0x8b,0x0d,0,0,0,0,0xe9,0,0,0,0};
+    int32_t slot_disp = 0x1cea00 - (0x11be60 + 7), run_disp = 0x1728b0 - (0x11be60 + 12);
+    memcpy(global_drain + 3, &slot_disp, sizeof(slot_disp));
+    memcpy(global_drain + 8, &run_disp, sizeof(run_disp));
+    memcpy(image + 0x11be60, global_drain, sizeof(global_drain));
     /* Self-written call-frame fixture around the real patched CALL. */
     const unsigned char enter[] = {0x48,0x83,0xec,0x28};
     const unsigned char leave[] = {0x48,0x83,0xc4,0x28,0xc3};
