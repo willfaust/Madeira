@@ -25,8 +25,8 @@
 #                                  without it (RocketLeague.exe imports it)
 # and GAME_MODULES below: builtins games or their installers import that the
 # farm does not have (without one the loader stops with STATUS_DLL_NOT_FOUND
-# before the program runs). Every module built here links its delay imports
-# as plain imports (see UNDELAY below).
+# before the program runs). Non-CRT modules link eligible delay imports as
+# plain imports (see UNDELAY below).
 # Pass the tracked modules a change touches (kernelbase, shell32, xinput1_1 ...
 # xinput1_4, ...) to rebuild them. ntdll is padded as well: build-ntdll.sh.
 #
@@ -128,7 +128,7 @@ mkdir -p "$B/dlls/stdole2.tlb"
 [ -e "$B/dlls/stdole2.tlb/aarch64-windows" ] || [ -L "$B/dlls/stdole2.tlb/aarch64-windows" ] \
     || ln -s arm64ec-windows "$B/dlls/stdole2.tlb/aarch64-windows"
 
-# UNDELAY: every module built here links its delay imports as plain imports.
+# UNDELAY: eligible non-CRT modules link delay imports as plain imports.
 # lld's ARM64EC delay-load helper stub is x64 code inside .text (lea rax,
 # __imp_aux_X; jmp __tailMerge), and the JIT-pool copy Madeira runs a hybrid
 # module from relocates the delay IAT to the stub's pool address, so the first
@@ -146,24 +146,29 @@ restore_makefiles() {
 }
 trap restore_makefiles EXIT
 in_farm() { [ -n "$(find "$DEST" -maxdepth 1 -iname "$1.dll" 2>/dev/null)" ]; }
-if [ "${UNDELAY:-1}" != 0 ]; then
-    for m in "$@"; do
-        mk="$R/wine/dlls/$m/Makefile.in"
-        [ -f "$mk" ] || continue
-        delayed="$(sed -n 's/^DELAYIMPORTS[[:space:]]*=[[:space:]]*//p' "$mk")"
-        [ -n "$delayed" ] && grep -q '^IMPORTS' "$mk" || continue
-        ok=1
-        for i in $delayed; do
-            in_farm "$i" || case " $* " in *" $i "*) ;; *) ok=0 ;; esac
-        done
-        [ "$ok" = 1 ] || continue
-        cp "$mk" "$backup/$m"
-        undelayed+=("$m")
-        sed -i.bak -e '/^DELAYIMPORTS[[:space:]]*=/d' -e "s/^\(IMPORTS[[:space:]]*=.*\)\$/\1 $delayed/" "$mk" && rm -f "$mk.bak"
-        rm -f "$B/dlls/$m/arm64ec-windows/$(sed -n 's/^MODULE[[:space:]]*=[[:space:]]*//p' "$mk")"   # an earlier link with the delay imports must not satisfy make
+for m in "$@"; do
+    mk="$R/wine/dlls/$m/Makefile.in"
+    [ -f "$mk" ] || continue
+    # Eager user32/advapi32 imports cycle back through msacm32 before CRT locale
+    # initialization. Relink CRTs even if an older UNDELAY=1 output is present.
+    if [ "$m" = msvcrt ] || grep -Eq '^PARENTSRC[[:space:]]*=[[:space:]]*\.\./msvcrt([[:space:]]|$)' "$mk"; then
+        rm -f "$B/dlls/$m/arm64ec-windows/$(sed -n 's/^MODULE[[:space:]]*=[[:space:]]*//p' "$mk")"
+        continue
+    fi
+    [ "${UNDELAY:-1}" != 0 ] || continue
+    delayed="$(sed -n 's/^DELAYIMPORTS[[:space:]]*=[[:space:]]*//p' "$mk")"
+    [ -n "$delayed" ] && grep -q '^IMPORTS' "$mk" || continue
+    ok=1
+    for i in $delayed; do
+        in_farm "$i" || case " $* " in *" $i "*) ;; *) ok=0 ;; esac
     done
-    [ ${#undelayed[@]} -eq 0 ] || echo "delay imports linked as plain imports: ${undelayed[*]}"
-fi
+    [ "$ok" = 1 ] || continue
+    cp "$mk" "$backup/$m"
+    undelayed+=("$m")
+    sed -i.bak -e '/^DELAYIMPORTS[[:space:]]*=/d' -e "s/^\(IMPORTS[[:space:]]*=.*\)\$/\1 $delayed/" "$mk" && rm -f "$mk.bak"
+    rm -f "$B/dlls/$m/arm64ec-windows/$(sed -n 's/^MODULE[[:space:]]*=[[:space:]]*//p' "$mk")"   # an earlier link with the delay imports must not satisfy make
+done
+[ ${#undelayed[@]} -eq 0 ] || echo "delay imports linked as plain imports: ${undelayed[*]}"
 
 # The DLL file targets, not dlls/<name>/all: that would also build a module's
 # unix side (winegstreamer's needs GStreamer, see build-ntdll.sh).
