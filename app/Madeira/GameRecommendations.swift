@@ -869,6 +869,21 @@ enum GameRecommendations {
         env.MADEIRA_AUDIO_LEAD_MS = 150
         env.MADEIRA_EC_HOOK_TRACE = 0
         """)
+
+    /// Borderlands 2 (Steam 49520; Binaries\Win32\Borderlands2.exe, started by 2K's
+    /// Binaries\Win32\Launcher.exe, which is Steam's default). Tested on an iPhone
+    /// 17 Pro Max (2026-11-02). Steam's custom-executable (CEG) step needed the empty
+    /// system32\mui and syswow64\mui folders, and then code 53 ("corrupt") went away
+    /// once Madeira's downloader kept only the later depot's copy of a file two
+    /// depots ship. It then ran with the standard list's line and no switches.
+    static let borderlands2 = GameRecommendation(
+        id: "borderlands-2", title: "Borderlands 2", version: 1,
+        config: """
+        # Madeira's recommended settings for Borderlands 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """)
+
     /// Horizon Forbidden West (Complete Edition, Steam 2420110), community builds
     /// 517-534 (2026-10-13/14). The game needs AVX. Memory it frees is released at
     /// once (with the free delay it reserved the same aligned addresses again and
@@ -1204,7 +1219,7 @@ enum GameRecommendations {
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
                       ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,
                       crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,
-                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, standard]
+                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps2, borderlands2, standard]
         + steamTitles.map(\.list)
 
     // MARK: Recognising a game
@@ -1217,6 +1232,7 @@ enum GameRecommendations {
     static let falloutNewVegasAppID = 22380, fallout3AppIDs: Set<Int> = [22300, 22370]   // Fallout 3, its GOTY Edition
     /// Black Ops II's campaign, Zombies and multiplayer.
     static let blackOps2AppIDs: Set<Int> = [202970, 212910, 202990]
+    static let borderlands2AppID = 49520
     /// GTA V Legacy, the edition every Steam copy of GTA V also carries.
     static let gta5LegacyAppID = 271590
     /// Grand Theft Auto IV: The Complete Edition.
@@ -1251,6 +1267,7 @@ enum GameRecommendations {
             if steamAppID.map(fallout3AppIDs.contains) == true || installFolder == "fallout 3"
                 || installFolder == "fallout 3 goty" { return fallout3 }
             if blackOps2AppIDs.contains(steamAppID ?? 0) || installFolder == "call of duty black ops ii" { return blackOps2 }
+            if steamAppID == borderlands2AppID || installFolder == "borderlands 2" { return borderlands2 }
             if steamAppID == horizonForbiddenWestAppID || installFolder == "horizon forbidden west complete edition" {
                 return horizonForbiddenWest
             }
@@ -1302,6 +1319,8 @@ enum GameRecommendations {
             return fallout3
         case "t6sp.exe", "t6zm.exe", "t6mp.exe":
             return blackOps2
+        case "borderlands2.exe":
+            return borderlands2
         case "horizonforbiddenwest.exe":
             return horizonForbiddenWest
         case "riftapart.exe":
@@ -1408,7 +1427,7 @@ extension GameRecommendations {
                    programs: [], steamPrograms: ["raidou tmotsa.exe"], list: raidouRemastered),
         SteamTitle(appIDs: [1235140], folders: ["yakuza like a dragon"],
                    programs: [], steamPrograms: ["yakuzalikeadragon.exe"], list: yakuzaLikeADragon),
-        SteamTitle(appIDs: [200260], folders: ["batman arkham city goty"],
+        SteamTitle(appIDs: [200260, 57400], folders: ["batman arkham city goty", "batman arkham city"],
                    programs: [], steamPrograms: ["batmanac.exe", "bmlauncher.exe"], list: batmanArkhamCityGoty),
         SteamTitle(appIDs: [3375780], folders: ["trails in the sky 1st chapter"],
                    programs: [], steamPrograms: ["sora_1st.exe"], list: trailsInTheSky1stChapter),
@@ -1975,9 +1994,12 @@ extension GameRecommendations {
         """)
 
     /// Batman: Arkham City GOTY (Steam App ID 200260). Ported on 2026-10-26 from a community tested list for it
-    /// (its version 2); not device-tested here.
+    /// (its version 2). Version 2 (an iPhone 17 Pro Max, 2026-10-31): with Madeira's own card name, BatmanAC.exe
+    /// started its .NET launcher BmLauncher.exe and exited, and the Dock session ended with the launcher still
+    /// opening; with "Older NVIDIA card (Direct3D 9)" it started no launcher and the game played. The first
+    /// edition (57400) has the same BatmanAC.exe and is not tested.
     static let batmanArkhamCityGoty = GameRecommendation(
-        id: "batman-arkham-city-goty", title: "Batman: Arkham City GOTY", version: 1,
+        id: "batman-arkham-city-goty", title: "Batman: Arkham City GOTY", version: 2,
         config: """
         # Madeira's recommended settings for Batman: Arkham City GOTY.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
@@ -1988,7 +2010,8 @@ extension GameRecommendations {
         env.MADEIRA_CTX_CPU_AREA = 2
         env.MADEIRA_WAIT_CHILDREN = 1
         env.MADEIRA_JIT_DUMP = 0
-        """)
+        """,
+        olderNvidia: true)
 
     /// Trails in the Sky 1st Chapter (Steam App ID 3375780). Ported on 2026-10-26 from a community tested list for
     /// it (its version 1); not device-tested here.
