@@ -2787,12 +2787,19 @@ struct LibraryStatus: View {
     @State private var memory = false
     let ticks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     var body: some View {
-        HStack(spacing: 8) {
-            badge("JIT", jit)
-            badge("Memory+", memory)
-            if jit && memory {
-                Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    .padding(.leading, 4)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                badge("JIT", jit)
+                badge("Memory+", memory)
+                if jit && memory {
+                    Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                }
+            }
+            if !memory {
+                Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .onAppear { update() }.onReceive(ticks) { _ in update() }

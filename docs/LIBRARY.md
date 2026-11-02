@@ -502,6 +502,20 @@ Log tags: `[onboarding]` (`shown reason=… steps=…`, `step=…`, `done`,
 (`native-steam=… sections=… collapse=…`, flags only) and the library and download
 tags of `docs/STEAM_LIBRARY.md`. No account name, token or path is logged.
 
+## Memory+ status
+
+The **Memory+** badge in Settings reads the signed app's Increased Memory
+Limit entitlement (`com.apple.developer.kernel.increased-memory-limit`).
+It is separate from JIT and cannot be enabled by an in-app switch. When it is
+unavailable, the status explains that the signing tool must grant this
+capability to Madeira. Sign and install the updated copy over the existing
+app; do not delete the app and its game data to change this status.
+
+A green badge confirms the entitlement, not that every game will launch or
+that a particular amount of memory is available. The signing-method-specific
+reports in [issue #256](https://github.com/willfaust/Madeira/issues/256) are
+individual results, not a universal workaround.
+
 ## Controllers
 
 Player 1's controller navigates the library through `GamepadInput`: D-pad or
