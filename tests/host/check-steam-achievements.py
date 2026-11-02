@@ -43,7 +43,7 @@ check(project.count('A1009C04 /* SteamAchievements.swift in Sources */') == 2 an
       project.count('A2009C04 /* SteamAchievements.swift */') == 3, 'SteamAchievements.swift is in the app target')
 check('guard running || self.wasRunning' in source and 'applicationState == .active' in source,
       'the watcher only scans while a game runs and Madeira is on screen')
-check('appcache/stats' in source and 'SteamRuntime.relativeRoot' in source, "it reads the Steam client's appcache in the prefix")
+check('appcache/stats' in source and 'SteamRuntimeFiles.relativeRoot' in source, "it reads the Steam client's appcache in the prefix")
 foundation = source[:source.index('// MARK: Views')]
 code = '\n'.join(l for l in foundation.splitlines() if not l.strip().startswith('//'))
 check('LibraryModel' not in code and 'LogStore' not in code and 'UIApplication' not in code, 'the model part is Foundation only')

@@ -217,7 +217,7 @@ enum SteamAchievements {
 
 extension SteamAchievements {
     static var folder: URL {
-        LibraryModel.drive.appendingPathComponent(SteamRuntime.relativeRoot, isDirectory: true)
+        LibraryModel.drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot, isDirectory: true)
             .appendingPathComponent("appcache/stats", isDirectory: true)
     }
 
