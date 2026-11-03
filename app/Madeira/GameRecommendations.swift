@@ -1810,15 +1810,27 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// BeamNG.drive (Steam App ID 284160). Ported on 2026-10-26 from a community tested list for it (its version
-    /// 2); not device-tested here. Left out: MADEIRA_X64_MACHINE (read by a Wine/tools patch that is not merged).
+    /// BeamNG.drive (Steam App ID 284160). Version 2 device-tested on an iPad (2026-11-03): in game, DirectX 11,
+    /// "emulated x86 mode" in BeamNG's launcher (native ARM64 mode lacks an aarch64 d3dcompiler_47.dll; Vulkan has
+    /// no driver here). Bin64\BeamNG.drive.x64.exe hosts CEF 150 (Chromium) in its own process:
+    /// MADEIRA_CEF_PA_EXES gives it Social Club's layout-2 PartitionAlloc/V8 room (MADEIRA_SC_PA_POOLS = 2), and
+    /// MADEIRA_CEF_CMDLINE lets CEF read the --single-process switch MADEIRA_CHILD_ARGS adds, since the
+    /// 512 GB address space holds one Chromium, not its gpu/utility/renderer children. Version 1 was ported on
+    /// 2026-10-26 from a community list and stopped in chrome_elf.dll.
     static let beamngDrive = GameRecommendation(
-        id: "beamng-drive", title: "BeamNG.drive", version: 1,
+        id: "beamng-drive", title: "BeamNG.drive", version: 2,
         config: """
         # Madeira's recommended settings for BeamNG.drive.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-low = 1
+        env.MADEIRA_POOL_LOW_IMAGES = 1
+        env.MADEIRA_POOL_RECYCLE_IMAGES = 1
         env.MADEIRA_EC_HOOK_TRACE = 0
         env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_SC_PA_POOLS = 2
+        env.MADEIRA_CEF_PA_EXES = BeamNG.drive.x64.exe
+        env.MADEIRA_CHILD_ARGS = BeamNG.drive.x64.exe --single-process --js-flags=--jitless --disable-features=PartitionAllocBackupRefPtr
+        env.MADEIRA_CEF_CMDLINE = 1
         # The defaults this list was tested with (upstream's differ).
         env.MADEIRA_FREE_DELAY_MS = 2000
         env.MADEIRA_CTX_CPU_AREA = 2
