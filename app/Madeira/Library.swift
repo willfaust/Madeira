@@ -5083,7 +5083,7 @@ struct LibraryPointerSettings: View {
         // A Bluetooth or USB mouse does nothing on iPhone until AssistiveTouch
         // is on (iOS routes pointer devices only through it); nothing says so.
         if UIDevice.current.userInterfaceIdiom == .phone {
-            Text("Using a Bluetooth or USB mouse? iPhone only lets apps use a mouse with AssistiveTouch on: Settings > Accessibility > Touch > AssistiveTouch. Then close and reopen Madeira.")
+            Text("Using a mouse? Turn on AssistiveTouch (Settings > Accessibility > Touch), then reopen Madeira.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         LabeledContent("Touch sensitivity") {

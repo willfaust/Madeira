@@ -11731,40 +11731,6 @@
         }
       }
     },
-    "Mouse found, but iPhone only lets apps use a mouse with AssistiveTouch on: Settings > Accessibility > Touch > AssistiveTouch. Then close and reopen Madeira.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maus gefunden, aber das iPhone lässt Apps eine Maus nur mit eingeschaltetem AssistiveTouch nutzen: Einstellungen > Bedienungshilfen > Tippen > AssistiveTouch. Danach Madeira schließen und wieder öffnen."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ratón detectado, pero el iPhone solo deja usar un ratón a las apps con AssistiveTouch activado: Ajustes > Accesibilidad > Tocar > AssistiveTouch. Después cierra y vuelve a abrir Madeira."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "마우스를 찾았지만 iPhone에서는 AssistiveTouch를 켜야 앱이 마우스를 쓸 수 있습니다: 설정 > 손쉬운 사용 > 터치 > AssistiveTouch. 그런 다음 Madeira를 닫았다가 다시 여세요."
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mouse encontrado, mas o iPhone só deixa os apps usarem um mouse com o AssistiveTouch ativado: Ajustes > Acessibilidade > Toque > AssistiveTouch. Depois feche e abra o Madeira de novo."
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Мышь найдена, но iPhone даёт приложениям пользоваться мышью только с включённым AssistiveTouch: Настройки > Универсальный доступ > Касание > AssistiveTouch. Затем закройте и снова откройте Madeira."
-          }
-        }
-      }
-    },
     "Move to": {
       "localizations": {
         "de": {
@@ -22917,36 +22883,36 @@
         }
       }
     },
-    "Using a Bluetooth or USB mouse? iPhone only lets apps use a mouse with AssistiveTouch on: Settings > Accessibility > Touch > AssistiveTouch. Then close and reopen Madeira.": {
+    "Using a mouse? Turn on AssistiveTouch (Settings > Accessibility > Touch), then reopen Madeira.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth- oder USB-Maus? Das iPhone lässt Apps eine Maus nur mit eingeschaltetem AssistiveTouch nutzen: Einstellungen > Bedienungshilfen > Tippen > AssistiveTouch. Danach Madeira schließen und wieder öffnen."
+            "value": "Maus? AssistiveTouch einschalten (Einstellungen > Bedienungshilfen > Tippen), dann Madeira neu öffnen."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "¿Usas un ratón Bluetooth o USB? El iPhone solo deja usar un ratón a las apps con AssistiveTouch activado: Ajustes > Accesibilidad > Tocar > AssistiveTouch. Después cierra y vuelve a abrir Madeira."
+            "value": "¿Usas un ratón? Activa AssistiveTouch (Ajustes > Accesibilidad > Tocar) y vuelve a abrir Madeira."
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bluetooth 또는 USB 마우스를 쓰나요? iPhone에서는 AssistiveTouch를 켜야 앱이 마우스를 쓸 수 있습니다: 설정 > 손쉬운 사용 > 터치 > AssistiveTouch. 그런 다음 Madeira를 닫았다가 다시 여세요."
+            "value": "마우스를 쓰나요? AssistiveTouch를 켠 뒤(설정 > 손쉬운 사용 > 터치) Madeira를 다시 여세요."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Usando um mouse Bluetooth ou USB? O iPhone só deixa os apps usarem um mouse com o AssistiveTouch ativado: Ajustes > Acessibilidade > Toque > AssistiveTouch. Depois feche e abra o Madeira de novo."
+            "value": "Usando um mouse? Ative o AssistiveTouch (Ajustes > Acessibilidade > Toque) e abra o Madeira de novo."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Мышь Bluetooth или USB? iPhone даёт приложениям пользоваться мышью только с включённым AssistiveTouch: Настройки > Универсальный доступ > Касание > AssistiveTouch. Затем закройте и снова откройте Madeira."
+            "value": "Мышь? Включите AssistiveTouch (Настройки > Универсальный доступ > Касание) и снова откройте Madeira."
           }
         }
       }

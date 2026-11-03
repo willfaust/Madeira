@@ -2665,7 +2665,7 @@ struct HardwareInputSettings: View {
     /// device is routed through AssistiveTouch.
     private var hint: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("Mouse found, but iPhone only lets apps use a mouse with AssistiveTouch on: Settings > Accessibility > Touch > AssistiveTouch. Then close and reopen Madeira.")
+            Text("Using a mouse? Turn on AssistiveTouch (Settings > Accessibility > Touch), then reopen Madeira.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
