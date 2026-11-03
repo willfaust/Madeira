@@ -16046,8 +16046,8 @@ static void ios_cef_cmdline_apply( unsigned char *base, DWORD *eat, DWORD cave )
  * section as code, reading the section table from the mapped headers. Without
  * this the first call into the thunk died as "NoExec instruction in entry
  * block" / AV EXEC at the cave (BeamNG, Build IPA #17). So grow the section
- * that holds the cave to cover it, in `sec` and, when the mapper works from a
- * copy, in the mapped table too. The cave is inside the section's last page
+ * that holds the cave to cover it in `sec`, which is the mapped table unless
+ * the mapper had to work from a copy. The cave is inside the section's last page
  * (ios_cef_cmdline_site checks it), so the page protections do not change. */
 static void ios_cef_cmdline_grow_section( IMAGE_SECTION_HEADER *sec, IMAGE_SECTION_HEADER *mapped, int count,
                                           DWORD cave, DWORD len )
@@ -16062,7 +16062,10 @@ static void ios_cef_cmdline_grow_section( IMAGE_SECTION_HEADER *sec, IMAGE_SECTI
         if (cave != ((va + vs + 15) & ~15u)) continue;   /* the cave ios_cef_cmdline_site picked */
         if (cave + len - va <= vs) return;
         sec[s].Misc.VirtualSize = cave + len - va;
-        if (mapped && mapped != sec) mapped[s].Misc.VirtualSize = cave + len - va;
+        /* A copy means the mapped table runs past header_map_size and a section
+         * mapping may have overwritten it: leave those bytes alone. libcef never
+         * takes that path, so FEX still reads the grown size from `sec`. */
+        (void)mapped;
         return;
     }
 }

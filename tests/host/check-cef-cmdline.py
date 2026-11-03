@@ -154,12 +154,12 @@ int main( int argc, char **argv )
         IMAGE_SECTION_HEADER copy[2];
         memcpy( copy, sec, sizeof(copy) );
         ios_cef_cmdline_grow_section( copy, sec, 2, cave, 38 );
-        if (copy[0].Misc.VirtualSize != TEXT_VS + 38 || sec[0].Misc.VirtualSize != TEXT_VS + 38)
-            FAIL("section not grown over the thunk: 0x%x/0x%x\n", copy[0].Misc.VirtualSize, sec[0].Misc.VirtualSize);
+        if (copy[0].Misc.VirtualSize != TEXT_VS + 38 || sec[0].Misc.VirtualSize != TEXT_VS)
+            FAIL("copy not grown, or mapped table written through a copy: 0x%x/0x%x\n", copy[0].Misc.VirtualSize, sec[0].Misc.VirtualSize);
         if (sec[1].Misc.VirtualSize != 0x1000) FAIL("other section changed\n");
         ios_cef_cmdline_grow_section( sec, sec, 2, cave, 38 );
         if (sec[0].Misc.VirtualSize != TEXT_VS + 38) FAIL("grow not idempotent\n");
-        printf("PASS: cef_initialize's section grows to cover the thunk (mapped table and copy)\n");
+        printf("PASS: cef_initialize's section grows to cover the thunk (mapped table not touched through a copy)\n");
     }
 
     if (run)
