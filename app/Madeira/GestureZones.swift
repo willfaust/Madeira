@@ -427,6 +427,8 @@ struct GestureZonePanel: View {
         .background(GlassShape())
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18), lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { } // Panel gaps must not dismiss the selection beneath them.
         .position(x: panelX, y: screen.height / 2)
     }
 

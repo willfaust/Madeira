@@ -4297,6 +4297,10 @@ struct TouchControlsOverlay: View {
                 // The library between sessions (the window came up for a start that did not
                 // happen) draws nothing over the library's own screens.
                 if landscape && !(library.enabled && !session && !m.editing) {
+                    if m.editing {
+                        Color.clear.contentShape(editorCanvas(geo.size))
+                            .onTapGesture { m.selected = nil; zones.selected = nil }
+                    }
                     if (m.visible || m.editing) && !library.blocksGameplayTouch {
                         if GestureZonesModel.enabled {
                             GestureZonesLayer(screen: geo.size, editing: m.editing)
@@ -4327,6 +4331,22 @@ struct TouchControlsOverlay: View {
         .ignoresSafeArea()
         .statusBarHidden(library.current != nil)
         .persistentSystemOverlays(library.current != nil ? .hidden : .automatic)
+    }
+
+    /// The dismissal gesture must never take a control's drag on iOS 26.
+    private func editorCanvas(_ screen: CGSize) -> Path {
+        var area = Path(CGRect(origin: .zero, size: screen))
+        for control in m.controls {
+            let size = TouchControlsModel.size(control)
+            let frame = CGRect(x: CGFloat(control.nx) * screen.width - size.width / 2,
+                               y: CGFloat(control.ny) * screen.height - size.height / 2,
+                               width: size.width, height: size.height)
+            area = area.subtracting(Path(frame))
+        }
+        if GestureZonesModel.enabled {
+            for zone in zones.zones { area = area.subtracting(Path(zone.rect(in: screen))) }
+        }
+        return area
     }
 
     /// Every control in ONE GlassEffectContainer: on iOS 26 the system merges
@@ -4788,6 +4808,7 @@ struct MappingPanel: View {
     let screen: CGSize
     @ObservedObject private var m = TouchControlsModel.shared
     @State private var tab = 0                    // 0 keyboard, 1 controller
+    @State private var resizeDiameter: CGFloat?
 
 
     var body: some View {
@@ -4806,6 +4827,31 @@ struct MappingPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(control.locked == true ? "Unlock control" : "Lock control")
             }
+            HStack(spacing: 8) {
+                Text("Size").font(.system(size: 12))
+                Slider(value: Binding(get: { control.scale }, set: { value in
+                    if let i = m.index(of: control.id), m.controls[i].locked != true {
+                        m.controls[i].scale = value
+                    }
+                }), in: 0.5...3.0, onEditingChanged: { resizing in
+                    if resizing {
+                        if resizeDiameter == nil { resizeDiameter = TouchControlsModel.diameter(control) }
+                    } else if resizeDiameter != nil {
+                        // Let the slider finish tracking before the panel moves.
+                        DispatchQueue.main.async { resizeDiameter = nil }
+                    }
+                })
+                    .id(control.id)
+                    .disabled(control.locked == true)
+                    .accessibilityLabel("Control size")
+                    .accessibilityValue("\(Int(control.scale * 100)) percent")
+                Text("\(Int(control.scale * 100))%")
+                    .font(.system(size: 12).monospacedDigit())
+                    .frame(width: 42, alignment: .trailing)
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 44)
+            .foregroundStyle(.white)
             Rectangle().fill(.white.opacity(0.15)).frame(height: 1)
             LayerButtons { mv in if let i = m.index(of: control.id) { mv.apply(&m.controls, i) } }
                 .padding(.horizontal, 10)
@@ -4819,6 +4865,8 @@ struct MappingPanel: View {
         .background(GlassShape())
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18), lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { } // Panel gaps must not dismiss the selection beneath them.
         .position(layout.center)
     }
 
@@ -4838,7 +4886,7 @@ struct MappingPanel: View {
     private var layout: Placement {
         let cx = CGFloat(control.nx) * screen.width
         let cy = CGFloat(control.ny) * screen.height
-        let r  = TouchControlsModel.diameter(control) / 2
+        let r  = (resizeDiameter ?? TouchControlsModel.diameter(control)) / 2
         let gap: CGFloat = 14, edge: CGFloat = 8
 
         for size in [CGSize(width: 340, height: 236),
