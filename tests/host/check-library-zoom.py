@@ -580,11 +580,11 @@ require('static let diskCap = 300 * 1024 * 1024' in cover_cache and 'static func
         and 'setAttributes([.modificationDate: Date()]' in cover_cache and 'func releaseMemory()' in cover_cache,
         'memory: the cover files on disk are capped at 300 MB (least recently used first); a game start frees the decoded bitmaps')
 
-# The store sections (itch.io, Epic Games, EA app) follow Steam and Other games on the grid as on the original page, each one
+# The store sections (GOG, itch.io, Epic Games, EA app) follow Steam and Other games on the grid as on the original page, each one
 # hosted whole; their sheets belong to the page, not to a cell the grid can reuse.
 build = between(page, '@MainActor static func build(_ inputs: Inputs)', 'private mutating func append(')
 stores_ok = 'for store in LibraryGridStore.allCases {' in build and 'page.append(.fixed(.store(store, signature: signature))' in build
-for section, sheets, model in [('ItchGamesSection', 'ItchSheets', 'ItchGames'), ('EpicGamesSection', 'EpicSheets', 'EpicGames'),
+for section, sheets, model in [('GOGGamesSection', 'GOGSheets', 'GOGGames'), ('ItchGamesSection', 'ItchSheets', 'ItchGames'), ('EpicGamesSection', 'EpicSheets', 'EpicGames'),
                                ('EAGamesSection', 'EASheets', 'EAGames')]:
     source = (app / f'{model}.swift').read_text()
     stores_ok = (stores_ok and f'AnyView({section}(search: search, layout: layout, width: width, open: open, inGrid: true))' in page
@@ -593,7 +593,7 @@ for section, sheets, model in [('ItchGamesSection', 'ItchSheets', 'ItchGames'), 
                  and '.sheet(' not in between(source, f'struct {section}: View {{', f'struct {sheets}: ViewModifier'))
 require(stores_ok and 'stores: group == "platform" ? LibraryGridStore.signatures(search: search, layout: layout) : [:]' in page
         and 'stores = i.stores' in page,
-        'page: the itch.io, Epic Games and EA app sections follow Steam and Other games, re-measured when their games change; the page owns their sheets')
+        'page: the GOG, itch.io, Epic Games and EA app sections follow Steam and Other games, re-measured when their games change; the page owns their sheets')
 
 print('check-library-zoom: ' + ('PASS' if failures == 0 else f'FAIL ({failures})'))
 sys.exit(0 if failures == 0 else 1)

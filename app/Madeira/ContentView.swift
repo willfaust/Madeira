@@ -2197,6 +2197,7 @@ struct ContentView: View {
         .sheet(item: $devSheet) { sheet in
             switch sheet {
             case .steamSignIn: SteamSignInView()
+            case .gogSignIn: GOGSignInView()
             case .epicSignIn: EpicSignInView()
             case .eaSignIn: EASignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
@@ -2647,17 +2648,28 @@ struct ContentView: View {
             library.error = "Big Picture needs Madeira Dock's Steam components (Settings › Steam) to start from."
             return
         }
+        // A GOG game's install-script registry values (The Witcher's launcher needs its
+        // InstallFolder), for its own entry or a program added from its folder.
+        GOGLibrary.shared.writeInstallScriptRegistry(for: entry)
+        if entry.gogProductID != nil {
+            // A GOG game: its redistributable installers still to run, before the game
+            // (from the services batch), and GOG's game services while it runs.
+            LibraryEntry.setGOGSetup(GOGLibrary.shared.setupBatch(for: entry), for: entry.id)
+            GOGGalaxy.shared.prepare(entry)
+        }
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
+            GOGGalaxy.shared.stop()
             return
         }
         // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
         // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
         guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
+            GOGGalaxy.shared.stop()
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
@@ -2730,6 +2742,7 @@ struct ContentView: View {
         // Steam downloads wait for the session, and the app's own Steam connection closes
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)
+        GOGLibrary.shared.sessionChanged(active: true)
         ItchLibrary.shared.sessionChanged(active: true)
         EpicLibrary.shared.sessionChanged(active: true)
         EALibrary.shared.sessionChanged(active: true)
