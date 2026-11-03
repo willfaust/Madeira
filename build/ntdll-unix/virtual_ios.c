@@ -15915,6 +15915,161 @@ static const char *ios_sc_host_name( char *buf, size_t cap )
     return buf;
 }
 
+/* BeamNG.drive (2026-11-02): [cef-cmdline] let a listed CEF host's Chromium read
+ * its own process command line.
+ *
+ * Every CEF process needs its own two 32 GB-aligned PartitionAlloc pools, and
+ * the 64 GB band above 0x7000000000 holds one set (Social Club's layout 2).
+ * BeamNG.drive.x64.exe got that set (env.MADEIRA_CEF_PA_EXES), then its CEF
+ * started gpu, network, storage and renderer processes whose pools could not
+ * be placed: chrome_elf.dll stopped on its int3 (80000003) in each and the game
+ * waited forever (build 70 logs, 2026-11-02/03). Social Club's helper avoids
+ * that with --single-process. BeamNG ignored --single-process on its command
+ * line (env.MADEIRA_CHILD_ARGS): the gpu process still started, so the switch
+ * never reached Chromium. The game's cef_settings_t most likely has
+ * command_line_args_disabled set, which makes CEF drop the process command
+ * line.
+ *
+ * With env.MADEIRA_CEF_CMDLINE = 1, when libcef.dll is mapped in a program
+ * named by env.MADEIRA_CEF_PA_EXES, its cef_initialize export is pointed at a
+ * 38-byte x64 thunk written into the zero tail of an executable section. The
+ * thunk clears settings->command_line_args_disabled when the struct looks like
+ * CEF 128+'s (size 0x68..0x1000, the field at +0x64 equal to 1), then jumps to
+ * the real cef_initialize. Switches then come from env.MADEIRA_CHILD_ARGS.
+ * Opt-in, off by default; nothing else in libcef.dll changes. */
+static const unsigned char ios_cef_cmdline_thunk[38] =
+{
+    0x48,0x85,0xd2,                         /* test rdx, rdx                  */
+    0x74,0x1c,                              /* jz   tail                      */
+    0x48,0x83,0x3a,0x68,                    /* cmp  qword [rdx], 0x68         */
+    0x72,0x16,                              /* jb   tail                      */
+    0x48,0x81,0x3a,0x00,0x10,0x00,0x00,     /* cmp  qword [rdx], 0x1000       */
+    0x77,0x0d,                              /* ja   tail                      */
+    0x83,0x7a,0x64,0x01,                    /* cmp  dword [rdx+0x64], 1       */
+    0x75,0x07,                              /* jne  tail                      */
+    0xc7,0x42,0x64,0x00,0x00,0x00,0x00,     /* mov  dword [rdx+0x64], 0       */
+    0xe9,0x00,0x00,0x00,0x00                /* tail: jmp cef_initialize (rel32) */
+};
+#define IOS_CEF_CMDLINE_JMP 33   /* offset of the jmp's opcode */
+
+/* 1 when the path's last component is `want` (ASCII, lower case), any case. */
+static int ios_path_base_is( const WCHAR *path, size_t len, const char *want )
+{
+    size_t base = 0, k, n = strlen( want );
+
+    if (!path) return 0;
+    for (k = 0; k < len; k++) if (path[k] == '\\' || path[k] == '/') base = k + 1;
+    if (len - base != n) return 0;
+    for (k = 0; k < n; k++)
+    {
+        WCHAR c = path[base + k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != (WCHAR)(unsigned char)want[k]) return 0;
+    }
+    return 1;
+}
+
+/* Why `base` (libcef.dll, mapped, `size` bytes) cannot take the thunk, or NULL;
+ * on success *eat is the export-address slot of cef_initialize and *cave the
+ * RVA the thunk goes to. Pure: reads only the image. */
+static const char *ios_cef_cmdline_site( const unsigned char *base, SIZE_T size, const IMAGE_NT_HEADERS64 *nt,
+                                         const IMAGE_SECTION_HEADER *sec, DWORD **eat, DWORD *cave )
+{
+    const IMAGE_DATA_DIRECTORY *dir;
+    const IMAGE_EXPORT_DIRECTORY *exp;
+    const DWORD *names, *funcs;
+    const WORD *ords;
+    DWORD i, fn = 0, salign;
+    int s, found = 0;
+
+    if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return "not a 64-bit x64 image";
+    if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) return "no export directory";
+    dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (!dir->VirtualAddress || dir->VirtualAddress + sizeof(*exp) > size) return "no export directory";
+    exp = (const IMAGE_EXPORT_DIRECTORY *)(base + dir->VirtualAddress);
+    if (exp->AddressOfNames + 4ull * exp->NumberOfNames > size ||
+        exp->AddressOfNameOrdinals + 2ull * exp->NumberOfNames > size ||
+        exp->AddressOfFunctions + 4ull * exp->NumberOfFunctions > size) return "export directory out of range";
+    names = (const DWORD *)(base + exp->AddressOfNames);
+    ords  = (const WORD *)(base + exp->AddressOfNameOrdinals);
+    funcs = (const DWORD *)(base + exp->AddressOfFunctions);
+    for (i = 0; i < exp->NumberOfNames; i++)
+    {
+        if (names[i] + sizeof("cef_initialize") > size) continue;
+        if (strcmp( (const char *)base + names[i], "cef_initialize" )) continue;
+        if (ords[i] >= exp->NumberOfFunctions) return "cef_initialize ordinal out of range";
+        *eat = (DWORD *)(funcs + ords[i]);
+        fn = funcs[ords[i]];
+        found = 1;
+        break;
+    }
+    if (!found) return "no cef_initialize export";
+    if (fn >= dir->VirtualAddress && fn < dir->VirtualAddress + dir->Size) return "cef_initialize is forwarded";
+    if (fn == 0 || fn >= size) return "cef_initialize out of range";
+    salign = nt->OptionalHeader.SectionAlignment ? nt->OptionalHeader.SectionAlignment : 0x1000;
+    for (s = 0; s < nt->FileHeader.NumberOfSections; s++)
+    {
+        DWORD va = sec[s].VirtualAddress, vs = sec[s].Misc.VirtualSize;
+        DWORD end = (va + vs + salign - 1) & ~(salign - 1), start = (va + vs + 15) & ~15u, k;
+
+        if (!(sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) || !vs) continue;
+        if (fn < va || fn >= va + vs) continue;   /* the thunk sits beside cef_initialize */
+        if (end > size || start + sizeof(ios_cef_cmdline_thunk) > end) return "no room after cef_initialize's section";
+        for (k = start; k < start + sizeof(ios_cef_cmdline_thunk); k++)
+            if (base[k]) return "section tail not zero";
+        *cave = start;
+        return NULL;
+    }
+    return "cef_initialize is not in an executable section";
+}
+
+/* Write the thunk at `cave` and point the export slot at it. */
+static void ios_cef_cmdline_apply( unsigned char *base, DWORD *eat, DWORD cave )
+{
+    DWORD orig = *eat;
+    int32_t disp = (int32_t)(orig - (cave + IOS_CEF_CMDLINE_JMP + 5));
+
+    memcpy( base + cave, ios_cef_cmdline_thunk, sizeof(ios_cef_cmdline_thunk) );
+    memcpy( base + cave + IOS_CEF_CMDLINE_JMP + 1, &disp, sizeof(disp) );
+    *eat = cave;
+}
+
+static void ios_cef_cmdline_patch( char *base, SIZE_T total_size, const IMAGE_NT_HEADERS *nt,
+                                   const IMAGE_SECTION_HEADER *sec, const UNICODE_STRING *nt_name )
+{
+    static int enabled = -1;
+    PEB *peb;
+    RTL_USER_PROCESS_PARAMETERS *pp;
+    DWORD *eat = NULL, cave = 0, orig;
+    const char *why;
+    char hn[64];
+
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_CEF_CMDLINE" );
+        enabled = e && e[0] == '1';
+    }
+    if (!enabled || !nt_name || !nt_name->Buffer ||
+        !ios_path_base_is( nt_name->Buffer, nt_name->Length / sizeof(WCHAR), "libcef.dll" )) return;
+    peb = ios_jit_current_peb();
+    pp = peb ? peb->ProcessParameters : NULL;
+    if (!pp || !pp->ImagePathName.Buffer ||
+        !ios_cef_pa_listed( pp->ImagePathName.Buffer, pp->ImagePathName.Length / sizeof(WCHAR) )) return;
+    if ((why = ios_cef_cmdline_site( (const unsigned char *)base, total_size, (const IMAGE_NT_HEADERS64 *)nt,
+                                     sec, &eat, &cave )))
+    {
+        dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p not patched: %s\n",
+                 ios_sc_host_name( hn, sizeof(hn) ), base, why );
+        return;
+    }
+    orig = *eat;
+    ios_cef_cmdline_apply( (unsigned char *)base, eat, cave );
+    dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p: cef_initialize (rva 0x%x) now goes through rva 0x%x, "
+                "which lets CEF read the process command line (env.MADEIRA_CHILD_ARGS switches)\n",
+             ios_sc_host_name( hn, sizeof(hn) ), base, (unsigned)orig, (unsigned)cave );
+}
+
 /* madeira-bcd: [sc-rph] the renderer half of Social Club's pages under
  * --single-process.
  *
@@ -26372,6 +26527,8 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     ios_sc_render_handler_patch( ptr, total_size, nt, sec, nt_name );
     /* [fex-vmeta], likewise (opt-in, ignore-volatile-metadata). */
     ios_ignore_volatile_metadata( ptr, total_size, nt, (ULONG_PTR)image_info->base, nt_name );
+    /* BeamNG.drive: [cef-cmdline], same moment (see ios_cef_cmdline_patch). */
+    ios_cef_cmdline_patch( ptr, total_size, nt, sec, nt_name );
 
     /* madeira-bcd [x64-image]: decided before any protection is set, so both
      * the section pass and the eager copy loop below see the mark (see
