@@ -12037,40 +12037,6 @@
         }
       }
     },
-    "Mouse detected. iPhone needs AssistiveTouch: ": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maus erkannt. Das iPhone braucht AssistiveTouch: "
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ratón detectado. El iPhone necesita AssistiveTouch: "
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "마우스가 감지되었습니다. iPhone에서는 AssistiveTouch가 필요합니다: "
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mouse detectado. O iPhone precisa do AssistiveTouch: "
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Обнаружена мышь. На iPhone нужен AssistiveTouch: "
-          }
-        }
-      }
-    },
     "Move to": {
       "localizations": {
         "de": {
@@ -23627,6 +23593,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Использовать сохранения Steam Cloud"
+          }
+        }
+      }
+    },
+    "Using a mouse? Turn on AssistiveTouch (Settings > Accessibility > Touch), then reopen Madeira.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maus? AssistiveTouch einschalten (Einstellungen > Bedienungshilfen > Tippen), dann Madeira neu öffnen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "¿Usas un ratón? Activa AssistiveTouch (Ajustes > Accesibilidad > Tocar) y vuelve a abrir Madeira."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마우스를 쓰나요? AssistiveTouch를 켠 뒤(설정 > 손쉬운 사용 > 터치) Madeira를 다시 여세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usando um mouse? Ative o AssistiveTouch (Ajustes > Acessibilidade > Toque) e abra o Madeira de novo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Мышь? Включите AssistiveTouch (Настройки > Универсальный доступ > Касание) и снова откройте Madeira."
           }
         }
       }

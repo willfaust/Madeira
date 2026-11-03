@@ -707,6 +707,9 @@ final class HardwareInput: ObservableObject {
     /// and ignores it. No API reports this, so the idiom is the detection.
     static var pointerLockAvailable: Bool { lockEnabled && UIDevice.current.userInterfaceIdiom != .phone }
 
+    /// iPhone: the mouse arrives only through AssistiveTouch.
+    static var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+
     /// The desktop session (explorer on a virtual desktop). Read per use: the
     /// app sets MADEIRA_DESKTOP for each launch.
     static var desktopMode: Bool {
@@ -1031,7 +1034,10 @@ final class HardwareInput: ObservableObject {
         installTouchObserver()
         let base = computeBaseFocus()
         let keyboard = base && !typingElsewhere() && !libraryTypingOwnsKeys
-        let over = hoverSeen ? pointerOver : clickFocus.onGame
+        // iPhone: the AssistiveTouch pointer's hover ends whenever it stops
+        // against a screen edge, while GCMouse deltas keep coming; following
+        // hover there dropped mouse-look at every edge. Clicks decide instead.
+        let over = hoverSeen && !Self.isPhone ? pointerOver : clickFocus.onGame
         let mouse = base && (!Self.focusEnabled || pointerLocked || over || !gameButtons.isEmpty)
         baseFocused = base
         updateButtonPolling(active: Self.mouseRoutingEnabled && appActive && mouseConnected)
@@ -1113,7 +1119,7 @@ final class HardwareInput: ObservableObject {
         guard Self.enabled, let game = MetalBackedView.keyboardTarget else { return }
         let onGame = t.view.map { $0.isDescendant(of: game) } ?? false
         clickFocus.touchBegan(onGame: onGame, at: CACurrentMediaTime())
-        if !hoverSeen { refreshFocus(onGame ? "tap on the game view" : "tap elsewhere") }
+        if !hoverSeen || Self.isPhone { refreshFocus(onGame ? "tap on the game view" : "tap elsewhere") }
     }
 
     // MARK: - keyboard
@@ -2659,8 +2665,7 @@ struct HardwareInputSettings: View {
     /// device is routed through AssistiveTouch.
     private var hint: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("Mouse detected. iPhone needs AssistiveTouch: "
-                 + "Settings > Accessibility > Touch > AssistiveTouch > On, then Devices")
+            Text("Using a mouse? Turn on AssistiveTouch (Settings > Accessibility > Touch), then reopen Madeira.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
