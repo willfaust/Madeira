@@ -50,7 +50,8 @@ print('PASS: [cef-cmdline] is opt-in, libcef.dll in a listed program only, appli
 thunk = native[native.index('static const unsigned char ios_cef_cmdline_thunk[38]'):]
 thunk = thunk[:thunk.index('};') + 2] + '\n#define IOS_CEF_CMDLINE_JMP 33\n'
 code = thunk + function(native, 'static const char *ios_cef_cmdline_site(') + \
-    function(native, 'static void ios_cef_cmdline_apply(')
+    function(native, 'static void ios_cef_cmdline_apply(') + \
+    function(native, 'static void ios_cef_cmdline_grow_section(')
 
 harness = r'''
 #include <stdio.h>
@@ -149,6 +150,17 @@ int main( int argc, char **argv )
     if (*eat != cave || memcmp( img + cave, ios_cef_cmdline_thunk, 33 ) || img[cave + 33] != 0xe9) FAIL("apply\n");
     { int32_t d; memcpy( &d, img + cave + 34, 4 ); if (cave + 38 + d != FN) FAIL("rel32 does not reach cef_initialize\n"); }
     if (((DWORD *)(img + EDATA + 0x40))[0] != OTHER) FAIL("other export moved\n");
+    {   /* FEX marks only [va, va+VirtualSize) as code: the section must grow over the thunk */
+        IMAGE_SECTION_HEADER copy[2];
+        memcpy( copy, sec, sizeof(copy) );
+        ios_cef_cmdline_grow_section( copy, sec, 2, cave, 38 );
+        if (copy[0].Misc.VirtualSize != TEXT_VS + 38 || sec[0].Misc.VirtualSize != TEXT_VS + 38)
+            FAIL("section not grown over the thunk: 0x%x/0x%x\n", copy[0].Misc.VirtualSize, sec[0].Misc.VirtualSize);
+        if (sec[1].Misc.VirtualSize != 0x1000) FAIL("other section changed\n");
+        ios_cef_cmdline_grow_section( sec, sec, 2, cave, 38 );
+        if (sec[0].Misc.VirtualSize != TEXT_VS + 38) FAIL("grow not idempotent\n");
+        printf("PASS: cef_initialize's section grows to cover the thunk (mapped table and copy)\n");
+    }
 
     if (run)
     {

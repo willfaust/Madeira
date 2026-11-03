@@ -16041,6 +16041,32 @@ static void ios_cef_cmdline_apply( unsigned char *base, DWORD *eat, DWORD cave )
     *eat = cave;
 }
 
+/* The cave lies past the section's VirtualSize, and FEX's InvalidationTracker
+ * (HandleImageMap) marks only [VirtualAddress, +VirtualSize) of each executable
+ * section as code, reading the section table from the mapped headers. Without
+ * this the first call into the thunk died as "NoExec instruction in entry
+ * block" / AV EXEC at the cave (BeamNG, Build IPA #17). So grow the section
+ * that holds the cave to cover it, in `sec` and, when the mapper works from a
+ * copy, in the mapped table too. The cave is inside the section's last page
+ * (ios_cef_cmdline_site checks it), so the page protections do not change. */
+static void ios_cef_cmdline_grow_section( IMAGE_SECTION_HEADER *sec, IMAGE_SECTION_HEADER *mapped, int count,
+                                          DWORD cave, DWORD len )
+{
+    int s;
+
+    for (s = 0; s < count; s++)
+    {
+        DWORD va = sec[s].VirtualAddress, vs = sec[s].Misc.VirtualSize;
+
+        if (!(sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) || !vs) continue;
+        if (cave != ((va + vs + 15) & ~15u)) continue;   /* the cave ios_cef_cmdline_site picked */
+        if (cave + len - va <= vs) return;
+        sec[s].Misc.VirtualSize = cave + len - va;
+        if (mapped && mapped != sec) mapped[s].Misc.VirtualSize = cave + len - va;
+        return;
+    }
+}
+
 static void ios_cef_cmdline_patch( char *base, SIZE_T total_size, const IMAGE_NT_HEADERS *nt,
                                    const IMAGE_SECTION_HEADER *sec, const UNICODE_STRING *nt_name )
 {
@@ -16077,8 +16103,11 @@ static void ios_cef_cmdline_patch( char *base, SIZE_T total_size, const IMAGE_NT
     }
     orig = *eat;
     ios_cef_cmdline_apply( (unsigned char *)base, eat, cave );
+    ios_cef_cmdline_grow_section( (IMAGE_SECTION_HEADER *)sec, IMAGE_FIRST_SECTION( (IMAGE_NT_HEADERS *)nt ),
+                                  nt->FileHeader.NumberOfSections, cave, sizeof(ios_cef_cmdline_thunk) );
     dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p: cef_initialize (rva 0x%x) now goes through rva 0x%x, "
-                "which lets CEF read the process command line (env.MADEIRA_CHILD_ARGS switches)\n",
+                "which lets CEF read the process command line (env.MADEIRA_CHILD_ARGS switches); "
+                "its section now ends past the thunk, so the emulator runs it\n",
              ios_sc_host_name( hn, sizeof(hn) ), base, (unsigned)orig, (unsigned)cave );
 }
 
