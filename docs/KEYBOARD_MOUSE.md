@@ -45,8 +45,10 @@ doing in it. Input reaches the program only while it has focus:
 - **Keyboard:** no other text input is first responder, for example a text
   field in the app. The game view's own text bridge counts as the program's.
 - **Mouse:** the pointer is over the game view (iPad, where UIKit reports the
-  pointer's position); or, where it does not (iPhone AssistiveTouch), the last
-  click or tap in the app's window landed on the game view; or pointer lock is
+  pointer's position); or, on iPhone (AssistiveTouch), the last click or tap in
+  the app's window landed on the game view. iPhone ignores hover for focus even
+  when AssistiveTouch reports it: its hover ends whenever the pointer stops at a
+  screen edge while GCMouse deltas keep coming, which dropped mouse-look there; or pointer lock is
   on; or a button that went down on the game view is still held (a drag that
   leaves the view keeps the mouse until the button is released).
 - **Right stick controls mouse:** the "always required" part.
