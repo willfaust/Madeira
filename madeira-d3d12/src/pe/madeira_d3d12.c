@@ -39,6 +39,8 @@
 #include "madeira_d3d12_stubs.h"
 #include "madeira_ir_abi.h"
 #include "madeira_graphics_entry.h"
+#include <stddef.h>
+#include "madeira_list_journal.h"   /* list-journal, api-census */
 
 /* madeira-bcd: MAD_BUILD_ID (build-pe.sh passes it from the environment) names the build,
  * so a log says which runtime ran. */
@@ -1935,11 +1937,25 @@ struct mad_cmd {
 #define MAD_ARG_DRAWINFO_OFF   544u /* IRRuntimeDrawInfo (24 bytes; first uint16 = index type) at kIRArgumentBufferUniformsBindPoint */
 #define MAD_ARG_VBTABLE_OFF    576u /* ml927: IRRuntimeVertexBuffers (31 x {addr, length, stride} = 496 bytes) at kIRVertexBufferBindPoint, object stage */
 
+/* list-journal with api-census: what a list has bound, to count state sets that
+ * change nothing (madeira_list_journal.inc.c) */
+struct mad_jr_seen {
+    const void *pso, *rs[2], *heaps[2];
+    UINT64 root[2][16];
+    UINT16 root_valid[2];
+    UINT topology; UINT8 topology_valid, ib_valid, vb_valid, vp_valid, sc_valid;
+    D3D12_INDEX_BUFFER_VIEW ib;
+    D3D12_VERTEX_BUFFER_VIEW vb[4];
+    D3D12_VIEWPORT vp;
+    D3D12_RECT sc;
+};
+
 struct mad_list {
     ID3D12GraphicsCommandList7Vtbl *vtbl;   /* ml1144: full List7 slot table, List1..7 answered; ml1300: List8's slot follows it (g_list_vtbl8) */
     LONG refs;
     const IID *iid;
     const char *name;
+    struct mad_journal jr;     /* list-journal: records of the x64 methods, replayed at the next flush (MAD_JR_OFFSET) */
     D3D12_COMMAND_LIST_TYPE type;
     struct mad_alloc *alloc;
     int closed;
@@ -1966,6 +1982,7 @@ struct mad_list {
      * the last latch per parameter (its table and cdata offset + 1) */
     struct mad_rootsig *rec_rs[2]; UINT64 rec_tab[2][MAD_ROOT_PARAM_MAX]; struct mad_heap *rec_heap;
     UINT64 lat_va[2][MAD_ROOT_PARAM_MAX]; unsigned lat_data[2][MAD_ROOT_PARAM_MAX];
+    struct mad_jr_seen jr_seen;   /* list-journal + api-census */
 };
 
 static struct mad_cmd *mad_list_push(struct mad_list *l, enum mad_ck kind) {
@@ -2012,6 +2029,7 @@ static ULONG STDMETHODCALLTYPE list_Release(ID3D12GraphicsCommandList *This) {
         for (unsigned k = 0; k < l->nrings; k++) NSObject_release(l->rings[k]);
         if (l->nrings) InterlockedExchangeAdd(&g_ring_chunks, -(LONG)l->nrings);   /* madeira-bcd metal-gap: live chunks */
         free(l->rings); free(l->ring_cpu); free(l->ring_gpu); free(l->cmds); free(l->used); free(l->cdata);
+        free(l->jr.buf);   /* list-journal: empty here (Release goes through a trampoline that flushes) */
         free(l);
     }
     return (ULONG)r;
@@ -2046,6 +2064,7 @@ static HRESULT STDMETHODCALLTYPE list_Reset(ID3D12GraphicsCommandList *This,
     l->ncdata = 0;
     l->rec_rs[0] = l->rec_rs[1] = NULL; l->rec_heap = NULL;   /* madeira-bcd static-cbv */
     memset(l->rec_tab, 0, sizeof l->rec_tab); memset(l->lat_va, 0, sizeof l->lat_va); memset(l->lat_data, 0, sizeof l->lat_data);
+    memset(&l->jr_seen, 0, sizeof l->jr_seen);   /* list-journal + api-census */
     mad_list_rings_rewind(l);   /* ml1061: only reuses chunks the GPU has finished with */
     return S_OK;
 }
@@ -10722,6 +10741,7 @@ static void mad_perf_cb(obj_handle_t cb, double wait_s) {
     }
     mad_perf_unlock();
 }
+static void mad_jr_report(LONG presents, double wall);   /* list-journal, api-census */
 static void mad_perf_present(void) {
     LARGE_INTEGER now, fq; double wall;
     if (g_perf_enabled <= 0) return;
@@ -10735,6 +10755,7 @@ static void mad_perf_present(void) {
                   wall, g_perf_presents, g_perf_presents / wall, g_perf_cbs, g_perf_gpu_union * 1000, 100.0 * g_perf_gpu_union / wall,
                   g_perf_gpu_sum * 1000, g_perf_wait_s * 1000, 100.0 * g_perf_wait_s / wall,
                   g_perf_presents ? g_perf_gpu_union * 1000 / g_perf_presents : 0.0, g_perf_presents ? g_perf_wait_s * 1000 / g_perf_presents : 0.0);
+        mad_jr_report(g_perf_presents, wall);   /* api-census */
         {   /* ml1116: encoder fence traffic per frame (mode 2 should cut waits well below updates) */
             static LONG lw, lu, lb; LONG cw = g_fence_waits, cu = g_fence_updates, cb = g_barrier_seen;
             d3d12_log("[perf] ml1119 caller thread per frame: ExecuteCommandLists %.2f ms, Present %.2f ms (frame %.1f ms)\n",
@@ -11508,7 +11529,8 @@ static void mad_list_wait_idle(struct mad_list *l) {
 
 
 
-static ID3D12Device10Vtbl g_device_vtbl;
+static struct { void *jr_ctx; ID3D12Device10Vtbl v; } g_device_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_device_vtbl (g_device_vtbl_jr.v)
 /* Keep the normal implementation, including submission ordering, behind a
  * typed compiler-generated x64 entry when an x64 overlay needs to patch it. */
 MAD_X64_GRAPHICS_ENTRY void STDMETHODCALLTYPE
@@ -11516,19 +11538,26 @@ mad_x64_ExecuteCommandLists(ID3D12CommandQueue *This, UINT count, ID3D12CommandL
     queue_ExecuteCommandLists(This, count, lists);
 }
 
-static ID3D12CommandQueueVtbl g_queue_vtbl;
-static ID3D12CommandAllocatorVtbl g_alloc_vtbl;
+static struct { void *jr_ctx; ID3D12CommandQueueVtbl v; } g_queue_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_queue_vtbl (g_queue_vtbl_jr.v)
+static struct { void *jr_ctx; ID3D12CommandAllocatorVtbl v; } g_alloc_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_alloc_vtbl (g_alloc_vtbl_jr.v)
 /* ml1300: ID3D12GraphicsCommandList8 is List7 plus OMSetFrontAndBackStencilRef.
  * The toolchain's d3d12.h stops at List7, so the List8 slot is appended after
  * the List7 table; g_list_vtbl names that List7 part for every assignment below.
  * Final Fantasy Tactics - The Ivalice Chronicles creates its command lists as
  * List8 and treats E_NOINTERFACE as a lost device. */
 static struct {
-    ID3D12GraphicsCommandList7Vtbl v7;
-    void (STDMETHODCALLTYPE *OMSetFrontAndBackStencilRef)(ID3D12GraphicsCommandList *This, UINT front, UINT back);
-} g_list_vtbl8;
+    void *jr_ctx;   /* list-journal / api-census: read by the x64 trampolines (madeira_list_journal.h) */
+    struct {
+        ID3D12GraphicsCommandList7Vtbl v7;
+        void (STDMETHODCALLTYPE *OMSetFrontAndBackStencilRef)(ID3D12GraphicsCommandList *This, UINT front, UINT back);
+    } t;
+} g_list_vtbl8_jr;
+#define g_list_vtbl8 (g_list_vtbl8_jr.t)
 #define g_list_vtbl (g_list_vtbl8.v7)
-static ID3D12FenceVtbl g_fence_vtbl;
+static struct { void *jr_ctx; ID3D12FenceVtbl v; } g_fence_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_fence_vtbl (g_fence_vtbl_jr.v)
 
 static HRESULT STDMETHODCALLTYPE device_QI(ID3D12Device *This, REFIID riid, void **out) {
     HRESULT hr;
@@ -14507,7 +14536,8 @@ mad_x64_GetDesc(ID3D12CommandQueue *This, D3D12_COMMAND_QUEUE_DESC *ret) {
 }
 
 /* ---- resource ------------------------------------------------------------ */
-static ID3D12Resource2Vtbl g_res_vtbl;
+static struct { void *jr_ctx; ID3D12Resource2Vtbl v; } g_res_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_res_vtbl (g_res_vtbl_jr.v)
 
 /* ml1132: every change to the address index is bracketed by these (live_lock
  * held, so writers are already serialised). The count is odd while the index
@@ -15403,9 +15433,12 @@ static HRESULT STDMETHODCALLTYPE device_CreatePlacedResource(ID3D12Device *This,
 
 
 /* ---- root signature, pipeline state, descriptor heap --------------------- */
-static ID3D12RootSignatureVtbl g_rootsig_vtbl;
-static ID3D12PipelineStateVtbl g_pso_vtbl;
-static ID3D12DescriptorHeapVtbl g_heap_vtbl;
+static struct { void *jr_ctx; ID3D12RootSignatureVtbl v; } g_rootsig_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_rootsig_vtbl (g_rootsig_vtbl_jr.v)
+static struct { void *jr_ctx; ID3D12PipelineStateVtbl v; } g_pso_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_pso_vtbl (g_pso_vtbl_jr.v)
+static struct { void *jr_ctx; ID3D12DescriptorHeapVtbl v; } g_heap_vtbl_jr;   /* list-journal / api-census: jr_ctx, just before the slots, is how the x64 trampolines find their state */
+#define g_heap_vtbl (g_heap_vtbl_jr.v)
 
 
 static HRESULT STDMETHODCALLTYPE rootsig_QI(ID3D12RootSignature *T, REFIID r, void **o) { return mad_qi((struct mad_obj *)T, r, o, 1); }
@@ -21218,7 +21251,13 @@ static HRESULT STDMETHODCALLTYPE rootsig_GetDevice(ID3D12RootSignature *This, RE
 }
 
 /* ---- vtable construction ------------------------------------------------- */
+#include "madeira_list_journal.inc.c"   /* list-journal, api-census: after the list_* methods it replays */
+
 static void build_vtables(void) {
+    /* list-journal / api-census: the tables now hold trampolines another thread may be
+     * recording through; refilling them would let a call skip its list's flush. The
+     * configuration they depend on does not change within a process. */
+    if (g_jr_installed) return;
     static LONG done;
     if (InterlockedCompareExchange(&done, 1, 0) != 0) return;
 
@@ -21578,6 +21617,7 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
         return E_FAIL;
     }
     mad_quiet_log_init();   /* madeira-bcd quiet-log */
+    mad_jr_install();       /* list-journal, api-census: over the tables build_vtables just filled */
     HRESULT hr = device_QI((ID3D12Device *)d, riid, device);
     device_Release((ID3D12Device *)d);
     if (SUCCEEDED(hr)) d3d12_log("[madeira-d3d12] device created: %s\n", MadeiraD3D12GetBuildMarker());
