@@ -6,6 +6,7 @@ ContentView.swift, the pure touch state from TouchGamepad.swift and the pure
 preset state from TouchControlPresets.swift) on the host: the built-in
 controller layout on phone and tablet screens, built-ins read-only, "Custom
 Layout N" naming, encode/decode and what loading a layout puts on screen.
+Where SwiftUI is available, it also checks the production canvas hit shape.
 
 The preset is checked as data: its name, id and its 18 bindings, each an XInput
 mapping that produces a non-neutral pad sample; and the key sticks' glyphs.
@@ -199,26 +200,103 @@ require(loadedZones[0].x + loadedZones[0].w <= 1, "a loaded zone stays on screen
 let old = try! JSONDecoder().decode(ControlPreset.self, from: Data(#"{"id":"a","name":"Old","controls":[]}"#.utf8))
 require(old.zones == nil && ControlPresetStore.zones(of: old).isEmpty, "layouts saved before zones still load")
 
+__EDITOR_SIZE_TESTS__
+
 if failures > 0 { print("\(failures) FAILED"); exit(1) }
 print("PASS: built-in controller layout, layout store, naming and loading")
 '''
 
-with tempfile.TemporaryDirectory(prefix='madeira-presets-') as tmp:
-    src, exe = Path(tmp) / 'main.swift', Path(tmp) / 'check'
-    # CoreGraphics where it exists: on macOS, Foundation alone no longer gives CGRect
-    # its members (midX, width, ...); Linux's Foundation still does.
-    header = 'import Foundation\n#if canImport(CoreGraphics)\nimport CoreGraphics\n#endif\n'
-    src.write_text(header + actions + pure_touch + pure + tests)
-    subprocess.run([os.environ.get('SWIFTC', 'swiftc'), str(src), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
-
-# ---------------------------------------------------------------- Part B
+# Compile the production editor callbacks against small state fixtures.
 def function(source, start):
     i = source.index(start); b = source.index('{', i); depth = 1; k = b + 1
     while depth:
         depth += (source[k] == '{') - (source[k] == '}'); k += 1
     return source[i:k]
 
+
+panel = content[content.index('struct MappingPanel: View {'):]
+setter = panel.split('set: { value in', 1)[1].split('}), in:', 1)[0]
+backdrop = content.split('Color.clear.contentShape(editorCanvas(geo.size))', 1)[1]
+dismiss = function(backdrop, '.onTapGesture {').split('{', 1)[1][:-1]
+sizes = '\n'.join(function(content, signature) for signature in ('static func diameter(', 'static func size('))
+canvas = function(content, 'private func editorCanvas(')
+editor_tests = r'''
+final class EditorControls {
+    static let shared = EditorControls()
+    static let baseDiameter: CGFloat = 64
+    var sizeScale = 1.0
+    var controls: [TouchControl] = []
+    var selected: UUID? = UUID()
+    var editing = true
+    func index(of id: UUID?) -> Int? { controls.firstIndex { $0.id == id } }
+''' + sizes + r'''
+}
+final class EditorZones {
+    static var enabled = true
+    var selected: UUID? = UUID()
+    var zones: [GestureZone] = []
+}
+func setSize(_ control: TouchControl, _ value: Double, _ m: EditorControls) {
+''' + setter + r'''
+}
+func dismissPanel(_ m: EditorControls, _ zones: EditorZones) {
+''' + dismiss + r'''
+}
+let editor = EditorControls()
+var first = TouchControl(), second = TouchControl()
+editor.controls = [first, second]
+setSize(first, 3.0, editor)
+require(editor.controls[0].scale == 3 && editor.controls[1].scale == 1, "size slider changes only its selected control")
+editor.controls[0].locked = true
+setSize(first, 0.5, editor)
+require(editor.controls[0].scale == 3, "size slider honours the current lock even with an older view value")
+setSize(TouchControl(), 0.5, editor)
+require(editor.controls.count == 2 && editor.controls[0].scale == 3, "a removed slider target is ignored")
+editor.controls[0].locked = nil
+setSize(first, 0.5, editor)
+let resized = try! JSONDecoder().decode([TouchControl].self, from: JSONEncoder().encode(editor.controls))
+require(resized[0].scale == 0.5 && resized[1].scale == 1, "slider sizes survive the controls file format")
+let editorZones = EditorZones(), beforeDismiss = editor.controls
+dismissPanel(editor, editorZones)
+require(editor.selected == nil && editorZones.selected == nil && editor.editing,
+        "an outside tap dismisses either panel and keeps edit mode")
+require(editor.controls == beforeDismiss, "dismissing the panel preserves control edits")
+#if canImport(SwiftUI)
+typealias TouchControlsModel = EditorControls
+typealias GestureZonesModel = EditorZones
+let m = editor, zones = editorZones
+''' + canvas + r'''
+let canvasScreen = CGSize(width: 800, height: 400)
+var canvasControl = TouchControl()
+editor.controls = [canvasControl]
+var canvasZone = GestureZone(); canvasZone.x = 0.4; canvasZone.w = 0.4
+editorZones.zones = [canvasZone]
+let area = editorCanvas(canvasScreen)
+require(!area.contains(CGPoint(x: 400, y: 200)), "a control overlapping a zone is excluded from canvas taps")
+require(!area.contains(CGPoint(x: 600, y: 300)), "zone taps stay with the zone editor")
+require(area.contains(CGPoint(x: 720, y: 380)), "empty space takes dismissal taps")
+EditorZones.enabled = false
+require(editorCanvas(canvasScreen).contains(CGPoint(x: 600, y: 300)), "disabled zones do not block dismissal")
+EditorZones.enabled = true; editorZones.zones = []
+require(editorCanvas(canvasScreen).contains(CGPoint(x: 490, y: 200)), "canvas starts beyond a normal-size control")
+editor.controls[0].scale = 3
+require(!editorCanvas(canvasScreen).contains(CGPoint(x: 490, y: 200)), "the tap exclusion follows a resized control")
+editor.controls[0].action = .pad("RT"); editor.controls[0].scale = 1
+require(!editorCanvas(canvasScreen).contains(CGPoint(x: 445, y: 200)), "wide shoulder controls keep their full touch region")
+#endif
+'''
+tests = tests.replace('__EDITOR_SIZE_TESTS__', editor_tests)
+
+with tempfile.TemporaryDirectory(prefix='madeira-presets-') as tmp:
+    src, exe = Path(tmp) / 'main.swift', Path(tmp) / 'check'
+    # CoreGraphics where it exists: on macOS, Foundation alone no longer gives CGRect
+    # its members (midX, width, ...); Linux's Foundation still does.
+    header = 'import Foundation\n#if canImport(CoreGraphics)\nimport CoreGraphics\n#endif\n#if canImport(SwiftUI)\nimport SwiftUI\n#endif\n'
+    src.write_text(header + actions + pure_touch + pure + tests)
+    subprocess.run([os.environ.get('SWIFTC', 'swiftc'), str(src), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+# ---------------------------------------------------------------- Part B
 gamepad = (app / 'GamepadInput.swift').read_text()
 for flag, where in (('MADEIRA_CONTROL_PRESETS', presets), ('MADEIRA_CONTROLS_EDITOR_DONE', content)):
     assert f'.flag("{flag}")' in where, flag + ' is a kill switch'
@@ -240,6 +318,8 @@ default = function(presets, 'func applyDefaultIfNeeded(screen: ControlPresetScre
 assert 'm.controls.isEmpty' in default and 'm.needsDefaultLayout = false' in default, 'applied once, never over controls'
 assert 'Self.touchPad' in function(presets, 'var defaultPending: Bool {'), 'no controller default without touch XInput'
 overlay = function(content, 'struct TouchControlsOverlay: View {')
+assert overlay.index('Color.clear.contentShape(editorCanvas(geo.size))') < overlay.index('GestureZonesLayer('), 'dismissal stays behind editable controls'
+assert panel.index('.onTapGesture { }') < panel.index('.position(layout.center)'), 'only the panel consumes its background taps'
 assert 'ControlPresetsModel.enabled && m.visible && !m.editing' in overlay, 'menu only while touch controls are shown'
 assert 'if m.editing && Self.editorDone {' in overlay and 'Text("Done")' in overlay
 assert 'TouchControlsOverlay.showsLayoutMenu(self) ? 3 : 2' in model, 'the menu button is hit-testable'
