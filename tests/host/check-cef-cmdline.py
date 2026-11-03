@@ -112,7 +112,8 @@ static void build( WORD machine, int forwarded, int dirty_tail, DWORD text_vs, i
         memcpy( img + FN, fn, sizeof(fn) );
         img[OTHER] = 0xc3;
     }
-    if (dirty_tail) img[TEXT + text_vs + 20] = 0xcc;
+    if (dirty_tail == 1) img[TEXT + text_vs + 20] = 0x90;
+    if (dirty_tail == 2) memset( img + TEXT + text_vs, 0xcc, 0x200 );   /* lld-link int3 padding */
     if (!with_export) return;
     nt.OptionalHeader.DataDirectory[0].VirtualAddress = EDATA;
     nt.OptionalHeader.DataDirectory[0].Size = 0x200;
@@ -176,7 +177,9 @@ int main( int argc, char **argv )
     }
 
     build( IMAGE_FILE_MACHINE_AMD64, 0, 1, TEXT_VS, 1 );
-    if (!(why = site( &eat, &cave )) || strcmp( why, "section tail not zero" )) FAIL("dirty tail: %s\n", why);
+    if (!(why = site( &eat, &cave )) || strcmp( why, "section tail not free (not 0x00/0xcc padding)" )) FAIL("dirty tail: %s\n", why);
+    build( IMAGE_FILE_MACHINE_AMD64, 0, 2, TEXT_VS, 1 );
+    if ((why = site( &eat, &cave ))) FAIL("int3 padding refused: %s\n", why);
     build( IMAGE_FILE_MACHINE_AMD64, 0, 0, 0xffe, 1 );
     if (!(why = site( &eat, &cave )) || strcmp( why, "no room after cef_initialize's section" )) FAIL("room: %s\n", why);
     build( IMAGE_FILE_MACHINE_AMD64, 1, 0, TEXT_VS, 1 );
@@ -186,7 +189,7 @@ int main( int argc, char **argv )
     build( IMAGE_FILE_MACHINE_I386, 0, 0, TEXT_VS, 1 );
     if (!(why = site( &eat, &cave ))) FAIL("32-bit image taken\n");
     printf("PASS: export slot -> 16-byte-aligned cave after cef_initialize's section, rel32 back to it; "
-           "dirty tail, no room, forwarded, no exports and 32-bit images refused\n");
+           "int3 padding taken; dirty tail, no room, forwarded, no exports and 32-bit images refused\n");
     return 0;
 }
 '''

@@ -16016,8 +16016,14 @@ static const char *ios_cef_cmdline_site( const unsigned char *base, SIZE_T size,
         if (!(sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) || !vs) continue;
         if (fn < va || fn >= va + vs) continue;   /* the thunk sits beside cef_initialize */
         if (end > size || start + sizeof(ios_cef_cmdline_thunk) > end) return "no room after cef_initialize's section";
+        /* Past VirtualSize nothing belongs to the section. The mapper zeroes
+         * what lies past SizeOfRawData; up to it is the file's padding, which
+         * lld-link (Chromium's linker) fills with int3 (0xcc) in code sections:
+         * BeamNG's CEF 150 libcef.dll was refused with "tail not zero" on IPA
+         * #15. Either filler is free space; anything else is left alone. */
+        *cave = start;   /* also on refusal, so the log can show the bytes */
         for (k = start; k < start + sizeof(ios_cef_cmdline_thunk); k++)
-            if (base[k]) return "section tail not zero";
+            if (base[k] && base[k] != 0xcc) return "section tail not free (not 0x00/0xcc padding)";
         *cave = start;
         return NULL;
     }
@@ -16059,8 +16065,14 @@ static void ios_cef_cmdline_patch( char *base, SIZE_T total_size, const IMAGE_NT
     if ((why = ios_cef_cmdline_site( (const unsigned char *)base, total_size, (const IMAGE_NT_HEADERS64 *)nt,
                                      sec, &eat, &cave )))
     {
-        dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p not patched: %s\n",
-                 ios_sc_host_name( hn, sizeof(hn) ), base, why );
+        const unsigned char *t = (const unsigned char *)base + cave;
+        if (cave && cave + 8 <= total_size)
+            dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p not patched: %s (rva 0x%x: %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                     ios_sc_host_name( hn, sizeof(hn) ), base, why, (unsigned)cave,
+                     t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7] );
+        else
+            dprintf( 2, "[cef-cmdline] %s: libcef.dll at %p not patched: %s\n",
+                     ios_sc_host_name( hn, sizeof(hn) ), base, why );
         return;
     }
     orig = *eat;
