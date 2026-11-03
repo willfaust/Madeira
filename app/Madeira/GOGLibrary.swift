@@ -186,8 +186,25 @@ struct GOGInstalledGame: Codable, Sendable {
     private func loadInstalled() {
         guard let data = try? Data(contentsOf: Self.installedURL),
               let records = try? JSONDecoder().decode([String: GOGInstalledGame].self, from: data) else { return }
-        // A record whose program is gone (the folder was deleted in Files) is dropped.
-        installed = records.filter { FileManager.default.fileExists(atPath: Self.drive.appendingPathComponent($0.value.programPath).path) }
+        // A record whose program is gone (the folder was deleted in Files) is dropped. One
+        // saved with the .info file's spelling of the program takes the name on disk.
+        var repaired = false
+        installed = records.compactMapValues { record in
+            var record = record
+            let root = Self.drive.appendingPathComponent(record.folder, isDirectory: true)
+            guard let exe = Self.onDisk(record.launchExe, folder: root) else { return nil }
+            if exe != record.launchExe {
+                if record.chosenProgram == record.launchExe { record.chosenProgram = exe }
+                record.launchExe = exe
+                repaired = true
+            }
+            if let dir = record.workingDir, let found = Self.onDisk(dir, folder: root), found != dir {
+                record.workingDir = found
+                repaired = true
+            }
+            return record
+        }
+        if repaired { writeInstalled() }
     }
 
     private func writeInstalled() {
@@ -575,11 +592,35 @@ struct GOGInstalledGame: Codable, Sendable {
         if let name = names.first(where: { $0.lowercased() == "goggame-\(product).info" }),
            let data = try? Data(contentsOf: folder.appendingPathComponent(name)), data.count < 4 << 20,
            let task = playTask(info: data) {
-            return task
+            return onDisk(task, folder: folder)
         }
         let programs = names.filter { $0.lowercased().hasSuffix(".exe") && !$0.lowercased().hasPrefix("unins") }
         if programs.count == 1 { return PlayTask(path: programs[0], arguments: "", workingDir: nil) }
         throw GOGAPIError.noPlayTask
+    }
+
+    /// The task with its program and working folder spelled as on disk: GOG's .info files
+    /// name them as Windows would match them, ignoring case ("dosbox.exe" for DOSBox.exe),
+    /// and this file system does not.
+    nonisolated static func onDisk(_ task: PlayTask, folder: URL) -> PlayTask {
+        var task = task
+        task.path = onDisk(task.path, folder: folder) ?? task.path
+        if let dir = task.workingDir { task.workingDir = onDisk(dir, folder: folder) ?? dir }
+        return task
+    }
+
+    /// A "/"-separated path below the folder, each part matched ignoring case; nil: not there.
+    nonisolated static func onDisk(_ relative: String, folder: URL) -> String? {
+        let fm = FileManager.default
+        var url = folder
+        var parts: [String] = []
+        for part in relative.split(separator: "/").map(String.init) {
+            let names = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
+            guard let name = names.first(where: { $0 == part }) ?? names.first(where: { $0.lowercased() == part.lowercased() }) else { return nil }
+            parts.append(name)
+            url.appendPathComponent(name)
+        }
+        return parts.joined(separator: "/")
     }
 
     /// A program the game's page offers: GOG's play tasks first (its name, such as
@@ -600,7 +641,7 @@ struct GOGInstalledGame: Codable, Sendable {
         let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
         if let name = names.first(where: { $0.lowercased() == "goggame-\(product).info" }),
            let data = try? Data(contentsOf: folder.appendingPathComponent(name)), data.count < 4 << 20 {
-            for (title, task) in playTasks(info: data) { add(ProgramChoice(name: title, task: task)) }
+            for (title, task) in playTasks(info: data) { add(ProgramChoice(name: title, task: onDisk(task, folder: folder))) }
         }
         func programs(_ relative: String) -> [String] {
             let url = relative.isEmpty ? folder : folder.appendingPathComponent(relative, isDirectory: true)
