@@ -95,7 +95,7 @@ assert 'if (cand + alloc_size <= pool_limit\n            && IOS_POOL_IN_REACH(ca
 
 nt = native[native.index('NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process'):]
 nt = nt[:nt.index('NTSTATUS WINAPI NtAllocateVirtualMemoryEx(')]
-assert 'if (is_jumbo && ios_sc_grant_dead_n && ios_sc_cef_enabled() && ios_sc_current_is_helper())' in nt
+assert 'if (is_jumbo && ios_sc_grant_dead_n && ios_sc_cef_enabled() && ios_sc_current_is_cef_host())' in nt
 assert nt.index('ios_sc_reap_dead();') < nt.index('ios_sc2_route(')
 assert 'if (sc2 && ios_sc2_route( hint, *size_ptr, type, protect, &pick, &sz, &st2 ))' in nt
 assert nt.index('goto sc_decided;') < nt.index('sc_decided:') < nt.index('[jumbo] hinted reserve %p')
@@ -108,7 +108,7 @@ ex = native[native.index('NTSTATUS WINAPI NtAllocateVirtualMemoryEx('):]
 ex = ex[:ex.index('\n}\n')]
 exb = ex[ex.index('/* madeira-bcd: Social Club layout 2. SocialClubHelper.exe\'s V8 reserves'):]
 assert ex.index('if (process != NtCurrentProcess())') < ex.index('/* madeira-bcd: Social Club layout 2. SocialClubHelper.exe')
-assert 'int sc2 = is_jumbo && ios_sc_layout_mode == 2 && ios_sc_cef_enabled() && ios_sc_current_is_helper();' in exb
+assert 'int sc2 = is_jumbo && ios_sc_layout_mode == 2 && ios_sc_cef_enabled() && ios_sc_current_is_cef_host();' in exb
 assert 'if ((type & MEM_COMMIT) && *ret && ios_sc_layout_mode == 2 && (ULONG_PTR)*ret < ios_sc2_arena_lo)\n' \
        '                ios_sc2_note_commit( *ret, *size_ptr );' in exb
 order = [exb.index(x) for x in ('if (sc2 && ios_sc_grant_dead_n) ios_sc_reap_dead();',
@@ -122,7 +122,7 @@ assert order == sorted(order), 'Ex path: reap, cage, generic, grant note, census
 assert ex[:ex.index('\n#else\n    return allocate_virtual_memory(')].count('allocate_virtual_memory( ret, size_ptr,') == 1, \
     'one generic allocation in the iOS Ex path'
 note = function(native, 'static void ios_sc2_note_commit(')
-assert 'if (a < IOS_SC2_L_BASE || !ios_sc_grant_n || !ios_sc_current_is_helper()) return;' in note, \
+assert 'if (a < IOS_SC2_L_BASE || !ios_sc_grant_n || !ios_sc_current_is_cef_host()) return;' in note, \
     'only SocialClubHelper.exe commits are judged'
 assert 'if (ios_sc_grants[i].peb != peb || ios_sc_grants[i].dead) continue;' in note, 'only its own live grants'
 route = function(native, 'static int ios_sc2_route(')

@@ -56,7 +56,7 @@ static int ios_sc_layout_mode, ios_cage_holdback_live, ios_soft_n;
 static struct { uint64_t base, size, committed, commits, collisions; int cage; } ios_soft[IOS_SOFT_MAX];
 static int compatibility_enabled = 1, helper_process;
 static int ios_sc_cef_enabled(void) { return compatibility_enabled; }
-static int ios_sc_current_is_helper(void) { return helper_process; }
+static int ios_sc_current_is_cef_host(void) { return helper_process; }
 static int ios_sc2_route(void *h, SIZE_T s, ULONG t, ULONG p, void **r, SIZE_T *z, NTSTATUS *st) { return 0; }
 static NTSTATUS ios_sc_glued_pools(void **p, SIZE_T *s, ULONG t, ULONG f) { return STATUS_NO_MEMORY; }
 static uintptr_t ios_jumbo_holdback_take(SIZE_T size) { return 0; }

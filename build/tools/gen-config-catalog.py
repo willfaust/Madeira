@@ -849,6 +849,19 @@ OVERLAY = {
                         "must start on a 32 GB boundary, gets 0x7800000000 (20 GB of it really reserved). 2: also "
                         "libcef.dll's (0x7000000000) and Oilpan's; the JIT pool's RW alias moves to 0x7900000000. "
                         "Off by default; set it in the game's own file; read at session start."},
+    "env.MADEIRA_CEF_CMDLINE": {"category": "Memory & JIT pool", "title": "Let in-process Chromium read the game's command line",
+                "kind": "bool", "default": "0",
+                "note": "1: in a program named by env.MADEIRA_CEF_PA_EXES, libcef.dll's cef_initialize clears the game's "
+                        "command_line_args_disabled, so Chromium switches given with env.MADEIRA_CHILD_ARGS (such as "
+                        "--single-process) reach it. For a game whose Chromium helper processes are refused memory "
+                        "(BeamNG.drive). Default off; set it in the game's own file; log [cef-cmdline]."},
+    "env.MADEIRA_CEF_PA_EXES": {"category": "Memory & JIT pool", "title": "Games that run Chromium in their own process",
+                "kind": "text", "default": "",
+                "note": "Exe names, separated by ';' (e.g. BeamNG.drive.x64.exe). A listed program gets the address "
+                        "space SocialClubHelper.exe gets under env.MADEIRA_SC_PA_POOLS: room for chrome_elf.dll's and "
+                        "libcef.dll's PartitionAlloc pools, Oilpan and V8's cage. Use it with env.MADEIRA_SC_PA_POOLS = 2 "
+                        "for a game that loads libcef.dll itself and stops in chrome_elf.dll (80000003). Empty by "
+                        "default; set it in the game's own file; read at session start."},
     "avail-phys": {"category": "Memory & JIT pool", "title": "Report the memory left before the app's limit as available",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: Windows programs' available physical memory (GlobalMemoryStatusEx) is what "

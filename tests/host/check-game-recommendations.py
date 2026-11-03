@@ -453,15 +453,20 @@ assert not any(line.startswith('mip0-full') for ident, p in presets.items() if p
 # GTA IV, version 3: AVX pinned off (a community list for the same launcher chain).
 assert presets['gta4-steam']['version'] == 3 and presets['gta4-steam']['switches'] == \
     'avx: false, fastSync: true, semaphoreFastPath: true, display: "fit"', presets['gta4-steam']
-# The merged lists: version 1 (Arkham City 2, with the switch the owner's test found), none of the community
+# The merged lists: version 1 (Arkham City 2, with the switch the owner's test found; BeamNG.drive 2, its
+# device-tested single-process CEF lines), none of the community
 # variant or app-side switches, and no MADEIRA_SPAWN_SWAP (its engine code is not in this tree).
 for ident in MERGED:
     p = presets[ident]
-    assert p['version'] == (2 if ident == 'batman-arkham-city-goty' else 1), ident
+    assert p['version'] == (2 if ident in ('batman-arkham-city-goty', 'beamng-drive') else 1), ident
     assert not any(line.startswith(('env.MADEIRA_WINTYPES', 'env.MADEIRA_OPTIN_DLLS', 'env.MADEIRA_D3D8 ',
                                     'env.MADEIRA_STEAM_IDENTITY', 'env.MADEIRA_MFC_DOCK', 'pool-split-retry'))
                    for line in p['lines']), (ident, p['lines'])
 assert [ident for ident, p in presets.items() if any(line.startswith('env.MADEIRA_SPAWN_SWAP') for line in p['lines'])] == []
+assert presets['beamng-drive']['tested'][-4:] == [
+    'env.MADEIRA_SC_PA_POOLS = 2', 'env.MADEIRA_CEF_PA_EXES = BeamNG.drive.x64.exe',
+    'env.MADEIRA_CHILD_ARGS = BeamNG.drive.x64.exe --single-process --js-flags=--jitless '
+    '--disable-features=PartitionAllocBackupRefPtr', 'env.MADEIRA_CEF_CMDLINE = 1'], presets['beamng-drive']['lines']
 print('PASS: RDR2 (Steam) is the owner\'s 463 list plus the 466, 467, 470, 472, 475, 476, 480 and 514 test lines (v10), line for line with its switches (720 lines of this screen), and outside Steam the same without the Dock lines, with the ec-hook reporter off (v1); GTA V Enhanced keeps its tested lines plus the stamped orphan-lock mode (v2) and, from Steam, the VC++ engine block (v3), GoW its tested lines; Horizon Zero Dawn has build 491\'s proven list plus build 494\'s frame-rate switches (v16), GoT the owner\'s build 515 list (v3); every other game and the Desktop the standard list (v3)')
 
 # Crysis Remastered, version 1 (community build 528, 2026-10-13 22:08, it ran perfectly): the

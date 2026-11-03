@@ -32,6 +32,7 @@ harness2 = r"""
 #include <stdarg.h>
 """ + enums + gv + r"""
 static const char *ios_sc_kind_what(int kind) { return kind == IOS_SC2_E ? "chrome_elf.dll's PartitionAlloc pools" : "another grant"; }
+static const char *ios_sc_host_name(char *b, size_t n) { snprintf(b, n, "SocialClubHelper.exe"); return b; }
 static char out[1 << 16];
 static size_t outn;
 static int fake_dprintf(int fd, const char *f, ...)
