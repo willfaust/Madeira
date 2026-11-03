@@ -97,6 +97,9 @@ struct GOGInstallScript: Equatable, Sendable {
                     plan.values.append(value)
                 }
                 plan.notes.append("\(label): Execute \(action.arguments["executable"] ?? "") replaced by its known registry values")
+            case "supportdata" where Self.isSupportAppCopy(action.arguments):
+                // GOGDepot.files installs the support folder's app/ files with the game's.
+                plan.notes.append("\(label): supportData installed with the game's files")
             case "":            plan.notes.append("\(label): no action")
             default:            plan.notes.append("\(label): \(action.kind) left out")
             }
@@ -156,6 +159,15 @@ struct GOGInstallScript: Equatable, Sendable {
         // A later action for the same value wins, as when the interpreter runs them in order.
         plan.values.removeAll { $0.root == value.root && $0.key.lowercased() == value.key.lowercased() && $0.name.lowercased() == value.name.lowercased() }
         plan.values.append(value)
+    }
+
+    /// A supportData action that copies the support folder's `app` folder into the game's
+    /// folder, which the downloader does at install (GOGDepot.files).
+    static func isSupportAppCopy(_ args: [String: String]) -> Bool {
+        func clean(_ text: String?) -> String {
+            (text ?? "").replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        }
+        return clean(args["source"]) == "{supportdir}/app" && clean(args["target"]) == "{app}"
     }
 
     /// `{app}` and `{supportDir}` (Madeira keeps the script in the game's folder) as the

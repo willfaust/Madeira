@@ -150,18 +150,29 @@ enum GOGCodec {
 enum GOGDepot {
     /// The files of one depot (support files, GOG's installer scripts, are left out,
     /// except the install script `goggame-<id>.script`, which goes to the folder's root
-    /// for its registry values (GOGInstallScript); folders are made as files need them;
-    /// links are not supported on drive_c).
+    /// for its registry values (GOGInstallScript), and the support folder's `app/`
+    /// files, which the script's supportData action copies into the game's folder
+    /// (DOSBox games' .conf files); folders are made as files need them; links are not
+    /// supported on drive_c).
     static func files(_ data: Data, product: String) throws -> [GOGFile] {
         let json = try GOGCodec.json(data, what: "depot")
         guard let items = (json["depot"] as? [String: Any])?["items"] as? [[String: Any]] else { throw GOGFormatError.parse("depot") }
         var files: [GOGFile] = []
+        var supportFiles: [GOGFile] = []
         for item in items where item["type"] as? String == "DepotFile" {
             guard var path = item["path"] as? String, let raw = item["chunks"] as? [[String: Any]] else { throw GOGFormatError.parse("file") }
+            var fromSupport = false
             if (item["flags"] as? [String] ?? []).contains("support") {
-                let name = path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) ?? ""
-                guard GOGInstallScript.isScriptName(name) else { continue }
-                path = name
+                let parts = path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").map(String.init)
+                let name = parts.last ?? ""
+                if GOGInstallScript.isScriptName(name) {
+                    path = name
+                } else if parts.count > 1, parts[0].lowercased() == "app" {
+                    path = parts.dropFirst().joined(separator: "/")
+                    fromSupport = true
+                } else {
+                    continue
+                }
             }
             let chunks = try raw.map { chunk -> GOGChunk in
                 guard let md5 = chunk["md5"] as? String, let compressed = chunk["compressedMd5"] as? String,
@@ -171,10 +182,12 @@ enum GOGDepot {
                 return GOGChunk(md5: md5.lowercased(), size: size, compressedMD5: compressed.lowercased(), compressedSize: compressedSize)
             }
             guard GOGCodec.components(path) != nil else { throw GOGFormatError.unsafePath }
-            files.append(GOGFile(path: path.replacingOccurrences(of: "\\", with: "/"), product: product, chunks: chunks,
-                                 md5: (item["md5"] as? String).map { $0.lowercased() }, sha256: (item["sha256"] as? String).map { $0.lowercased() }))
+            let file = GOGFile(path: path.replacingOccurrences(of: "\\", with: "/"), product: product, chunks: chunks,
+                               md5: (item["md5"] as? String).map { $0.lowercased() }, sha256: (item["sha256"] as? String).map { $0.lowercased() })
+            if fromSupport { supportFiles.append(file) } else { files.append(file) }
         }
-        return files
+        // supportData does not overwrite: the game's own file of the same name wins.
+        return unique(files + supportFiles)
     }
 
     /// The files of several depots, each path once (matched without case, as Windows

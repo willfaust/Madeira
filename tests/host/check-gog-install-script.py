@@ -7,7 +7,8 @@
 Synthetic data only. Compiles app/Madeira/SwiftGOG/GOGInstallScript.swift with
 tests/host/gog-script/main.swift and runs it (setRegistry values, placeholders,
 language and bitness filters, script names), then checks statically that the
-downloader keeps only the install script among GOG's support files, that depot
+downloader keeps the install script and the support folder's app/ files among GOG's
+support files, that depot
 lists are de-duplicated, and that a play writes the values before Wine starts.
 Needs `swiftc` (or SWIFTC=); without it the compiled part is skipped unless
 --require-swift.
@@ -31,7 +32,9 @@ downloader = (app / 'SwiftGOG/GOGDownloader.swift').read_text()
 files = downloader[downloader.index('    static func files(_ data: Data, product: String)'):]
 files = files[:files.index('\n    }\n')]
 require('GOGInstallScript.isScriptName(name)' in files and 'path = name' in files,
-        'downloader: of the support files only goggame-<id>.script is kept, at the folder root')
+        'downloader: goggame-<id>.script is kept from the support files, at the folder root')
+require('parts[0].lowercased() == "app"' in files and 'unique(files + supportFiles)' in files,
+        "downloader: the support folder's app/ files go into the game's folder, the game's own files winning")
 library = (app / 'GOGLibrary.swift').read_text()
 require('files = GOGDepot.unique(files)' in library, 'download: each path once across depots')
 write = library[library.index('    func writeInstallScriptRegistry('):]
