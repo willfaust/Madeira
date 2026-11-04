@@ -702,6 +702,37 @@ static void mad_eco_prio_self(char role) {
  * call), so the measurement does not cost what it measures. */
 static volatile LONG64 g_es_enc_t, g_es_open_t;
 static volatile LONG g_es_enc_n, g_es_open_n, g_es_use_n;
+/* madeira-duo gpu-mix: what the GPU is given per frame, reported with [perf] ml1108.
+ * Render passes, compute and blit encoders, and the attachment traffic a tile GPU pays
+ * at pass edges: pixels loaded from memory (load action Load) and stored back (Store),
+ * summed over attachments. More passes or more load/store pixels per frame in the slow
+ * windows points at how the work is split; flat counts with rising GPU time point at the
+ * work itself or the GPU clock. */
+static volatile LONG g_gm_rp, g_gm_rp_small, g_gm_ce, g_gm_be;
+static volatile LONG64 g_gm_load_px, g_gm_store_px, g_gm_clear_px, g_gm_rt_px;
+static void mad_gm_pass(const struct WMTRenderPassInfo *i) {
+    LONG64 px = (LONG64)i->render_target_width * i->render_target_height * (i->render_target_array_length ? i->render_target_array_length : 1);
+    LONG64 ld = 0, st = 0, cl = 0; unsigned k;
+    InterlockedIncrement(&g_gm_rp);
+    if (px < 256 * 256) InterlockedIncrement(&g_gm_rp_small);
+    for (k = 0; k < 8; k++) {
+        if (!i->colors[k].texture) continue;
+        if (i->colors[k].load_action == WMTLoadActionLoad) ld += px; else if (i->colors[k].load_action == WMTLoadActionClear) cl += px;
+        if (i->colors[k].store_action == WMTStoreActionStore || i->colors[k].store_action == WMTStoreActionStoreAndMultisampleResolve) st += px;
+    }
+    if (i->depth.texture) {
+        if (i->depth.load_action == WMTLoadActionLoad) ld += px; else if (i->depth.load_action == WMTLoadActionClear) cl += px;
+        if (i->depth.store_action == WMTStoreActionStore) st += px;
+    }
+    if (i->stencil.texture && i->stencil.texture != i->depth.texture) {
+        if (i->stencil.load_action == WMTLoadActionLoad) ld += px; else if (i->stencil.load_action == WMTLoadActionClear) cl += px;
+        if (i->stencil.store_action == WMTStoreActionStore) st += px;
+    }
+    if (ld) InterlockedExchangeAdd64(&g_gm_load_px, ld);
+    if (st) InterlockedExchangeAdd64(&g_gm_store_px, st);
+    if (cl) InterlockedExchangeAdd64(&g_gm_clear_px, cl);
+    InterlockedExchangeAdd64(&g_gm_rt_px, px);
+}
 static UINT64 g_es_freq;
 static inline UINT64 mad_tick(void) {
 #if defined(__aarch64__) || defined(__arm64ec__)
@@ -957,18 +988,21 @@ static void mad_es_bce(obj_handle_t e, const struct wmtcmd_base *c) {
 static obj_handle_t mad_es_renc(obj_handle_t cb, struct WMTRenderPassInfo *i) {
     UINT64 t; obj_handle_t r;
     mad_eb_flush_cur(EBF_ENCODER);
+    if (i) mad_gm_pass(i);
     t = mad_tick(); r = (MTLCommandBuffer_renderCommandEncoder)(cb, i);
     InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
 }
 static obj_handle_t mad_es_cenc(obj_handle_t cb, bool concurrent) {
     UINT64 t; obj_handle_t r;
     mad_eb_flush_cur(EBF_ENCODER);
+    InterlockedIncrement(&g_gm_ce);
     t = mad_tick(); r = (MTLCommandBuffer_computeCommandEncoder)(cb, concurrent);
     InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
 }
 static obj_handle_t mad_es_benc(obj_handle_t cb) {
     UINT64 t; obj_handle_t r;
     mad_eb_flush_cur(EBF_ENCODER);
+    InterlockedIncrement(&g_gm_be);
     t = mad_tick(); r = (MTLCommandBuffer_blitCommandEncoder)(cb);
     InterlockedExchangeAdd64(&g_es_open_t, (LONG64)(mad_tick() - t)); InterlockedIncrement(&g_es_open_n); return r;
 }
@@ -10842,6 +10876,16 @@ static void mad_perf_present(void) {
                   g_perf_gpu_sum * 1000, g_perf_wait_s * 1000, 100.0 * g_perf_wait_s / wall,
                   g_perf_presents ? g_perf_gpu_union * 1000 / g_perf_presents : 0.0, g_perf_presents ? g_perf_wait_s * 1000 / g_perf_presents : 0.0);
         mad_jr_report(g_perf_presents, wall);   /* api-census */
+        if (g_perf_presents) {   /* madeira-duo gpu-mix */
+            double n = (double)g_perf_presents;
+            LONG rp = InterlockedExchange(&g_gm_rp, 0), rs = InterlockedExchange(&g_gm_rp_small, 0);
+            LONG ce = InterlockedExchange(&g_gm_ce, 0), be = InterlockedExchange(&g_gm_be, 0);
+            LONG64 lp = InterlockedExchange64(&g_gm_load_px, 0), sp = InterlockedExchange64(&g_gm_store_px, 0);
+            LONG64 cp = InterlockedExchange64(&g_gm_clear_px, 0), tp = InterlockedExchange64(&g_gm_rt_px, 0);
+            d3d12_log("[gpu-mix] per frame: %.1f render passes (%.1f under 256x256, avg target %.2f MPix), %.1f compute, %.1f blit encoders; "
+                      "attachment MPix loaded %.2f, stored %.2f, cleared %.2f; cbs %.1f\n",
+                      rp / n, rs / n, rp ? tp / 1e6 / rp : 0.0, ce / n, be / n, lp / 1e6 / n, sp / 1e6 / n, cp / 1e6 / n, g_perf_cbs / n);
+        }
         {   /* ml1116: encoder fence traffic per frame (mode 2 should cut waits well below updates) */
             static LONG lw, lu, lb; LONG cw = g_fence_waits, cu = g_fence_updates, cb = g_barrier_seen;
             d3d12_log("[perf] ml1119 caller thread per frame: ExecuteCommandLists %.2f ms, Present %.2f ms (frame %.1f ms)\n",
