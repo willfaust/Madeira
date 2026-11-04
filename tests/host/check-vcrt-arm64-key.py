@@ -375,7 +375,9 @@ else:
              "-Wno-unused-but-set-variable", "-Wno-deprecated-declarations", "-Wno-pointer-sign", "-Wno-unknown-pragmas",
              # gcc only: strnlen's bound is the destination's size while the (NUL-terminated) source is smaller
              "-Wno-unknown-warning-option", "-Wno-stringop-overread",
-             "-fshort-wchar", "-D__WINESRC__", "-DWINE_UNIX_LIB", "-I", str(wine / "include"), "-I", str(n_dir)]
+             # clang 21 at -O1 turns init_unicode_string's loop into a call to the C library's wcslen, which
+             # counts 4-byte characters whatever -fshort-wchar says (check-hidpad.py does the same)
+             "-fno-builtin", "-fshort-wchar", "-D__WINESRC__", "-DWINE_UNIX_LIB", "-I", str(wine / "include"), "-I", str(n_dir)]
     cc = subprocess.run([CC] + flags + [str(src), "-o", str(exe)], capture_output=True, text=True)
     if cc.returncode:
         print(cc.stderr[-4000:])
