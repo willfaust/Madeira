@@ -41,6 +41,7 @@
 #include "madeira_graphics_entry.h"
 #include <stddef.h>
 #include "madeira_list_journal.h"   /* list-journal, api-census */
+#include "madeira_fx.h"   /* madeira-duo xess-metalfx */
 
 /* madeira-bcd: MAD_BUILD_ID (build-pe.sh passes it from the environment) names the build,
  * so a log says which runtime ran. */
@@ -1536,9 +1537,14 @@ static HRESULT mad_creation_failure(struct mad_device *d, const char *what) {
     return E_OUTOFMEMORY;
 }
 
+/* madeira-duo xess-metalfx: every object answers this IID with itself, so an
+ * export handed a wrapper of one of our objects (Streamline's interposer
+ * forwards interfaces it does not know) can reach the object behind it. */
+DEFINE_GUID(IID_MadeiraObject, 0x6d616465, 0x6972, 0x6166, 0x78, 0x74, 0x65, 0x6d, 0x70, 0x6f, 0x72, 0x31);
 static HRESULT mad_qi(struct mad_obj *o, REFIID riid, void **out, int is_device_child) {
     if (!out) return E_POINTER;
     *out = NULL;
+    if (riid && IsEqualGUID(riid, &IID_MadeiraObject)) { InterlockedIncrement(&o->refs); *out = o; return S_OK; }
     if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, o->iid) ||
         IsEqualGUID(riid, &IID_ID3D12Object) ||
         (is_device_child && IsEqualGUID(riid, &IID_ID3D12DeviceChild))) {
@@ -1933,6 +1939,7 @@ enum mad_ck {
     MC_CBV_LATCH,   /* madeira-bcd static-cbv: a table's constant-buffer descriptors as they were when a draw was recorded */
     MC_DISCARD,     /* madeira-bcd rp-discard: a DiscardResource (u.discard); the replay only notes it */
     MC_WBI,         /* write-buffer-immediate: one WriteBufferImmediate value (u.wbi), written by a 4-byte blit copy */
+    MC_FX_TEMPORAL, /* madeira-duo xess-metalfx: one MetalFX temporal scale (u.fxt), see MadeiraD3D12TemporalUpscale */
 };
 struct mad_cmd {
     enum mad_ck kind;
@@ -1968,6 +1975,8 @@ struct mad_cmd {
         struct { UINT bp, index, data, n; UINT64 va; } latch;   /* madeira-bcd static-cbv: bind point (0 graphics, 1 compute), parameter, descriptors in cdata */
         struct { struct mad_resource *res; UINT whole; } discard;   /* madeira-bcd rp-discard: whole = every subresource, no rectangles */
         struct { struct mad_resource *res; UINT64 off; UINT32 value; UINT32 mode; } wbi;   /* write-buffer-immediate */
+        struct { struct mad_resource *color, *depth, *motion, *exposure, *output;
+                 UINT32 in_w, in_h, flags; float jx, jy, mvx, mvy, pre_exposure; } fxt;   /* madeira-duo xess-metalfx: MADEIRA_TU_* flags */
     } u;
 };
 
@@ -3737,6 +3746,7 @@ static int mad_cmd_names(const struct mad_cmd *c, const struct mad_resource *r) 
     case MC_CLEAR_RT: case MC_CLEAR_DS: return c->u.clear.res == r;
     case MC_DISCARD: return c->u.discard.res == r;
     case MC_WBI: return c->u.wbi.res == r;
+    case MC_FX_TEMPORAL: return c->u.fxt.color == r || c->u.fxt.depth == r || c->u.fxt.motion == r || c->u.fxt.exposure == r || c->u.fxt.output == r;
     default: return 0;
     }
 }
@@ -3847,6 +3857,7 @@ static void exec_rp_note(struct mad_exec *e, const struct mad_cmd *c) {
         if (e->npend && mad_clear_defer_on()) exec_flush_other_views(e, c->u.clear.res, &c->u.clear.v);
         break;
     case MC_RESOLVE: break;   /* exec_resolve applies every pending clear first */
+    case MC_FX_TEMPORAL: break;   /* exec_fx_temporal applies every pending clear first */
     default: return;
     }
     if (e->rp_ndisc) exec_disc_touch(e, c);
@@ -10446,6 +10457,165 @@ static void mad_gw_report(double frames) {
         n += snprintf(line + n, sizeof line - n, "%s%s %.1f dispatches %.0f tg", j ? "; " : "", tc[j].p, tc[j].draws / frames, tc[j].work / frames);
     if (n) d3d12_log("[gpu-work] top compute per frame: %s\n", line);
 }
+/* madeira-duo xess-metalfx: MetalFX TEMPORAL UPSCALING IN THE REPLAY.
+ * MadeiraD3D12TemporalUpscale (Madeira's libxess.dll answers a game's XeSS
+ * calls with it) records MC_FX_TEMPORAL; here it becomes one MetalFX temporal
+ * scale on the list's command buffer. The scaler writes a private texture of
+ * our own, made with every usage MetalFX may ask of its output, and a blit
+ * copies that into the game's output texture, whose usage flags are the
+ * game's. Ordering: open encoders end first (they update the device fence),
+ * the scaler waits for that fence and updates it, and the copy waits again.
+ * Scalers are made once per (formats, sizes, auto exposure) and kept, as
+ * DXMT's D3D11 path does: an XeSS context comes and goes with resolution
+ * changes, and a scaler the GPU may still use must not be released.
+ * madeira.cfg fx-temporal-mv-x / -mv-y / -jitter-x / -jitter-y multiply the
+ * game's motion vectors and jitter (sign conventions; default 1),
+ * fx-temporal-max-scale caps the output/input ratio the scaler accepts
+ * (default 3). */
+struct mad_fxt_entry {
+    obj_handle_t scaler, out, mv_view;
+    const struct mad_resource *mv_res;
+    enum WMTPixelFormat cpf, opf, dpf, mpf;
+    UINT cw, ch, ow, oh;
+    int autoexp;
+};
+static struct mad_fxt_entry g_fxt[8];
+static unsigned g_nfxt;
+static SRWLOCK g_fxt_lock = SRWLOCK_INIT;
+static volatile LONG g_fxt_done, g_fxt_skipped;
+static float g_fxt_mul[4] = { 1, 1, 1, 1 }, g_fxt_max_scale = 3.0f;
+static double mad_cfg_float_pe(const char *key, double dflt) {
+    char v[64];
+    if (!mad_cfg_str_pe(key, v, sizeof v) || !v[0]) return dflt;
+    return strtod(v, NULL);
+}
+static enum WMTPixelFormat mad_fxt_mv_pf(enum WMTPixelFormat f) {   /* as DXMT's GetCorrectMotionVectorFormat */
+    switch (f) {
+    case WMTPixelFormatRG16Uint: case WMTPixelFormatRG16Float: case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRG16Snorm: case WMTPixelFormatRG16Unorm:
+        return WMTPixelFormatRG16Float;
+    case WMTPixelFormatRG32Uint: case WMTPixelFormatRG32Float: case WMTPixelFormatRG32Sint:
+        return WMTPixelFormatRG32Float;
+    case WMTPixelFormatRGBA16Sint: case WMTPixelFormatRGBA16Snorm: case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA16Unorm: case WMTPixelFormatRGBA16Float:
+        return WMTPixelFormatRGBA16Float;
+    default:
+        return WMTPixelFormatInvalid;
+    }
+}
+static void mad_fxt_skip(struct mad_exec *e, const char *why, const struct mad_cmd *c) {
+    LONG n = InterlockedIncrement(&g_fxt_skipped);
+    if (n <= 8 || (n % 1000) == 0)
+        d3d12_log("[xess-metalfx] temporal scale skipped (%s): color %u depth %u motion %u output %u (%ld skipped so far)\n", why,
+                  c->u.fxt.color ? (unsigned)c->u.fxt.color->tex_pf : 0, c->u.fxt.depth ? (unsigned)c->u.fxt.depth->tex_pf : 0,
+                  c->u.fxt.motion ? (unsigned)c->u.fxt.motion->tex_pf : 0, c->u.fxt.output ? (unsigned)c->u.fxt.output->tex_pf : 0, (long)n);
+    MAD_SKIP(e);
+}
+static struct mad_fxt_entry *mad_fxt_get(struct mad_device *d, const struct mad_cmd *c, enum WMTPixelFormat mpf) {
+    const struct mad_resource *col = c->u.fxt.color, *dep = c->u.fxt.depth, *out = c->u.fxt.output;
+    int autoexp = (c->u.fxt.flags & MADEIRA_TU_AUTO_EXPOSURE) != 0;
+    struct mad_fxt_entry *en = NULL;
+    unsigned k;
+    AcquireSRWLockExclusive(&g_fxt_lock);
+    for (k = 0; k < g_nfxt; k++) {
+        struct mad_fxt_entry *x = &g_fxt[k];
+        if (x->cpf == col->tex_pf && x->opf == out->tex_pf && x->dpf == dep->tex_pf && x->mpf == mpf &&
+            x->cw == col->width && x->ch == col->height && x->ow == out->width && x->oh == out->height && x->autoexp == autoexp) { en = x; break; }
+    }
+    if (!en && g_nfxt < sizeof g_fxt / sizeof g_fxt[0]) {
+        struct WMTFXTemporalScalerInfo si; struct WMTTextureInfo ti;
+        if (!g_nfxt) {
+            g_fxt_mul[0] = (float)mad_cfg_float_pe("fx-temporal-mv-x", 1.0);
+            g_fxt_mul[1] = (float)mad_cfg_float_pe("fx-temporal-mv-y", 1.0);
+            g_fxt_mul[2] = (float)mad_cfg_float_pe("fx-temporal-jitter-x", 1.0);
+            g_fxt_mul[3] = (float)mad_cfg_float_pe("fx-temporal-jitter-y", 1.0);
+            g_fxt_max_scale = (float)mad_cfg_float_pe("fx-temporal-max-scale", 3.0);
+            if (g_fxt_max_scale < 1.0f) g_fxt_max_scale = 1.0f;
+        }
+        en = &g_fxt[g_nfxt++];
+        memset(en, 0, sizeof *en);
+        en->cpf = col->tex_pf; en->opf = out->tex_pf; en->dpf = dep->tex_pf; en->mpf = mpf;
+        en->cw = col->width; en->ch = col->height; en->ow = out->width; en->oh = out->height; en->autoexp = autoexp;
+        memset(&si, 0, sizeof si);
+        si.color_format = en->cpf; si.output_format = en->opf; si.depth_format = en->dpf; si.motion_format = mpf;
+        si.input_width = en->cw; si.input_height = en->ch; si.output_width = en->ow; si.output_height = en->oh;
+        si.input_content_min_scale = 1.0f; si.input_content_max_scale = g_fxt_max_scale;
+        si.auto_exposure = autoexp; si.input_content_properties_enabled = true; si.requires_synchronous_initialization = true;
+        en->scaler = MTLDevice_newTemporalScaler(d->mtl_device, &si);
+        if (en->scaler) {
+            memset(&ti, 0, sizeof ti);
+            ti.pixel_format = en->opf; ti.width = en->ow; ti.height = en->oh; ti.depth = 1; ti.array_length = 1;
+            ti.type = WMTTextureType2D; ti.mipmap_level_count = 1; ti.sample_count = 1;
+            ti.usage = (enum WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite);
+            ti.options = WMTResourceStorageModePrivate;
+            en->out = MTLDevice_newTexture(d->mtl_device, &ti);
+        }
+        d3d12_log("[xess-metalfx] MetalFX temporal scaler #%u: color %ux%u fmt %u, depth fmt %u, motion fmt %u (game %u), output %ux%u fmt %u, "
+                  "max scale %.2f, auto exposure %d -> scaler %s, output texture %s; mv x%.2f y%.2f, jitter x%.2f y%.2f\n",
+                  g_nfxt, en->cw, en->ch, (unsigned)en->cpf, (unsigned)en->dpf, (unsigned)mpf, (unsigned)c->u.fxt.motion->tex_pf,
+                  en->ow, en->oh, (unsigned)en->opf, g_fxt_max_scale, autoexp, en->scaler ? "ok" : "REFUSED", en->out ? "ok" : "FAILED",
+                  g_fxt_mul[0], g_fxt_mul[1], g_fxt_mul[2], g_fxt_mul[3]);
+    }
+    ReleaseSRWLockExclusive(&g_fxt_lock);
+    return en;
+}
+static void exec_fx_temporal(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_device *d = e->q->device;
+    struct mad_resource *col = c->u.fxt.color, *dep = c->u.fxt.depth, *mv = c->u.fxt.motion, *ex = c->u.fxt.exposure, *out = c->u.fxt.output;
+    struct mad_fxt_entry *en;
+    struct WMTFXTemporalScalerProps p;
+    struct wmtcmd_blit_copy_from_texture_to_texture k;
+    enum WMTPixelFormat mpf;
+    obj_handle_t mtex, fence;
+    LONG n;
+    if (!col || !col->texture || !dep || !dep->texture || !mv || !mv->texture || !out || !out->texture || (ex && !ex->texture)) {
+        mad_fxt_skip(e, "a texture is missing", c); return;
+    }
+    if ((mpf = mad_fxt_mv_pf(mv->tex_pf)) == WMTPixelFormatInvalid) { mad_fxt_skip(e, "motion vector format", c); return; }
+    if (!(en = mad_fxt_get(d, c, mpf))) { mad_fxt_skip(e, "scaler table full", c); return; }
+    if (!en->scaler || !en->out) { mad_fxt_skip(e, "no scaler", c); return; }
+    exec_end(e);
+    while (e->npend) exec_flush_clear(e, 0);   /* pending clears of what the scaler reads go first */
+    mtex = mv->texture;
+    if (mpf != mv->tex_pf) {   /* a typed view; kept per entry: a command buffer may not retain what it reads */
+        if (en->mv_res != mv || !en->mv_view) {
+            if (en->mv_view) NSObject_release(en->mv_view);   /* only when the game changed its motion texture */
+            en->mv_view = mad_resolve_view(mv, mpf, 0, 0); en->mv_res = mv;
+        }
+        if (!en->mv_view) { mad_fxt_skip(e, "motion vector view", c); return; }
+        mtex = en->mv_view;
+    }
+    memset(&p, 0, sizeof p);
+    p.input_content_width = c->u.fxt.in_w && c->u.fxt.in_w <= en->cw ? c->u.fxt.in_w : en->cw;
+    p.input_content_height = c->u.fxt.in_h && c->u.fxt.in_h <= en->ch ? c->u.fxt.in_h : en->ch;
+    p.reset = (c->u.fxt.flags & MADEIRA_TU_RESET) != 0;
+    p.depth_reversed = (c->u.fxt.flags & MADEIRA_TU_DEPTH_REVERSED) != 0;
+    p.motion_vector_scale_x = c->u.fxt.mvx * g_fxt_mul[0];
+    p.motion_vector_scale_y = c->u.fxt.mvy * g_fxt_mul[1];
+    p.jitter_offset_x = c->u.fxt.jx * g_fxt_mul[2];
+    p.jitter_offset_y = c->u.fxt.jy * g_fxt_mul[3];
+    p.pre_exposure = c->u.fxt.pre_exposure > 0 ? c->u.fxt.pre_exposure : 1.0f;
+    fence = e->mode ? mad_enc_fence_obj(d) : 0;
+    MTLCommandBuffer_encodeTemporalScale(e->cb, en->scaler, col->texture, en->out, dep->texture, mtex, ex ? ex->texture : 0, fence, &p);
+    g_enc_seq++;
+    e->fence_needed = 1;   /* the copy waits for the scaler */
+    if (!exec_begin_blit(e)) { mad_fxt_skip(e, "no blit encoder", c); return; }
+    exec_note_write(e, out);
+    memset(&k, 0, sizeof k);
+    k.type = WMTBlitCommandCopyFromTextureToTexture;
+    k.src = en->out;
+    k.src_size.width = en->ow; k.src_size.height = en->oh; k.src_size.depth = 1;
+    k.dst = out->texture;
+    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
+    n = InterlockedIncrement(&g_fxt_done);
+    if (n <= 6 || (n % 3000) == 0)
+        d3d12_log("[xess-metalfx] temporal scale #%ld: content %ux%u of %ux%u -> %ux%u, jitter %.3f %.3f, mv scale %.3f %.3f, reset %d, "
+                  "depth reversed %d, exposure %s, pre-exposure %.3f, fence mode %d\n",
+                  (long)n, p.input_content_width, p.input_content_height, en->cw, en->ch, en->ow, en->oh, p.jitter_offset_x, p.jitter_offset_y,
+                  p.motion_vector_scale_x, p.motion_vector_scale_y, (int)p.reset, (int)p.depth_reversed, ex ? "texture" : en->autoexp ? "auto" : "none",
+                  p.pre_exposure, e->mode);
+}
+
 static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t cb) {
     g_list_seq++;
     struct mad_exec e;
@@ -10589,6 +10759,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         case MC_DISPATCH: exec_dispatch(&e, c); mad_gw_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;   /* madeira-bcd vis-trace */
         case MC_RESOLVE: exec_resolve(&e, c); break;
         case MC_DISCARD: break;   /* madeira-bcd rp-discard: exec_rp_note above */
+        case MC_FX_TEMPORAL: exec_fx_temporal(&e, c); break;   /* madeira-duo xess-metalfx */
         }
         if (g_ffx_exp > 0 && c->kind == MC_DISPATCH) mad_ffx_after(&e, c);   /* cs-split, fi-field-check */
         if (rs) {   /* madeira-bcd: replay split, summed per list */
@@ -21493,6 +21664,75 @@ static HRESULT STDMETHODCALLTYPE rootsig_GetDevice(ID3D12RootSignature *This, RE
 
 /* ---- vtable construction ------------------------------------------------- */
 #include "madeira_list_journal.inc.c"   /* list-journal, api-census: after the list_* methods it replays */
+
+/* madeira-duo xess-metalfx: THE EXPORTS (see madeira_fx.h). Madeira's
+ * libxess.dll calls them with what the game hands XeSS. The list may be a
+ * wrapper (Streamline's interposer): IID_MadeiraObject reaches ours. */
+static struct mad_list *mad_fxt_list(ID3D12GraphicsCommandList *p) {
+    void *base = NULL;
+    if (!p) return NULL;
+    if (((struct mad_list *)p)->vtbl == &g_list_vtbl) return (struct mad_list *)p;
+    if (SUCCEEDED(p->lpVtbl->QueryInterface(p, &IID_MadeiraObject, &base)) && base) {
+        ((IUnknown *)base)->lpVtbl->Release((IUnknown *)base);
+        if (((struct mad_list *)base)->vtbl == &g_list_vtbl) return (struct mad_list *)base;
+    }
+    return NULL;
+}
+static struct mad_resource *mad_fxt_res(ID3D12Resource *p) {
+    void *base = NULL;
+    if (!p) return NULL;
+    if (((struct mad_resource *)p)->vtbl == &g_res_vtbl) return (struct mad_resource *)p;
+    if (SUCCEEDED(p->lpVtbl->QueryInterface(p, &IID_MadeiraObject, &base)) && base) {
+        ((IUnknown *)base)->lpVtbl->Release((IUnknown *)base);
+        if (((struct mad_resource *)base)->vtbl == &g_res_vtbl) return (struct mad_resource *)base;
+    }
+    return NULL;
+}
+BOOL WINAPI MadeiraD3D12TemporalUpscaleSupported(ID3D12Device *device) {
+    struct mad_device *d = (struct mad_device *)device;
+    void *base = NULL;
+    if (!d) return FALSE;
+    if (d->vtbl != (void *)&g_device_vtbl) {
+        if (FAILED(device->lpVtbl->QueryInterface(device, &IID_MadeiraObject, &base)) || !base) return FALSE;
+        ((IUnknown *)base)->lpVtbl->Release((IUnknown *)base);
+        d = (struct mad_device *)base;
+        if (d->vtbl != (void *)&g_device_vtbl) return FALSE;
+    }
+    return d->mtl_device && MTLDevice_supportsFXTemporalScaler(d->mtl_device);
+}
+HRESULT WINAPI MadeiraD3D12TemporalUpscale(ID3D12GraphicsCommandList *list, const struct madeira_temporal_upscale_args *a) {
+    static LONG said, said_bad;
+    struct mad_list *l = mad_fxt_list(list);
+    struct mad_resource *col, *dep, *mv, *ex, *out;
+    struct mad_cmd *c;
+    if (!l || !a || a->size < sizeof *a) {
+        if (InterlockedIncrement(&said_bad) <= 4)
+            d3d12_log("[xess-metalfx] MadeiraD3D12TemporalUpscale refused: %s\n", !l ? "not one of our command lists" : "bad arguments");
+        return E_INVALIDARG;
+    }
+    col = mad_fxt_res(a->color); dep = mad_fxt_res(a->depth); mv = mad_fxt_res(a->motion);
+    ex = mad_fxt_res(a->exposure); out = mad_fxt_res(a->output);
+    if (!col || !dep || !mv || !out || (a->exposure && !ex)) {
+        if (InterlockedIncrement(&said_bad) <= 4)
+            d3d12_log("[xess-metalfx] MadeiraD3D12TemporalUpscale refused: a resource is not ours (color %p depth %p motion %p exposure %p output %p)\n",
+                      (void *)col, (void *)dep, (void *)mv, (void *)ex, (void *)out);
+        return E_INVALIDARG;
+    }
+    if (l->jr.used) mad_jr_flush(l);   /* list-journal: what the game recorded before this call goes first */
+    if (!(c = mad_list_push(l, MC_FX_TEMPORAL))) return E_FAIL;
+    c->u.fxt.color = col; c->u.fxt.depth = dep; c->u.fxt.motion = mv; c->u.fxt.exposure = ex; c->u.fxt.output = out;
+    c->u.fxt.in_w = a->input_width; c->u.fxt.in_h = a->input_height; c->u.fxt.flags = a->flags;
+    c->u.fxt.jx = a->jitter_x; c->u.fxt.jy = a->jitter_y; c->u.fxt.mvx = a->motion_scale_x; c->u.fxt.mvy = a->motion_scale_y;
+    c->u.fxt.pre_exposure = a->pre_exposure;
+    mad_list_note_used(l, col); mad_list_note_used(l, dep); mad_list_note_used(l, mv); mad_list_note_used(l, out);
+    if (ex) mad_list_note_used(l, ex);
+    if (InterlockedIncrement(&said) <= 4)
+        d3d12_log("[xess-metalfx] recorded: color '%s' %ux%u, depth '%s', motion '%s', output '%s' %ux%u, content %ux%u, flags %#x%s\n",
+                  col->name ? col->name : "?", col->width, col->height, dep->name ? dep->name : "?", mv->name ? mv->name : "?",
+                  out->name ? out->name : "?", out->width, out->height, a->input_width, a->input_height, a->flags,
+                  (void *)l != (void *)list ? " (list reached through a wrapper)" : "");
+    return S_OK;
+}
 
 static void build_vtables(void) {
     /* list-journal / api-census: the tables now hold trampolines another thread may be

@@ -23,3 +23,5 @@ EXPORTS
     MadeiraD3D12PresenterAcquire
     MadeiraD3D12PresenterPresent
     MadeiraD3D12PresenterDestroy
+    MadeiraD3D12TemporalUpscaleSupported
+    MadeiraD3D12TemporalUpscale
