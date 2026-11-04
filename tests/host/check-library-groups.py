@@ -51,7 +51,7 @@ page = between(view, '    private var library: some View {', '    private func c
 require(page.index('if group != "platform" {') < page.index('LibraryGroupedGames(grouping: group, search: search,')
         < page.index('let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled'),
         'page: the other choices replace the sections, Platform keeps them')
-require('let items = focusOrder' in page and 'guard group != "platform" else { return entries }' in view,
+require('let items = focusOrder' in page and 'guard group != "platform" else { return currentTab.shows(.other) ? entries : [] }' in view,
         "controller focus follows the grouped page's order")
 
 # ------------------------------------------------------------------ grouped view

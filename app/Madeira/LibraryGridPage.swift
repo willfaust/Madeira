@@ -38,6 +38,8 @@ enum LibraryGridCard: Hashable {
 
 /// An element of the page that is not a card: full width, its own height.
 enum LibraryGridFixed: Hashable {
+    /// The store tabs (LibraryStoreTab), above the Desktop button.
+    case storeTabs
     case desktop
     /// A section or group title; `collapse` names its stored collapsed state
     /// ("others", "installed", "group:<key>"), nil when it does not collapse.
@@ -53,6 +55,7 @@ enum LibraryGridFixed: Hashable {
 
     var id: String {
         switch self {
+        case .storeTabs: return "storeTabs"
         case .desktop: return "desktop"
         case .header(let id, _, _, _, _): return "header." + id
         case .signIn: return "signIn"
@@ -70,6 +73,15 @@ enum LibraryGridFixed: Hashable {
 /// a fixed element hosting the store's own section, its cards laid out by the section as on the original page.
 enum LibraryGridStore: String, CaseIterable {
     case gog, itch, epic, ea
+
+    var tab: LibraryStoreTab {
+        switch self {
+        case .gog: return .gog
+        case .itch: return .itch
+        case .epic: return .epic
+        case .ea: return .ea
+        }
+    }
 
     @MainActor var enabled: Bool {
         switch self {
@@ -197,19 +209,27 @@ struct LibraryGridPageModel: Equatable {
         var collapsedGroups: String
         /// The shown store sections and their signatures (LibraryGridStore.signatures).
         var stores: [LibraryGridStore: String] = [:]
+        /// The store tabs offered (none: every section) and the one shown (LibraryStoreTab).
+        var tabs: [LibraryStoreTab] = []
+        var tab: LibraryStoreTab = .all
     }
 
     @MainActor static func build(_ inputs: Inputs) -> LibraryGridPageModel {
         var page = LibraryGridPageModel()
-        page.append(.fixed(.desktop), spacing: 0)
+        if inputs.group == "platform" && !inputs.tabs.isEmpty { page.append(.fixed(.storeTabs), spacing: 0) }
+        page.append(.fixed(.desktop), spacing: LibraryGridGeometry.sectionSpacing)
         if inputs.group != "platform" {
             page.grouped(inputs)
         } else {
+            // A store tab shows only its own section, as on the original page.
+            let tab = inputs.tab
             let steamFirst = MadeiraDock.enabled && LibraryGridSteamItems.hasInstalled
-            if steamFirst { page.steamSection(inputs, part: .installed) }
+            if steamFirst && tab.shows(.steam) { page.steamSection(inputs, part: .installed) }
             if LibraryGridSteamItems.shown {
-                page.othersSection(inputs)
-                if MadeiraDock.enabled { page.steamSection(inputs, part: steamFirst ? .notInstalled : .all) }
+                if tab.shows(.other) { page.othersSection(inputs) }
+                if MadeiraDock.enabled && tab.shows(.steam) { page.steamSection(inputs, part: steamFirst ? .notInstalled : .all) }
+            } else if !tab.shows(.other) {
+                // Another store's tab: no games you added.
             } else if LibraryModel.shared.entries.filter({ $0.desktop != true && $0.listedInLibrary && $0.steamAppID == nil && $0.epicAppName == nil
                                                             && $0.gogProductID == nil && $0.itchGameID == nil && $0.eaOfferID == nil }).isEmpty {
                 page.append(.fixed(.emptyLibrary), spacing: LibraryGridGeometry.blockSpacing)
@@ -217,7 +237,7 @@ struct LibraryGridPageModel: Equatable {
                 page.grid("others", inputs.others, spacing: LibraryGridGeometry.blockSpacing)
             }
             // The stores' sections follow, as on the original page.
-            for store in LibraryGridStore.allCases {
+            for store in LibraryGridStore.allCases where tab.shows(store.tab) {
                 if let signature = inputs.stores[store] {
                     page.append(.fixed(.store(store, signature: signature)), spacing: LibraryGridGeometry.blockSpacing)
                 }
@@ -430,6 +450,7 @@ struct LibraryGridInputsKey: Hashable {
     var hideOthers: Bool, hideInstalled: Bool, showUninstalled: Bool
     var collapsedGroups: String
     var stores: [LibraryGridStore: String]
+    var tabs: [LibraryStoreTab], tab: LibraryStoreTab
     var otherIDs: [UUID]
     var switches: [Bool]
     /// Sort by size reads the metadata, and sort by added orders by the entries a metadata change can create, so a
@@ -441,6 +462,7 @@ struct LibraryGridInputsKey: Hashable {
         hideOthers = i.hideOthers; hideInstalled = i.hideInstalled; showUninstalled = i.showUninstalled
         collapsedGroups = i.collapsedGroups
         stores = i.stores
+        tabs = i.tabs; tab = i.tab
         otherIDs = i.others.map(\.id)
         switches = [SteamGamesSection.collapsible, MadeiraDock.enabled, LibraryGridSteamItems.shown, SteamOwnedLibrary.enabled]
         metadataMovesCards = i.sort == "size" || i.sort == "added"
@@ -495,16 +517,23 @@ struct LibraryGridPage: View {
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
     @AppStorage("madeiraLibraryCollapsedGroups") private var collapsedGroups = ""
     @AppStorage(LibraryGridSize.key) private var position: Double = -1
+    @AppStorage(LibraryStoreTab.key) private var storeTab = LibraryStoreTab.all.rawValue
     @State private var steamSheet: SteamSheetID?
     @State private var showSignIn = false
 
     private struct SteamSheetID: Identifiable { let id: Int }
 
+    private var storeTabs: [LibraryStoreTab] {
+        group == "platform" ? LibraryStoreTab.available(steam: MadeiraDock.enabled && (LibraryGridSteamItems.shown || LibraryGridSteamItems.hasInstalled)) : []
+    }
+
     var body: some View {
+        let tabs = storeTabs
         let inputs = LibraryGridPageModel.Inputs(search: search, sort: sort, group: group, others: others,
                                                  hideOthers: hideOthers, hideInstalled: hideInstalled,
                                                  showUninstalled: showUninstalled, collapsedGroups: collapsedGroups,
-                                                 stores: group == "platform" ? LibraryGridStore.signatures(search: search, layout: layout) : [:])
+                                                 stores: group == "platform" ? LibraryGridStore.signatures(search: search, layout: layout) : [:],
+                                                 tabs: tabs, tab: LibraryStoreTab.current(storeTab, in: tabs))
         LibraryGridHostView(
             build: { LibraryGridPageModel.build(inputs) }, inputsKey: LibraryGridInputsKey(inputs),
             otherRevision: LibraryGridOtherChanges.shared.revision, layout: layout, position: position, focused: focused,
@@ -556,6 +585,8 @@ struct LibraryGridPage: View {
 
     private func fixedView(_ fixed: LibraryGridFixed, width: CGFloat) -> AnyView {
         switch fixed {
+        case .storeTabs:
+            return AnyView(LibraryStoreTabBar(tabs: storeTabs, selection: $storeTab))
         case .desktop:
             return desktop()
         case .header(_, let title, let count, let collapse, _):

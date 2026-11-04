@@ -54,7 +54,7 @@ require('let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled'
         and 'if SteamGamesSection.shown {' in page[steam_at:others_at],
         'Other games is a section exactly when the Steam section is shown; installed Steam games come first')
 require('part: steamFirst ? .notInstalled : .all, open: { selected = $0 })' in page[others_at:]
-        and 'if MadeiraDock.enabled {' in page[others_at:],
+        and 'if MadeiraDock.enabled && tab.shows(.steam) {' in page[others_at:],
         'Not installed follows Other games; with nothing installed the whole Steam section does')
 single = page[others_at:]
 require('ContentUnavailableView("Make yourself at home"' in single and single.count('cells(entries, width: viewport.size.width)') == 2,
@@ -112,6 +112,30 @@ require('if list && dense {' in cell and '} else if list {' in cell, "Steam card
 require('SteamGamesSection.shown' in view and '[library-sections] native-steam=' in view, 'log line [library-sections]')
 require(re.search(r'\[library-sections\][^"]*\\\((?!SteamOwnedLibrary\.enabled|SteamGamesSection\.)', view) is None,
         'the log line has flags only')
+
+# ------------------------------------------------------------------ store tabs
+tabs = between(library, 'enum LibraryStoreTab: String, CaseIterable, Identifiable {', 'struct LibraryStoreTabBar: View {')
+bar = between(library, 'struct LibraryStoreTabBar: View {', 'struct LibraryCells<Item: Identifiable, Cell: View>: View {')
+grid_page = (root / 'app/Madeira/LibraryGridPage.swift').read_text()
+grid_build = between(grid_page, '@MainActor static func build(_ inputs: Inputs)', 'private mutating func append(')
+require('static var enabled: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_TABS") }' in tabs
+        and 'guard enabled else { return [] }' in tabs and 'return tabs.count < 2 ? [] : [.all] + tabs' in tabs,
+        'store tabs: only the shown sections, none with fewer than two, MADEIRA_LIBRARY_TABS=0 turns them off')
+require('guard let tab = LibraryStoreTab(rawValue: stored), tabs.contains(tab) else { return .all }' in tabs,
+        'store tabs: a tab that is no longer offered shows All')
+require('.pickerStyle(.segmented)' in bar and 'ViewThatFits(in: .horizontal) {' in bar
+        and 'ScrollView(.horizontal, showsIndicators: false) {' in bar,
+        'store tabs: the system segmented control, capsules that scroll when it does not fit')
+require('group == "platform" ? LibraryStoreTab.available(' in view
+        and page.index('LibraryStoreTabBar(tabs: storeTabs, selection: $storeTab)') < page.index('desktopButton'),
+        'store tabs: at the top of the page, with Group by Platform only')
+require(all(f'tab.shows(.{t})' in page for t in ('steam', 'other', 'gog', 'itch', 'epic', 'ea')),
+        'store tabs: each section shows on its tab and on All')
+require(grid_build.index('page.append(.fixed(.storeTabs), spacing: 0)') < grid_build.index('page.append(.fixed(.desktop)')
+        and all(f'tab.shows(.{t})' in grid_build for t in ('steam', 'other')) and 'where tab.shows(store.tab)' in grid_build
+        and 'tabs = i.tabs; tab = i.tab' in grid_page,
+        'store tabs: the zoomable grid shows the same tabs and sections, and rebuilds when the tab changes')
+require('MADEIRA_LIBRARY_TABS' in docs, 'docs/LIBRARY.md: the store tabs and their switch')
 
 # ------------------------------------------------------------------ docs
 require('MADEIRA_LIBRARY_COLLAPSE' in docs and '**Other games**' in docs and '**Not installed**' in docs,
