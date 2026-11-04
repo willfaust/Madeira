@@ -4,10 +4,13 @@
 Also compile the actual image guard/patch, test both vtable pointer bases and
 reject mismatched images without writes. Exercise the preferred-base case with
 DIR64 rebasing of the existing vtable slots, without relocations for the new
-task callbacks: those must already name the mapped image. No supplied binary.
+task callbacks: those must already name the mapped image. Every analysed
+helper build (ios_sch_builds) runs: the first build with its .text tail
+layout, 2.4.0.296 with its task callbacks in int3 padding. No supplied binary.
 Requires x86_64 Linux, GNU binutils, Python and a C compiler.
 """
 from pathlib import Path
+import hashlib
 import os
 import re
 import resource
@@ -29,91 +32,88 @@ def define(name):
     return int(value, 0)
 
 
-def array(name):
+def array_bytes(name):
     start = native.index('static const unsigned char ' + name + '[')
-    return native[start:native.index('};', start) + 2]
+    body = native[start:native.index('};', start) + 2]
+    return bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', body[body.index('{'):]))
 
 
-blob = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_loop_thunk')))
-start = native.index('static const struct { unsigned int rva;')
-code_table = native[start:native.index('};', start) + 2]
-# The helper's code stays out of the tree: ios_sch_code holds each range's SHA-256.
-# The fixture image holds a filler in each range instead, and this stand-in for
-# CommonCrypto answers a range's own digest exactly while its filler is intact.
+def code_table(name):
+    """(rva, len, digest) of each guarded range of one build's table."""
+    start = native.index(' ' + name + '[] =')
+    body = native[start:native.index('\n};', start)]
+    out = []
+    for m in re.finditer(r'\{ (IOS_SCH\w+|0x[\da-f]+), (0x[\da-f]+),[^{]*\{([^}]*)\}', body):
+        rva = define(m[1]) if m[1].startswith('IOS') else int(m[1], 16)
+        out.append((rva, int(m[2], 16), bytes(int(x, 16) for x in re.findall(r'0x([\da-f]{2})', m[3]))))
+    return out
+
+
+def padding_ranges(table):
+    """Ranges whose digest is a RET followed by int3 padding (no helper code)."""
+    return [(rva, n) for rva, n, d in table if d == hashlib.sha256(b'\xc3' + b'\xcc' * (n - 1)).digest()]
+
+
+# The patch region: every #define, blob, digest table, build table, guard and patch.
+region = native[native.index('#define IOS_SCH_IMAGE_BASE'):
+                native.index('\n}', native.index('static void ios_sc_render_handler_patch(')) + 2]
+
+# Per build: what the fixture needs beyond ios_sch_builds (helper routines the
+# adapter calls and the regions the zero tails must stay in).
+BUILDS = [
+    dict(name='first build', prefix='IOS_SCH_', table='ios_sch_code', defsym=[],
+         helper_new=0x13e708, run_until_idle=0x1728b0, global_drain=0x11be60, global_loop=0x1cea00,
+         text_vs=0x17f34c, text_raw=0x17f400, data=define('IOS_SCH_DATA'), data_vs=0x43bc, data_raw=0x1a00,
+         loop=['ios_sch_loop_thunk'], diagnostics=True),
+    dict(name='2.4.0.296', prefix='IOS_SCH296_', table='ios_sch296_code', defsym=['--defsym', 'SCH296=1'],
+         helper_new=0x1622b8, run_until_idle=0x1965d0, global_drain=0x13eec0, global_loop=0x1f6a10,
+         text_vs=define('IOS_SCH296_TEXT_VS'), text_raw=define('IOS_SCH296_TEXT_RAW'),
+         data=define('IOS_SCH296_DATA'), data_vs=define('IOS_SCH296_DATA_VS'), data_raw=0x1a00,
+         loop=['ios_sch296_loop_thunk', 'ios_sch296_task_add', 'ios_sch296_task_release',
+               'ios_sch296_task_one', 'ios_sch296_task_any'], diagnostics=False),
+]
+
+# The helper's code stays out of the tree: each build's table holds each range's
+# SHA-256. The fixture image holds a filler in each range instead, and this
+# stand-in for CommonCrypto answers a range's own digest exactly while its filler
+# is intact. RET + int3 padding ranges hold those bytes themselves (their
+# digests are checked against hashlib above, they are not the helper's code).
 SHA_STANDIN = r'''
+static const struct ios_sch_build *sch_build;
 static char *sch_fixture_image;
+static int sch_padding(size_t k)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(sch_padding_ranges); i++)
+        if (sch_padding_ranges[i][0] == sch_build->code[k].rva && sch_padding_ranges[i][1] == sch_build->code[k].len)
+            return 1;
+    return 0;
+}
 static unsigned char sch_filler(size_t rva, size_t i) { return (unsigned char)((rva + i) * 131u + 7u); }
 static void sch_fill(char *image)
 {
     sch_fixture_image = image;
-    for (size_t k = 0; k < ARRAY_SIZE(ios_sch_code); k++)
-        for (size_t i = 0; i < ios_sch_code[k].len; i++)
-            image[ios_sch_code[k].rva + i] = (char)sch_filler(ios_sch_code[k].rva, i);
+    for (size_t k = 0; k < sch_build->code_count; k++)
+        for (size_t i = 0; i < sch_build->code[k].len; i++)
+            image[sch_build->code[k].rva + i] = sch_padding(k) ? (char)(i ? 0xcc : 0xc3)
+                                                               : (char)sch_filler(sch_build->code[k].rva, i);
 }
 static unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *md)
 {
     memset(md, 0, CC_SHA256_DIGEST_LENGTH);
-    for (size_t k = 0; k < ARRAY_SIZE(ios_sch_code); k++)
+    for (size_t k = 0; k < sch_build->code_count; k++)
     {
-        const unsigned char *p = (const unsigned char *)sch_fixture_image + ios_sch_code[k].rva;
+        const unsigned char *p = (const unsigned char *)sch_fixture_image + sch_build->code[k].rva;
         size_t i;
-        if ((const void *)p != data || len != ios_sch_code[k].len) continue;
-        for (i = 0; i < len && p[i] == sch_filler(ios_sch_code[k].rva, i); i++) ;
-        if (i == len) memcpy(md, ios_sch_code[k].sha256, CC_SHA256_DIGEST_LENGTH);
+        if ((const void *)p != data || len != sch_build->code[k].len) continue;
+        for (i = 0; i < len; i++)
+            if (p[i] != (sch_padding(k) ? (i ? 0xcc : 0xc3) : sch_filler(sch_build->code[k].rva, i))) break;
+        if (i == len) memcpy(md, sch_build->code[k].sha256, CC_SHA256_DIGEST_LENGTH);
     }
     return md;
 }
 '''
 
-defines = '\n'.join(line for line in native.splitlines() if line.startswith('#define IOS_SCH_'))
-symbols = {
-    'current_loop': define('IOS_SCH_CURRENT_LOOP'), 'helper_new': 0x13e708,
-    'loop_ctor': define('IOS_SCH_LOOP_CTOR'), 'original_webkit': define('IOS_SCH_WEBKIT'),
-    'loop_work': define('IOS_SCH_LOOP_WORK'), 'loop_delayed': define('IOS_SCH_LOOP_DELAYED'),
-    'loop_idle': define('IOS_SCH_LOOP_IDLE'), 'task': define('IOS_SCH_TASK'),
-    'loop_cache': define('IOS_SCH_TASK') + 0x30, 'cef_post_delayed': define('IOS_SCH_POST_TASK'),
-}
-
-with tempfile.TemporaryDirectory(prefix='madeira-sc-loop-') as name:
-    folder = Path(name)
-    linker = folder / 'loop.ld'
-    linker.write_text('SECTIONS { . = %d; .text : { *(.text) } }\n' % define('IOS_SCH_LOOP_INIT') +
-                      '\n'.join('%s = %d;' % item for item in symbols.items()) + '\n')
-    subprocess.run(['as', '--64', str(root / 'tests/host/sc-render-loop.S'),
-                    '-o', str(folder / 'loop.o')], check=True)
-    subprocess.run(['ld', '-T', str(linker), str(folder / 'loop.o'),
-                    '-o', str(folder / 'loop.elf')], check=True)
-    subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text',
-                    str(folder / 'loop.elf'), str(folder / 'loop.bin')], check=True)
-    assert (folder / 'loop.bin').read_bytes() == blob, 'assembly differs from production bytes'
-    table = subprocess.check_output(['nm', str(folder / 'loop.elf')], text=True)
-    for symbol, macro in (
-        ('sc_loop_init', 'IOS_SCH_LOOP_INIT'), ('sc_loop_pump', 'IOS_SCH_LOOP_PUMP'),
-        ('sc_loop_add_ref', 'IOS_SCH_TASK_ADD'), ('sc_loop_release', 'IOS_SCH_TASK_RELEASE'),
-        ('sc_loop_one_ref', 'IOS_SCH_TASK_ONE'), ('sc_loop_any_ref', 'IOS_SCH_TASK_ANY'),
-    ):
-        assert int(re.search(r'([\da-f]+) T ' + symbol + r'\b', table)[1], 16) == define(macro)
-    assert define('IOS_SCH_THUNK') + 112 <= define('IOS_SCH_LOOP_INIT')
-    assert 0x180400 <= define('IOS_SCH_LOOP_INIT') < define('IOS_SCH_LOOP_INIT') + len(blob) <= 0x181000
-    assert 0x1d03bc <= define('IOS_SCH_TASK') < define('IOS_SCH_TASK') + 64 <= define('IOS_SCH_CACHE')
-    print('PASS: assembly matches production bytes, entry RVAs and disjoint zero-tail ranges', flush=True)
-
-    drain_linker = folder / 'drain.ld'
-    drain_linker.write_text('SECTIONS { . = %d; .text : { *(.text) } }\n' % define('IOS_SCH_RENDER_DRAIN') +
-                           'current_loop = %d; run_until_idle = 0x1728b0;\n' % define('IOS_SCH_CURRENT_LOOP'))
-    subprocess.run(['as', '--64', str(root / 'tests/host/sc-render-drain.S'),
-                    '-o', str(folder / 'drain.o')], check=True)
-    subprocess.run(['ld', '-T', str(drain_linker), str(folder / 'drain.o'),
-                    '-o', str(folder / 'drain.elf')], check=True)
-    subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text',
-                    str(folder / 'drain.elf'), str(folder / 'drain.bin')], check=True)
-    drain_blob = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_render_drain')))
-    assert (folder / 'drain.bin').read_bytes() == drain_blob
-    trace_blob = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_run_trace')))
-    assert define('IOS_SCH_RUN_INSTALL') + len(trace_blob) <= define('IOS_SCH_RENDER_DRAIN')
-    assert define('IOS_SCH_RENDER_DRAIN') + len(drain_blob) <= 0x181000
-
-    code = r'''
+PRELUDE = r'''
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdint.h>
@@ -145,32 +145,145 @@ static unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *m
 static int ios_sc_cef_enabled(void) { const char *e = getenv("MADEIRA_SC_CEF"); return !(e && e[0] == '0'); }
 /* Test output contains no guest payload or addresses. */
 #define dprintf(...) ((void)0)
-''' + defines + '\n' + array('ios_sch_thunk') + '\n' + array('ios_sch_loop_thunk') + '\n' + array('ios_sch_run_trace') + '\n' + array('ios_sch_render_drain') + '\n' + array('ios_sch_ipc_rebind') + '\n' + array('ios_sch_ipc_split') + '\n' + array('ios_sch_ui_trace') + '\n' + array('ios_sch_renderer_channels') + '\n' + code_table + '\n' + SHA_STANDIN + '\n' + function('static int ios_sc_path_is_helper(') + '\n' + function('static const char *ios_sch_mismatch(') + '\n' + function('static void ios_sc_render_handler_patch(') + r'''
+'''
+
+
+def link(folder, source, sections, symbols, defsym):
+    """Assemble `source`, link each (section, address) and return section bytes and symbols."""
+    script = 'SECTIONS { %s }\n' % ' '.join('%s 0x%x : { *(%s) }' % (s, a, s) for s, a in sections)
+    script += '\n'.join('%s = %d;' % item for item in symbols.items()) + '\n'
+    (folder / 'link.ld').write_text(script)
+    subprocess.run(['as', '--64', *defsym, str(root / 'tests/host' / source), '-o', str(folder / 'a.o')], check=True)
+    subprocess.run(['ld', '-T', str(folder / 'link.ld'), str(folder / 'a.o'), '-o', str(folder / 'a.elf')], check=True)
+    out = {}
+    for section, _ in sections:
+        subprocess.run(['objcopy', '-O', 'binary', '--only-section=' + section,
+                        str(folder / 'a.elf'), str(folder / 'a.bin')], check=True)
+        out[section] = (folder / 'a.bin').read_bytes()
+    table = subprocess.check_output(['nm', str(folder / 'a.elf')], text=True)
+    names = {m[2]: int(m[1], 16) for m in re.finditer(r'(?m)^([\da-f]+) [Tt] (\w+)$', table)}
+    return out, names
+
+
+def check_build(index, build, folder):
+    P = build['prefix']
+    d = lambda name: define(P + name)
+    table = code_table(build['table'])
+    padding = padding_ranges(table)
+    text_end = (0x1000 + build['text_vs'] + 0xfff) & ~0xfff
+    data_end = (build['data'] + build['data_vs'] + 0xfff) & ~0xfff
+
+    # --- the adapter and drain assemble to the production bytes at their RVAs ---
+    loop_symbols = {
+        'current_loop': d('CURRENT_LOOP'), 'helper_new': build['helper_new'],
+        'loop_ctor': d('LOOP_CTOR'), 'original_webkit': d('WEBKIT'),
+        'loop_work': d('LOOP_WORK'), 'loop_delayed': d('LOOP_DELAYED'),
+        'loop_idle': d('LOOP_IDLE'), 'task': d('TASK'),
+        'loop_cache': d('TASK') + 0x30, 'cef_post_delayed': d('POST_TASK'),
+    }
+    if build['diagnostics']:
+        sections = [('.text', d('LOOP_INIT'))]
+    else:
+        sections = [('.text', d('LOOP_INIT')), ('.text.add_ref', d('TASK_ADD')), ('.text.release', d('TASK_RELEASE')),
+                    ('.text.one_ref', d('TASK_ONE')), ('.text.any_ref', d('TASK_ANY'))]
+    out, names = link(folder, 'sc-render-loop.S', sections, loop_symbols, build['defsym'])
+    for (section, _), blob in zip(sections, build['loop']):
+        assert out[section] == array_bytes(blob), (build['name'], section, 'assembly differs from production bytes')
+    for symbol, macro in (
+        ('sc_loop_init', 'LOOP_INIT'), ('sc_loop_pump', 'LOOP_PUMP'),
+        ('sc_loop_add_ref', 'TASK_ADD'), ('sc_loop_release', 'TASK_RELEASE'),
+        ('sc_loop_one_ref', 'TASK_ONE'), ('sc_loop_any_ref', 'TASK_ANY'),
+    ):
+        assert names[symbol] == d(macro), (build['name'], symbol)
+    out, _ = link(folder, 'sc-render-drain.S', [('.text', d('RENDER_DRAIN'))],
+                  {'current_loop': d('CURRENT_LOOP'), 'run_until_idle': build['run_until_idle']}, build['defsym'])
+    assert out['.text'] == array_bytes(P.lower().rstrip('_') + '_render_drain')
+
+    # --- every blob sits in its section's zero tail or in guarded RET+int3 padding ---
+    blobs = re.search(r'ios_sch%s_blob\[\] =\n\{(.*?)\n\};' % ('' if build['diagnostics'] else '296'), native, re.S)[1]
+    placed = []
+    entries = list(re.finditer(r'\{ (IOS_SCH\w+), (ios_sch\w+), sizeof\(\2\),\s*(0x[\da-f]+|0),\s*([01]),', blobs))
+    assert len(entries) == blobs.count('{ IOS_SCH'), (build['name'], 'unparsed blob entries')
+    for m in entries:
+        rva, length, fill = define(m[1]), len(array_bytes(m[2])), int(m[3], 0)
+        placed.append((rva, rva + length))
+        if fill == 0:
+            assert 0x1000 + build['text_vs'] <= rva and rva + length <= text_end, (build['name'], m[2])
+        else:
+            assert fill == 0xcc and any(p + 1 <= rva and rva + length <= p + n for p, n in padding), (build['name'], m[2])
+    data_ranges = [(d('TASK'), 64), (d('IPC_CONTEXT'), 16), (d('CACHE'), 8)]
+    if build['diagnostics']:
+        data_ranges += [(d('RUN_RING'), d('RUN_RING_SIZE')), (d('IPC_COUNT'), 4), (d('UI_COUNT'), 4)]
+    for rva, n in data_ranges:
+        assert build['data'] + build['data_vs'] <= rva and rva + n <= data_end, (build['name'], hex(rva))
+        placed.append((rva, rva + n))
+    placed.sort()
+    assert all(a[1] <= b[0] for a, b in zip(placed, placed[1:])), (build['name'], 'overlapping blobs')
+    print('PASS: %s: assembly matches production bytes, entry RVAs and disjoint tail/padding ranges'
+          % build['name'], flush=True)
+
+    padding_c = 'static const unsigned int sch_padding_ranges[][2] = {%s};\n' % (
+        ','.join('{0x%x,%d}' % p for p in padding) if padding else '{0,0}')
+    defines = {
+        'BUILD': index, 'B_STAMP': d('STAMP'), 'B_SIZE': d('SIZE'), 'B_TEXT_VS': build['text_vs'],
+        'B_TEXT_RAW': build['text_raw'], 'B_DATA': build['data'], 'B_DATA_VS': build['data_vs'],
+        'B_DATA_RAW': build['data_raw'], 'B_TEXT_END': text_end,
+        'B_HELPER_NEW': build['helper_new'], 'B_RUN_UNTIL_IDLE': build['run_until_idle'],
+        'B_GLOBAL_DRAIN': build['global_drain'], 'B_GLOBAL_LOOP': build['global_loop'],
+    }
+    for name in ('VT_BROWSER', 'VT_RENDERER', 'VT_RPH', 'GET_HANDLER', 'GET_NULL', 'WEBKIT', 'THUNK', 'CACHE',
+                 'LOOP_INIT', 'LOOP_PUMP', 'TASK', 'TASK_ADD', 'TASK_RELEASE', 'TASK_ONE', 'TASK_ANY',
+                 'CURRENT_LOOP', 'LOOP_CTOR', 'LOOP_WORK', 'LOOP_DELAYED', 'LOOP_IDLE', 'POST_TASK',
+                 'RENDER_DRAIN', 'RENDER_DRAIN_SITE'):
+        defines['B_' + name] = d(name)
+    flags = ['-D%s=%d' % item for item in defines.items()]
+
+    code = PRELUDE + function('static int ios_sc_path_is_helper(') + '\n' + region + '\n' + padding_c + \
+        SHA_STANDIN + r'''
 static IMAGE_NT_HEADERS nt;
 static IMAGE_SECTION_HEADER sections[2];
 static WCHAR helper_name[] = {'S','o','c','i','a','l','C','l','u','b','H','e','l','p','e','r','.','e','x','e'};
 static UNICODE_STRING name = { helper_name, sizeof(helper_name) };
 static void reset_image(char *image, uint64_t base)
 {
-    memset(image, 0, IOS_SCH_SIZE);
-    nt = (IMAGE_NT_HEADERS){{ IMAGE_FILE_MACHINE_AMD64, 2, IOS_SCH_STAMP },
-                           { IMAGE_NT_OPTIONAL_HDR64_MAGIC, IOS_SCH_SIZE }};
-    sections[0] = (IMAGE_SECTION_HEADER){ IOS_SCH_TEXT, {0x17f34c}, 0x17f400, IMAGE_SCN_MEM_EXECUTE };
-    sections[1] = (IMAGE_SECTION_HEADER){ IOS_SCH_DATA, {0x43bc}, 0x1a00, IMAGE_SCN_MEM_WRITE };
+    memset(image, 0, B_SIZE);
+    nt = (IMAGE_NT_HEADERS){{ IMAGE_FILE_MACHINE_AMD64, 2, B_STAMP },
+                           { IMAGE_NT_OPTIONAL_HDR64_MAGIC, B_SIZE }};
+    sections[0] = (IMAGE_SECTION_HEADER){ IOS_SCH_TEXT, {B_TEXT_VS}, B_TEXT_RAW, IMAGE_SCN_MEM_EXECUTE };
+    sections[1] = (IMAGE_SECTION_HEADER){ B_DATA, {B_DATA_VS}, B_DATA_RAW, IMAGE_SCN_MEM_WRITE };
     sch_fill(image);
-    uint64_t *vb = (void *)(image + IOS_SCH_VT_BROWSER), *vr = (void *)(image + IOS_SCH_VT_RENDERER);
-    vb[IOS_SCH_SLOT_BROWSER] = vr[IOS_SCH_SLOT_RENDERER] = base + IOS_SCH_GET_HANDLER;
-    vb[IOS_SCH_SLOT_RENDERER] = vr[IOS_SCH_SLOT_BROWSER] = base + IOS_SCH_GET_NULL;
-    *(uint64_t *)(image + IOS_SCH_VT_RPH) = base + IOS_SCH_WEBKIT;
+    uint64_t *vb = (void *)(image + B_VT_BROWSER), *vr = (void *)(image + B_VT_RENDERER);
+    vb[IOS_SCH_SLOT_BROWSER] = vr[IOS_SCH_SLOT_RENDERER] = base + B_GET_HANDLER;
+    vb[IOS_SCH_SLOT_RENDERER] = vr[IOS_SCH_SLOT_BROWSER] = base + B_GET_NULL;
+    *(uint64_t *)(image + B_VT_RPH) = base + B_WEBKIT;
 }
 static void reject_without_writes(char *image)
 {
-    char *before = malloc(IOS_SCH_SIZE);
+    char *before = malloc(B_SIZE);
     assert(before);
-    memcpy(before, image, IOS_SCH_SIZE);
-    ios_sc_render_handler_patch(image, IOS_SCH_SIZE, &nt, sections, &name);
-    assert(!memcmp(before, image, IOS_SCH_SIZE));
+    memcpy(before, image, B_SIZE);
+    ios_sc_render_handler_patch(image, B_SIZE, &nt, sections, &name);
+    assert(!memcmp(before, image, B_SIZE));
     free(before);
+}
+/* A byte the patch may change: a blob, a hook span, a .data range or one of
+ * the two vtable slots. Anything else differing is an undeclared write. */
+static int declared(size_t rva, int ipc)
+{
+    const struct ios_sch_build *b = sch_build;
+    for (size_t k = 0; k < b->blob_count; k++)
+        if ((ipc || !b->blob[k].ipc) && rva >= b->blob[k].rva && rva < b->blob[k].rva + b->blob[k].len) return 1;
+    for (size_t k = 0; k < b->hook_count; k++)
+        if ((ipc || !b->hook[k].ipc) && rva >= b->hook[k].site && rva < b->hook[k].site + b->hook[k].span) return 1;
+    if (rva >= b->task && rva < b->task + 64) return 1;
+    if (rva >= b->vt_browser + 8 * IOS_SCH_SLOT_RENDERER && rva < b->vt_browser + 8 * IOS_SCH_SLOT_RENDERER + 8) return 1;
+    if (rva >= b->vt_rph && rva < b->vt_rph + 8) return 1;
+    return 0;
+}
+static void check_declared(const char *before, const char *image, int ipc)
+{
+    for (size_t rva = 0; rva < B_SIZE; rva++)
+        if (before[rva] != image[rva]) assert(declared(rva, ipc));
 }
 struct Task;
 struct RunState { uint32_t level, quit; void *dispatcher; };
@@ -361,152 +474,165 @@ static void *run_renderer(void *entry)
 int main(int argc, char **argv)
 {
     (void)argv;
-    char *image = mmap(NULL, IOS_SCH_SIZE, PROT_READ | PROT_WRITE,
+    sch_build = &ios_sch_builds[BUILD];
+    assert(sch_build->stamp == B_STAMP && sch_build->size == B_SIZE);
+    for (size_t k = 0; k < ARRAY_SIZE(ios_sch_builds); k++)
+        assert(k == BUILD || ios_sch_builds[k].stamp != B_STAMP);
+    char *image = mmap(NULL, B_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     uint64_t view = (uintptr_t)image, got = 0;
+    const struct ios_sch_build *found = NULL;
     reset_image(image, view);
     if (argc > 1 && !strcmp(argv[1], "disabled")) {
         reject_without_writes(image);
-        assert(!munmap(image, IOS_SCH_SIZE));
+        assert(!munmap(image, B_SIZE));
         puts("PASS: disabled renderer/CEF adapter leaves the image unchanged");
         return 0;
     }
-    assert(!ios_sch_mismatch(image, IOS_SCH_SIZE, &nt, sections, &got) && got == view);
+    assert(!ios_sch_mismatch(image, B_SIZE, &nt, sections, &found, &got) && got == view && found == sch_build);
     nt.FileHeader.TimeDateStamp ^= 1; reject_without_writes(image);
     reset_image(image, view); nt.OptionalHeader.SizeOfImage++; reject_without_writes(image);
     reset_image(image, view); sections[0].Misc.VirtualSize++; reject_without_writes(image);
+    reset_image(image, view); sections[0].SizeOfRawData += 0x200; reject_without_writes(image);
     reset_image(image, view); sections[1].Characteristics = 0; reject_without_writes(image);
-    for (size_t i = 0; i < sizeof(ios_sch_code) / sizeof(ios_sch_code[0]); i++) {
-        reset_image(image, view); image[ios_sch_code[i].rva] ^= 1; reject_without_writes(image);
+    reset_image(image, view); sections[1].Misc.VirtualSize++; reject_without_writes(image);
+    for (size_t i = 0; i < sch_build->code_count; i++) {
+        reset_image(image, view); image[sch_build->code[i].rva] ^= 1; reject_without_writes(image);
+        reset_image(image, view); image[sch_build->code[i].rva + sch_build->code[i].len - 1] ^= 1;
+        reject_without_writes(image);
     }
-    const size_t dirty[] = { IOS_SCH_THUNK, IOS_SCH_LOOP_INIT, IOS_SCH_TASK,
-                            IOS_SCH_RENDER_CHANNEL_THUNK,
-                            IOS_SCH_RENDER_CHANNEL_THUNK + sizeof(ios_sch_renderer_channels) - 1,
-                            IOS_SCH_TASK + 63, IOS_SCH_CACHE, IOS_SCH_VT_RPH, IOS_SCH_RUN_INSTALL,
-                            IOS_SCH_RUN_INSTALL + sizeof(ios_sch_run_trace) - 1,
-                            IOS_SCH_RUN_RING, IOS_SCH_RUN_RING + IOS_SCH_RUN_RING_SIZE - 1,
-                            IOS_SCH_RENDER_DRAIN, IOS_SCH_RENDER_DRAIN + sizeof(ios_sch_render_drain) - 1,
-                            IOS_SCH_IPC_TRACE, IOS_SCH_IPC_TRACE + sizeof(ios_sch_ipc_rebind) - 1,
-                            IOS_SCH_IPC_COUNT, IOS_SCH_IPC_COUNT + 3,
-                            IOS_SCH_IPC_SPLIT, IOS_SCH_IPC_SPLIT + sizeof(ios_sch_ipc_split) - 1,
-                            IOS_SCH_IPC_CONTEXT, IOS_SCH_IPC_CONTEXT + 15,
-                            IOS_SCH_UI_TRACE, IOS_SCH_UI_TRACE + sizeof(ios_sch_ui_trace) - 1,
-                            IOS_SCH_UI_COUNT, IOS_SCH_UI_COUNT + 3 };
-    for (size_t i = 0; i < sizeof(dirty) / sizeof(dirty[0]); i++) {
-        reset_image(image, view); image[dirty[i]] ^= 1; reject_without_writes(image);
+    /* Every blob destination (zero tail or int3 padding) and .data range,
+     * first and last byte. */
+    for (size_t i = 0; i < sch_build->blob_count; i++) {
+        reset_image(image, view); image[sch_build->blob[i].rva] ^= 1; reject_without_writes(image);
+        reset_image(image, view); image[sch_build->blob[i].rva + sch_build->blob[i].len - 1] ^= 1;
+        reject_without_writes(image);
     }
+    for (size_t i = 0; i < sch_build->zero_count; i++) {
+        reset_image(image, view); image[sch_build->zero[i].rva] ^= 1; reject_without_writes(image);
+        reset_image(image, view); image[sch_build->zero[i].rva + sch_build->zero[i].len - 1] ^= 1;
+        reject_without_writes(image);
+    }
+    reset_image(image, view); image[B_THUNK] ^= 1; reject_without_writes(image);
+    reset_image(image, view); image[B_TASK + 63] ^= 1; reject_without_writes(image);
+    reset_image(image, view); image[B_CACHE] ^= 1; reject_without_writes(image);
+    reset_image(image, view); image[B_VT_RPH] ^= 1; reject_without_writes(image);
     reset_image(image, view);
-    *(uint64_t *)(image + IOS_SCH_VT_BROWSER + IOS_SCH_SLOT_BROWSER * 8) = 0x13370000;
+    *(uint64_t *)(image + B_VT_BROWSER + IOS_SCH_SLOT_BROWSER * 8) = 0x13370000;
     reject_without_writes(image);
     reset_image(image, view);
-    ios_sc_render_handler_patch(image, IOS_SCH_SIZE, &nt, sections, &name);
+    *(uint64_t *)(image + B_VT_RENDERER + IOS_SCH_SLOT_RENDERER * 8) += 0x10;
+    reject_without_writes(image);
+    reset_image(image, view);
+    char *before = malloc(B_SIZE);
+    assert(before);
+    memcpy(before, image, B_SIZE);
+    ios_sc_render_handler_patch(image, B_SIZE, &nt, sections, &name);
+    check_declared(before, image, 1);
+    for (size_t i = 0; i < sch_build->blob_count; i++)
+        assert(!memcmp(image + sch_build->blob[i].rva, sch_build->blob[i].code, sch_build->blob[i].len));
+    for (size_t i = 0; i < sch_build->hook_count; i++) {
+        const struct ios_sch_hook *h = &sch_build->hook[i];
+        int32_t displacement = 0;
+        assert((unsigned char)image[h->site] == h->opcode && (h->opcode == 0xe8 || h->opcode == 0xe9));
+        memcpy(&displacement, image + h->site + 1, sizeof(displacement));
+        assert(h->site + 5 + displacement == h->dest);
+        for (size_t j = 5; j < h->span; j++) assert((unsigned char)image[h->site + j] == 0x90);
+        /* the destination is the entry of one of this build's blobs */
+        int entry = 0;
+        for (size_t k = 0; k < sch_build->blob_count; k++)
+            if (h->dest >= sch_build->blob[k].rva && h->dest < sch_build->blob[k].rva + sch_build->blob[k].len) entry = 1;
+        assert(entry);
+    }
     int32_t drain_disp = 0;
-    assert((unsigned char)image[IOS_SCH_RENDER_DRAIN_SITE] == 0xe8);
-    memcpy(&drain_disp, image + IOS_SCH_RENDER_DRAIN_SITE + 1, sizeof(drain_disp));
-    assert(IOS_SCH_RENDER_DRAIN_SITE + 5 + drain_disp == IOS_SCH_RENDER_DRAIN);
-    assert(!memcmp(image + IOS_SCH_RENDER_DRAIN, ios_sch_render_drain, sizeof(ios_sch_render_drain)));
-    int32_t ipc_disp = 0;
-    assert((unsigned char)image[IOS_SCH_IPC_CONNECT] == 0xe9);
-    memcpy(&ipc_disp, image + IOS_SCH_IPC_CONNECT + 1, sizeof(ipc_disp));
-    assert(IOS_SCH_IPC_CONNECT + 5 + ipc_disp == IOS_SCH_IPC_TRACE);
-    assert(!memcmp(image + IOS_SCH_IPC_TRACE, ios_sch_ipc_rebind, sizeof(ios_sch_ipc_rebind)));
-    assert(!memcmp(image + IOS_SCH_IPC_SPLIT, ios_sch_ipc_split, sizeof(ios_sch_ipc_split)));
-    const size_t split_sites[] = {0x4b290, 0x4ba50, 0x4a5c3, 0x4baab, 0x4d255, 0x4d2fb, 0x4a719, 0x4da6c};
-    const size_t split_entries[] = {IOS_SCH_IPC_SPLIT, IOS_SCH_IPC_CAPTURE, IOS_SCH_IPC_STORE,
-        IOS_SCH_IPC_ROLE, IOS_SCH_IPC_GLOBAL_LOOP, IOS_SCH_IPC_INITIAL_CONNECT, IOS_SCH_IPC_DESTROY,
-        IOS_SCH_IPC_DIRECT};
-    for (size_t i = 0; i < ARRAY_SIZE(split_sites); i++) {
-        int32_t displacement = 0;
-        assert((unsigned char)image[split_sites[i]] == ((i == 4 || i == 5) ? 0xe8 : 0xe9));
-        memcpy(&displacement, image + split_sites[i] + 1, sizeof(displacement));
-        assert(split_sites[i] + 5 + displacement == split_entries[i]);
-    }
-    const size_t trace_sites[] = {0x174121, 0x17412b};
-    const size_t trace_entries[] = {IOS_SCH_RUN_INSTALL, IOS_SCH_RUN_RESTORE};
-    const size_t trace_spans[] = {7, 9};
-    assert(!memcmp(image + IOS_SCH_RUN_INSTALL, ios_sch_run_trace, sizeof(ios_sch_run_trace)));
-    for (size_t i = 0; i < 2; i++) {
-        int32_t displacement = 0;
-        assert((unsigned char)image[trace_sites[i]] == 0xe9);
-        memcpy(&displacement, image + trace_sites[i] + 1, sizeof(displacement));
-        assert(trace_sites[i] + 5 + displacement == trace_entries[i]);
-        for (size_t j = 5; j < trace_spans[i]; j++)
-            assert((unsigned char)image[trace_sites[i] + j] == 0x90);
-    }
-    task = (void *)(image + IOS_SCH_TASK);
-    assert(*(uint64_t *)(image + IOS_SCH_VT_RPH) == view + IOS_SCH_LOOP_INIT);
-    assert((uintptr_t)task->execute == view + IOS_SCH_LOOP_PUMP);
+    assert((unsigned char)image[B_RENDER_DRAIN_SITE] == 0xe8);
+    memcpy(&drain_disp, image + B_RENDER_DRAIN_SITE + 1, sizeof(drain_disp));
+    assert(B_RENDER_DRAIN_SITE + 5 + drain_disp == B_RENDER_DRAIN);
+    task = (void *)(image + B_TASK);
+    assert(*(uint64_t *)(image + B_VT_RPH) == view + B_LOOP_INIT);
+    assert(*(uint64_t *)(image + B_VT_BROWSER + IOS_SCH_SLOT_RENDERER * 8) == view + B_THUNK);
+    assert((uintptr_t)task->execute == view + B_LOOP_PUMP);
+    reset_image(image, view);
+    setenv("MADEIRA_SC_IPC_SPLIT", "0", 1);
+    memcpy(before, image, B_SIZE);
+    ios_sc_render_handler_patch(image, B_SIZE, &nt, sections, &name);
+    unsetenv("MADEIRA_SC_IPC_SPLIT");
+    check_declared(before, image, 0);
+    for (size_t i = 0; i < sch_build->blob_count; i++)
+        if (sch_build->blob[i].ipc)
+            assert(!memcmp(image + sch_build->blob[i].rva, before + sch_build->blob[i].rva, sch_build->blob[i].len));
+    assert(*(uint64_t *)(image + B_VT_RPH) == view + B_LOOP_INIT);
+    free(before);
     reset_image(image, IOS_SCH_IMAGE_BASE);
-    assert(!ios_sch_mismatch(image, IOS_SCH_SIZE, &nt, sections, &got) && got == IOS_SCH_IMAGE_BASE);
-    ios_sc_render_handler_patch(image, IOS_SCH_SIZE, &nt, sections, &name);
-    assert(*(uint64_t *)(image + IOS_SCH_VT_RPH) == IOS_SCH_IMAGE_BASE + IOS_SCH_LOOP_INIT);
-    task = (void *)(image + IOS_SCH_TASK);
-    assert((uintptr_t)task->add_ref == view + IOS_SCH_TASK_ADD);
-    assert((uintptr_t)task->release == view + IOS_SCH_TASK_RELEASE);
-    assert((uintptr_t)task->one_ref == view + IOS_SCH_TASK_ONE);
-    assert((uintptr_t)task->any_ref == view + IOS_SCH_TASK_ANY);
-    assert((uintptr_t)task->execute == view + IOS_SCH_LOOP_PUMP);
+    assert(!ios_sch_mismatch(image, B_SIZE, &nt, sections, &found, &got) && got == IOS_SCH_IMAGE_BASE);
+    ios_sc_render_handler_patch(image, B_SIZE, &nt, sections, &name);
+    assert(*(uint64_t *)(image + B_VT_RPH) == IOS_SCH_IMAGE_BASE + B_LOOP_INIT);
+    task = (void *)(image + B_TASK);
+    assert((uintptr_t)task->add_ref == view + B_TASK_ADD);
+    assert((uintptr_t)task->release == view + B_TASK_RELEASE);
+    assert((uintptr_t)task->one_ref == view + B_TASK_ONE);
+    assert((uintptr_t)task->any_ref == view + B_TASK_ANY);
+    assert((uintptr_t)task->execute == view + B_LOOP_PUMP);
     /* The pool's existing DIR64 entries rebase the vtable slots only. The
      * new data-tail task has no relocation entries, as in the helper image. */
-    *(uint64_t *)(image + IOS_SCH_VT_BROWSER + IOS_SCH_SLOT_RENDERER * 8) += view - IOS_SCH_IMAGE_BASE;
-    *(uint64_t *)(image + IOS_SCH_VT_RPH) += view - IOS_SCH_IMAGE_BASE;
-    assert(!memcmp(image + IOS_SCH_LOOP_INIT, ios_sch_loop_thunk, sizeof(ios_sch_loop_thunk)));
-    puts("PASS: production patch accepts view/preferred bases and rejects changed code/layout/tails without writes");
+    *(uint64_t *)(image + B_VT_BROWSER + IOS_SCH_SLOT_RENDERER * 8) += view - IOS_SCH_IMAGE_BASE;
+    *(uint64_t *)(image + B_VT_RPH) += view - IOS_SCH_IMAGE_BASE;
+    puts("PASS: production patch accepts view/preferred bases, writes only its declared ranges and rejects changed code/layout/tails without writes");
 
-    stub(image, IOS_SCH_CURRENT_LOOP, (uintptr_t)get_loop);
-    stub(image, 0x13e708, (uintptr_t)helper_new);
-    stub(image, IOS_SCH_LOOP_CTOR, (uintptr_t)construct_loop);
-    stub(image, IOS_SCH_WEBKIT, (uintptr_t)original_webkit);
-    stub(image, IOS_SCH_LOOP_WORK, (uintptr_t)do_work);
-    stub(image, IOS_SCH_LOOP_DELAYED, (uintptr_t)do_delayed);
-    stub(image, IOS_SCH_LOOP_IDLE, (uintptr_t)do_idle);
-    stub(image, 0x1728b0, (uintptr_t)run_until_idle);
+    stub(image, B_CURRENT_LOOP, (uintptr_t)get_loop);
+    stub(image, B_HELPER_NEW, (uintptr_t)helper_new);
+    stub(image, B_LOOP_CTOR, (uintptr_t)construct_loop);
+    stub(image, B_WEBKIT, (uintptr_t)original_webkit);
+    stub(image, B_LOOP_WORK, (uintptr_t)do_work);
+    stub(image, B_LOOP_DELAYED, (uintptr_t)do_delayed);
+    stub(image, B_LOOP_IDLE, (uintptr_t)do_idle);
+    stub(image, B_RUN_UNTIL_IDLE, (uintptr_t)run_until_idle);
     /* The browser's global drain, as a stand-in (the helper's own bytes stay out
      * of the tree, the image holds the filler): RunUntilIdle on the loop the
      * process-wide slot holds. mov rcx, [rip + slot]; jmp RunUntilIdle */
     unsigned char global_drain[12] = {0x48,0x8b,0x0d,0,0,0,0,0xe9,0,0,0,0};
-    int32_t slot_disp = 0x1cea00 - (0x11be60 + 7), run_disp = 0x1728b0 - (0x11be60 + 12);
+    int32_t slot_disp = B_GLOBAL_LOOP - (B_GLOBAL_DRAIN + 7), run_disp = B_RUN_UNTIL_IDLE - (B_GLOBAL_DRAIN + 12);
     memcpy(global_drain + 3, &slot_disp, sizeof(slot_disp));
     memcpy(global_drain + 8, &run_disp, sizeof(run_disp));
-    memcpy(image + 0x11be60, global_drain, sizeof(global_drain));
+    memcpy(image + B_GLOBAL_DRAIN, global_drain, sizeof(global_drain));
     /* Self-written call-frame fixture around the real patched CALL. */
     const unsigned char enter[] = {0x48,0x83,0xec,0x28};
     const unsigned char leave[] = {0x48,0x83,0xc4,0x28,0xc3};
-    memcpy(image + IOS_SCH_RENDER_DRAIN_SITE - sizeof(enter), enter, sizeof(enter));
-    memcpy(image + IOS_SCH_RENDER_DRAIN_SITE + 5, leave, sizeof(leave));
-    drain_entry = (void *)(image + IOS_SCH_RENDER_DRAIN_SITE - sizeof(enter));
+    memcpy(image + B_RENDER_DRAIN_SITE - sizeof(enter), enter, sizeof(enter));
+    memcpy(image + B_RENDER_DRAIN_SITE + 5, leave, sizeof(leave));
+    drain_entry = (void *)(image + B_RENDER_DRAIN_SITE - sizeof(enter));
     if (argc > 1 && !strcmp(argv[1], "legacy-drain")) {
         /* Control: the original global drain must fail the TLS ownership
          * check while the browser's state is active on the other thread. */
-        int32_t old_disp = 0x11be60 - IOS_SCH_RENDER_DRAIN_SITE - 5;
-        memcpy(image + IOS_SCH_RENDER_DRAIN_SITE + 1, &old_disp, sizeof(old_disp));
+        int32_t old_disp = B_GLOBAL_DRAIN - B_RENDER_DRAIN_SITE - 5;
+        memcpy(image + B_RENDER_DRAIN_SITE + 1, &old_disp, sizeof(old_disp));
     }
-    *(uintptr_t *)(image + IOS_SCH_POST_TASK) = (uintptr_t)post_delayed;
-    assert(!mprotect(image + 0x1000, 0x180000, PROT_READ | PROT_EXEC));
+    *(uintptr_t *)(image + B_POST_TASK) = (uintptr_t)post_delayed;
+    assert(!mprotect(image + 0x1000, B_TEXT_END - 0x1000, PROT_READ | PROT_EXEC));
     struct Loop browser = {0};
     struct RunState active_browser = {7, 0, (void *)0x87654321};
     browser.state = &active_browser;
     browser_loop = &browser;
     browser_parent = &active_browser;
-    *(struct Loop **)(image + 0x1cea00) = &browser;
+    *(struct Loop **)(image + B_GLOBAL_LOOP) = &browser;
     current = &browser;
     pthread_t thread;
-    void *initialize = (void *)(uintptr_t)*(uint64_t *)(image + IOS_SCH_VT_RPH);
-    assert(initialize == image + IOS_SCH_LOOP_INIT);
+    void *initialize = (void *)(uintptr_t)*(uint64_t *)(image + B_VT_RPH);
+    assert(initialize == image + B_LOOP_INIT);
     assert(!pthread_create(&thread, NULL, run_renderer, initialize));
     assert(!pthread_join(thread, NULL));
     assert(current == &browser); /* Renderer initialization never borrows browser TLS. */
     assert(browser.state == browser_parent && active_browser.level == 7 &&
            !active_browser.quit && active_browser.dispatcher == (void *)0x87654321);
     allocation_fail = 0;
-    int before = posts;
-    ((void (ABI *)(void *))(image + IOS_SCH_LOOP_INIT))(expected_handler);
-    assert(current == &browser && posts == before && constructions == 1);
+    int before_posts = posts;
+    ((void (ABI *)(void *))(image + B_LOOP_INIT))(expected_handler);
+    assert(current == &browser && posts == before_posts && constructions == 1);
     assert(browser.state == browser_parent && drain_calls == 4);
-    ((void (ABI *)(void))(image + 0x11be60))(); /* Browser's original global drain still works. */
+    ((void (ABI *)(void))(image + B_GLOBAL_DRAIN))(); /* Browser's original global drain still works. */
     assert(browser.state == browser_parent && drain_calls == 5);
-    assert(!munmap(image, IOS_SCH_SIZE));
+    assert(!munmap(image, B_SIZE));
     puts("PASS: preferred vtables + unrelocated task callbacks execute; TLS, IPC work/timers, bounds, refs and shutdown");
     puts("PASS: renderer startup drains its TLS work, nested states restore, active browser state stays intact");
     return 0;
@@ -517,12 +643,21 @@ int main(int argc, char **argv)
     driver.write_text(code)
     binary = folder / 'test'
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                    '-O2', '-fsanitize=address,undefined', '-g', '-pthread', str(driver),
+                    '-O2', '-fsanitize=address,undefined', '-g', '-pthread', *flags, str(driver),
                     '-o', str(binary)], check=True)
+    print('--- %s' % build['name'], flush=True)
     subprocess.run([str(binary)], check=True)
     legacy = subprocess.run([str(binary), 'legacy-drain'], capture_output=True, text=True,
                             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert legacy.returncode != 0 and 'loop == current' in legacy.stderr, legacy.stderr
-    print('PASS: original renderer CALL fails the cross-thread TLS ownership control', flush=True)
+    print('PASS: %s: original renderer CALL fails the cross-thread TLS ownership control' % build['name'], flush=True)
     for variable in ('MADEIRA_SC_RENDER_HANDLER', 'MADEIRA_SC_CEF'):
         subprocess.run([str(binary), 'disabled'], check=True, env={**os.environ, variable: '0'})
+
+
+with tempfile.TemporaryDirectory(prefix='madeira-sc-loop-') as name:
+    builds = re.search(r'ios_sch_builds\[\] =\n\{(.*?)\n\};', native, re.S)[1]
+    assert re.findall(r'\n    \{ (IOS_SCH\w*?)STAMP,', builds) == [b['prefix'] for b in BUILDS], \
+        'every analysed build has a fixture, in table order'
+    for index, build in enumerate(BUILDS):
+        check_build(index, build, Path(name))
