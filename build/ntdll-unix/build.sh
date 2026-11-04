@@ -169,10 +169,13 @@ if [ ${#GNUTLS_DEFS[@]} -gt 0 ]; then
 fi
 # OpenGL: opengl32's unix side (wrappers + generated thunks). It dispatches to
 # win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c.
-compile_unixlib "$WINE_SRC/dlls/opengl32/unix_wgl.c" "opengl32_wgl" "opengl32" \
-    -I"$WINE_SRC/dlls/opengl32"
-compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "opengl32" \
-    -I"$WINE_SRC/dlls/opengl32"
+# opengl32_*_ios.c wrap Wine's two sources with get_teb64() converting a 32-bit
+# caller's TEB address through its WoW64 window (opengl32_teb64_ios.h); without
+# it every 32-bit program that loads opengl32.dll died in its thread attach.
+compile_unixlib "$BUILD_DIR/opengl32_wgl_ios.c" "opengl32_wgl" "opengl32" \
+    -I"$BUILD_DIR" -I"$WINE_SRC/dlls/opengl32"
+compile_unixlib "$BUILD_DIR/opengl32_thunks_ios.c" "opengl32_thunks" "opengl32" \
+    -I"$BUILD_DIR" -I"$WINE_SRC/dlls/opengl32"
 # Vulkan: winevulkan's unix side (instance/device wrappers + generated thunks).
 # It dispatches to win32u's Vulkan layer (build/win32u-unix/vulkan_ios.c), which
 # loads the session's Vulkan library (MADEIRA_VULKAN_LIBRARY; off by default).
