@@ -10,6 +10,11 @@ root = Path(__file__).resolve().parents[2]
 native = (root / 'build/ntdll-unix/virtual_ios.c').read_text()
 
 
+def sch_table(name):
+    start = native.index(' ' + name + '[] =')
+    return native[start:native.index('\n};', start)]
+
+
 def define(name):
     return int(re.search(r'#define ' + name + r'\s+(0x[\da-fA-F]+|\d+)', native)[1], 0)
 
@@ -17,6 +22,16 @@ def define(name):
 start = native.index('static const unsigned char ios_sch_ipc_rebind[')
 array = native[start:native.index('};', start) + 2]
 blob = bytes(int(h, 16) for h in re.findall(r'0x([\da-fA-F]{2})', array))
+# The rebind trace is the first build's alone (ios_sch_builds[0]). 2.4.0.296's
+# tables leave its Connect routine unhooked; that build keeps only the channel
+# retention hook in its Channel Response (check-sc-ipc-split.py executes it).
+first_blob, first_hook = sch_table('ios_sch_blob'), sch_table('ios_sch_hook')
+later_blob, later_hook = sch_table('ios_sch296_blob'), sch_table('ios_sch296_hook')
+assert '{ IOS_SCH_IPC_TRACE, ios_sch_ipc_rebind, sizeof(ios_sch_ipc_rebind), 0, 0,' in first_blob
+assert '{ IOS_SCH_IPC_CONNECT, IOS_SCH_IPC_TRACE, 5, 0xe9, 0 },' in first_hook
+assert 'rebind' not in later_blob and 'IPC_CONNECT' not in later_hook and 'IPC_TRACE' not in later_hook
+assert '{ IOS_SCH296_RENDER_CHANNEL_KEEP, IOS_SCH296_RENDER_CHANNEL_THUNK, 7, 0xe9, 1 },' in later_hook
+assert not re.search(r'#define IOS_SCH296_IPC_(TRACE|COUNT)', native)
 
 with tempfile.TemporaryDirectory(prefix='madeira-sc-ipc-') as name:
     folder = Path(name)

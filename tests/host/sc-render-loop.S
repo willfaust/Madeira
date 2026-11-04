@@ -1,6 +1,9 @@
 /* Win64 renderer-loop adapter embedded in virtual_ios.c.
  * check-sc-render-loop.py links the symbols to the guarded helper RVAs and
- * checks these bytes against the production blob before executing it. */
+ * checks these bytes against the production blob before executing it.
+ * With --defsym SCH296=1 (Social Club 2.4.0.296) the four task callbacks are
+ * in sections of their own, linked at verified int3 padding between helper
+ * functions; the adapter itself is unchanged. */
 .intel_syntax noprefix
 .text
 .global sc_loop_init, sc_loop_pump, sc_loop_add_ref, sc_loop_release, sc_loop_one_ref, sc_loop_any_ref
@@ -87,26 +90,35 @@ pump_done:
     pop rsi
     pop rbx
     ret
+.ifdef SCH296
+.macro sc_callback name
+.section .text.\name, "ax"
+.endm
+.else
 /* The 15-byte gap spelled out as production has it (an 11-byte NOP, then a
  * 4-byte one): GNU as releases order a two-NOP pad differently. */
 .byte 0x66,0x66,0x2e,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
 .byte 0x0f,0x1f,0x40,0x00
+.macro sc_callback name
 .balign 16, 0x90
+.endm
+.endif
+sc_callback add_ref
 sc_loop_add_ref:
     lock inc dword ptr [rcx+0x38]
     ret
-.balign 16, 0x90
+sc_callback release
 sc_loop_release:
     lock dec dword ptr [rcx+0x38]
     xor eax, eax                    /* the image retains an owner reference */
     ret
-.balign 16, 0x90
+sc_callback one_ref
 sc_loop_one_ref:
     cmp dword ptr [rcx+0x38], 1
     sete al
     movzx eax, al
     ret
-.balign 16, 0x90
+sc_callback any_ref
 sc_loop_any_ref:
     cmp dword ptr [rcx+0x38], 0
     setne al

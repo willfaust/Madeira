@@ -4,8 +4,12 @@
 Use the actual image guard/patch and assembled production hooks. The fixture
 models the helper ABI, consumed CefRefPtr, per-thread manager, initialization
 reentry, handlers and ordered destruction; no supplied binary is executed.
+Every analysed helper build (ios_sch_builds) runs: the first build's getter
+preserves every register, 2.4.0.296's compact getter is a plain Win64
+function and its two IPC stubs sit in int3 padding.
 """
 from pathlib import Path
+import hashlib
 import os
 import re
 import resource
@@ -20,9 +24,10 @@ def define(name):
     return int(re.search(r'#define ' + name + r'\s+(0x[\da-fA-F]+|\d+)', native)[1], 0)
 
 
-def array(name):
+def array_bytes(name):
     start = native.index('static const unsigned char ' + name + '[')
-    return native[start:native.index('};', start) + 2]
+    body = native[start:native.index('};', start) + 2]
+    return bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', body[body.index('{'):]))
 
 
 def function(signature):
@@ -30,91 +35,93 @@ def function(signature):
     return native[start:native.index('\n}', start) + 2]
 
 
-start = native.index('static const struct { unsigned int rva;')
-guards = native[start:native.index('};', start) + 2]
-# The helper's code stays out of the tree: ios_sch_code holds each range's SHA-256.
-# The fixture image holds a filler in each range instead, and this stand-in for
-# CommonCrypto answers a range's own digest exactly while its filler is intact.
+def code_table(name):
+    start = native.index(' ' + name + '[] =')
+    body = native[start:native.index('\n};', start)]
+    out = []
+    for m in re.finditer(r'\{ (IOS_SCH\w+|0x[\da-f]+), (0x[\da-f]+),[^{]*\{([^}]*)\}', body):
+        rva = define(m[1]) if m[1].startswith('IOS') else int(m[1], 16)
+        out.append((rva, int(m[2], 16), bytes(int(x, 16) for x in re.findall(r'0x([\da-f]{2})', m[3]))))
+    return out
+
+
+def hook_table(name):
+    start = native.index(' ' + name + '[] =')
+    body = native[start:native.index('\n};', start)]
+    value = lambda t: define(t) if t.startswith('IOS') else int(t, 16)
+    return {(value(m[1]), value(m[2]), int(m[3]), int(m[4], 16), int(m[5]))
+            for m in re.finditer(r'\{ (IOS_SCH\w+|0x[\da-f]+), (IOS_SCH\w+), (\d), (0x[\da-f]+), ([01]) \}', body)}
+
+
+region = native[native.index('#define IOS_SCH_IMAGE_BASE'):
+                native.index('\n}', native.index('static void ios_sc_render_handler_patch(')) + 2]
+
+# Each build's IPC manager routines (beyond ios_sch_builds): sites the fixture
+# jumps into, the routines it stands in for and the hooks' resume points.
+BUILDS = [
+    dict(name='first build', prefix='IOS_SCH_', table='ios_sch_code', hooks='ios_sch_hook', defsym=[],
+         currently_on=0x181af8, browser=0x1cdb90, helper_new=0x13e708, helper_delete=0x13e744,
+         ctor=0x4a400, init=0x4ba50, ctor_store=0x4a5c3, role_store=0x4baab,
+         global_loop=0x11bb70, loop_call=0x4d255, connect_call=0x4d2fb, connect=0x4ac10,
+         dtor=0x4a6e0, dtor_store=0x4a719, getter=0x4b290, direct=0x4da6c, log=0x111340,
+         text_vs=0x17f34c, text_raw=0x17f400, data=define('IOS_SCH_DATA'), data_vs=0x43bc,
+         full_preserve=1, creation_log=1, rebind_trace=1,
+         split=[('.text', 'IPC_SPLIT', 'ios_sch_ipc_split')]),
+    dict(name='2.4.0.296', prefix='IOS_SCH296_', table='ios_sch296_code', hooks='ios_sch296_hook',
+         defsym=['--defsym', 'SCH296=1'],
+         currently_on=0x1a4b00, browser=0x1f5ba0, helper_new=0x1622b8, helper_delete=0x1622f4,
+         ctor=0x4af20, init=0x4c840, ctor_store=0x4b0e3, role_store=0x4c8a6,
+         global_loop=0x13eb40, loop_call=0x4e097, connect_call=0x4e143, connect=0x4ba30,
+         dtor=0x4b240, dtor_store=0x4b279, getter=0x4c0d0, direct=0x4e76a, log=0,
+         text_vs=define('IOS_SCH296_TEXT_VS'), text_raw=define('IOS_SCH296_TEXT_RAW'),
+         data=define('IOS_SCH296_DATA'), data_vs=define('IOS_SCH296_DATA_VS'),
+         full_preserve=0, creation_log=0, rebind_trace=0,
+         split=[('.text', 'IPC_SPLIT', 'ios_sch296_ipc_split'),
+                ('.text.global_loop', 'IPC_GLOBAL_LOOP', 'ios_sch296_ipc_global_loop'),
+                ('.text.initial_connect', 'IPC_INITIAL_CONNECT', 'ios_sch296_ipc_initial_connect'),
+                ('.text.direct', 'IPC_DIRECT', 'ios_sch296_ipc_direct')]),
+]
+
+# The helper's code stays out of the tree: each build's table holds each range's
+# SHA-256. The fixture image holds a filler in each range instead, and this
+# stand-in for CommonCrypto answers a range's own digest exactly while its filler
+# is intact. RET + int3 padding ranges hold those bytes themselves.
 SHA_STANDIN = r'''
+static const struct ios_sch_build *sch_build;
 static char *sch_fixture_image;
+static int sch_padding(size_t k)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(sch_padding_ranges); i++)
+        if (sch_padding_ranges[i][0] == sch_build->code[k].rva && sch_padding_ranges[i][1] == sch_build->code[k].len)
+            return 1;
+    return 0;
+}
 static unsigned char sch_filler(size_t rva, size_t i) { return (unsigned char)((rva + i) * 131u + 7u); }
 static void sch_fill(char *image)
 {
     sch_fixture_image = image;
-    for (size_t k = 0; k < ARRAY_SIZE(ios_sch_code); k++)
-        for (size_t i = 0; i < ios_sch_code[k].len; i++)
-            image[ios_sch_code[k].rva + i] = (char)sch_filler(ios_sch_code[k].rva, i);
+    for (size_t k = 0; k < sch_build->code_count; k++)
+        for (size_t i = 0; i < sch_build->code[k].len; i++)
+            image[sch_build->code[k].rva + i] = sch_padding(k) ? (char)(i ? 0xcc : 0xc3)
+                                                               : (char)sch_filler(sch_build->code[k].rva, i);
 }
 static unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *md)
 {
     memset(md, 0, CC_SHA256_DIGEST_LENGTH);
-    for (size_t k = 0; k < ARRAY_SIZE(ios_sch_code); k++)
+    for (size_t k = 0; k < sch_build->code_count; k++)
     {
-        const unsigned char *p = (const unsigned char *)sch_fixture_image + ios_sch_code[k].rva;
+        const unsigned char *p = (const unsigned char *)sch_fixture_image + sch_build->code[k].rva;
         size_t i;
-        if ((const void *)p != data || len != ios_sch_code[k].len) continue;
-        for (i = 0; i < len && p[i] == sch_filler(ios_sch_code[k].rva, i); i++) ;
-        if (i == len) memcpy(md, ios_sch_code[k].sha256, CC_SHA256_DIGEST_LENGTH);
+        if ((const void *)p != data || len != sch_build->code[k].len) continue;
+        for (i = 0; i < len; i++)
+            if (p[i] != (sch_padding(k) ? (i ? 0xcc : 0xc3) : sch_filler(sch_build->code[k].rva, i))) break;
+        if (i == len) memcpy(md, sch_build->code[k].sha256, CC_SHA256_DIGEST_LENGTH);
     }
     return md;
 }
 '''
-defines = '\n'.join(x for x in native.splitlines() if x.startswith('#define IOS_SCH_'))
-blob = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_ipc_split')))
-symbols = {
-    'cef_currently_on': 0x181af8, 'renderer_manager': define('IOS_SCH_IPC_CONTEXT'),
-    'command_line': define('IOS_SCH_IPC_CONTEXT') + 8, 'browser_manager': 0x1cdb90,
-    'helper_new': 0x13e708, 'manager_ctor': 0x4a400, 'manager_init': 0x4ba50,
-    'init_continue': 0x4ba55, 'ctor_continue': 0x4a5ca, 'role_continue': 0x4bab2,
-    'helper_global_loop': 0x11bb70, 'manager_connect': 0x4ac10,
-    'manager_dtor': 0x4a6e0, 'helper_delete': 0x13e744, 'dtor_continue': 0x4a720,
-    'helper_log': 0x111340, 'manager_getter': 0x4b290, 'direct_continue': 0x4da73,
-}
-entries = {
-    'sc_ipc_get_manager': 'IOS_SCH_IPC_SPLIT', 'sc_ipc_capture_config': 'IOS_SCH_IPC_CAPTURE',
-    'sc_ipc_ctor_store': 'IOS_SCH_IPC_STORE', 'sc_ipc_renderer_role': 'IOS_SCH_IPC_ROLE',
-    'sc_ipc_global_loop': 'IOS_SCH_IPC_GLOBAL_LOOP',
-    'sc_ipc_initial_connect': 'IOS_SCH_IPC_INITIAL_CONNECT', 'sc_ipc_destroy': 'IOS_SCH_IPC_DESTROY',
-    'sc_ipc_direct_getter': 'IOS_SCH_IPC_DIRECT',
-}
 
-with tempfile.TemporaryDirectory(prefix='madeira-sc-split-') as name:
-    folder = Path(name)
-    linker = folder / 'split.ld'
-    linker.write_text('SECTIONS { . = %d; .text : { *(.text) } }\n' % define('IOS_SCH_IPC_SPLIT') +
-                      '\n'.join('%s = %d;' % x for x in symbols.items()) + '\n')
-    subprocess.run(['as', '--64', str(root / 'tests/host/sc-ipc-split.S'),
-                    '-o', str(folder / 'split.o')], check=True)
-    subprocess.run(['ld', '-T', str(linker), str(folder / 'split.o'),
-                    '-o', str(folder / 'split.elf')], check=True)
-    subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text',
-                    str(folder / 'split.elf'), str(folder / 'split.bin')], check=True)
-    assert (folder / 'split.bin').read_bytes() == blob
-    table = subprocess.check_output(['nm', str(folder / 'split.elf')], text=True)
-    for entry, macro in entries.items():
-        assert int(re.search(r'([\da-f]+) T ' + entry + r'\b', table)[1], 16) == define(macro)
-    trace = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_ipc_rebind')))
-    assert define('IOS_SCH_IPC_TRACE') + len(trace) <= define('IOS_SCH_IPC_SPLIT')
-    assert define('IOS_SCH_IPC_SPLIT') + len(blob) <= 0x181000
-    assert define('IOS_SCH_IPC_COUNT') + 4 <= define('IOS_SCH_IPC_CONTEXT')
-    assert define('IOS_SCH_IPC_CONTEXT') + 16 <= define('IOS_SCH_CACHE')
-    channel_symbols = {'reply_continue': define('IOS_SCH_RENDER_CHANNEL_KEEP') + 7,
-                       'reply_cleanup': define('IOS_SCH_RENDER_CHANNEL_REPLY') + 0x19}
-    channel_linker = folder / 'channels.ld'
-    channel_linker.write_text('SECTIONS { . = %d; .text : { *(.text) } }\n' % define('IOS_SCH_RENDER_CHANNEL_THUNK') +
-                             '\n'.join('%s = %d;' % x for x in channel_symbols.items()) + '\n')
-    subprocess.run(['as', '--64', str(root / 'tests/host/sc-renderer-channels.S'),
-                    '-o', str(folder / 'channels.o')], check=True)
-    subprocess.run(['ld', '-T', str(channel_linker), str(folder / 'channels.o'),
-                    '-o', str(folder / 'channels.elf')], check=True)
-    subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text',
-                    str(folder / 'channels.elf'), str(folder / 'channels.bin')], check=True)
-    channel_blob = bytes(int(x, 16) for x in re.findall(r'0x([\da-fA-F]{2})', array('ios_sch_renderer_channels')))
-    assert (folder / 'channels.bin').read_bytes() == channel_blob
-    assert 0x180400 <= define('IOS_SCH_RENDER_CHANNEL_THUNK')
-    assert define('IOS_SCH_RENDER_CHANNEL_THUNK') + len(channel_blob) <= define('IOS_SCH_THUNK')
-
-    code = r'''
+PRELUDE = r'''
 #define _GNU_SOURCE
 #include <assert.h>
 #include <stdint.h>
@@ -146,11 +153,9 @@ typedef struct { uint32_t VirtualAddress; union { uint32_t VirtualSize; } Misc;
 static unsigned char *CC_SHA256(const void *data, uint32_t len, unsigned char *md);
 static int ios_sc_cef_enabled(void) { const char *e = getenv("MADEIRA_SC_CEF"); return !(e && *e == '0'); }
 #define dprintf(...) ((void)0)
-''' + defines + '\n' + '\n'.join(array(x) for x in (
-        'ios_sch_thunk', 'ios_sch_loop_thunk', 'ios_sch_run_trace', 'ios_sch_render_drain',
-        'ios_sch_ipc_rebind', 'ios_sch_ipc_split', 'ios_sch_ui_trace', 'ios_sch_renderer_channels')) + '\n' + guards + '\n' + SHA_STANDIN + '\n' + '\n'.join(function(x) for x in (
-            'static int ios_sc_path_is_helper(', 'static const char *ios_sch_mismatch(',
-            'static void ios_sc_render_handler_patch(')) + r'''
+'''
+
+FIXTURE = r'''
 struct Client {
     uint16_t *channel;
     unsigned int active, handler, channels, disconnects;
@@ -180,12 +185,18 @@ static char *image;
 static struct Manager browser;
 static struct Manager *(ABI *get_manager)(void);
 extern struct Manager *ABI probe_get(void *);
+extern struct Manager *ABI probe_abi(void *);
 extern void ABI store_ctor(struct Manager *, void *);
 extern void ABI store_role(struct Manager *, unsigned int, void *);
 extern void ABI call_loop(struct Manager *, void *);
 extern void ABI initial_connect(struct Manager *, const uint16_t *, unsigned int, void *);
 extern struct Manager *ABI lookup_direct(void *);
 extern void ABI receive_channel(struct Manager *, const uint16_t **, unsigned int, void *);
+#if FULL_PRESERVE
+#define PROBE probe_get   /* every volatile register, the vectors and CF survive */
+#else
+#define PROBE probe_abi   /* a Win64 function: its nonvolatile registers survive */
+#endif
 static _Thread_local int on_renderer;
 static unsigned int allocations, constructions, initializations, global_loops, deletes, logs, creation_logs, destroys;
 static int shutdown_complete;
@@ -196,8 +207,8 @@ static int pause_init;
 static uint16_t channel0[] = {'r','g','s','c','_','i','p','c','_','c','4','_','c','h','a','n','n','e','l','_','0',0};
 static uint16_t channel1[] = {'r','g','s','c','_','i','p','c','_','c','4','_','c','h','a','n','n','e','l','_','1',0};
 static uint16_t channel2[] = {'r','g','s','c','_','i','p','c','_','c','4','_','c','h','a','n','n','e','l','_','2',0};
-static struct Manager **browser_slot(void) { return (void *)(image + 0x1cdb90); }
-static struct Manager **renderer_slot(void) { return (void *)(image + IOS_SCH_IPC_CONTEXT); }
+static struct Manager **browser_slot(void) { return (void *)(image + R_BROWSER); }
+static struct Manager **renderer_slot(void) { return (void *)(image + R_CONTEXT); }
 static int ABI currently_on(int thread)
 {
     assert(thread == 6);
@@ -224,7 +235,7 @@ static struct Manager *ABI construct(struct Manager *m)
 {
     assert(on_renderer && *renderer_slot() == m && *browser_slot() == &browser);
     constructions++; init_members(m);
-    store_ctor(m, image + 0x4a5c3);
+    store_ctor(m, image + R_CTOR_STORE);
     assert(*browser_slot() == &browser);
     return m;
 }
@@ -257,11 +268,11 @@ static int ABI initialize(struct Manager *m, struct Config **cfg)
         atomic_store(&initializing, 1);
         while (!atomic_load(&proceed)) { }
     }
-    store_role(m, 0, image + 0x4baab);
+    store_role(m, 0, image + R_ROLE_STORE);
     assert(m->role == (unsigned int)on_renderer);
     if (on_renderer) assert(get_manager() == m); /* original Initialize uses this getter too */
-    call_loop(m, image + 0x4d255);
-    initial_connect(m, channel0, 0, image + 0x4d2fb);
+    call_loop(m, image + R_LOOP_CALL);
+    initial_connect(m, channel0, 0, image + R_CONNECT_CALL);
     if (on_renderer) assert(!m->client.active); /* browser's channel must never be opened here */
     else assert(m->client.active);
     config.ref.refs--;
@@ -316,13 +327,14 @@ static void destructor_fixture(void)
     /* Same aligned frame and live values as the original destructor at its hook. */
     const unsigned char prologue[] = {0x57,0x56,0x48,0x83,0xec,0x28,0x48,0x89,0xcf,0x31,0xf6,
                                       0x48,0x8b,0x8f,0x28,0x1a,0,0,0xe9,0,0,0,0};
-    memcpy(image + 0x4a6e0, prologue, sizeof(prologue));
-    int32_t disp = 0x4a719 - (0x4a6e0 + sizeof(prologue));
-    memcpy(image + 0x4a6e0 + sizeof(prologue) - 4, &disp, 4);
+    memcpy(image + R_DTOR, prologue, sizeof(prologue));
+    int32_t disp = R_DTOR_STORE - (R_DTOR + sizeof(prologue));
+    memcpy(image + R_DTOR + sizeof(prologue) - 4, &disp, 4);
+    /* After the hook only RCX (the owned object), RDI and RSI are read. */
     unsigned char tail[] = {0x48,0x89,0xca,0x48,0x89,0xf9,0x48,0xb8,0,0,0,0,0,0,0,0,
                             0xff,0xd0,0x48,0x83,0xc4,0x28,0x5e,0x5f,0xc3};
     uintptr_t fn = (uintptr_t)finish_destroy;
-    memcpy(tail + 8, &fn, 8); memcpy(image + 0x4a720, tail, sizeof(tail));
+    memcpy(tail + 8, &fn, 8); memcpy(image + R_DTOR_STORE + 7, tail, sizeof(tail));
 }
 static void channel_reply_fixture(const char *before)
 {
@@ -330,9 +342,9 @@ static void channel_reply_fixture(const char *before)
      * CefString wrapper (RSI), CALL Connect, and reach the original reply cleanup.
      * The helper's own bytes stay out of the tree, so this stand-in replaces the
      * filler between the hook's end and the cleanup, which the patch leaves alone. */
-    const size_t at = IOS_SCH_RENDER_CHANNEL_KEEP + 7, end = IOS_SCH_RENDER_CHANNEL_REPLY + 0x19;
+    const size_t at = R_KEEP + 7, end = R_REPLY + 0x19;
     unsigned char code[] = {0x48,0x8b,0x16,0xe8,0,0,0,0}; /* mov rdx,[rsi]; call Connect */
-    int32_t disp = (int32_t)(IOS_SCH_IPC_CONNECT - (at + sizeof(code)));
+    int32_t disp = (int32_t)(R_CONNECT - (at + sizeof(code)));
     assert(end >= at + sizeof(code) && !memcmp(image + at, before + at, end - at));
     memcpy(code + 4, &disp, 4);
     memcpy(image + at, code, sizeof(code));
@@ -342,22 +354,22 @@ static void *renderer_thread(void *unused)
 {
     (void)unused;
     on_renderer = 1;
-    struct Manager *m = probe_get(get_manager);
+    struct Manager *m = PROBE(get_manager);
     assert(m != &browser && m == *renderer_slot() && m->role == 1);
-    assert(lookup_direct(image + 0x4da6c) == m);
+    assert(lookup_direct(image + R_DIRECT) == m);
     m->client.handler = 2; /* renderer handler registration from OnWebKitInitialized */
     assert(config.ref.refs == 1 && m->owned != browser.owned && m->name.heap != browser.name.heap);
     const uint16_t *name = channel1;
-    receive_channel(m, &name, 0, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 0, image + R_KEEP);
     assert(browser.client.active && browser.name.heap[20] == '0' && browser.client.handler == 1);
     assert(m->client.active && m->name.heap[20] == '1' && m->client.handler == 2);
     name = channel2;
-    receive_channel(m, &name, 1, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 1, image + R_KEEP);
     /* The old instruction would close channel_1 here and notify its peer.
      * The production patch must leave both frontend connections alive. */
     assert(m->client.channels == ((1u << 1) | (1u << 2)));
     assert(!m->client.disconnects && browser.client.channels == 1 && browser.client.handler == 1);
-    receive_channel(m, &name, 1, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 1, image + R_KEEP);
     assert(m->client.channels == ((1u << 1) | (1u << 2)) && !m->client.disconnects);
     assert(m->client.count == 2);
     /* Execute both capacity branches against the exact client count offset.
@@ -365,13 +377,13 @@ static void *renderer_thread(void *unused)
      * must not call Connect or touch the connections already owned. */
     unsigned int calls = connect_calls;
     m->client.count = 63;
-    receive_channel(m, &name, 1, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 1, image + R_KEEP);
     assert(connect_calls == calls + 1 && m->client.count == 63);
     m->client.count = 64;
-    receive_channel(m, &name, 1, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 1, image + R_KEEP);
     assert(connect_calls == calls + 1 && m->client.count == 64);
     m->client.count = UINT32_MAX;
-    receive_channel(m, &name, 1, image + IOS_SCH_RENDER_CHANNEL_KEEP);
+    receive_channel(m, &name, 1, image + R_KEEP);
     assert(connect_calls == calls + 1 && m->client.count == UINT32_MAX);
     assert(m->client.channels == ((1u << 1) | (1u << 2)) && !m->client.disconnects);
     m->client.count = 2;
@@ -402,83 +414,112 @@ __asm__(
 "pmovmskb %xmm2,%eax; cmp $65535,%eax; jne probe_fail; pmovmskb %xmm3,%eax; cmp $65535,%eax; jne probe_fail;"
 "pmovmskb %xmm4,%eax; cmp $65535,%eax; jne probe_fail; pmovmskb %xmm5,%eax; cmp $65535,%eax; jne probe_fail;"
 "mov %rdi,%rax; jmp probe_return; probe_fail: xor %eax,%eax;"
-"probe_return: add $40,%rsp; pop %rdi; pop %rbx; ret\n");
+"probe_return: add $40,%rsp; pop %rdi; pop %rbx; ret\n"
+/* Win64 callee contract only: RBX, RBP, RSI, RDI, R12-R15 and XMM6 survive. */
+"probe_abi: push %rbx; push %rbp; push %rsi; push %rdi; push %r12; push %r13; push %r14; push %r15;"
+"sub $24,%rsp; movdqu %xmm6,(%rsp); mov %rcx,%rax;"
+"mov $101,%ebx; mov $102,%ebp; mov $103,%esi; mov $104,%edi; mov $105,%r12d; mov $106,%r13d;"
+"mov $107,%r14d; mov $108,%r15d; pcmpeqd %xmm6,%xmm6; sub $32,%rsp; call *%rax; add $32,%rsp;"
+"cmp $101,%rbx; jne abi_fail; cmp $102,%rbp; jne abi_fail; cmp $103,%rsi; jne abi_fail; cmp $104,%rdi; jne abi_fail;"
+"cmp $105,%r12; jne abi_fail; cmp $106,%r13; jne abi_fail; cmp $107,%r14; jne abi_fail; cmp $108,%r15; jne abi_fail;"
+"mov %rax,%rcx; pmovmskb %xmm6,%eax; cmp $65535,%eax; jne abi_fail; mov %rcx,%rax; jmp abi_return;"
+"abi_fail: xor %eax,%eax;"
+"abi_return: movdqu (%rsp),%xmm6; add $24,%rsp; pop %r15; pop %r14; pop %r13; pop %r12; pop %rdi; pop %rsi;"
+"pop %rbp; pop %rbx; ret\n");
 int main(int argc, char **argv)
 {
-    image = mmap(NULL, IOS_SCH_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    sch_build = &ios_sch_builds[BUILD];
+    assert(sch_build->stamp == B_STAMP && sch_build->size == B_SIZE);
+    image = mmap(NULL, B_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
-    IMAGE_NT_HEADERS nt = {{ IMAGE_FILE_MACHINE_AMD64, 2, IOS_SCH_STAMP },
-                           { IMAGE_NT_OPTIONAL_HDR64_MAGIC, IOS_SCH_SIZE }};
+    IMAGE_NT_HEADERS nt = {{ IMAGE_FILE_MACHINE_AMD64, 2, B_STAMP },
+                           { IMAGE_NT_OPTIONAL_HDR64_MAGIC, B_SIZE }};
     IMAGE_SECTION_HEADER sec[2] = {
-        { IOS_SCH_TEXT, {0x17f34c}, 0x17f400, IMAGE_SCN_MEM_EXECUTE },
-        { IOS_SCH_DATA, {0x43bc}, 0x1a00, IMAGE_SCN_MEM_WRITE }};
+        { IOS_SCH_TEXT, {B_TEXT_VS}, B_TEXT_RAW, IMAGE_SCN_MEM_EXECUTE },
+        { B_DATA, {B_DATA_VS}, 0x1a00, IMAGE_SCN_MEM_WRITE }};
     WCHAR path[] = {'S','o','c','i','a','l','C','l','u','b','H','e','l','p','e','r','.','e','x','e'};
     UNICODE_STRING name = {path, sizeof(path)};
     sch_fill(image);
     uint64_t base = IOS_SCH_IMAGE_BASE;
-    *(uint64_t *)(image + IOS_SCH_VT_BROWSER + IOS_SCH_SLOT_BROWSER * 8) = base + IOS_SCH_GET_HANDLER;
-    *(uint64_t *)(image + IOS_SCH_VT_BROWSER + IOS_SCH_SLOT_RENDERER * 8) = base + IOS_SCH_GET_NULL;
-    *(uint64_t *)(image + IOS_SCH_VT_RENDERER + IOS_SCH_SLOT_RENDERER * 8) = base + IOS_SCH_GET_HANDLER;
-    *(uint64_t *)(image + IOS_SCH_VT_RENDERER + IOS_SCH_SLOT_BROWSER * 8) = base + IOS_SCH_GET_NULL;
-    *(uint64_t *)(image + IOS_SCH_VT_RPH) = base + IOS_SCH_WEBKIT;
+    *(uint64_t *)(image + sch_build->vt_browser + IOS_SCH_SLOT_BROWSER * 8) = base + sch_build->get_handler;
+    *(uint64_t *)(image + sch_build->vt_browser + IOS_SCH_SLOT_RENDERER * 8) = base + sch_build->get_null;
+    *(uint64_t *)(image + sch_build->vt_renderer + IOS_SCH_SLOT_RENDERER * 8) = base + sch_build->get_handler;
+    *(uint64_t *)(image + sch_build->vt_renderer + IOS_SCH_SLOT_BROWSER * 8) = base + sch_build->get_null;
+    *(uint64_t *)(image + sch_build->vt_rph) = base + sch_build->webkit;
     /* The image holds the filler, not the helper's code: the opt-out is checked
      * against the image as it was before the patch. */
-    char *before = malloc(IOS_SCH_SIZE);
+    char *before = malloc(B_SIZE);
     assert(before);
-    memcpy(before, image, IOS_SCH_SIZE);
-    ios_sc_render_handler_patch(image, IOS_SCH_SIZE, &nt, sec, &name);
+    memcpy(before, image, B_SIZE);
+    ios_sc_render_handler_patch(image, B_SIZE, &nt, sec, &name);
     if (argc > 1 && !strcmp(argv[1], "disabled")) {
-        assert(!memcmp(image + 0x4b290, before + 0x4b290, 8));
-        for (size_t i = 0; i < sizeof(ios_sch_ipc_split); i++) assert(!image[IOS_SCH_IPC_SPLIT+i]);
-        assert((unsigned char)image[IOS_SCH_IPC_CONNECT] == 0xe9);
-        assert((unsigned char)image[IOS_SCH_RENDER_DRAIN_SITE] == 0xe8);
-        assert(!memcmp(image + IOS_SCH_RENDER_CHANNEL_KEEP, before + IOS_SCH_RENDER_CHANNEL_KEEP, 7));
-        for (size_t i = 0; i < sizeof(ios_sch_renderer_channels); i++)
-            assert(!image[IOS_SCH_RENDER_CHANNEL_THUNK+i]);
+        assert(!memcmp(image + R_GETTER, before + R_GETTER, 8));
+        for (size_t k = 0; k < sch_build->blob_count; k++)
+            if (sch_build->blob[k].ipc)
+                assert(!memcmp(image + sch_build->blob[k].rva, before + sch_build->blob[k].rva, sch_build->blob[k].len));
+        for (size_t k = 0; k < sch_build->hook_count; k++)
+            if (sch_build->hook[k].ipc)
+                assert(!memcmp(image + sch_build->hook[k].site, before + sch_build->hook[k].site, sch_build->hook[k].span));
+#if REBIND_TRACE
+        assert((unsigned char)image[R_CONNECT] == 0xe9);
+#endif
+        assert((unsigned char)image[sch_build == &ios_sch_builds[0] ? IOS_SCH_RENDER_DRAIN_SITE
+                                                                     : IOS_SCH296_RENDER_DRAIN_SITE] == 0xe8);
+        assert(!memcmp(image + R_KEEP, before + R_KEEP, 7));
         free(before);
-        assert(!munmap(image, IOS_SCH_SIZE));
+        assert(!munmap(image, B_SIZE));
         puts("PASS: IPC split opt-out preserves the earlier renderer, drain and diagnostic patches");
         return 0;
     }
-    assert((unsigned char)image[0x4b290] == 0xe9);
-    assert((unsigned char)image[IOS_SCH_RENDER_CHANNEL_KEEP] == 0xe9);
+    assert((unsigned char)image[R_GETTER] == 0xe9);
+    assert((unsigned char)image[R_KEEP] == 0xe9);
     channel_reply_fixture(before);
     free(before);
-    if (argc > 1 && !strcmp(argv[1], "legacy"))
-        memcpy(image + 0x4b290, "\x48\x8b\x05\xf9\x28\x18\x00\xc3", 8);
+    if (argc > 1 && !strcmp(argv[1], "legacy")) {
+        /* The original getter: mov rax, [rip + browser singleton]; ret */
+        unsigned char getter[8] = {0x48,0x8b,0x05,0,0,0,0,0xc3};
+        int32_t disp = (int32_t)(R_BROWSER - (R_GETTER + 7));
+        memcpy(getter + 3, &disp, 4);
+        memcpy(image + R_GETTER, getter, sizeof(getter));
+    }
     if (argc > 1 && !strcmp(argv[1], "old-rebind"))
-        memcpy(image + IOS_SCH_RENDER_CHANNEL_KEEP, "\x44\x0f\xb6\xc3\x48\x8b\xc8", 7);
-    stub(0x13e708, (uintptr_t)allocate); stub(0x4a400, (uintptr_t)construct);
-    image[0x4a5ca] = image[0x4bab2] = (char)0xc3;
-    stub(0x4ba55, (uintptr_t)initialize); stub(0x11bb70, (uintptr_t)global_loop);
-    stub(IOS_SCH_IPC_CONNECT + 5, (uintptr_t)connect_body);
-    stub(0x111340, (uintptr_t)log_rebind); stub(0x13e744, (uintptr_t)delete_manager);
+        memcpy(image + R_KEEP, "\x44\x0f\xb6\xc3\x48\x8b\xc8", 7);
+    stub(R_NEW, (uintptr_t)allocate); stub(R_CTOR, (uintptr_t)construct);
+    image[R_CTOR_STORE + 7] = image[R_ROLE_STORE + 7] = (char)0xc3;
+    stub(R_INIT + 5, (uintptr_t)initialize); stub(R_GLOBAL_LOOP, (uintptr_t)global_loop);
+    stub(R_CONNECT + (REBIND_TRACE ? 5 : 0), (uintptr_t)connect_body);
+#if CREATION_LOG || REBIND_TRACE
+    stub(R_LOG, (uintptr_t)log_rebind);
+#else
+    (void)log_rebind;
+#endif
+    stub(R_DELETE, (uintptr_t)delete_manager);
     const unsigned char loop_return[] = {0x48,0x83,0xc4,0x20,0x41,0x5e,0xc3};
     const unsigned char connect_return[] = {0x48,0x83,0xc4,0x28,0xc3};
     const unsigned char direct_return[] = {0x48,0x89,0xd8,0x48,0x83,0xc4,0x20,0x5b,0xc3};
-    memcpy(image + 0x4d25a, loop_return, sizeof(loop_return));
-    memcpy(image + 0x4d300, connect_return, sizeof(connect_return));
-    memcpy(image + 0x4da73, direct_return, sizeof(direct_return));
+    memcpy(image + R_LOOP_CALL + 5, loop_return, sizeof(loop_return));
+    memcpy(image + R_CONNECT_CALL + 5, connect_return, sizeof(connect_return));
+    memcpy(image + R_DIRECT + 7, direct_return, sizeof(direct_return));
     const unsigned char reply_return[] = {0x48,0x83,0xc4,0x28,0x5e,0x5b,0xc3};
-    memcpy(image + IOS_SCH_RENDER_CHANNEL_REPLY + 0x19, reply_return, sizeof(reply_return));
+    memcpy(image + R_REPLY + 0x19, reply_return, sizeof(reply_return));
     destructor_fixture();
-    *(uintptr_t *)(image + 0x181af8) = (uintptr_t)currently_on;
-    assert(!mprotect(image + 0x1000, 0x180000, PROT_READ | PROT_EXEC));
+    *(uintptr_t *)(image + R_CURRENTLY_ON) = (uintptr_t)currently_on;
+    assert(!mprotect(image + 0x1000, B_TEXT_END - 0x1000, PROT_READ | PROT_EXEC));
     static void *ref_vtable[] = {(void *)add_ref};
     config = (struct Config){NULL, vbtable, {ref_vtable, 1}};
     *browser_slot() = &browser; init_members(&browser); browser.client.handler = 1;
-    get_manager = (void *)(image + 0x4b290);
-    assert(probe_get(get_manager) == &browser && !allocations);
-    assert(lookup_direct(image + 0x4da6c) == &browser);
+    get_manager = (void *)(image + R_GETTER);
+    assert(PROBE(get_manager) == &browser && !allocations);
+    assert(lookup_direct(image + R_DIRECT) == &browser);
     struct Config *argument = &config;
     config.ref.refs++; /* same ownership as the original WinMain call */
-    ((int (ABI *)(struct Manager *, struct Config **))(image + 0x4ba50))(&browser, &argument);
+    ((int (ABI *)(struct Manager *, struct Config **))(image + R_INIT))(&browser, &argument);
     assert(config.ref.refs == 1 && browser.client.active && global_loops == 1);
     /* Browser reconnection still closes its old channel when requested; only
      * the renderer's Channel Response instruction changed. */
-    ((void (ABI *)(struct Manager *, const uint16_t *, unsigned int))(image + IOS_SCH_IPC_CONNECT))(&browser, channel1, 1);
+    ((void (ABI *)(struct Manager *, const uint16_t *, unsigned int))(image + R_CONNECT))(&browser, channel1, 1);
     assert(browser.client.channels == (1u << 1) && browser.client.disconnects == 1);
-    ((void (ABI *)(struct Manager *, const uint16_t *, unsigned int))(image + IOS_SCH_IPC_CONNECT))(&browser, channel0, 1);
+    ((void (ABI *)(struct Manager *, const uint16_t *, unsigned int))(image + R_CONNECT))(&browser, channel0, 1);
     assert(browser.client.channels == 1 && browser.client.disconnects == 2);
     pause_init = argc == 1;
     pthread_t thread;
@@ -491,31 +532,147 @@ int main(int argc, char **argv)
     }
     assert(!pthread_join(thread, NULL));
     assert(get_manager() == &browser && browser.client.active && *renderer_slot());
-    assert(logs == 7 && creation_logs == 1 && config.ref.refs == 1);
+    assert(logs == (REBIND_TRACE ? 7 : 0) && creation_logs == CREATION_LOG && config.ref.refs == 1);
     shutdown_complete = 1;
-    ((void (ABI *)(struct Manager *))(image + 0x4a6e0))(&browser);
+    ((void (ABI *)(struct Manager *))(image + R_DTOR))(&browser);
     assert(destroys == 2 && deletes == 1 && !*renderer_slot() && !*browser_slot());
     assert(destroyed_channels == 3);
-    assert(!munmap(image, IOS_SCH_SIZE));
+    assert(!munmap(image, B_SIZE));
     puts("PASS: browser channel_0 and renderer channels_1/2 retain their managers, handlers and connections");
     puts("PASS: repeated replies retain connections; the 64-slot bound avoids opening another transport");
+#if FULL_PRESERVE
     puts("PASS: Win64 scalar/vector/flags state, consumed CefRefPtr, initialization reentry and concurrent browser lookup");
+#else
+    puts("PASS: Win64 nonvolatile state, consumed CefRefPtr, initialization reentry and concurrent browser lookup");
+#endif
     puts("PASS: renderer is destroyed and freed once after CEF shutdown, before clearing the browser singleton");
 }
 '''
+
+
+def link(folder, source, sections, symbols, defsym):
+    script = 'SECTIONS { %s }\n' % ' '.join('%s 0x%x : { *(%s) }' % (s, a, s) for s, a in sections)
+    script += '\n'.join('%s = %d;' % item for item in symbols.items()) + '\n'
+    (folder / 'link.ld').write_text(script)
+    subprocess.run(['as', '--64', *defsym, str(root / 'tests/host' / source), '-o', str(folder / 'a.o')], check=True)
+    subprocess.run(['ld', '-T', str(folder / 'link.ld'), str(folder / 'a.o'), '-o', str(folder / 'a.elf')], check=True)
+    out = {}
+    for section, _ in sections:
+        subprocess.run(['objcopy', '-O', 'binary', '--only-section=' + section,
+                        str(folder / 'a.elf'), str(folder / 'a.bin')], check=True)
+        out[section] = (folder / 'a.bin').read_bytes()
+    table = subprocess.check_output(['nm', str(folder / 'a.elf')], text=True)
+    return out, {m[2]: int(m[1], 16) for m in re.finditer(r'(?m)^([\da-f]+) [Tt] (\w+)$', table)}
+
+
+def check_build(index, build, folder):
+    P = build['prefix']
+    d = lambda name: define(P + name)
+    symbols = {
+        'cef_currently_on': build['currently_on'], 'renderer_manager': d('IPC_CONTEXT'),
+        'command_line': d('IPC_CONTEXT') + 8, 'browser_manager': build['browser'],
+        'helper_new': build['helper_new'], 'manager_ctor': build['ctor'], 'manager_init': build['init'],
+        'init_continue': build['init'] + 5, 'ctor_continue': build['ctor_store'] + 7,
+        'role_continue': build['role_store'] + 7, 'helper_global_loop': build['global_loop'],
+        'manager_connect': build['connect'], 'manager_dtor': build['dtor'],
+        'helper_delete': build['helper_delete'], 'dtor_continue': build['dtor_store'] + 7,
+        'manager_getter': build['getter'], 'direct_continue': build['direct'] + 7,
+    }
+    if build['log']:
+        symbols['helper_log'] = build['log']
+    sections = [(section, d(macro)) for section, macro, _ in build['split']]
+    out, names = link(folder, 'sc-ipc-split.S', sections, symbols, build['defsym'])
+    for section, _, blob in build['split']:
+        assert out[section] == array_bytes(blob), (build['name'], section)
+    entries = {
+        'sc_ipc_get_manager': 'IPC_SPLIT', 'sc_ipc_capture_config': 'IPC_CAPTURE',
+        'sc_ipc_ctor_store': 'IPC_STORE', 'sc_ipc_renderer_role': 'IPC_ROLE',
+        'sc_ipc_global_loop': 'IPC_GLOBAL_LOOP', 'sc_ipc_initial_connect': 'IPC_INITIAL_CONNECT',
+        'sc_ipc_destroy': 'IPC_DESTROY', 'sc_ipc_direct_getter': 'IPC_DIRECT',
+    }
+    for entry, macro in entries.items():
+        assert names[entry] == d(macro), (build['name'], entry)
+    keep, reply = d('RENDER_CHANNEL_KEEP'), d('RENDER_CHANNEL_REPLY')
+    out, _ = link(folder, 'sc-renderer-channels.S', [('.text', d('RENDER_CHANNEL_THUNK'))],
+                  {'reply_continue': keep + 7, 'reply_cleanup': reply + 0x19}, build['defsym'])
+    assert out['.text'] == array_bytes(P.lower().rstrip('_') + '_renderer_channels'), build['name']
+    assert keep == reply + 5
+    # The C hook table installs exactly these hooks for the split, at the sites
+    # the fixture drives (each site is inside a guarded digest range).
+    expect = {
+        (build['getter'], d('IPC_SPLIT'), 7, 0xe9, 1), (build['init'], d('IPC_CAPTURE'), 5, 0xe9, 1),
+        (build['ctor_store'], d('IPC_STORE'), 7, 0xe9, 1), (build['role_store'], d('IPC_ROLE'), 7, 0xe9, 1),
+        (build['loop_call'], d('IPC_GLOBAL_LOOP'), 5, 0xe8, 1),
+        (build['connect_call'], d('IPC_INITIAL_CONNECT'), 5, 0xe8, 1),
+        (build['dtor_store'], d('IPC_DESTROY'), 7, 0xe9, 1), (build['direct'], d('IPC_DIRECT'), 7, 0xe9, 1),
+        (keep, d('RENDER_CHANNEL_THUNK'), 7, 0xe9, 1),
+    }
+    hooks = hook_table(build['hooks'])
+    assert {h for h in hooks if h[4]} == expect, (build['name'], sorted(expect ^ {h for h in hooks if h[4]}))
+    table = code_table(build['table'])
+    for site, _, span, _, _ in hooks:
+        assert any(rva <= site and site + span <= rva + n for rva, n, _ in table), (build['name'], hex(site))
+    padding = [(rva, n) for rva, n, dg in table if dg == hashlib.sha256(b'\xc3' + b'\xcc' * (n - 1)).digest()]
+    # Layout: tail blobs between .text's VirtualSize and its page end, padding
+    # stubs inside a guarded RET + int3 run past its RET, and the renderer
+    # manager slot in .data's zero-filled page slack ahead of the handler cache.
+    text_start, text_end = 0x1000 + build['text_vs'], (0x1000 + build['text_vs'] + 0xfff) & ~0xfff
+    for section, macro, blob in build['split'] + [('.text', 'RENDER_CHANNEL_THUNK', P.lower().rstrip('_') + '_renderer_channels')]:
+        at, n = d(macro), len(array_bytes(blob))
+        assert (text_start <= at and at + n <= text_end or
+                any(rva < at and at + n <= rva + size for rva, size in padding)), (build['name'], macro)
+    assert build['data'] + build['data_vs'] <= d('IPC_CONTEXT') and d('IPC_CONTEXT') + 16 <= d('CACHE')
+    assert d('CACHE') + 8 <= (build['data'] + build['data_vs'] + 0xfff) & ~0xfff
+    assert build['connect'] == d('IPC_CONNECT')
+    if build['rebind_trace']:
+        trace = array_bytes('ios_sch_ipc_rebind')
+        assert define('IOS_SCH_IPC_TRACE') + len(trace) <= define('IOS_SCH_IPC_SPLIT')
+        assert define('IOS_SCH_IPC_COUNT') + 4 <= define('IOS_SCH_IPC_CONTEXT')
+    print('PASS: %s: assembled split/channel bytes, entry RVAs and hook table match' % build['name'], flush=True)
+
+    text_end = (0x1000 + build['text_vs'] + 0xfff) & ~0xfff
+    defines = {
+        'BUILD': index, 'B_STAMP': d('STAMP'), 'B_SIZE': d('SIZE'), 'B_TEXT_VS': build['text_vs'],
+        'B_TEXT_RAW': build['text_raw'], 'B_DATA': build['data'], 'B_DATA_VS': build['data_vs'],
+        'B_TEXT_END': text_end, 'FULL_PRESERVE': build['full_preserve'],
+        'CREATION_LOG': build['creation_log'], 'REBIND_TRACE': build['rebind_trace'],
+        'R_BROWSER': build['browser'], 'R_CONTEXT': d('IPC_CONTEXT'), 'R_CURRENTLY_ON': build['currently_on'],
+        'R_NEW': build['helper_new'], 'R_DELETE': build['helper_delete'], 'R_CTOR': build['ctor'],
+        'R_INIT': build['init'], 'R_CTOR_STORE': build['ctor_store'], 'R_ROLE_STORE': build['role_store'],
+        'R_GLOBAL_LOOP': build['global_loop'], 'R_LOOP_CALL': build['loop_call'],
+        'R_CONNECT_CALL': build['connect_call'], 'R_CONNECT': build['connect'], 'R_DTOR': build['dtor'],
+        'R_DTOR_STORE': build['dtor_store'], 'R_GETTER': build['getter'], 'R_DIRECT': build['direct'],
+        'R_LOG': build['log'], 'R_KEEP': keep, 'R_REPLY': reply,
+    }
+    padding_c = 'static const unsigned int sch_padding_ranges[][2] = {%s};\n' % (
+        ','.join('{0x%x,%d}' % p for p in padding) if padding else '{0,0}')
+    code = PRELUDE + function('static int ios_sc_path_is_helper(') + '\n' + region + '\n' + padding_c + \
+        SHA_STANDIN + FIXTURE
     driver = folder / 'test.c'
     driver.write_text(code)
     binary = folder / 'test'
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                    '-O2', '-fsanitize=address,undefined', '-g', '-pthread', str(driver),
+                    '-O2', '-fsanitize=address,undefined', '-g', '-pthread',
+                    *('-D%s=%d' % item for item in defines.items()), str(driver),
                     '-o', str(binary)], check=True)
+    print('--- %s' % build['name'], flush=True)
     subprocess.run([str(binary)], check=True, timeout=30)
     old = subprocess.run([str(binary), 'legacy'], capture_output=True, text=True, timeout=30,
                          preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert old.returncode and 'm != &browser' in old.stderr, old.stderr
-    print('PASS: restoring the legacy getter reproduces the shared manager ownership failure', flush=True)
+    print('PASS: %s: restoring the legacy getter reproduces the shared manager ownership failure'
+          % build['name'], flush=True)
     old_rebind = subprocess.run([str(binary), 'old-rebind'], capture_output=True, text=True, timeout=30,
                                preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
     assert old_rebind.returncode and 'm->client.channels ==' in old_rebind.stderr, old_rebind.stderr
-    print('PASS: restoring the old Channel Response instruction closes the first frontend connection', flush=True)
+    print('PASS: %s: restoring the old Channel Response instruction closes the first frontend connection'
+          % build['name'], flush=True)
     subprocess.run([str(binary), 'disabled'], check=True, env={**os.environ, 'MADEIRA_SC_IPC_SPLIT': '0'})
+
+
+with tempfile.TemporaryDirectory(prefix='madeira-sc-split-') as name:
+    builds = re.search(r'ios_sch_builds\[\] =\n\{(.*?)\n\};', native, re.S)[1]
+    assert re.findall(r'\n    \{ (IOS_SCH\w*?)STAMP,', builds) == [b['prefix'] for b in BUILDS], \
+        'every analysed build has a fixture, in table order'
+    for index, build in enumerate(BUILDS):
+        check_build(index, build, Path(name))

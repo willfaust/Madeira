@@ -27,6 +27,13 @@ assert define('IOS_SCH_RUN_RING') + define('IOS_SCH_RUN_RING_SIZE') <= define('I
 assert define('IOS_SCH_TASK_ANY') + 11 <= define('IOS_SCH_RUN_INSTALL')
 assert define('IOS_SCH_RUN_INSTALL') + len(blob) <= 0x181000
 assert int(re.search(r'#define IOS_SC_RUN_RING_RVA (0x[\da-f]+)', header.read_text())[1], 0) == define('IOS_SCH_RUN_RING')
+# 2.4.0.296 has no room for the trace: its build entry installs no RunState
+# hook and its patch never names the ring, which the diagnostic gate rejects.
+later = native[native.index('static const struct ios_sch_blob ios_sch296_blob[]'):
+               native.index('static const struct ios_sch_build ios_sch_builds[]')]
+assert 'run_trace' not in later and 'RUN_' not in later
+assert not re.search(r'#define IOS_SCH296_RUN', native)
+assert define('IOS_SCH296_STAMP') == 0x6ae5e38b and define('IOS_SCH296_SIZE') == 0x26d000
 
 with tempfile.TemporaryDirectory(prefix='madeira-sc-runstate-') as name:
     folder = Path(name)
@@ -220,6 +227,12 @@ int main(void)
     *(uint32_t *)(image + 0x88) ^= 1;
     assert(!ios_sc_diag_helper((uintptr_t)image, (uintptr_t)image + 0x173be4));
     *(uint32_t *)(image + 0x88) ^= 1;
+    /* 2.4.0.296 (ios_sch_builds[1]) has no RunState trace or ring: never read one. */
+    *(uint32_t *)(image + 0x88) = 0x6ae5e38b; *(uint32_t *)(image + 0xd0) = 0x26d000;
+    assert(!ios_sc_diag_helper((uintptr_t)image, (uintptr_t)image + 0x173be4));
+    *(uint32_t *)(image + 0xd0) = 0x244000;
+    assert(!ios_sc_diag_helper((uintptr_t)image, (uintptr_t)image + 0x173be4));
+    *(uint32_t *)(image + 0x88) = 0x6a86d563;
     memcpy(pool + IOS_SC_RUN_RING_RVA, ring, sizeof(*ring));
     uint64_t stack[256] = {0}; stack[12] = (uintptr_t)image + 0x17412b;
     ios_sc_runstate_dump((uintptr_t)image, (uintptr_t)image + 0x173be4, (uintptr_t)&p, (uintptr_t)stack);
