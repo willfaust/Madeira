@@ -583,7 +583,7 @@ require('static let diskCap = 300 * 1024 * 1024' in cover_cache and 'static func
 # The store sections (GOG, itch.io, Epic Games, EA app) follow Steam and Other games on the grid as on the original page, each one
 # hosted whole; their sheets belong to the page, not to a cell the grid can reuse.
 build = between(page, '@MainActor static func build(_ inputs: Inputs)', 'private mutating func append(')
-stores_ok = 'for store in LibraryGridStore.allCases {' in build and 'page.append(.fixed(.store(store, signature: signature))' in build
+stores_ok = 'for store in LibraryGridStore.allCases where tab.shows(store.tab) {' in build and 'page.append(.fixed(.store(store, signature: signature))' in build
 for section, sheets, model in [('GOGGamesSection', 'GOGSheets', 'GOGGames'), ('ItchGamesSection', 'ItchSheets', 'ItchGames'), ('EpicGamesSection', 'EpicSheets', 'EpicGames'),
                                ('EAGamesSection', 'EASheets', 'EAGames')]:
     source = (app / f'{model}.swift').read_text()

@@ -57,6 +57,11 @@ Removing an entry never removes the game's files or saves.
   installed games, Sort by apply to every section. Pull down to read the
   Steam install records and the account's library again. Without Madeira
   Dock the games you added are one grid.
+- Store tabs: with Group by Platform and two or more sections, a segmented control at
+  the top of the page shows **All** of them or one at a time (**Steam**, **Other** for the
+  games you added, **GOG**, **itch.io**, **Epic**, **EA**). Only the sections the page shows
+  get a tab; the choice is remembered, and a tab whose store is turned off shows All. When
+  the segments do not fit across, they become capsules that scroll sideways.
 - Grid cards: a game that is not installed shows its artwork darkened, with a
   download glyph on a soft circle of blur. Every grid card throws ambient
   light on the page around it, like an LED strip behind a TV: its artwork's own
@@ -549,6 +554,7 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_FRONTEND_KEYBOARD` | on | Keyboard opens the game view's own keyboard instead of the key window |
 | `MADEIRA_ONBOARDING` | on | first-run setup never opens, and Settings › JIT/Steam have no **Run setup again** |
 | `MADEIRA_LIBRARY_COLLAPSE` | on | the **Steam** and **Other games** titles do not collapse (**Not installed** still folds) |
+| `MADEIRA_LIBRARY_TABS` | on | no store tabs: every section on one page |
 | `MADEIRA_LIBRARY_AMBIENT` | on | no ambient light around the library's grid cards |
 
 Opt-in (`env.NAME = 1`), off by default:
