@@ -1,0 +1,28 @@
+name: Runner probe
+
+# Which GitHub-hosted macOS images start for this repository, and which Xcode
+# versions they carry (build.yml needs Xcode 27). Manual only.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths: ['.github/workflows/runner-probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-26, macos-15, macos-latest, macos-26-xlarge]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
+    steps:
+      - run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          ls -d /Applications/Xcode*.app
+          df -h /
