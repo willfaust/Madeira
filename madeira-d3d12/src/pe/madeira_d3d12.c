@@ -6384,8 +6384,15 @@ static int mad_pa_start(void) {
     LONG s = InterlockedCompareExchange(&state, 1, 0);
     if (s == 0) {
         unsigned t, n = 0;
+        /* madeira-duo pso-async-threads: a build mostly waits on Metal's compiler
+         * service, which compiles several at once. On a new PoE2 map ~550
+         * pipelines miss the archive at ~430 ms each, and with 2 builders enemies
+         * stayed invisible for seconds (text15: 11k draws skipped). */
+        unsigned want = (unsigned)mad_cfg_int_pe("pso-async-threads", 2);
+        if (want < 1) want = 1; if (want > 8) want = 8;
         g_pa_sem = CreateSemaphoreA(NULL, 0, MAD_PA_MAX, NULL);
-        for (t = 0; g_pa_sem && t < 2; t++) {
+        d3d12_log("[madeira-d3d12] pso-async: %u builder threads (madeira.cfg pso-async-threads)\n", want);
+        for (t = 0; g_pa_sem && t < want; t++) {
             HANDLE h = CreateThread(NULL, 256 << 10, mad_pa_worker, NULL, 0, NULL);
             if (h) { CloseHandle(h); n++; }
         }
