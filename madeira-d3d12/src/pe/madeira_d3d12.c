@@ -3447,12 +3447,17 @@ static int mad_readback_swap_on(void) {
  * the warm-up turns itself off. */
 struct mad_pso_warm_req { UINT64 device, info, vd; };
 static void mad_pso_warm(obj_handle_t device, const void *info, const void *vd, UINT kind) {
-    static int on = -1;
+    static int on = -1, compute_only;
     static volatile LONG sent;
     struct madeira_ctl_args a; struct mad_pso_warm_req r;
     if (on < 0) { on = mad_cfg_int_pe("pso-warm", 0) > 0;   /* pipeline cache warm-up: N background compiles of every lazy pipeline at creation (1-4; 0 = off) */
-                  if (on) d3d12_log("[madeira-d3d12] pso-warm: lazy pipelines are compiled once in the background when the game creates them (madeira.cfg pso-warm)\n"); }
-    if (!on || !device || !info) return;
+                  /* madeira-duo: PoE2 creates ~10,000 graphics pipelines and draws with ~2,600 (text6/text8 logs, 4 Nov);
+                   * warming all of them compiled for the whole session on a clamped CPU. Graphics pipelines are
+                   * built off the render thread anyway (pso-async); compute ones block it at first dispatch. */
+                  compute_only = mad_cfg_int_pe("pso-warm-compute-only", 0) > 0;   /* 1: pso-warm compiles compute pipelines only */
+                  if (on) d3d12_log("[madeira-d3d12] pso-warm: lazy %spipelines are compiled once in the background when the game creates them (madeira.cfg pso-warm%s)\n",
+                                    compute_only ? "compute " : "", compute_only ? ", pso-warm-compute-only" : ""); }
+    if (!on || !device || !info || (compute_only && kind != 2)) return;
     r.device = device; r.info = (UINT64)(ULONG_PTR)info; r.vd = (UINT64)(ULONG_PTR)vd;
     memset(&a, 0, sizeof a); a.op = 10; a.len = kind; a.ptr = (UINT64)(ULONG_PTR)&r;
     MadeiraCtl(&a);   /* winemetal copies the descriptors before it returns */
