@@ -1062,6 +1062,7 @@ static void mad_es_thread_exit(void) {   /* DLL_THREAD_DETACH: the thread's stat
 /* madeira-bcd: where pipeline creation time goes -- the "Compiling shaders"
  * screen and the stalls at first draw. QPC ticks, summed over all threads. */
 static volatile LONG64 g_pt_gfx, g_pt_cs, g_pt_conv, g_pt_lib, g_pt_rs, g_pt_realize;
+static volatile LONG64 g_pt_conv_hit; static volatile LONG g_pn_conv_hit;   /* madeira-duo: shader cache hits within g_pt_conv */
 static volatile LONG g_pn_gfx, g_pn_cs, g_pn_lib, g_pn_rs, g_pn_realize;
 /* madeira-duo hitch recorder (mad_hitch_frame, mad_ecl_run): cumulative, never reset,
  * QPC ticks. Compute pipelines built at first dispatch; batch commits (mad_queue_flush);
@@ -1073,8 +1074,8 @@ static void mad_pso_time_report(const char *why) {
     QueryPerformanceFrequency(&f);
     ms = f.QuadPart ? 1000.0 / (double)f.QuadPart : 0.0;
     d3d12_log("[madeira-d3d12] pso time (%s): %ld graphics pipelines %.0f ms, %ld compute %.0f ms; inside them shader conversion+cache "
-              "%.0f ms, %ld new Metal libraries %.0f ms; %ld root signatures %.0f ms; %ld lazy pipelines built at first draw %.0f ms\n",
-              why, g_pn_gfx, (double)g_pt_gfx * ms, g_pn_cs, (double)g_pt_cs * ms, (double)g_pt_conv * ms, g_pn_lib,
+              "%.0f ms (cache hits %ld, %.0f ms), %ld new Metal libraries %.0f ms; %ld root signatures %.0f ms; %ld lazy pipelines built at first draw %.0f ms\n",
+              why, g_pn_gfx, (double)g_pt_gfx * ms, g_pn_cs, (double)g_pt_cs * ms, (double)g_pt_conv * ms, (long)g_pn_conv_hit, (double)g_pt_conv_hit * ms, g_pn_lib,
               (double)g_pt_lib * ms, g_pn_rs, (double)g_pt_rs * ms, g_pn_realize, (double)g_pt_realize * ms);
 }
 static LONG g_perf_ecl, g_perf_signals, g_perf_waits, g_perf_polls, g_perf_qwait_sleeps; static LONGLONG g_perf_wait_ticks, g_perf_sig_lat_ticks; static LONG g_perf_sig_lat_n;
@@ -10571,17 +10572,12 @@ static int mad_hz_take(void) {   /* one more line in this 5 s window? */
     InterlockedIncrement(&g_hz_dropped);
     return 0;
 }
-static LONG64 mad_hz_ft(const FILETIME *f) { return (LONG64)(((ULONGLONG)f->dwHighDateTime << 32) | f->dwLowDateTime); }
-static LONG64 mad_hz_thread_cpu(HANDLE h) {   /* kernel + user, 100 ns units; -1 if unknown */
-    FILETIME c, e, k, u;
-    if (!h || !GetThreadTimes(h, &c, &e, &k, &u)) return -1;
-    return mad_hz_ft(&k) + mad_hz_ft(&u);
-}
-static LONG64 mad_hz_process_cpu(void) {
-    FILETIME c, e, k, u;
-    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return -1;
-    return mad_hz_ft(&k) + mad_hz_ft(&u);
-}
+/* No CPU-time reads: GetThreadTimes / GetProcessTimes are Wine server round trips
+ * (~100 a second from the game's thread in the 4 Nov res3 log) and GetThreadTimes
+ * answered with the PROCESS's time on Madeira (cpu above wall). The [xp-t] sampler
+ * has the per-thread CPU. -1 = not measured. */
+static LONG64 mad_hz_thread_cpu(HANDLE h) { (void)h; return -1; }
+static LONG64 mad_hz_process_cpu(void) { return -1; }
 static void mad_hz_memory(char *buf, size_t n) {   /* MadeiraCtl op 7: phys_footprint and what iOS still allows */
     struct madeira_ctl_args a;
     memset(&a, 0, sizeof a); a.op = 7; MadeiraCtl(&a);
@@ -17739,10 +17735,15 @@ static void mad_failmemo_add(const UINT64 key[2], const struct madeira_ir_conver
 }
 
 static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a);
+/* madeira-duo: the res3 log (4 Nov) spent 45.6 s in conversion+cache for 13,806 hits
+ * and 194 misses; split it, so the pso time line says what a hit costs. */
 static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {   /* madeira-bcd: timed */
-    LONG64 t0 = mad_qpc();
+    LONG64 t0 = mad_qpc(), dt;
+    LONG hits = g_sc_hit;
     mad_ir_convert_cached_impl(a);
-    InterlockedExchangeAdd64(&g_pt_conv, mad_qpc() - t0);
+    dt = mad_qpc() - t0;
+    InterlockedExchangeAdd64(&g_pt_conv, dt);
+    if (g_sc_hit != hits) { InterlockedExchangeAdd64(&g_pt_conv_hit, dt); InterlockedIncrement(&g_pn_conv_hit); }
 }
 static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a) {
     UINT64 key[2]; int fresh = 0;
