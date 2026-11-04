@@ -4369,18 +4369,23 @@ struct TouchControlsOverlay: View {
     /// neighbours sit further apart than that, so nothing merges until it is
     /// moved almost touching. Before 26 the same views stack as plain material.
     @ViewBuilder private func controls(_ screen: CGSize, session: Bool) -> some View {
+        // A library session's Control opacity; full while editing. The opacity
+        // goes on the whole group, not on each button: inside a
+        // GlassEffectContainer the glass is rendered by the container as one
+        // layer over its children, so a button's own .opacity faded its label and
+        // left the glass as it was (the Opacity slider seemed to do nothing).
+        let opacity = session && !m.editing ? library.opacity : 1
         let buttons = ForEach(m.controls) { c in
             TouchControlButton(control: c, screen: screen)
-                // A library session's Control opacity; full while editing.
-                .opacity(session && !m.editing ? library.opacity : 1)
         }
         if #available(iOS 26.0, *) {
             GlassEffectContainer(spacing: 12) {
                 ZStack { buttons }
                     .frame(width: screen.width, height: screen.height, alignment: .topLeading)
             }
+            .opacity(opacity)
         } else {
-            buttons
+            buttons.opacity(opacity)
         }
     }
 
@@ -4520,6 +4525,9 @@ struct GlassShape: View {
     var capsule = false
     var cornerRadius: CGFloat = 18
     var tint: Color? = nil
+    /// The touch controls' Solid button style (TouchControlStyle): a plain opaque
+    /// disc in place of the glass, the tint as its colour.
+    var solid = false
     fileprivate var shape: AnyShape {
         if circle { return AnyShape(Circle()) }
         if capsule { return AnyShape(Capsule()) }
@@ -4537,7 +4545,9 @@ extension View {
     /// sibling of its glass ends up blurred underneath it; a label that is the
     /// glass view's own content is drawn on top, as the system's buttons are.
     @ViewBuilder func glassFace(_ g: GlassShape) -> some View {
-        if #available(iOS 26.0, *) {
+        if g.solid {
+            self.background(g.shape.fill(g.tint ?? TouchControlStyle.solidFill))
+        } else if #available(iOS 26.0, *) {
             if let tint = g.tint {
                 self.glassEffect(.regular.tint(tint.opacity(0.55)), in: g.shape)
             } else {
@@ -4550,6 +4560,17 @@ extension View {
             }
         }
     }
+}
+
+/// The touch controls' button style, remembered for every game: "glass" (the
+/// system's Liquid Glass, as before) or "solid" (an opaque disc, no glass;
+/// the Opacity slider still fades the whole set). Chosen in the in-game menu
+/// and in Settings › Appearance. The overlay's top bar stays glass.
+enum TouchControlStyle {
+    static let key = "madeiraControlsStyle"
+    static let styles: [(id: String, name: String)] = [("glass", "Glass"), ("solid", "Solid")]
+    static let solidFill = Color(red: 0.17, green: 0.17, blue: 0.19)
+    static func isSolid(_ style: String) -> Bool { style == "solid" }
 }
 
 extension ControlAction {
@@ -4570,11 +4591,13 @@ struct TouchControlButton: View {
     let control: TouchControl
     let screen: CGSize
     @ObservedObject private var m = TouchControlsModel.shared
+    @AppStorage(TouchControlStyle.key) private var style = "glass"
     @State private var isDown = false
     @State private var dragBase: CGPoint?
     @State private var stickDir: Int = -1
     @State private var padVector = CGSize.zero
 
+    private var solid: Bool { TouchControlStyle.isSolid(style) }
     private var diameter: CGFloat { TouchControlsModel.diameter(control) }
     private var size: CGSize { TouchControlsModel.size(control) }
     private var isStick: Bool { control.action.stickKeys != nil || control.action.isPadStick }
@@ -4608,19 +4631,19 @@ struct TouchControlButton: View {
                 }
             }
             .frame(width: size.width, height: size.height)
-            .glassFace(GlassShape(circle: true, tint: a.padTint))
+            .glassFace(GlassShape(circle: true, tint: a.padTint, solid: solid))
         case .small:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.36, weight: .semibold))
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(circle: true))
+                .glassFace(GlassShape(circle: true, solid: solid))
         case .wide:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.42, weight: .semibold))
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.88))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(cornerRadius: size.height * 0.30))
+                .glassFace(GlassShape(cornerRadius: size.height * 0.30, solid: solid))
         case .capsule:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.40, weight: .semibold))
@@ -4630,7 +4653,7 @@ struct TouchControlButton: View {
                 .padding(.horizontal, 6)
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(capsule: true))
+                .glassFace(GlassShape(capsule: true, solid: solid))
         }
     }
 
@@ -4644,7 +4667,7 @@ struct TouchControlButton: View {
                     Text(control.action.label).font(.caption).foregroundStyle(.white.opacity(0.8))
                 }
                 .frame(width: diameter, height: diameter)
-                .glassFace(GlassShape(circle: true))
+                .glassFace(GlassShape(circle: true, solid: solid))
             } else if control.action.stickKeys != nil {
                 // Reuse the portrait pad's face so both look and animate the
                 // same; scale it to whatever size this control was pinched to.
@@ -4656,7 +4679,7 @@ struct TouchControlButton: View {
                            height: JoystickFace.padRadius * 2)
                     .scaleEffect(diameter / (JoystickFace.padRadius * 2))
                     .frame(width: diameter, height: diameter)
-                    .glassFace(GlassShape(circle: true))
+                    .glassFace(GlassShape(circle: true, solid: solid))
             } else if control.action.isPad {
                 padFace
             } else {
@@ -4667,7 +4690,7 @@ struct TouchControlButton: View {
                                   weight: .medium))
                     .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                     .frame(width: size.width, height: size.height)
-                    .glassFace(GlassShape(circle: true))
+                    .glassFace(GlassShape(circle: true, solid: solid))
             }
         }
         .frame(width: size.width, height: size.height)
