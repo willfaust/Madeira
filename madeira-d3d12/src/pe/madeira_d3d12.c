@@ -10346,6 +10346,85 @@ static void mad_ffx_load(void);
 static void mad_ffx_before(struct mad_exec *e, const struct mad_cmd *c);
 static void mad_ffx_after(struct mad_exec *e, const struct mad_cmd *c);
 static obj_handle_t mad_fill_pattern(struct mad_device *d, UINT32 v);
+/* madeira-duo gpu-work: the work each pipeline is given, per [perf] window. Draws and
+ * vertices x instances for render pipelines, dispatches and threadgroups for compute
+ * ones, counted at replay. With [gpu-mix] flat, the pipelines whose share jumps in the
+ * slow windows are the work the GPU time goes to. Indirect records count as draws or
+ * dispatches with no size (the GPU writes it). A small open-addressed table keyed by
+ * the pipeline; a full table drops new pipelines (counted). */
+#define MAD_GW_N 2048
+struct mad_gw { struct mad_pso *volatile pso; volatile LONG draws; volatile LONG64 work; int compute; char name[84]; };   /* names copied: a pipeline may be freed before the report */
+static struct mad_gw g_gw[MAD_GW_N];
+static volatile LONG g_gw_draws, g_gw_disp, g_gw_ind, g_gw_full;
+static volatile LONG64 g_gw_verts, g_gw_tgs;
+static void mad_gw_note(struct mad_pso *p, LONG64 work) {
+    unsigned h, k;
+    if (!p) return;
+    h = (unsigned)(((ULONG_PTR)p >> 4) * 2654435761u) & (MAD_GW_N - 1);
+    for (k = 0; k < 16; k++) {
+        struct mad_gw *g = &g_gw[(h + k) & (MAD_GW_N - 1)];
+        struct mad_pso *cur = g->pso;
+        if (cur != p) {
+            if (cur) continue;
+            cur = InterlockedCompareExchangePointer((void *volatile *)&g->pso, p, NULL);
+            if (cur && cur != p) continue;
+            if (!cur) {
+                g->compute = p->is_compute;
+                if (p->is_compute) snprintf(g->name, sizeof g->name, "%.48s", p->vs_name);
+                else snprintf(g->name, sizeof g->name, "%.40s/%.40s", p->vs_name, p->ps_name);
+            }
+        }
+        InterlockedIncrement(&g->draws);
+        if (work) InterlockedExchangeAdd64(&g->work, work);
+        return;
+    }
+    InterlockedIncrement(&g_gw_full);
+}
+static void mad_gw_draw(struct mad_exec *e, const struct mad_cmd *c) {
+    LONG64 v = c->kind == MC_DRAW_INDEXED ? (LONG64)c->u.drawi.icount * (c->u.drawi.inst ? c->u.drawi.inst : 1)
+                                          : (LONG64)c->u.draw.vcount * (c->u.draw.icount ? c->u.draw.icount : 1);
+    InterlockedIncrement(&g_gw_draws); InterlockedExchangeAdd64(&g_gw_verts, v);
+    mad_gw_note(e->pso, v);
+}
+static void mad_gw_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
+    LONG64 t = (LONG64)c->u.dispatch.x * c->u.dispatch.y * c->u.dispatch.z;
+    InterlockedIncrement(&g_gw_disp); InterlockedExchangeAdd64(&g_gw_tgs, t);
+    mad_gw_note(e->cpso, t);
+}
+static void mad_gw_indirect(struct mad_exec *e, const struct mad_cmd *c) {
+    InterlockedExchangeAdd(&g_gw_ind, (LONG)c->u.ind.count);
+    mad_gw_note(c->kind == MC_DISPATCH_INDIRECT ? e->cpso : e->pso, 0);
+}
+/* Called from the [perf] report with the window's frame count: totals, then the top
+ * pipelines of each kind by work, then the table is emptied for the next window. */
+static void mad_gw_report(double frames) {
+    struct top { const char *p; LONG draws; LONG64 work; } tg[4], tc[4];
+    unsigned i, j, used = 0;
+    LONG d = InterlockedExchange(&g_gw_draws, 0), di = InterlockedExchange(&g_gw_disp, 0), ind = InterlockedExchange(&g_gw_ind, 0);
+    LONG full = InterlockedExchange(&g_gw_full, 0);
+    LONG64 v = InterlockedExchange64(&g_gw_verts, 0), t = InterlockedExchange64(&g_gw_tgs, 0);
+    char line[1024]; int n;
+    memset(tg, 0, sizeof tg); memset(tc, 0, sizeof tc);
+    for (i = 0; i < MAD_GW_N; i++) {
+        struct mad_gw *g = &g_gw[i];
+        struct mad_pso *p = g->pso; LONG dr; LONG64 w; struct top *tt;
+        if (!p) continue;
+        used++;
+        dr = InterlockedExchange(&g->draws, 0); w = InterlockedExchange64(&g->work, 0);
+        g->pso = NULL;
+        tt = g->compute ? tc : tg;
+        for (j = 0; j < 4; j++) if (w > tt[j].work || (!tt[j].p && dr)) break;
+        if (j < 4) { memmove(&tt[j + 1], &tt[j], (3 - j) * sizeof *tt); tt[j].p = g->name; tt[j].draws = dr; tt[j].work = w; }
+    }
+    d3d12_log("[gpu-work] per frame: %.0f draws, %.2f M vertices x instances, %.1f dispatches, %.0f threadgroups, %.1f indirect records; %u pipelines used in the window%s\n",
+              d / frames, v / 1e6 / frames, di / frames, t / frames, ind / frames, used, full ? " (table full, some not counted)" : "");
+    for (j = 0, n = 0; j < 4 && tg[j].p; j++)
+        n += snprintf(line + n, sizeof line - n, "%s%s %.0f draws %.2f MV", j ? "; " : "", tg[j].p, tg[j].draws / frames, tg[j].work / 1e6 / frames);
+    if (n) d3d12_log("[gpu-work] top render per frame: %s\n", line);
+    for (j = 0, n = 0; j < 4 && tc[j].p; j++)
+        n += snprintf(line + n, sizeof line - n, "%s%s %.1f dispatches %.0f tg", j ? "; " : "", tc[j].p, tc[j].draws / frames, tc[j].work / frames);
+    if (n) d3d12_log("[gpu-work] top compute per frame: %s\n", line);
+}
 static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t cb) {
     g_list_seq++;
     struct mad_exec e;
@@ -10456,12 +10535,13 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         case MC_QUERY_BEGIN: exec_query_begin(&e, c); break;     /* ml1088 */
         case MC_QUERY_END: exec_query_end(&e, c); break;
         case MC_QUERY_RESOLVE: exec_query_resolve(&e, c); break;
-        case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c); break;   /* madeira-bcd vis-trace */
+        case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); mad_gw_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c); break;   /* madeira-bcd vis-trace */
         case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: case MC_DISPATCH_INDIRECT: {
             struct mad_cmd t = *c; UINT k; UINT64 toff = 0;
             int tess = 0;
             if (!c->u.ind.args || !c->u.ind.args->buffer) { e.skipped++; break; }
             exec_indirect_probe(&e, c);   /* madeira-bcd: diagnostics, every 3 s per pipeline */
+            mad_gw_indirect(&e, c);   /* madeira-duo gpu-work */
             if (c->kind != MC_DISPATCH_INDIRECT && e.pso && e.pso->gs_emu == 2)   /* madeira-bcd */
                 tess = exec_tess_indirect_prep(&e, c, &toff);
             for (k = 0; k < c->u.ind.count; k++) {
@@ -10485,7 +10565,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             if (g_vt_on > 0) InterlockedIncrement(&g_vt_copy_q[q->type & 3]);   /* madeira-bcd vis-trace */
             break;
         case MC_BLEND_FACTOR: memcpy(e.blend, c->u.blend.rgba, sizeof e.blend); e.has_blend = 1; break;
-        case MC_DISPATCH: exec_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;   /* madeira-bcd vis-trace */
+        case MC_DISPATCH: exec_dispatch(&e, c); mad_gw_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;   /* madeira-bcd vis-trace */
         case MC_RESOLVE: exec_resolve(&e, c); break;
         case MC_DISCARD: break;   /* madeira-bcd rp-discard: exec_rp_note above */
         }
@@ -10885,6 +10965,7 @@ static void mad_perf_present(void) {
             d3d12_log("[gpu-mix] per frame: %.1f render passes (%.1f under 256x256, avg target %.2f MPix), %.1f compute, %.1f blit encoders; "
                       "attachment MPix loaded %.2f, stored %.2f, cleared %.2f; cbs %.1f\n",
                       rp / n, rs / n, rp ? tp / 1e6 / rp : 0.0, ce / n, be / n, lp / 1e6 / n, sp / 1e6 / n, cp / 1e6 / n, g_perf_cbs / n);
+            mad_gw_report(n);
         }
         {   /* ml1116: encoder fence traffic per frame (mode 2 should cut waits well below updates) */
             static LONG lw, lu, lb; LONG cw = g_fence_waits, cu = g_fence_updates, cb = g_barrier_seen;
