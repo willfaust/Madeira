@@ -6358,8 +6358,21 @@ static int mad_pso_async_on(void) {
     }
     return g_pso_async;
 }
+/* madeira-duo: name our own threads so env.MADEIRA_THREAD_QOS rules can class them
+ * (an unnamed guest thread runs USER_INTERACTIVE, beside the game's frame threads). */
+static void mad_name_self(const WCHAR *name) {
+    static HRESULT (WINAPI *set_desc)(HANDLE, const WCHAR *);
+    static int looked;
+    if (!looked) {
+        HMODULE k = GetModuleHandleA("kernelbase.dll");
+        if (k) set_desc = (void *)GetProcAddress(k, "SetThreadDescription");
+        looked = 1;
+    }
+    if (set_desc) set_desc(GetCurrentThread(), name);
+}
 static DWORD WINAPI mad_pa_worker(void *arg) {
     (void)arg;
+    mad_name_self(L"MadeiraPSO");   /* madeira-duo: classed by MADEIRA_THREAD_QOS */
     for (;;) {
         struct mad_pso *p = NULL; obj_handle_t pool; LONG n = 0;
         WaitForSingleObject(g_pa_sem, INFINITE);
@@ -6446,6 +6459,7 @@ static void mad_prebuild_run(struct mad_prebuild *w) {
 }
 static DWORD WINAPI mad_prebuild_worker(void *arg) {
     (void)arg;
+    mad_name_self(L"MadeiraPrebuild");
     for (;;) {
         obj_handle_t pool;
         WaitForSingleObject(g_pb_go, INFINITE);
@@ -11613,6 +11627,7 @@ static void mad_swd_stall(struct mad_queue *q, const char *what, unsigned slices
 static DWORD WINAPI mad_sub_worker(void *arg) {
     struct mad_queue *q = arg;
     mad_xp_role('W');   /* ml1128 */
+    mad_name_self(L"MadeiraSubmit");
     mad_eco_prio_self(0);   /* eco-prio (opt-in) */
     for (;;) {
         struct mad_subjob *j;
