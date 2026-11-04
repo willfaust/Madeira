@@ -26,7 +26,7 @@ env.MADEIRA_JAPANESE = 1
 | Part | Effect |
 |---|---|
 | Locale | `LC_ALL = ja_JP.UTF-8`: Wine's system and user locale are Japanese (ja-JP), so the ANSI and OEM code pages are 932 (Shift-JIS). A Japanese `env.LC_ALL` already in the game's config is kept. |
-| Code page tables | `env.MADEIRA_NLS_EXTRA = 1`: Wine's `c_932.nls` (and the other CJK tables) are loaded from the app's `nls/extra` folder. Without them code page 932 does not exist in Madeira. |
+| Code page tables | `env.MADEIRA_NLS_EXTRA = 1`: Wine's `c_932.nls` (and the other CJK tables, plus `c_10000.nls`, Mac Roman, which Wine's font code asks for when it reads font names) are loaded from the app's `nls/extra` folder. Without them code page 932 does not exist in Madeira. |
 | Font | The bundled **Noto Sans JP** (SIL Open Font License 1.1) is copied into the prefix's `C:\windows\Fonts`. |
 | Font names | `HKCU\Software\Wine\Fonts\Replacements` maps MS Gothic, MS PGothic, MS UI Gothic, MS Mincho, MS PMincho, Meiryo, Yu Gothic, Yu Mincho and their Japanese names (ＭＳ ゴシック, ＭＳ 明朝 …) onto Noto Sans JP. A replacement only applies while no real font of that name is installed, so a game that brings its own fonts keeps them. |
 
