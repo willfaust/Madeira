@@ -132,7 +132,8 @@ struct Checks {
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-library-groups-') as tmp:
     tmp = Path(tmp)
-    (tmp / 'rules.swift').write_text('import Foundation\n' + rules)
+    (tmp / 'rules.swift').write_text('import Foundation\n'
+                                     'func L(_ text: String) -> String { text }   // Library.swift\'s lookup; English here\n' + rules)
     (tmp / 'checks.swift').write_text(checks)
     exe = tmp / 'check'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-o', str(exe),

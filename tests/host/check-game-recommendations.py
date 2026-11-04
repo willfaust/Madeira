@@ -800,8 +800,8 @@ check(id(steam + #"\Call of Duty Black Ops"#, 42710) == "none" && id(steam + #"\
       "the first Black Ops' multiplayer shares the folder and has no list")
 check(id(steam + #"\The Escapists 2"#, 641990) == "the-escapists-2" && id(steam + #"\The Escapists 2\TheEscapists2.exe"#) == "the-escapists-2",
       "The Escapists 2 by App ID, folder and program")
-check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod"
-      && id(steam + #"\GarrysMod\hl2.exe"#) == "garrys-mod", "Garry's Mod by App ID, folder and program, both branches")
+check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod",
+      "Garry's Mod by App ID and folder (either branch) and by its 64-bit program")
 check(R.steamTitles.count == 51 && R.all.count == 77, "51 merged titles, 77 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")

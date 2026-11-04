@@ -44,6 +44,7 @@ final class HardwareInput {
     static var directCursorEnabled = true
     static var pointerLockAvailable = true
     static var desktopMode = false
+    static var hiddenCursorAbsolute = false   // MADEIRA_POINTER_HIDDEN_ABSOLUTE, off by default
     static let moveFlag: UInt32 = 1
     static let absoluteFlag: UInt32 = 0x8000
     static func desktopSize() -> (w: Int, h: Int) { (1024, 768) }

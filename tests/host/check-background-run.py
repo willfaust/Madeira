@@ -62,7 +62,8 @@ bg = body(driver, 'int madeira_audio_background(int keepalive, int mute, int hal
 check('g_bg_keepalive = keepalive && !halt;' in bg and 'g_bg_halt = halt ? 1 : 0;' in bg, 'halt wins over keepalive')
 check('ios_dev_create_locked(&fmt)' in bg and 'fmt.sample_rate = IOS_AUDIO_SAMPLE_RATE;' in bg,
       'keepalive makes the endpoint at the driver mix format when no client has')
-check('if (g_dev.au && !g_dev.running && !g_bg_halt && (any || g_bg_keepalive))' in bg, 'starts unless halted')
+check('if (g_dev.au && !g_dev.running && !g_bg_halt && (any || g_bg_keepalive)\n' in bg
+      and '&& !atomic_load_explicit(&g_dev_suspended, memory_order_acquire)) {' in bg, 'starts unless halted, or while iOS holds it')
 check('(g_bg_halt || (!any && !g_bg_keepalive))' in bg, 'stops when halted, or when nothing wants it')
 check('pthread_mutex_lock(&g_dev_lock);' in bg and 'pthread_mutex_unlock(&g_dev_lock);' in bg, 'under g_dev_lock')
 start = body(driver, 'static void ios_dev_start(void)')
@@ -70,7 +71,7 @@ check('!g_dev.running && !g_bg_halt' in start, 'a client start does not restart 
 idle = body(driver, 'static void ios_dev_stop_if_idle(void)')
 check('!any && !g_bg_keepalive' in idle, 'the last client stopping keeps a keepalive endpoint running')
 cb = body(driver, 'static OSStatus ios_audio_render_cb(')
-check(cb.index('ios_mix_stream(s, out') < cb.index('g_bg_mute') < cb.index('cb_epoch'),
+check(cb.index('ios_mix_stream(s, out') < cb.index('g_bg_mute') < cb.rindex('cb_epoch'),
       'mute silences after mixing, so rings drain and clocks keep time')
 resume = body(driver, 'void madeira_audio_resume_after_interruption(void)')
 check('AudioOutputUnitStop(g_dev.au);' in resume and 'AudioOutputUnitStart(g_dev.au);' in resume

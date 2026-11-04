@@ -687,9 +687,11 @@ check('if (winios_desktop_mode())       winios_user_driver.pSetCursor           
       'pSetCursor: compositor in the desktop session, direct-mode report otherwise')
 check('winios_user_driver.pSetCursorPos = winios_drv_set_cursor_pos;' in driver
       and re.search(r'static BOOL winios_drv_set_cursor_pos\( INT x, INT y \)\s*\{\s*'
-                    r'if \(winios_direct_cursor_on\(\)\) winios_direct_cursor_pos\( x, y \);\s*return TRUE;\s*\}',
+                    r'if \(!winios_direct_cursor_on\(\)\) return TRUE;\s*'
+                    r'if \(winios_direct_cursor_warp\) winios_direct_cursor_warp\( x, y \);\s*'
+                    r'else winios_direct_cursor_pos\( x, y \);\s*return TRUE;\s*\}',
                     driver) is not None,
-      'pSetCursorPos reports and succeeds, as nulldrv does')
+      'pSetCursorPos reports (as a warp when the app has one) and succeeds, as nulldrv does')
 check('if ((flags & MOUSEEVENTF_MOVE) && winios_direct_cursor_on()) winios_report_cursor_pos();' in driver,
       'every posted move reports where the server put the cursor')
 check(re.search(r'static int winios_direct_cursor_on\(void\)\s*\{\s*return '
