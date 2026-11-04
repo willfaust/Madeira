@@ -111,8 +111,23 @@ library session. The sheet has:
    choice" puts the kept launcher back at the next start. Log lines:
    `[dock-start-program]`.
 
-Tap a game. Dock is started with Steam's default launch option only; custom
-arguments are not supported.
+Tap a game. Dock is started with Steam's default launch option; extra
+arguments from the library profile go to Valve's `LaunchApp` through
+`MADEIRA_STEAM_HOST_ARGUMENTS` (bounded; see the Dock README).
+
+**Friends (Dock side only, 2026-10-30).** While the game runs, Dock signs
+in to Friends the way desktop Steam's Friends window does, so friends see the
+account Online and In-Game and the session receives friends' status. It
+writes the friends list to `C:\madeira-friends.bin` and accepts Join/Invite
+commands in `C:\madeira-friends-cmd.bin` (formats and limits in the Dock
+README, "Friends"). In a lobby, Invite sends a real lobby invite; on the iPad
+a friend accepted one and joined the lobby. Join goes through the client's
+own accepted-invite path to the running game. January client
+build only; elsewhere `friends-available=0` and the launch is unchanged.
+The in-game Session menu's Friends page (`DockFriends.swift`) reads the feed
+and sends Join/Invite; tested on the iPad in both directions. Incoming lobby
+invites show at the top with Accept (tested). The earlier Web API presence code was removed (2026-10-30): it got a
+refresh token revoked, and Dock now supplies friends' status.
 
 ## How a launch works
 

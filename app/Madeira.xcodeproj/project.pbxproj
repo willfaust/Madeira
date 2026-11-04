@@ -47,6 +47,7 @@
 		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
 		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
 		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
+		A1F0A002 /* DockFriends.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F0A002 /* DockFriends.swift */; };
 		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
 		A1000920 /* ExternalDrives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* ExternalDrives.swift */; };
 		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
@@ -325,6 +326,7 @@
 		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
 		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
 		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
+		A2F0A002 /* DockFriends.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockFriends.swift"; sourceTree = "<group>"; };
 		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
 		A2000920 /* ExternalDrives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalDrives.swift"; sourceTree = "<group>"; };
 		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
@@ -650,6 +652,7 @@
 				A2000903 /* LiquidMetalSkin.metal */,
 				A2000904 /* AmbientGlow.metal */,
 				A2000601 /* SteamOwnedLibrary.swift */,
+				A2F0A002 /* DockFriends.swift */,
 				A2000700 /* SteamCloud.swift */,
 				A2000920 /* ExternalDrives.swift */,
 				A2000921 /* ExternalStorage.swift */,
@@ -1116,6 +1119,7 @@
 				A1000903 /* LiquidMetalSkin.metal in Sources */,
 				A1000904 /* AmbientGlow.metal in Sources */,
 				A1000601 /* SteamOwnedLibrary.swift in Sources */,
+				A1F0A002 /* DockFriends.swift in Sources */,
 				A1000700 /* SteamCloud.swift in Sources */,
 				A1000920 /* ExternalDrives.swift in Sources */,
 				A1000921 /* ExternalStorage.swift in Sources */,
