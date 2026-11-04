@@ -439,11 +439,12 @@ final class DepotDownloader {
         // the earlier depot's chunks over the later one's, flipping the file
         // on every repair (Borderlands 2: the same 552 MB on each Repair, and
         // Steam's CEG step ending with 53, DataCorruption). Only the last
-        // depot that lists a path writes it.
+        // depot that lists a path writes it. A redistributable goes to its
+        // owner's folder, so the same name there is another file.
         var lastOwner: [String: Int] = [:]
         for (index, plan) in plans.enumerated() {
             for file in plan.manifest.files where !file.isDirectory && file.flags & 0x200 == 0 {
-                lastOwner[Self.overlapKey(file.filename)] = index
+                lastOwner[Self.overlapKey(file.filename, in: plan.installURL)] = index
             }
         }
         var overridden = 0
@@ -458,7 +459,7 @@ final class DepotDownloader {
             for (fileIndex, file) in plan.manifest.files.enumerated() {
                 // A later depot lists this file too: its copy is the one installed.
                 if !file.isDirectory, file.flags & 0x200 == 0,
-                   let owner = lastOwner[Self.overlapKey(file.filename)], owner != planIndex {
+                   let owner = lastOwner[Self.overlapKey(file.filename, in: plan.installURL)], owner != planIndex {
                     overridden += 1
                     paths.append(""); existing.append(false); continue
                 }
@@ -514,9 +515,9 @@ final class DepotDownloader {
         return result
     }
 
-    /// One install path, compared as Windows compares names: any case, either slash.
-    private nonisolated static func overlapKey(_ filename: String) -> String {
-        filename.replacingOccurrences(of: "\\", with: "/").lowercased()
+    /// One install path in one folder, compared as Windows compares names: any case, either slash.
+    private nonisolated static func overlapKey(_ filename: String, in folder: URL) -> String {
+        folder.path + "\n" + filename.replacingOccurrences(of: "\\", with: "/").lowercased()
     }
 
     /// Create or resize a file to its manifest length. Existing bytes below
