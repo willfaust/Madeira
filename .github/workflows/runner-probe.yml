@@ -16,13 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [macos-26, macos-15, macos-latest, macos-26-xlarge]
+        image: [ubuntu-latest, macos-26, macos-15, macos-latest]
     runs-on: ${{ matrix.image }}
     timeout-minutes: 10
     steps:
       - run: |
-          sw_vers
-          uname -m
-          xcodebuild -version
-          ls -d /Applications/Xcode*.app
+          uname -a
           df -h /
+          if [ "$(uname)" = Darwin ]; then sw_vers; xcodebuild -version; ls -d /Applications/Xcode*.app; fi
