@@ -44,6 +44,9 @@ Wine's server runs as a thread instead of a separate program.
   on-screen touch controls.
 - **Keyboard, mouse and trackpad** passed through to games as real input.
 - **Video and audio** for cutscenes and music, through FFmpeg, VideoToolbox and AudioToolbox.
+- **Japanese locale** per game, for Japanese games and visual novels whose text
+  shows as squares or gibberish or that do not start: Shift-JIS (code page 932)
+  and a bundled Japanese font ([details](docs/JAPANESE.md)).
 
 ## Requirements
 

@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main, 'codex/pr-build-*']
+    branches: [main, 'codex/pr-build-*', 'claude/**']
   pull_request:
   workflow_dispatch:
 
@@ -15,11 +15,13 @@ concurrency:
 
 # A complete IPA cache is scoped by the checked-out tree and build environment.
 # Native libraries and runtime components have separate source/SDK caches.
-# xcode-27: the ntdll unix side uses iOS 27 SDK fields (rusage_info_v6.ri_page_wait_time_mach).
+# Xcode 27: the ntdll unix side uses iOS 27 SDK fields (rusage_info_v6.ri_page_wait_time_mach).
+# Runner: the repository variable MADEIRA_RUNNER (upstream sets it to its `xcode-27` label);
+# without it, GitHub's hosted macos-26 image, on which tools/build/ci-select-xcode.sh picks Xcode 27.
 
 jobs:
   plan:
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     outputs:
       ipa: ${{ steps.key.outputs.ipa }}
       reuse: ${{ steps.ipa.outputs.cache-hit }}
@@ -27,6 +29,8 @@ jobs:
       ipaenv: ${{ steps.sdk.outputs.ipa }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - name: Check build reuse rules
         run: |
           python3 tests/host/check-build-inputs.py
@@ -54,12 +58,14 @@ jobs:
   reuse:
     needs: plan
     if: needs.plan.outputs.reuse == 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
       MADEIRA_RUNTIME_SDK: ${{ needs.plan.outputs.sdk }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - uses: actions/cache/restore@v4
@@ -83,12 +89,14 @@ jobs:
   llvm:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache
@@ -123,7 +131,7 @@ jobs:
   fex:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
@@ -131,6 +139,8 @@ jobs:
       key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key
@@ -163,7 +173,7 @@ jobs:
   i386:
     needs: plan
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
     timeout-minutes: 360
@@ -171,6 +181,8 @@ jobs:
       key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key
@@ -213,7 +225,7 @@ jobs:
   runtime:
     needs: [plan, llvm]
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -225,6 +237,8 @@ jobs:
       MADEIRA_RUNTIME_REUSE: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key
@@ -258,7 +272,7 @@ jobs:
   app:
     needs: [plan, llvm, fex, i386, runtime]
     if: needs.plan.outputs.reuse != 'true'
-    runs-on: xcode-27
+    runs-on: ${{ vars.MADEIRA_RUNNER || 'macos-26' }}
     env:
       MADEIRA_PLANNED_SDK: ${{ needs.plan.outputs.sdk }}
       MADEIRA_PLANNED_IPA: ${{ needs.plan.outputs.ipaenv }}
@@ -269,6 +283,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Select Xcode 27
+        run: bash tools/build/ci-select-xcode.sh
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache-llvm

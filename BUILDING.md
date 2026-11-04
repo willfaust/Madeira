@@ -53,6 +53,12 @@ requests. Documentation changes also start a run. A newer run cancels an older
 run for the same PR or branch. Build copies under `codex/pr-build-*` also run on
 push, so a PR head with merge conflicts can still produce an IPA.
 
+The jobs run on the runner named by the repository variable `MADEIRA_RUNNER`
+(Settings › Secrets and variables › Actions › Variables); without it they use
+GitHub's hosted `macos-26` image, and `tools/build/ci-select-xcode.sh` selects
+Xcode 27 there (`MADEIRA_XCODE` names a specific Xcode app). Branches under
+`claude/` also build on push.
+
 CI can reuse a completed IPA when the checked-out Git tree, runner platform,
 Xcode/SDK/compiler identity, runner image and build flags match. The Git tree
 includes component pins and build scripts. A reused IPA must pass the ZIP and

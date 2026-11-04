@@ -1155,6 +1155,8 @@ OVERLAY = {
                         "such a request fails (GetCPInfo and MultiByteToWideChar return an error), as before. For a game that "
                         "converts its text in one of those pages. Logged as [nls-extra]; [nls-missing] names a table that was "
                         "not found. Read at every request."},
+    "env.MADEIRA_JAPANESE": {"category": "Wine core (ntdll)", "title": "Japanese locale and fonts", "kind": "bool", "default": "0",
+                "note": "Default off. 1: the game runs with a Japanese system and user locale (LC_ALL = ja_JP.UTF-8, ANSI and OEM code page 932) and the extra code page tables (env.MADEIRA_NLS_EXTRA), and a Japanese font (Noto Sans JP) is installed in C:\\windows\\Fonts with MS Gothic, MS PGothic, MS UI Gothic, MS Mincho, Meiryo and Yu Gothic mapped onto it. For Japanese games and visual novels whose text shows as squares or gibberish, or that do not start. Game details › Compatibility › Japanese locale sets it for one game. Logged as [japanese]. Read at session start."},
     "env.MADEIRA_ALIAS_RELEASE": {"category": "Memory & JIT pool", "title": "Drop a released arena's code copies", "kind": "bool",
                 "default": "0",
                 "note": "Default off. 1: anonymous memory the game made executable (copied into the JIT pool) follows the game's "
