@@ -1063,6 +1063,11 @@ static void mad_es_thread_exit(void) {   /* DLL_THREAD_DETACH: the thread's stat
  * screen and the stalls at first draw. QPC ticks, summed over all threads. */
 static volatile LONG64 g_pt_gfx, g_pt_cs, g_pt_conv, g_pt_lib, g_pt_rs, g_pt_realize;
 static volatile LONG g_pn_gfx, g_pn_cs, g_pn_lib, g_pn_rs, g_pn_realize;
+/* madeira-duo hitch recorder (mad_hitch_frame, mad_ecl_run): cumulative, never reset,
+ * QPC ticks. Compute pipelines built at first dispatch; batch commits (mad_queue_flush);
+ * the game thread's time inside Present. */
+static volatile LONG64 g_hz_cs_realize_t, g_hz_flush_t, g_hz_present_t;
+static volatile LONG g_hz_cs_realize_n, g_hz_flush_n;
 static void mad_pso_time_report(const char *why) {
     LARGE_INTEGER f; double ms;
     QueryPerformanceFrequency(&f);
@@ -6268,8 +6273,10 @@ static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
         struct WMTComputePipelineInfo ci; obj_handle_t err = 0;
         memset(&ci, 0, sizeof ci);
         if (!p->lz || mad_lzlib_restore(p)) {   /* madeira-bcd pso-lazy-libs */
+            LONG64 t0 = mad_qpc();   /* madeira-duo hitch recorder */
             ci.compute_function = p->vs_fn;
             p->cps = MTLDevice_newComputePipelineState(p->device_handle, &ci, &err);
+            InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n);
         }
         if (err) mad_log_nserror("compute pipeline", err);
         if (!p->cps) {
@@ -10528,6 +10535,54 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
 
 /* ml1120: the replay itself; runs on the caller (async-submit = 0) or on the
  * queue's submission worker. */
+/* madeira-duo HITCH RECORDER. The [perf]/[xp] lines average 5 s windows, so a
+ * single 300 ms frame disappears into them, and the text5 run (4 Nov) could only
+ * say "ExecuteCommandLists took 100-1276 ms somewhere". This logs every slow
+ * frame and every slow submission on its own line with where the time went:
+ *   [hitch]     a frame (Present to Present on the game's thread) over hitch-ms
+ *               (madeira.cfg, default 50; 0 = off): the game thread's CPU time and
+ *               its time in ExecuteCommandLists / Present, the worker's jobs, the
+ *               Present split, encoding, commits, pipelines compiled, memory;
+ *   [hitch-ecl] one ExecuteCommandLists replay over hitch-ecl-ms (default 33):
+ *               lock wait, pipeline prebuild, encoding, encoder open/end,
+ *               commits, lazy pipelines, the rest (the replay itself), and the
+ *               replaying thread's CPU time (CPU far below wall = it was blocked:
+ *               a lock, a page-in, the GPU);
+ *   [hitch-sum] every 5 s: frames, worst frame, frames over 33/50/100/250 ms.
+ * The cumulative counters it diffs already exist (the encode split, [xp],
+ * pso time) or are g_hz_*; per frame it costs three GetThreadTimes-class calls.
+ * Lines are capped at 30 per 5 s so a stall storm cannot flood the log. */
+static int g_hz_frame_ms = -1, g_hz_ecl_ms;
+static LONG g_hz_lines, g_hz_dropped;
+static void mad_hz_load(void) {
+    if (g_hz_frame_ms >= 0) return;
+    g_hz_ecl_ms = (int)mad_cfg_int_pe("hitch-ecl-ms", 33);   /* hitch recorder: log a replay slower than this (0 = off) */
+    g_hz_frame_ms = (int)mad_cfg_int_pe("hitch-ms", 50);     /* hitch recorder: log a frame slower than this (0 = off) */
+    d3d12_log("[madeira-d3d12] hitch recorder: frames over %d ms, replays over %d ms (madeira.cfg hitch-ms / hitch-ecl-ms)\n",
+              g_hz_frame_ms, g_hz_ecl_ms);
+}
+static int mad_hz_take(void) {   /* one more line in this 5 s window? */
+    if (InterlockedIncrement(&g_hz_lines) <= 30) return 1;
+    InterlockedIncrement(&g_hz_dropped);
+    return 0;
+}
+static LONG64 mad_hz_ft(const FILETIME *f) { return (LONG64)(((ULONGLONG)f->dwHighDateTime << 32) | f->dwLowDateTime); }
+static LONG64 mad_hz_thread_cpu(HANDLE h) {   /* kernel + user, 100 ns units; -1 if unknown */
+    FILETIME c, e, k, u;
+    if (!h || !GetThreadTimes(h, &c, &e, &k, &u)) return -1;
+    return mad_hz_ft(&k) + mad_hz_ft(&u);
+}
+static LONG64 mad_hz_process_cpu(void) {
+    FILETIME c, e, k, u;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return -1;
+    return mad_hz_ft(&k) + mad_hz_ft(&u);
+}
+static void mad_hz_memory(char *buf, size_t n) {   /* MadeiraCtl op 7: phys_footprint and what iOS still allows */
+    struct madeira_ctl_args a;
+    memset(&a, 0, sizeof a); a.op = 7; MadeiraCtl(&a);
+    if (a.ret) snprintf(buf, n, "footprint %llu MB, headroom %llu MB", (unsigned long long)(a.ptr >> 20), (unsigned long long)(a.len >> 20));
+    else snprintf(buf, n, "footprint unknown");
+}
 static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList *const *lists) {
     /* ml1021: hold the queue for the WHOLE replay. A concurrent Present ->
      * flush_all must not commit the buffer we are still encoding into. */
@@ -10539,16 +10594,26 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList 
      * by exec_end before a list returns, so nothing in the pool is still in use
      * when it drains. Same thread pushes and pops. */
     obj_handle_t ml1049_pool = NSAutoreleasePool_alloc_init();
+    /* madeira-duo hitch recorder: the starting values ([hitch-ecl]) */
+    const int hz = (mad_hz_load(), g_hz_ecl_ms > 0);
+    LONG64 hz_t0 = hz ? mad_qpc() : 0, hz_lock = 0, hz_pre = 0, hz_cpu0 = hz ? mad_hz_thread_cpu(GetCurrentThread()) : -1;
+    LONG64 hz_enc = g_es_enc_t, hz_open = g_es_open_t, hz_rz = g_pt_realize, hz_cs = g_hz_cs_realize_t, hz_fl = g_hz_flush_t;
+    LONG hz_rzn = g_pn_realize, hz_csn = g_hz_cs_realize_n, hz_fln = g_hz_flush_n;
     const int rs = mad_rs_on();   /* madeira-bcd: replay split */
     UINT64 rs_t = rs ? mad_tick() : 0;
     struct mad_eb *eb = mad_es_begin();   /* madeira-bcd encode-batch / draw-dedup: this replay's encode state */
     if (ml1021_q) EnterCriticalSection(&ml1021_q->submit_lock);
+    if (hz) hz_lock = mad_qpc();
     if (rs) mad_rs_step(RS_LOCK, &rs_t);
 
     struct mad_queue *q = (struct mad_queue *)This;
     struct mad_rp_carry rp_k; const struct mad_list *rp_want = NULL;   /* madeira-bcd rp-carry */
     if (g_sd_state < 0) mad_sync_diag_load();   /* madeira-bcd: sync diagnostics, read once */
     mad_prebuild_lists(count, lists);   /* lazy pipelines this batch binds, built in parallel */
+    if (hz) {   /* first-use pipeline time is counted from here: prebuild's parallel builds are in "prebuild" */
+        hz_pre = mad_qpc();
+        hz_rz = g_pt_realize; hz_cs = g_hz_cs_realize_t; hz_rzn = g_pn_realize; hz_csn = g_hz_cs_realize_n;
+    }
     if (rs) mad_rs_step(RS_PREBUILD, &rs_t);
     memset(&rp_k, 0, sizeof rp_k); q->rp_carry = &rp_k; q->rp_next = NULL; q->rp_lists = lists; q->rp_nlists = count;
     for (UINT i = 0; i < count; i++) {
@@ -10609,6 +10674,26 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList 
      * before the frame's captures can exceed the memory budget */
     if (g_capture_on && ml1021_q && g_cap_bytes >= (48ull << 20)) mad_capture_drain(ml1021_q->device, g_capture_frame, 0);
     if (ml1049_pool) NSObject_release(ml1049_pool);
+    if (hz) {   /* madeira-duo hitch recorder */
+        LONG64 t1 = mad_qpc(), qpf = g_xp.qpf ? g_xp.qpf : 1;
+        double ms = 1000.0 / (double)qpf, tms = 1000.0 / (double)mad_tick_freq();
+        if ((t1 - hz_t0) * 1000 > (LONG64)g_hz_ecl_ms * qpf && mad_hz_take()) {
+            LONG64 cpu1 = hz_cpu0 >= 0 ? mad_hz_thread_cpu(GetCurrentThread()) : -1;
+            double wall = (t1 - hz_t0) * ms, enc = (g_es_enc_t - hz_enc) * tms, open = (g_es_open_t - hz_open) * tms;
+            double rz = (g_pt_realize - hz_rz) * ms, cs = (g_hz_cs_realize_t - hz_cs) * ms, fl = (g_hz_flush_t - hz_fl) * ms;
+            double lock = (hz_lock - hz_t0) * ms, pre = (hz_pre - hz_lock) * ms;
+            UINT64 cmds = 0; UINT i; char mem[96];
+            for (i = 0; i < count; i++) if (lists[i]) cmds += ((struct mad_list *)lists[i])->ncmds;
+            mad_hz_memory(mem, sizeof mem);
+            d3d12_log("[hitch-ecl] replay %.1f ms on tid %04lx (%s), thread cpu %.1f ms: lock wait %.1f, prebuild %.1f, encode %.1f, "
+                      "encoders open/end %.1f, commits %ld (%.1f ms), first-use pipelines gfx %ld (%.1f ms) compute %ld (%.1f ms), "
+                      "rest %.1f | %u lists, %llu commands | %s\n",
+                      wall, (unsigned long)GetCurrentThreadId(), q && q->sub_thread ? "worker" : "caller",
+                      cpu1 >= 0 ? (cpu1 - hz_cpu0) / 10000.0 : -1.0, lock, pre, enc, open,
+                      (long)(g_hz_flush_n - hz_fln), fl, (long)(g_pn_realize - hz_rzn), rz, (long)(g_hz_cs_realize_n - hz_csn), cs,
+                      wall - lock - pre - enc - open - fl - rz - cs, count, (unsigned long long)cmds, mem);
+        }
+    }
 }
 enum { MAD_SUB_ECL = 1, MAD_SUB_SIGNAL, MAD_SUB_WAIT, MAD_SUB_PRESENT };
 struct mad_swapchain;
@@ -10895,7 +10980,9 @@ static void mad_log_nserror(const char *what, obj_handle_t err) {
 }
 /* ml884: commit the queue's open command buffer and track it for fencing. */
 static void mad_queue_flush(struct mad_queue *q) {
+    LONG64 hz_t0;   /* madeira-duo hitch recorder: lock wait included */
     if (!q) return;
+    hz_t0 = mad_qpc();
     EnterCriticalSection(&q->submit_lock);   /* ml1021 */
     if (!q->open_cb) { LeaveCriticalSection(&q->submit_lock); return; }
     if (q->npending == 16) {
@@ -10936,6 +11023,7 @@ static void mad_queue_flush(struct mad_queue *q) {
         d3d12_log("[madeira-d3d12] batch #%llu committed (%llu lists so far)\n",
                   (unsigned long long)q->batches, (unsigned long long)q->executed);
     LeaveCriticalSection(&q->submit_lock);   /* ml1021 */
+    InterlockedExchangeAdd64(&g_hz_flush_t, mad_qpc() - hz_t0); InterlockedIncrement(&g_hz_flush_n);
 }
 static void mad_device_flush_all(struct mad_device *d) {
     /* ml1021: the queue registry was read with no lock while creation and
@@ -22008,6 +22096,84 @@ static void mad_vt_present(struct mad_device *d, UINT64 presents) {
         d3d12_log("[vis-trace] readback check so far: %ld mips equal to the GPU's own copy, %ld overwritten by a later readback, "
                   "%ld STALE (an earlier readback), %ld different\n", (long)g_vt_chk[0], (long)g_vt_chk[1], (long)g_vt_chk[2], (long)g_vt_chk[3]);
 }
+/* madeira-duo hitch recorder, the frame half (see mad_hz_load). Called at the end
+ * of every Present, so a "frame" is Present end to Present end on the game's thread. */
+struct mad_hz_snap {
+    LONG64 qpc, game_cpu, worker_cpu, proc_cpu, enc, open, rz, cs, create, fl, present;
+    LONG rzn, csn, createn, fln;
+    DWORD game_tid;
+    struct mad_xp xp;
+};
+static void mad_hz_snap_take(struct mad_hz_snap *n, HANDLE worker) {
+    n->qpc = mad_qpc();
+    n->game_tid = GetCurrentThreadId();
+    n->game_cpu = mad_hz_thread_cpu(GetCurrentThread());
+    n->worker_cpu = mad_hz_thread_cpu(worker);
+    n->proc_cpu = mad_hz_process_cpu();
+    n->enc = g_es_enc_t; n->open = g_es_open_t;
+    n->rz = g_pt_realize; n->rzn = g_pn_realize; n->cs = g_hz_cs_realize_t; n->csn = g_hz_cs_realize_n;
+    n->create = g_pt_gfx + g_pt_cs; n->createn = g_pn_gfx + g_pn_cs;
+    n->fl = g_hz_flush_t; n->fln = g_hz_flush_n; n->present = g_hz_present_t;
+    memcpy(&n->xp, &g_xp, sizeof n->xp);
+}
+static void mad_hitch_frame(struct mad_swapchain *s, HANDLE worker, UINT64 present_no) {
+    static struct mad_hz_snap prev; static int have;
+    static LONG64 win_start, worst; static LONG frames, over[4];
+    static const int bucket_ms[4] = { 33, 50, 100, 250 };
+    struct mad_hz_snap n;
+    LONG64 qpf, d;
+    double ms, tms, frame;
+    int b;
+    (void)s;
+    mad_hz_load();
+    if (g_hz_frame_ms <= 0) return;
+    mad_hz_snap_take(&n, worker);
+    qpf = n.xp.qpf ? n.xp.qpf : 1;
+    ms = 1000.0 / (double)qpf; tms = 1000.0 / (double)mad_tick_freq();
+    if (!win_start) win_start = n.qpc;
+    if (have) {
+        d = n.qpc - prev.qpc; frame = d * ms;
+        frames++; if (d > worst) worst = d;
+        for (b = 0; b < 4; b++) if (frame > bucket_ms[b]) over[b]++;
+        if (frame > g_hz_frame_ms && mad_hz_take()) {
+            #define HZ(f_) ((double)(n.xp.f_ - prev.xp.f_) * ms)
+            int same = n.game_tid == prev.game_tid && n.game_cpu >= 0 && prev.game_cpu >= 0;
+            double gcpu = same ? (n.game_cpu - prev.game_cpu) / 10000.0 : -1.0;
+            double wcpu = n.worker_cpu >= 0 && prev.worker_cpu >= 0 ? (n.worker_cpu - prev.worker_cpu) / 10000.0 : -1.0;
+            double pcpu = n.proc_cpu >= 0 && prev.proc_cpu >= 0 ? (n.proc_cpu - prev.proc_cpu) / 10000.0 : -1.0;
+            double in_ecl = HZ(t_ecl_caller), in_prs = (double)(n.present - prev.present) * ms;
+            double wbusy = HZ(t_ecl) + HZ(t_prs) + HZ(t_wait) + HZ(t_sig) + HZ(t_pool);
+            char mem[96];
+            mad_hz_memory(mem, sizeof mem);
+            d3d12_log("[hitch] frame %.1f ms at present #%llu | game thread %04lx: cpu %.1f ms, in ExecuteCommandLists %.1f (%lld calls), "
+                      "in Present %.1f [run-ahead wait %.1f, fps cap %.1f], outside d3d12 %.1f | process cpu %.1f ms | "
+                      "worker busy %.1f ms, cpu %.1f: replay %.1f (%lld), present %.1f (%lld) [flush %.1f, gpu latency wait %.1f (%lld), "
+                      "drawable %.1f, blit+present+commit %.1f], fence wait %.1f (%lld), signal %.1f (%lld), pool drain %.1f | "
+                      "encode %.1f ms, encoders open/end %.1f, commits %ld (%.1f ms) | first-use pipelines gfx %ld (%.1f ms) "
+                      "compute %ld (%.1f ms), created %ld (%.1f ms) | %s\n",
+                      frame, (unsigned long long)present_no, (unsigned long)n.game_tid, gcpu, in_ecl,
+                      (long long)(n.xp.ecl_calls - prev.xp.ecl_calls), in_prs, HZ(t_thr), HZ(t_cap), frame - in_ecl - in_prs,
+                      pcpu, wbusy, wcpu, HZ(t_ecl), (long long)(n.xp.n_ecl - prev.xp.n_ecl), HZ(t_prs),
+                      (long long)(n.xp.pres_done - prev.xp.pres_done), HZ(t_flush), HZ(t_lat), (long long)(n.xp.n_lat - prev.xp.n_lat),
+                      HZ(t_draw), HZ(t_cmt), HZ(t_wait), (long long)(n.xp.n_wait - prev.xp.n_wait), HZ(t_sig),
+                      (long long)(n.xp.n_sig - prev.xp.n_sig), HZ(t_pool),
+                      (n.enc - prev.enc) * tms, (n.open - prev.open) * tms, (long)(n.fln - prev.fln), (n.fl - prev.fl) * ms,
+                      (long)(n.rzn - prev.rzn), (n.rz - prev.rz) * ms, (long)(n.csn - prev.csn), (n.cs - prev.cs) * ms,
+                      (long)(n.createn - prev.createn), (n.create - prev.create) * ms, mem);
+            #undef HZ
+        }
+    }
+    if ((n.qpc - win_start) >= 5 * qpf) {   /* [hitch-sum], and the next window's line budget */
+        LONG dropped = InterlockedExchange(&g_hz_dropped, 0);
+        d3d12_log("[hitch-sum] %.1f s: %ld frames (%.1f fps), worst %.1f ms, over 33 ms %ld, over 50 ms %ld, over 100 ms %ld, "
+                  "over 250 ms %ld, hitch lines over the cap %ld\n", (n.qpc - win_start) * ms / 1000.0, (long)frames,
+                  frames * 1000.0 / ((n.qpc - win_start) * ms), worst * ms, (long)over[0], (long)over[1], (long)over[2],
+                  (long)over[3], (long)dropped);
+        win_start = n.qpc; worst = 0; frames = 0; memset(over, 0, sizeof over);
+        InterlockedExchange(&g_hz_lines, 0);
+    }
+    prev = n; have = 1;
+}
 static HRESULT STDMETHODCALLTYPE swap_Present(IDXGISwapChain4 *T, UINT sync, UINT flags) {   /* ml1119: timed wrapper */
     LARGE_INTEGER t0, t1; HRESULT hr;
     mad_xp_role('P'); InterlockedIncrement64(&g_xp.pres_enq);   /* ml1128 */
@@ -22016,6 +22182,11 @@ static HRESULT STDMETHODCALLTYPE swap_Present(IDXGISwapChain4 *T, UINT sync, UIN
     QueryPerformanceCounter(&t1);
     InterlockedExchangeAdd64(&g_perf_present_ticks, t1.QuadPart - t0.QuadPart);
     if (g_xp.fps_cap && !(flags & DXGI_PRESENT_TEST)) mad_fps_cap_pace((struct mad_swapchain *)T, t1.QuadPart);   /* madeira-bcd fps-gov */
+    if (!(flags & DXGI_PRESENT_TEST)) {   /* madeira-duo hitch recorder: fps-cap pacing counts as time in Present */
+        struct mad_swapchain *hs = (struct mad_swapchain *)T;
+        InterlockedExchangeAdd64(&g_hz_present_t, mad_qpc() - t0.QuadPart);
+        mad_hitch_frame(hs, hs->queue ? hs->queue->sub_thread : NULL, hs->presents);
+    }
     return hr;
 }
 static HRESULT swap_Present_pool(IDXGISwapChain4 *T, UINT sync, UINT flags) {
