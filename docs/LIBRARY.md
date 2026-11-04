@@ -319,7 +319,9 @@ in-game menu:
 
 1. touch controls on/off, their **Controller layout** (the built-in Xbox
    controller, the user's custom layouts, **Create new layout**; remembered per
-   game), their **Opacity** and **Size**, **Edit controls**
+   game), their **Opacity** and **Size**, their **Button style** (Glass, the
+   system's Liquid Glass, or Solid, a plain opaque disc; remembered for every
+   game, also in Settings › Appearance), **Edit controls**
    (the existing editor) and the **Keyboard** (its own key window, with an
    Esc/Ctrl/Shift/Alt/Tab/Enter/arrow row; modifiers latch);
 2. the FPS limit, **Aspect & scaling**, **Eco mode** (the developer overlay's

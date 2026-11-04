@@ -5580,6 +5580,7 @@ struct LibraryHUD: View {
     }
     @ObservedObject private var model = LibraryModel.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
     private let sessionTools = MadeiraConfig.flag("MADEIRA_SESSION_TOOLS")
@@ -5955,6 +5956,12 @@ struct LibraryHUD: View {
                 }
                 LabeledContent("Opacity") { Slider(value: $model.opacity, in: 0.15...1) }
                 LabeledContent("Size") { Slider(value: $controls.sizeScale, in: 0.5...2) }
+                // Glass or an opaque disc (TouchControlStyle); the same choice as Settings › Appearance.
+                LabeledContent("Button style") {
+                    Picker("Button style", selection: $controlStyle) {
+                        ForEach(TouchControlStyle.styles, id: \.id) { Text($0.name).tag($0.id) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 220)
+                }
                 Button("Edit controls", systemImage: "slider.horizontal.3") { controls.visible = true; controls.editing = true; model.menu = false }
                 if GamepadInput.keyboardMouseAvailable {
                     ControllerModeChoice(mode: Binding(get: { model.controllerMode }, set: { model.controllerMode = $0; model.saveCurrentProfile() }))

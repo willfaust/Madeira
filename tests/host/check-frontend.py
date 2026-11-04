@@ -651,6 +651,19 @@ check('GameSurfaceLayout.rect(' in content and 'GameSurfaceLayout.map(' in conte
 check('if touchPointerMode { touchModeBegan(touches); return }' in content, 'the game view handles the Touch pointer mode')
 check('TouchControlsModel.diameter(control)' in content and 'library.opacity' in content,
       "touch controls follow the session's size and opacity")
+# The Opacity slider: on iOS 26 a button's own .opacity inside the GlassEffectContainer
+# left the glass as it was, so the opacity goes on the container (and the pre-26 group).
+overlay = block(content, 'private func controls(_ screen: CGSize, session: Bool)')
+check('let opacity = session && !m.editing ? library.opacity : 1' in overlay and '.opacity(opacity)' in overlay
+      and 'TouchControlButton(control: c, screen: screen)\n        }' in overlay,
+      'the Opacity slider fades the whole GlassEffectContainer, not each button inside it')
+# Button style: Glass or Solid (TouchControlStyle), in the in-game menu and Settings › Appearance.
+button = block(content, 'struct TouchControlButton: View')
+check('@AppStorage(TouchControlStyle.key) private var style = "glass"' in button
+      and button.count('solid: solid') == 7 and 'if g.solid {' in content
+      and 'Picker("Button style", selection: $controlStyle)' in lib
+      and 'Picker("Touch control buttons", selection: $controlStyle)' in (root / 'app/Madeira/SettingsPages.swift').read_text(),
+      'Button style: every control face takes Solid; chosen in the in-game menu and Settings › Appearance')
 
 # Owner requests: the starting screen's glyph row, Settings credits last, no drive_c note.
 launch = block(hud, 'private func launchColumnView(')

@@ -137,6 +137,7 @@ struct SettingsPageView: View {
     @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
     @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     @State private var developerUI = !FrontendChoice.preferNew
     @State private var restartNotice = false
 
@@ -202,6 +203,13 @@ struct SettingsPageView: View {
             Toggle("Liquid metal", isOn: $liquidMetal.on)
         } footer: {
             Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
+        }
+        Section {
+            Picker("Touch control buttons", selection: $controlStyle) {
+                ForEach(TouchControlStyle.styles, id: \.id) { Text($0.name).tag($0.id) }
+            }
+        } footer: {
+            Text("Glass is the system's Liquid Glass. Solid draws each button as a plain opaque disc; a game's Opacity slider still fades them.")
         }
         Section {
             Toggle("New library grid", isOn: $zoomableGrid)
