@@ -8,6 +8,9 @@ export PATH="$MINGW:$PATH"
 
 [[ -x "$WINE/configure" ]] || { echo "ERROR: wine submodule is missing" >&2; exit 1; }
 
+# Madeira's wine patches (32-bit OpenGL among them) before anything compiles from the tree.
+"$ROOT/tools/build/apply-wine-patches.sh"
+
 # Native macOS build tree. Madeira's iOS unix-side libraries consume config.h,
 # generated headers, and host build outputs from here. aarch64 is the native
 # PE architecture used by the tracked Wine/DXMT side.

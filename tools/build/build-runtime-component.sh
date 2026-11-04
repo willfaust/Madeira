@@ -22,6 +22,7 @@ esac
 case "${1:-}" in
   windows)
     git -C "$ROOT" submodule update --init --recursive wine dxmt FEX
+    "$ROOT/tools/build/apply-wine-patches.sh"
     xcodebuild -downloadComponent MetalToolchain
     "$ROOT/tools/build/build-shader-headers.sh"
     ;;

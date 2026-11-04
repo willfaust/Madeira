@@ -11,6 +11,9 @@ APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# Madeira's wine patches (32-bit OpenGL among them) before anything compiles from the tree.
+"$REPO_ROOT/tools/build/apply-wine-patches.sh"
+
 # Optional Vulkan route; do not change the normal native build.
 VULKAN_FLAGS=()
 if [ "${MADEIRA_MOLTENVK:-0}" = 1 ]; then

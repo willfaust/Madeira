@@ -42,6 +42,9 @@ LOG="$B/madeira-i386-build.log"
 
 [ -x "$STRIP" ] || { echo "llvm-mingw not found at $TC (docs/BUILDING.md)" >&2; exit 1; }
 
+# Madeira's wine patches (32-bit OpenGL among them) before anything compiles from the tree.
+"$R/tools/build/apply-wine-patches.sh"
+
 # ---------------------------------------------------------------- configure
 # Its own tree, like build-arm64ec: reconfiguring build-macos with an extra
 # arch would regenerate every module Makefile the ntdll-unix build relies on.
