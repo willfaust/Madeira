@@ -1,0 +1,3 @@
+#define MADEIRA_REJECT_CALLBACK 1
+#define MADEIRA_REJECT_ADDRESS UINT64_C(0x12345678)
+#include "workload.c"

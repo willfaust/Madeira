@@ -60,6 +60,8 @@ prefix = r'''
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+static int madeira_pe_wine_enabled(void) { return 0; }
+static void *madeira_pe_wine_translate(const void *address, int reverse) { (void)reverse; return (void *)address; }
 typedef void *HANDLE;
 typedef int32_t LONG;
 typedef uint64_t mach_vm_size_t;
