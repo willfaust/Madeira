@@ -107,15 +107,17 @@ technique Blit
         PixelShader = compile ps_3_0 PSDark();
         VertexShader = compile vs_3_0 VSMain();
         ZWriteEnable = false;
+        MaterialDiffuse = float4(1, 0.5, 0.25, 1);
+        ZEnable = true;
     }
 }
 '''
 
 # d3dx9shader.h
-PT_INT, PT_TEXTURE, PT_SAMPLER, PT_SAMPLERCUBE, PT_PIXELSHADER, PT_VERTEXSHADER = 2, 5, 10, 14, 15, 16
+PT_INT, PT_FLOAT, PT_TEXTURE, PT_SAMPLER, PT_SAMPLERCUBE, PT_PIXELSHADER, PT_VERTEXSHADER = 2, 3, 5, 10, 14, 15, 16
 PC_MATRIX_ROWS, PC_OBJECT = 2, 4
 # dlls/d3dx9_36/effect.c state_table indices
-OP_ZENABLE, OP_ZWRITEENABLE, OP_CULLMODE, OP_ALPHABLENDENABLE = 0, 3, 8, 13
+OP_ZENABLE, OP_ZWRITEENABLE, OP_CULLMODE, OP_ALPHABLENDENABLE, OP_MATERIALDIFFUSE = 0, 3, 8, 13, 127
 OP_VERTEXSHADER, OP_PIXELSHADER, OP_TEXTURE, OP_ADDRESSU, OP_MAGFILTER, OP_MINFILTER = 146, 147, 164, 165, 169, 170
 VS_3_0, PS_3_0 = 0xfffe0300, 0xffff0300
 
@@ -154,7 +156,7 @@ class Reader:
         op, index, to, vo = self.u32(), self.u32(), self.u32(), self.u32()
         td = self.typedef(to)
         value = self.at(vo)
-        return dict(op=op, index=index, td=td, value=value)
+        return dict(op=op, index=index, td=td, value=value, vo=vo)
 
     def data(self):
         size = self.u32()
@@ -220,7 +222,7 @@ def functional(compiler):
             states = [rd.state() for _ in range(nstates)]
             ops = [s['op'] for s in states]
             expected = ([OP_VERTEXSHADER, OP_PIXELSHADER, OP_ZENABLE, OP_ALPHABLENDENABLE, OP_CULLMODE]
-                        if p == 0 else [OP_PIXELSHADER, OP_VERTEXSHADER, OP_ZWRITEENABLE])
+                        if p == 0 else [OP_PIXELSHADER, OP_VERTEXSHADER, OP_ZWRITEENABLE, OP_MATERIALDIFFUSE, OP_ZENABLE])
             check(ops == expected, 'pass %d state ops %r' % (p, ops))
             for k, s in enumerate(states):
                 check(s['index'] == 0, 'pass state index %d' % s['index'])
@@ -230,11 +232,22 @@ def functional(compiler):
                           'shader state typedef %r' % s['td'])
                     ids.append(s['value'])
                     object_states.append((t, p, 0xffffffff, k, s['op'], s['value']))
+                elif s['op'] == OP_MATERIALDIFFUSE:
+                    # A vector value is a column of its components, as the native compiler writes it
+                    # (FLOAT, MATRIX_ROWS, 4 rows x 1 column), with every component in the value.
+                    check(s['td']['type'] == PT_FLOAT and s['td']['cls'] == PC_MATRIX_ROWS
+                          and s['td']['rows'] == 4 and s['td']['cols'] == 1, 'vector pass state typedef %r' % s['td'])
+                    comps = struct.unpack_from('<4f', rd.d, rd.base + s['vo'])
+                    check(comps == (1.0, 0.5, 0.25, 1.0), 'vector pass state value %r' % (comps,))
                 else:
                     check(s['td']['type'] == PT_INT and s['td']['cls'] == PC_MATRIX_ROWS and s['td']['rows'] == 1,
                           'numeric pass state typedef %r' % s['td'])
             if p == 0:
                 check([s['value'] for s in states[2:]] == [0, 0, 1], 'pass 0 values %r' % [s['value'] for s in states[2:]])
+            else:
+                # ZWriteEnable = false, ZEnable = true (TRUE resolves next to ZEnable's own USEW)
+                check([states[2]['value'], states[4]['value']] == [0, 1],
+                      'pass 1 values %r' % [states[2]['value'], states[4]['value']])
     nrecords, nresources = rd.u32(), rd.u32()
     check(nrecords == 1, 'object records %d (only the texture parameter has one)' % nrecords)
     for _ in range(nrecords):
