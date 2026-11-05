@@ -29,8 +29,9 @@ them.
 ## Source and licence
 
 - Source: the `madeira-dock` submodule
-  (`https://github.com/125hz/madeira-dock`, pinned at `e1bf62f`), about 1,850 lines of
-  C. Copyright 2026 125hz, **GPL-3.0-or-later with the Madeira
+  (canonical repository `https://github.com/125hz/madeira-dock`; this repository
+  pins the commit, and `.gitmodules` names where it is fetched from), in C.
+  Copyright 2026 125hz, **GPL-3.0-or-later with the Madeira
   Converter Exception** (the owner open-sourced it on 2026-09-27; it used to
   be a closed executable).
 - Research references: OpenSteamworks (MIT) and Valve's public Steamworks
@@ -111,23 +112,28 @@ library session. The sheet has:
    choice" puts the kept launcher back at the next start. Log lines:
    `[dock-start-program]`.
 
-Tap a game. Dock is started with Steam's default launch option; extra
-arguments from the library profile go to Valve's `LaunchApp` through
+Tap a game. Dock is started with the launch entry Madeira picks from Steam's
+launch configuration, or key 0 when none can be picked; extra arguments from the
+library profile go to Valve's `LaunchApp` through
 `MADEIRA_STEAM_HOST_ARGUMENTS` (bounded; see the Dock README).
 
-**Friends (Dock side only, 2026-10-30).** While the game runs, Dock signs
-in to Friends the way desktop Steam's Friends window does, so friends see the
-account Online and In-Game and the session receives friends' status. It
-writes the friends list to `C:\madeira-friends.bin` and accepts Join/Invite
-commands in `C:\madeira-friends-cmd.bin` (formats and limits in the Dock
-README, "Friends"). In a lobby, Invite sends a real lobby invite; on the iPad
-a friend accepted one and joined the lobby. Join goes through the client's
-own accepted-invite path to the running game. January client
-build only; elsewhere `friends-available=0` and the launch is unchanged.
-The in-game Session menu's Friends page (`DockFriends.swift`) reads the feed
-and sends Join/Invite; tested on the iPad in both directions. Incoming lobby
-invites show at the top with Accept (tested). The earlier Web API presence code was removed (2026-10-30): it got a
-refresh token revoked, and Dock now supplies friends' status.
+**Friends.** While the game runs, Dock signs in to Friends the way desktop
+Steam's Friends window does, so friends see the account with the chosen status
+and the session receives friends' status. Settings › Steam › Status chooses it
+(passed as `MADEIRA_DOCK_PERSONA_STATE`). Offline turns friends off for the whole
+session; Online, Away and Invisible can also be changed from the Friends page.
+Dock writes the friends list to `C:\madeira-friends.bin` and accepts commands in
+`C:\madeira-friends-cmd.bin` (formats, limits and the `friends-*` report lines in
+the Dock README, "Friends"). In a lobby, Invite sends a real lobby invite. Join
+goes through the client's own accepted-invite path to the running game. January
+client build only; elsewhere `friends-available=0` and the launch is unchanged.
+The in-game Session menu's Friends page (`DockFriends.swift`) reads the feed and
+sends the commands; incoming lobby invites show at the top with Accept. Tested:
+sending an invite, receiving one and joining with it, joining a friend without an
+invite, being joined without sending one, and the Offline status turning friends
+off (Dock `docs/HANDOFF.md`). Friends'
+status comes from Dock, not Steam's Web API: a trial of Web API presence got a
+refresh token revoked (2026-10-29).
 
 ## How a launch works
 
