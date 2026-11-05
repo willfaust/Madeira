@@ -40,12 +40,29 @@ private enum StikJIT {
                         "Built-in JIT is available only on a physical device."])
     }
     static func resetCachedDDI(at paths: DDIPaths) throws {}
+    static func isDDIMounted(pairingFile: URL) throws -> Bool { false }
 }
 #endif
 
 private enum MadeiraJITWork {
     /// One request at a time, as the XPC handler ran them before.
     static let queue = DispatchQueue(label: "com.willfaust.madeora.jit-helper")
+
+    /// Another preparation may install the cryptex after StikJIT's initial check.
+    /// Verify that it is now mounted, then retry the normal operation just once.
+    static func retryInstalledCryptex<T>(verifyMounted: () throws -> Bool,
+                                        operation: () throws -> T) throws -> T {
+        do { return try operation() }
+        catch {
+            let message = error.localizedDescription.lowercased()
+            guard message.contains("cryptexd("), message.contains("routine: \"install\""),
+                  message.contains("system: cryptex already exists:"),
+                  message.contains("com.apple.security.cryptex: 17)"),
+                  (try? verifyMounted()) == true else { throw error }
+            NSLog("[MadeiraJIT] DDI cryptex already installed and mounted; retrying once")
+            return try operation()
+        }
+    }
 
     static func handle(_ request: MadeiraJITRequest) -> MadeiraJITRequest.Response {
         let manager = FileManager.default
@@ -72,9 +89,18 @@ private enum MadeiraJITWork {
 
             switch request.operation {
             case .prepare:
-                let readiness = StikJIT.prepareDevice(
-                    pairingFile: pairingURL, paths: paths,
-                    progress: { NSLog("[MadeiraJIT] prepare: %@", String(describing: $0)) })
+                let readiness = try retryInstalledCryptex(verifyMounted: {
+                    try StikJIT.isDDIMounted(pairingFile: pairingURL)
+                }) {
+                    let state = StikJIT.prepareDevice(
+                        pairingFile: pairingURL, paths: paths,
+                        progress: { NSLog("[MadeiraJIT] prepare: %@", String(describing: $0)) })
+                    if case .preparationFailed(let reason) = state {
+                        throw NSError(domain: "MadeiraJITHelper", code: 3,
+                                      userInfo: [NSLocalizedDescriptionKey: reason])
+                    }
+                    return state
+                }
                 switch readiness {
                 case .ready(let security):
                     return .init(success: true,
@@ -96,16 +122,20 @@ private enum MadeiraJITWork {
                                   userInfo: [NSLocalizedDescriptionKey:
                                     "The target process or Madeira JIT script was not provided."])
                 }
-                try StikJIT.enableJIT(
-                    targetPID: targetPID,
-                    pairingFile: pairingURL,
-                    ddiPaths: paths,
-                    script: .customBase64(scriptBase64),
-                    forceScript: true,
-                    preparationProgress: {
-                        NSLog("[MadeiraJIT] prepare: %@", String(describing: $0))
-                    },
-                    progress: { NSLog("[MadeiraJIT] %@", $0) })
+                try retryInstalledCryptex(verifyMounted: {
+                    try StikJIT.isDDIMounted(pairingFile: pairingURL)
+                }) {
+                    try StikJIT.enableJIT(
+                        targetPID: targetPID,
+                        pairingFile: pairingURL,
+                        ddiPaths: paths,
+                        script: .customBase64(scriptBase64),
+                        forceScript: true,
+                        preparationProgress: {
+                            NSLog("[MadeiraJIT] prepare: %@", String(describing: $0))
+                        },
+                        progress: { NSLog("[MadeiraJIT] %@", $0) })
+                }
                 return .init(success: true,
                              message: "Madeira detached cleanly from its built-in JIT helper.",
                              txmPresent: StikJIT.isTXMPresent)
