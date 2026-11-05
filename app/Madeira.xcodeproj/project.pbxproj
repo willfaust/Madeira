@@ -976,6 +976,7 @@
 				ko,
 				"pt-BR",
 				ru,
+				"zh-Hans",
 			);
 			mainGroup = A4000001;
 			productRefGroup = A4000003 /* Products */;

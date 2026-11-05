@@ -3655,7 +3655,7 @@ struct LibraryView: View {
                                 EmptyView()
                             } else if entries.isEmpty {
                                 Text(search.isEmpty
-                                     ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
+                                     ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
                                      : L("No other games match your search."))
                                     .foregroundStyle(.secondary)
                             } else {
