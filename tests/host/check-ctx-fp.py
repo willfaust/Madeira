@@ -70,16 +70,25 @@ static int madeira_cfg_get(const char *key, char *buf, size_t cap)
     snprintf(buf, cap, "%s", cfg_value);
     return 1;
 }
+/* the server's clock: the answer is kept for a second, so the checks step it */
+typedef long long timeout_t;
+#define TICKS_PER_SEC 10000000
+static timeout_t monotonic_time;
 """ + switch + r"""
 #define CHECK(x) do { if (!(x)) { printf("failed line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+#define LATER (monotonic_time += TICKS_PER_SEC)
 int main(void)
 {
     unsetenv("MADEIRA_CTX_FP");
     CHECK(ios_ctx_fp_enabled());
-    setenv("MADEIRA_CTX_FP", "1", 1); CHECK(ios_ctx_fp_enabled());
-    setenv("MADEIRA_CTX_FP", "0", 1); CHECK(!ios_ctx_fp_enabled());
-    cfg_value = "1"; CHECK(ios_ctx_fp_enabled());
-    unsetenv("MADEIRA_CTX_FP"); cfg_value = "0"; CHECK(!ios_ctx_fp_enabled());
+    LATER; setenv("MADEIRA_CTX_FP", "1", 1); CHECK(ios_ctx_fp_enabled());
+    LATER; setenv("MADEIRA_CTX_FP", "0", 1); CHECK(!ios_ctx_fp_enabled());
+    /* within the second the kept answer stands: no file read for a program that captures often */
+    setenv("MADEIRA_CTX_FP", "1", 1); CHECK(!ios_ctx_fp_enabled());
+    LATER; CHECK(ios_ctx_fp_enabled());
+    LATER; cfg_value = "0"; CHECK(!ios_ctx_fp_enabled());
+    LATER; cfg_value = "1"; setenv("MADEIRA_CTX_FP", "0", 1); CHECK(ios_ctx_fp_enabled());
+    LATER; unsetenv("MADEIRA_CTX_FP"); cfg_value = "0"; CHECK(!ios_ctx_fp_enabled());
     return 0;
 }
 """
