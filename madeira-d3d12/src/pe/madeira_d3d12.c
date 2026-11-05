@@ -5621,6 +5621,66 @@ static void mad_cbv_snapshot(struct mad_exec *e, const struct mad_rootsig *rs, U
         InterlockedIncrement(&g_sd_snaps); InterlockedExchangeAdd64(&g_sd_snap_bytes, (LONG64)w[k].len);
     }
 }
+/* madeira-duo (6 Nov 2026): rcas-fill = <FSR sharpness 0..1>. PoE2's FSR sharpening
+ * pass (RCASCS, bytecode FNV df5b6e66dfbf8d11) reads its strength from one word of its
+ * root CBV, register 10 .x (byte 160), and on the Duo the game writes 0 there whatever
+ * the slider says (both 100% captures; upload-guard = 2 showed the GPU reads exactly
+ * those bytes), so the pass returned its input unchanged. The game only runs the pass
+ * when its slider is above 0. When it does and the word is 0, the dispatch is bound to
+ * a copy of the buffer's first 256 bytes with FSR's own strength for this sharpness,
+ * exp2(-(2 - 2 * sharpness)), in that word. The game's buffer is never written; a
+ * strength the game does give is kept. Unset or 0: off. */
+#define MAD_RCAS_POE2_CS_HASH 0xdf5b6e66dfbf8d11ull
+#define MAD_RCAS_STRENGTH_OFFSET 160u
+static int g_rcas_fill_read;
+static UINT32 g_rcas_fill_bits;
+static volatile LONG g_rcas_fills;
+static UINT32 mad_rcas_fill_bits(void) {
+    if (!g_rcas_fill_read) {
+        char text[32] = "";
+        float sharpness = 0.0f;
+        if (mad_cfg_str_pe("rcas-fill", text, sizeof text)) sharpness = (float)strtod(text, NULL);
+        if (sharpness > 1.0f) sharpness = 1.0f;
+        if (sharpness > 0.0f) {
+            const float strength = exp2f(-(2.0f - 2.0f * sharpness));
+            memcpy(&g_rcas_fill_bits, &strength, sizeof g_rcas_fill_bits);
+            d3d12_log("[rcas-fill] FSR sharpening at %.2f (RCAS strength %.4f) when PoE2 gives none\n", sharpness, strength);
+        }
+        g_rcas_fill_read = 1;
+    }
+    return g_rcas_fill_bits;
+}
+static const UINT64 *mad_rcas_fill_root(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root, UINT64 *tmp) {
+    struct mad_list *l = e->l;
+    const unsigned per = MAD_ARG_RING_BYTES / MAD_ARG_SLOT_BYTES;
+    const unsigned slots = (256 + 255 + MAD_ARG_SLOT_BYTES - 1) / MAD_ARG_SLOT_BYTES;
+    struct mad_resource *resource;
+    UINT64 offset = 0, ring_offset, gpu, va;
+    obj_handle_t ring_buffer;
+    void *cpu;
+    unsigned char *copy;
+    UINT32 game_strength;
+    unsigned i;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++)
+        if (rs->params[i].type == MADEIRA_IR_PARAM_CBV && root[i]) break;
+    if (i >= rs->nparams || i >= MAD_ROOT_PARAM_MAX) return root;
+    resource = mad_resolve_address(e->q->device, root[i], &offset);
+    if (!mad_ug_cpu_written(resource) || offset + 256 > resource->size) return root;
+    memcpy(&game_strength, (const unsigned char *)resource->cpu + offset + MAD_RCAS_STRENGTH_OFFSET, sizeof game_strength);
+    if (game_strength) return root;
+    if (slots + 1 > per) return root;
+    if ((l->ring_used % per) + slots + 1 > per) l->ring_used += per - (l->ring_used % per);   /* the copy and the argument slot in one chunk */
+    if (!exec_ring_take_z(e, slots, 0, &ring_buffer, &ring_offset, &cpu, &gpu)) return root;
+    va = (gpu + ring_offset + 255) & ~(UINT64)255;   /* D3D12's CBV alignment */
+    copy = (unsigned char *)cpu + (va - gpu - ring_offset);
+    memcpy(copy, (const unsigned char *)resource->cpu + offset, 256);
+    memcpy(copy + MAD_RCAS_STRENGTH_OFFSET, &g_rcas_fill_bits, sizeof g_rcas_fill_bits);
+    memcpy(tmp, root, MAD_ROOT_PARAM_MAX * sizeof *tmp);
+    tmp[i] = va;
+    if (InterlockedIncrement(&g_rcas_fills) == 1) d3d12_log("[rcas-fill] first fill: RCASCS root CBV p%u had strength 0\n", i);
+    return tmp;
+}
+
 /* Before a draw's or dispatch's argument slot: note (upload-guard), mark
  * (desc-guard), copy (cbv-snapshot). Returns the root values to encode. */
 static const UINT64 *mad_sd_root(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root, UINT64 *tmp, const struct mad_pso *pso) {
@@ -5791,10 +5851,13 @@ static int exec_arg_slot_for(struct mad_exec *e, const struct mad_rootsig *rs, c
     unsigned chunk, slot;
     UINT64 sd_root[MAD_ROOT_PARAM_MAX];   /* madeira-bcd: sync diagnostics, see mad_sd_root */
     UINT64 sc_root[MAD_ROOT_PARAM_MAX];   /* madeira-bcd static-cbv */
+    UINT64 rcas_root[MAD_ROOT_PARAM_MAX]; /* madeira-duo rcas-fill */
     const unsigned sc_bp = root == e->croot ? 1u : 0u;
     const int sc_on = (g_scbv_on == 1 || g_scbv_on == 2) && rs && root && (root == e->root || root == e->croot);
     if (g_sd_state > 0 && rs && root) root = mad_sd_root(e, rs, root, sd_root, pso);
     if (sc_on) root = mad_scbv_root(e, rs, root, sc_root, sc_bp);
+    if (pso && pso->cs_hash == MAD_RCAS_POE2_CS_HASH && rs && root && mad_rcas_fill_bits())   /* madeira-duo rcas-fill */
+        root = mad_rcas_fill_root(e, rs, root, rcas_root);
     chunk = l->ring_used / (MAD_ARG_RING_BYTES / MAD_ARG_SLOT_BYTES);
     slot = l->ring_used % (MAD_ARG_RING_BYTES / MAD_ARG_SLOT_BYTES);
     if (chunk >= l->nrings && !mad_list_ring_grow(e)) return 0;   /* ml1061: pooled, GPU-lifetime aware */
