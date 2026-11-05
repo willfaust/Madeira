@@ -1,0 +1,27 @@
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -671,6 +671,24 @@
+    attribs.options.disable_blend_func_extended = false;
+    attribs.options.disable_glsl_line_continuations = false;
+    attribs.options.force_glsl_version = 0;
++   /* Madeira: the DRI frontends read allow_compressed_fallback from driconf,
++    * where it defaults to true (DRI_CONF_ALLOW_COMPRESSED_FALLBACK in
++    * driinfo_gallium.h). OSMesa never reads driconf, so the memset above left
++    * it false. On a GPU without BC sampling (Metal on A-series iPhones and
++    * iPads: supportsBCTextureCompression = NO, so neither MoltenVK nor
++    * KosmicKrisp has BC formats), GL_EXT_texture_compression_s3tc, _s3tc_srgb,
++    * ARB_texture_compression_rgtc, EXT_texture_compression_latc and
++    * ARB_texture_compression_bptc were then missing. A game that uploads DXT
++    * data without checking for them (every desktop GPU has them) got
++    * GL_INVALID_ENUM, and the incomplete texture sampled as opaque black
++    * (Mewgenics, willfaust/Madeira#566: forcing these extensions on with
++    * MESA_EXTENSION_OVERRIDE fixed it). With the option on, Mesa exposes
++    * them and decodes those uploads to RGBA8 on the CPU
++    * (st_compressed_format_fallback); a GPU with BC keeps the native formats.
++    * MADEIRA_GL_COMPRESSED_FALLBACK=0 turns it off.
++    */
++   attribs.options.allow_compressed_fallback =
++      debug_get_bool_option("MADEIRA_GL_COMPRESSED_FALLBACK", true);
+ 
+    osmesa_init_st_visual(&attribs.visual,
+                          PIPE_FORMAT_NONE,
