@@ -5634,7 +5634,6 @@ struct LibraryHUD: View {
                 if !model.startingScreen { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.menu {
                     Color.black.opacity(SessionMenuBackground.blur ? 0.3 : 0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
-                    Color.black.opacity(SessionMenuBackground.blur ? 0.3 : 0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
                     (bindsPage ? AnyView(bindsMenu) : assistPage ? AnyView(assistMenu) : friendsPage ? AnyView(friendsMenu) : AnyView(menu))
                         .frame(width: min(460, geo.size.width - 32), height: min(650, geo.size.height - geo.safeAreaInsets.top - geo.safeAreaInsets.bottom - 24))
                         .modifier(SessionMenuBackground())
