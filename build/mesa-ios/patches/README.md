@@ -11,6 +11,15 @@ licence (MIT).
   (MoltenVK only), the vertex stage first stores zero into every varying component the fragment
   shader reads, and both stages get one variable per slot with the same shape.
   `MADEIRA_ZINK_LINK_FS_INPUTS=0` turns this off, and `=1` turns it on for other drivers.
+- `0009-osmesa-allow-compressed-fallback.patch`: Metal on A-series iPhones and iPads has no BC
+  texture sampling (`supportsBCTextureCompression = NO`), so MoltenVK and KosmicKrisp report no BC
+  formats. Mesa can still expose S3TC (DXT1/3/5), RGTC, LATC and BPTC and decode those uploads to
+  RGBA8 on the CPU, but only when `allow_compressed_fallback` is on. The DRI frontends take it from
+  driconf, where it defaults to true. OSMesa never reads driconf and left it false, so those
+  extensions were missing, a game that uploads DXT data without checking got `GL_INVALID_ENUM`, and
+  the incomplete texture sampled as opaque black (Mewgenics, #566). OSMesa now turns the
+  option on; a GPU with BC keeps the native formats. `MADEIRA_GL_COMPRESSED_FALLBACK=0` turns it
+  off.
 - `kosmickrisp-ios-0001-wsi-metal-no-display-sync-on-ios.patch`: the Metal WSI sets
   `CAMetalLayer.displaySyncEnabled`, which iOS does not have. On iOS it is skipped, so an
   immediate-mode swapchain presents with vsync.
