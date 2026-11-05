@@ -71,6 +71,11 @@ Because JIT needs a debugger, Madeira cannot be offered on the App Store.
    [JIT setup](docs/JIT.md).
 4. In **Settings**, check that **JIT** and **Memory+** both show a green check:
    Madeira then says **Ready to play**.
+5. Add a game. Steam games come from **Sign in to Steam** in the library. For
+   a Windows game you already have, copy its whole folder into
+   **Madeira › wine › drive_c** with the Files app, then tap **+** in the
+   library and choose its `.exe`, `.bat` or `.cmd`; see
+   [Adding games](docs/LIBRARY.md#adding-games).
 
 Some 64-bit games need Microsoft's Visual C++ runtime, which is not included
 (see [Licensing](#licensing)).
