@@ -65,6 +65,7 @@ let defaults = UserDefaults(suiteName: suite)!
 defer { defaults.removePersistentDomain(forName: suite) }
 struct LibraryEntry {
     var windowsPath: String
+    var launchWindowsPath: String { windowsPath }
     var desktop: Bool? = nil
     static func hostURL(ofWindowsPath path: String) -> URL? { URL(fileURLWithPath: path) }
 }
