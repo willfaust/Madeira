@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Portions copyright 2026 thebcd69 (BCD): code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """Madeira's built-in recommended settings per game (owner's decision 2026-10-09).
 
 Source checks (every host): the lists in app/Madeira/GameRecommendations.swift

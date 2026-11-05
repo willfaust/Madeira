@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """build/ntdll-unix/process_ios.c: the child-spawn log line names the child's Windows current directory; no Wine runs.
 
 A title that ends on its own "asset could not be found" box raised the question which directory a Steam-launched

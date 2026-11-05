@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """The virtual monitor's Win32 names (build/win32u-unix/sysparams_ios.c); no Wine runs.
 
 Compiles the production helpers (ios_vmon_ids_enabled .. ios_vmon_device_key) against stubs and checks the strings

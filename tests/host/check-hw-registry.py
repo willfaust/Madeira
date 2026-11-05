@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """wineboot's volatile hardware keys on iOS; no Wine runs.
 
 1. Wiring, read from the files: loader_ios.c calls ios_hw_registry_publish in

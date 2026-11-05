@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """env.MADEIRA_VA_PRESSURE_GAP_OK: a slow scan through iOS's refused hole is not pressure.
 
 A 64-bit title: the app image landed high (address-map=[0x104d54000,...), 4 of 11 launches). A

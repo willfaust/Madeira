@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """The JIT-pool dump is opt-in (signal_arm64_ios.c ios_jit_dump_enabled); no Wine runs.
 
 A mach UNHANDLED is any fault passed on to Wine's own exception path, so the

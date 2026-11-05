@@ -1,3 +1,5 @@
+/* Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+ * under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md. */
 /* iOS-Madeira: ONE D3DKMT adapter for the GPU that DXGI, NVAPI and
  * madeira_d3d12 report -- opt-in, MADEIRA_KMT_ADAPTER=1 (env.MADEIRA_KMT_ADAPTER
  * in madeira.cfg).
