@@ -608,8 +608,9 @@ live Steam, VPN, TLS-handshake or device behaviour.
 
 ## Not included, and limits
 
-- No achievements, no workshop content. Steam Cloud saves: see
-  `docs/STEAM_CLOUD.md`. Beta branches: see "Version (beta branches)" above.
+- Steam Cloud saves: see `docs/STEAM_CLOUD.md`. Achievements: Game details >
+  Achievements (`SteamAchievements.swift`). Workshop content: see
+  `docs/STEAM_WORKSHOP.md`. Beta branches: see "Version (beta branches)" above.
   DLC: see "DLC" above.
 - A file that a newer build no longer contains is not deleted by an update
   (the install keeps it); **Uninstall** removes the whole folder.
