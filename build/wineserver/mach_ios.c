@@ -880,14 +880,23 @@ done:
 struct thread *ios_pending_persistent_hold;
 
 /* MADEIRA_CTX_FP=0: a cross-thread GetThreadContext returns zeroed vector registers, as
- * before. Read on every capture, madeira.cfg (and the game's own lines) first: this server
- * starts before the app exports env.* lines (ml1236) and runs again for the next session. */
+ * before. madeira.cfg (and the game's own lines) are read first: this server starts before
+ * the app exports env.* lines (ml1236) and runs again for the next session. The answer is
+ * kept for a second: madeira_cfg_get reads the config files, and a program that samples
+ * its threads' contexts often (a garbage collector, a profiler) would otherwise put that
+ * file I/O on every capture, inside the single-threaded server. */
 static int ios_ctx_fp_enabled(void)
 {
+    static timeout_t checked_at;
+    static int enabled = 1;
     char buf[16];
-    const char *e = madeira_cfg_get( "env.MADEIRA_CTX_FP", buf, sizeof(buf) ) ? buf
-                  : getenv( "MADEIRA_CTX_FP" );
-    return !(e && e[0] == '0');
+    const char *e;
+
+    if (checked_at && monotonic_time - checked_at < TICKS_PER_SEC) return enabled;
+    e = madeira_cfg_get( "env.MADEIRA_CTX_FP", buf, sizeof(buf) ) ? buf : getenv( "MADEIRA_CTX_FP" );
+    enabled = !(e && e[0] == '0');
+    checked_at = monotonic_time ? monotonic_time : 1;
+    return enabled;
 }
 
 int ios_fill_thread_context( struct thread *thread,
@@ -925,7 +934,7 @@ int ios_fill_thread_context( struct thread *thread,
 
     /* The vector registers too: without them every cross-thread floating-point context
      * came back zeroed. FEX keeps guest XMM0-15 in V0-V15 under ARM64EC, the same mapping
-     * the ARM64EC ABI uses, so these are the guest's XMM registers. Persona 5 Royal moves
+     * the ARM64EC ABI uses, so these are the guest's XMM registers. One engine moves
      * code between threads this way: a thread loads it into XMM13, and the main thread
      * reads its floating-point context into a CONTEXT in the image and jumps to the
      * XMM13 slot. A thread blocked in a syscall is overridden below from the saved frame.

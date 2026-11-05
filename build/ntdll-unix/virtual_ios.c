@@ -3801,7 +3801,7 @@ static int ios_pool_preserve_code_carve( size_t available, size_t want, int low_
 
 /* Nor should any request take a free carve four or more times its size while the pool's
  * budget still affords a fresh carve of the size asked: the carve stays with its taker for
- * that process's life. Persona 5 Royal's crashpad_handler.exe took a 16 MB carve for its
+ * that process's life. One game's crashpad_handler.exe took a 16 MB carve for its
  * 16 KB dispatcher and a 128 MB one for a 16 MB code buffer, and the game itself was then
  * capped at 16 MB. When the fresh carve fails anyway, the allocator retries with every
  * carve allowed (reuse_all_carves). MADEIRA_POOL_CODE_KEEP_BIG=0 restores the old policy. */
@@ -35622,7 +35622,7 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
             }
             /* ml557: do NOT recycle a carve a thread is still executing in. Refusing the
              * release leaked it for good, though: FEX releases a buffer once and never
-             * again, so "freeable on the next release" never came. Persona 5 Royal lost a
+             * again, so "freeable on the next release" never came. One game lost a
              * 128 MB buffer that way and ran its last 4 minutes on 16 MB ones. Free it as
              * retired instead, so reuse waits out the grace and its strict scan, exactly
              * as for a dead process's buffer. MADEIRA_POOL_CODE_DEFER_FREE=0 refuses it. */
