@@ -39,7 +39,7 @@ check('olderNvidia: olderNvidia, card: card, profile: profile)' in bcd and 'D3D9
 
 # The switch.
 check('olderNvidiaKey = "madeira.library.olderNvidia"' in prefs and 'func setOlderNvidia(' in prefs, 'LibraryPrefs keeps it per game')
-check('compatLabel(L("Older NVIDIA card (Direct3D 9)")' in library and 'LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath)' in library,
+check(re.search(r'compatLabel\((?:L\()?"Older NVIDIA card \(Direct3D 9\)"', library) is not None and 'LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath)' in library,
       'Game details > Compatibility shows it')
 check('olderNvidia = LibraryPrefs.olderNvidia(windowsPath)' in library, 'the settings page reads it')
 

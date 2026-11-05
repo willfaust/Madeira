@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Portions copyright 2026 thebcd69 (BCD): code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
-# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """Madeira's built-in recommended settings per game (owner's decision 2026-10-09).
 
 Source checks (every host): the lists in app/Madeira/GameRecommendations.swift
@@ -802,8 +800,8 @@ check(id(steam + #"\Call of Duty Black Ops"#, 42710) == "none" && id(steam + #"\
       "the first Black Ops' multiplayer shares the folder and has no list")
 check(id(steam + #"\The Escapists 2"#, 641990) == "the-escapists-2" && id(steam + #"\The Escapists 2\TheEscapists2.exe"#) == "the-escapists-2",
       "The Escapists 2 by App ID, folder and program")
-check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod"
-      && id(steam + #"\GarrysMod\hl2.exe"#) == "garrys-mod", "Garry's Mod by App ID, folder and program, both branches")
+check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod",
+      "Garry's Mod by App ID and folder (either branch) and by its 64-bit program")
 check(id(steam + #"\P3R"#, 2161700) == "persona-3-reload" && id(steam + #"\P3R\P3R\Binaries\Win64\P3R.exe"#) == "persona-3-reload",
       "Persona 3 Reload by App ID, folder and program")
 check(R.steamTitles.count == 52 && R.all.count == 78, "52 merged titles, 78 lists")

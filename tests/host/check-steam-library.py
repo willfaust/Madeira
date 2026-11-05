@@ -155,14 +155,16 @@ permitted = re.findall(r'<key>BGTaskSchedulerPermittedIdentifiers</key>\s*<array
 require(len(permitted) == 1 and re.findall(r'<string>([^<]*)</string>', permitted[0])
         == ['$(PRODUCT_BUNDLE_IDENTIFIER).download.*', '$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*'],
         "Info.plist permits only the bundle's own .download.* (background downloads) and .pairing.* (JIT pairing) tasks")
-require('UIBackgroundModes' not in info, 'Info.plist asks for no background mode')
+modes = re.findall(r'<key>UIBackgroundModes</key>\s*<array>(.*?)</array>', info, re.S)
+require(len(modes) == 1 and re.findall(r'<string>([^<]*)</string>', modes[0]) == ['audio'],
+        'Info.plist asks for no background mode but audio (BackgroundRun, check-background-run.py)')
 background = sources['SteamDownloadBackground.swift']
 require('hasSuffix(".download.*")' in background and '+ suffix' in background and 'suffix: String = "queue"' in background and 'BGContinuedProcessingTaskRequest(identifier: identifier' in background,
         'the continued-processing task uses the permitted identifier, made concrete')
 require('SteamSignIn.flag("MADEIRA_BACKGROUND_DOWNLOADS", default: true)' in background and
         'SteamSignIn.flag("MADEIRA_DOWNLOAD_NOTIFICATIONS", default: true)' in background,
         'background downloads and notifications each have a switch, on by default')
-require('if #available(iOS 26.0, *), Self.continuedEnabled { submitContinued() }' in background and 'beginBackgroundTask(' in background
+require('if #available(iOS 26.0, *), Self.continuedEnabled { submitContinued() }' in background and 'BackgroundRun.shared.beginTask(' in background
         and 'pauseForBackground()' in background, 'iOS 26 continues in the background; otherwise the grace period ends in a clean pause')
 owned_text = sources['SteamOwnedLibrary.swift']
 require('SteamDownloadBackground.shared.downloadStarted(appID: appID' in owned_text and 'SteamDownloadBackground.shared.progress(progress)' in owned_text
