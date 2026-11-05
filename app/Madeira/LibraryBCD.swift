@@ -19,6 +19,7 @@ enum BCDLaunch {
     static func applyExtras(avx: Bool, wineVCRT: Bool, nvidia: Bool, olderNvidia: Bool = false, card: GPUCard? = nil,
                             profile: GameProfile?) {
         if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
+        applyJapanese(false)   // applyLibrary turns it on for a game that has it
         if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
         var dxmtExtra: [String] = []
         if nvidia {
@@ -65,6 +66,23 @@ enum BCDLaunch {
         else { setenv("MADEIRA_DXMT_EXTRA", dxmtExtra.joined(separator: ";"), 1)   /* DXMT splits on ";" */ }
     }
 
+    /// "Japanese locale" (Game details › Compatibility): MADEIRA_JAPANESE, read by
+    /// WineProcessBridge.m before the wineserver starts (the font and the Japanese font
+    /// names go into the prefix) and when Wine starts (LC_ALL = ja_JP.UTF-8, so code page
+    /// 932, and the extra code page tables). Off: a Japanese locale an earlier launch
+    /// exported is taken back; madeira.cfg's and the game file's own env lines are
+    /// exported again after this, so a line there still applies.
+    static func applyJapanese(_ on: Bool) {
+        if on {
+            setenv("MADEIRA_JAPANESE", "1", 1)
+        } else {
+            unsetenv("MADEIRA_JAPANESE")
+            if let lc = getenv("LC_ALL"), String(cString: lc).hasPrefix("ja") {
+                unsetenv("LC_ALL"); unsetenv("LANG"); unsetenv("MADEIRA_NLS_EXTRA")
+            }
+        }
+    }
+
     /// A start from upstream's library: this game's madeira-bcd options. The
     /// FPS limit is the entry's (upstream's FPS picker, which offers 40 FPS too).
     static func applyLibrary(_ entry: LibraryEntry) {
@@ -80,6 +98,7 @@ enum BCDLaunch {
         let olderNvidia = card == nil && LibraryPrefs.olderNvidia(path)
         applyExtras(avx: LibraryPrefs.avx(path), wineVCRT: LibraryPrefs.wineVCRT(path),
                     nvidia: nvidia, olderNvidia: olderNvidia, card: card, profile: profile)
+        applyJapanese(LibraryPrefs.japanese(path))
         if let appID = entry.steamAppID {
             if let card { D3D9Identity.syncGamePrefs(appID: appID, card: card) }
             else { D3D9Identity.syncGamePrefs(appID: appID, olderNvidia: olderNvidia) }
@@ -89,6 +108,7 @@ enum BCDLaunch {
         LogStore.shared.log("[bcd] library launch \(program): avx=\(LibraryPrefs.avx(path) ? 1 : 0) "
                             + "wine-vcrt=\(LibraryPrefs.wineVCRT(path) ? 1 : 0) nvidia=\(nvidia ? 1 : 0) "
                             + "older-nvidia=\(olderNvidia ? 1 : 0) gpu-card=\(cardLog) "
+                            + "japanese=\(LibraryPrefs.japanese(path) ? 1 : 0) "
                             + "game-config=\(profile.hasSettings ? 1 : 0)")
     }
 

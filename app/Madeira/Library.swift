@@ -4365,6 +4365,10 @@ struct LibraryDetail: View {
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel(L("Wine's C++ runtime"), L("Instead of the game's msvcp/vcruntime"))
             }
+            // Japanese locale (LibraryPrefs.japanese, BCDLaunch.applyExtras, WineProcessBridge.m).
+            Toggle(isOn: Binding(get: { bcd.japanese }, set: { on in bcd.japanese = on; LibraryPrefs.setJapanese(on, for: entry.windowsPath) })) {
+                compatLabel(L("Japanese locale"), L("For Japanese games and visual novels whose text shows as squares or gibberish, or that do not start"))
+            }
             // madeira-bcd: MADEIRA_REAL_SUSPEND for this game (BCDLaunch.realSuspend).
             Picker(selection: Binding(get: { bcd.realSuspend.map { $0 ? 1 : 2 } ?? 0 },
                                       set: { v in bcd.realSuspend = v == 0 ? nil : v == 1; LibraryPrefs.setRealSuspend(bcd.realSuspend, for: entry.windowsPath) })) {
@@ -4634,7 +4638,7 @@ struct LibraryDetail: View {
 /// madeira-bcd: a game's own options as the fork stores them (LibraryDetail):
 /// LibraryPrefs' switches and the GameProfiles.swift file's lines.
 struct BCDGameValues {
-    var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false
+    var avx = false, nvidia = false, olderNvidia = false, wineVCRT = false, japanese = false
     var gpuCard = ""
     var realSuspend: Bool? = nil, unityIL2CPP = false
     var configText = ""
@@ -4645,6 +4649,7 @@ struct BCDGameValues {
         olderNvidia = LibraryPrefs.olderNvidia(windowsPath)
         gpuCard = LibraryPrefs.gpuCard(windowsPath) ?? ""
         wineVCRT = LibraryPrefs.wineVCRT(windowsPath)
+        japanese = LibraryPrefs.japanese(windowsPath)
         realSuspend = LibraryPrefs.realSuspend(windowsPath)
         configText = GameProfile(windowsPath: windowsPath).text
     }
