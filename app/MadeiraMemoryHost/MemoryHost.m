@@ -1,3 +1,5 @@
+/* Copyright 2026 thebcd69 (BCD). This file was taken from https://github.com/thebcd69/bcd-games
+ * under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md. */
 // MadeiraMemoryHost: an app extension on com.apple.ar.viewer, the extension
 // point iOS 27's jetsam table gives no memory limit. It creates memory objects
 // for Madeira on request (the extension memory experiment, see

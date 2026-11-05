@@ -1,3 +1,5 @@
+// Portions copyright 2026 thebcd69 (BCD): game lists and code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
+// under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 //
 //  GameRecommendations.swift
 //  Madeira
@@ -1376,7 +1378,7 @@ enum GameRecommendations {
 
 // MARK: More Steam titles
 
-/// Lists merged on 2026-10-26 from community tested lists, one per Steam title,
+/// Lists merged on 2026-10-26 from thebcd69's (BCD) tested lists, one per Steam title,
 /// in this file's format. Only lines this tree reads are kept; each list's comment
 /// names the lines left out and why.
 extension GameRecommendations {
@@ -1497,7 +1499,7 @@ extension GameRecommendations {
 
     ]
 
-    /// Microsoft Flight Simulator 2024 (Steam App ID 2537590). Ported on 2026-10-26 from a community tested list
+    /// Microsoft Flight Simulator 2024 (Steam App ID 2537590). Ported on 2026-10-26 from thebcd69's (BCD) tested list
     /// for it (its version 6); not device-tested here.
     static let msfs2024 = GameRecommendation(
         id: "msfs-2024", title: "Microsoft Flight Simulator 2024", version: 1,
@@ -1516,7 +1518,7 @@ extension GameRecommendations {
         """,
         avx: true, nvidia: true, wineVCRT: false, display: "fit")
 
-    /// Counter-Strike 2 (Steam App ID 730). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Counter-Strike 2 (Steam App ID 730). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 2); not device-tested here.
     static let counterStrike2 = GameRecommendation(
         id: "counter-strike-2", title: "Counter-Strike 2", version: 1,
@@ -1572,7 +1574,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Breakneck (Steam App ID 432940). Ported on 2026-10-26 from a community tested list for it (its version 1);
+    /// Breakneck (Steam App ID 432940). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 1);
     /// not device-tested here.
     static let breakneck = GameRecommendation(
         id: "breakneck", title: "Breakneck", version: 1,
@@ -1589,7 +1591,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Spelunky 2 (Steam App ID 418530). Ported on 2026-10-26 from a community tested list for it (its version 3);
+    /// Spelunky 2 (Steam App ID 418530). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 3);
     /// not device-tested here.
     static let spelunky2 = GameRecommendation(
         id: "spelunky-2", title: "Spelunky 2", version: 1,
@@ -1608,7 +1610,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Albion Online (Steam App ID 761890). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Albion Online (Steam App ID 761890). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here.
     static let albionOnline = GameRecommendation(
         id: "albion-online", title: "Albion Online", version: 1,
@@ -1625,7 +1627,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Hogwarts Legacy (Steam App ID 990080). Ported on 2026-10-26 from a community tested list for it (its
+    /// Hogwarts Legacy (Steam App ID 990080). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let hogwartsLegacy = GameRecommendation(
         id: "hogwarts-legacy", title: "Hogwarts Legacy", version: 1,
@@ -1642,7 +1644,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// METAL GEAR SOLID V: THE PHANTOM PAIN (Steam App ID 287700). Ported on 2026-10-26 from a community tested
+    /// METAL GEAR SOLID V: THE PHANTOM PAIN (Steam App ID 287700). Ported on 2026-10-26 from thebcd69's (BCD) tested
     /// list for it (its version 1); not device-tested here.
     static let metalGearSolidV = GameRecommendation(
         id: "metal-gear-solid-v", title: "METAL GEAR SOLID V: THE PHANTOM PAIN", version: 1,
@@ -1659,7 +1661,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Stellar Blade Demo (Steam App ID 3564860). Ported on 2026-10-26 from a community tested list for it (its
+    /// Stellar Blade Demo (Steam App ID 3564860). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 2); not device-tested here.
     static let stellarBladeDemo = GameRecommendation(
         id: "stellar-blade-demo", title: "Stellar Blade Demo", version: 1,
@@ -1677,7 +1679,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// STAR WARS Galactic Racer (Steam App ID 4078430). Ported on 2026-10-26 from a community tested list for it
+    /// STAR WARS Galactic Racer (Steam App ID 4078430). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 2); not device-tested here.
     static let starWarsGalacticRacer = GameRecommendation(
         id: "star-wars-galactic-racer", title: "STAR WARS Galactic Racer", version: 1,
@@ -1695,7 +1697,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Minecraft Dungeons II (Steam folder "minecraft dungeons ii"). Ported on 2026-10-26 from a community tested
+    /// Minecraft Dungeons II (Steam folder "minecraft dungeons ii"). Ported on 2026-10-26 from thebcd69's (BCD) tested
     /// list for it (its version 1); not device-tested here. Left out: MADEIRA_OPTIN_DLLS (the community app-side
     /// switch; not in this tree (opt-in DLLs not merged)); pool-split-retry (the community app-side switch; not in
     /// this tree).
@@ -1719,7 +1721,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Denshattack! (Steam App ID 2524850). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Denshattack! (Steam App ID 2524850). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here.
     static let denshattack = GameRecommendation(
         id: "denshattack", title: "Denshattack!", version: 1,
@@ -1736,7 +1738,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// FINAL FANTASY RESONANCE DEMO (Steam App ID 4474710). Ported on 2026-10-26 from a community tested list for
+    /// FINAL FANTASY RESONANCE DEMO (Steam App ID 4474710). Ported on 2026-10-26 from thebcd69's (BCD) tested list for
     /// it (its version 2); not device-tested here.
     static let finalFantasyResonanceDemo = GameRecommendation(
         id: "final-fantasy-resonance-demo", title: "FINAL FANTASY RESONANCE DEMO", version: 1,
@@ -1754,7 +1756,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// No Rest for the Wicked (Steam App ID 1371980). Ported on 2026-10-26 from a community tested list for it
+    /// No Rest for the Wicked (Steam App ID 1371980). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 4); not device-tested here. Left out: MADEIRA_WINTYPES (the community app-side switch; not in
     /// this tree).
     static let noRestForTheWicked = GameRecommendation(
@@ -1774,7 +1776,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Quaver (Steam App ID 980610). Ported on 2026-10-26 from a community tested list for it (its version 1); not
+    /// Quaver (Steam App ID 980610). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 1); not
     /// device-tested here.
     static let quaver = GameRecommendation(
         id: "quaver", title: "Quaver", version: 1,
@@ -1791,7 +1793,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Dying Light (Steam App ID 239140). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Dying Light (Steam App ID 239140). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 2); not device-tested here. Left out: MADEIRA_OPTIN_DLLS (the community app-side switch; not in this tree
     /// (opt-in DLLs not merged)); MADEIRA_OPTIN_DLLS (the community app-side switch; not in this tree (opt-in DLLs
     /// not merged)).
@@ -1810,7 +1812,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// BeamNG.drive (Steam App ID 284160). Ported on 2026-10-26 from a community tested list for it (its version
+    /// BeamNG.drive (Steam App ID 284160). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 2); not device-tested here. Left out: MADEIRA_X64_MACHINE (read by a Wine/tools patch that is not merged).
     static let beamngDrive = GameRecommendation(
         id: "beamng-drive", title: "BeamNG.drive", version: 1,
@@ -1827,7 +1829,7 @@ extension GameRecommendations {
         """)
 
     /// Monster Hunter Stories 3: Twisted Reflection Trial Version (Steam App ID 3470630). Ported on 2026-10-26 from
-    /// a community tested list for it (its version 1); not device-tested here.
+    /// thebcd69's (BCD) tested list for it (its version 1); not device-tested here.
     static let monsterHunterStories3Trial = GameRecommendation(
         id: "monster-hunter-stories-3-trial", title: "Monster Hunter Stories 3: Twisted Reflection Trial Version", version: 1,
         config: """
@@ -1842,7 +1844,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Phoenix Wright: Ace Attorney Trilogy (Steam App ID 787480). Ported on 2026-10-26 from a community tested
+    /// Phoenix Wright: Ace Attorney Trilogy (Steam App ID 787480). Ported on 2026-10-26 from thebcd69's (BCD) tested
     /// list for it (its version 1); not device-tested here.
     static let pwaat = GameRecommendation(
         id: "pwaat", title: "Phoenix Wright: Ace Attorney Trilogy", version: 1,
@@ -1859,7 +1861,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// American Truck Simulator (Steam App ID 270880). Ported on 2026-10-26 from a community tested list for it
+    /// American Truck Simulator (Steam App ID 270880). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let americanTruckSimulator = GameRecommendation(
         id: "american-truck-simulator", title: "American Truck Simulator", version: 1,
@@ -1875,7 +1877,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Marvel's Spider-Man: Miles Morales (Steam App ID 1817190). Ported on 2026-10-26 from a community tested
+    /// Marvel's Spider-Man: Miles Morales (Steam App ID 1817190). Ported on 2026-10-26 from thebcd69's (BCD) tested
     /// list for it (its version 1); not device-tested here.
     static let marvelsSpiderManMilesMorales = GameRecommendation(
         id: "marvels-spider-man-miles-morales", title: "Marvel's Spider-Man: Miles Morales", version: 1,
@@ -1894,7 +1896,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: true, wineVCRT: false, display: "fit")
 
-    /// Diablo II: Resurrected (Steam App ID 2536520). Ported on 2026-10-26 from a community tested list for it
+    /// Diablo II: Resurrected (Steam App ID 2536520). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 2); not device-tested here. Left out: MADEIRA_OPTIN_DLLS (the community app-side switch; not
     /// in this tree (opt-in DLLs not merged)); MADEIRA_NTDLL_XSEC (read by the companion ntdll-xsec.dll, which this
     /// tree does not build); MADEIRA_SHARED_SECTION_EXEC (needs ntdll-xsec.dll (NTDLL_XSEC) to tell the emulator; not
@@ -1914,7 +1916,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Clair Obscur: Expedition 33 (Steam App ID 1903340). Ported on 2026-10-26 from a community tested list for
+    /// Clair Obscur: Expedition 33 (Steam App ID 1903340). Ported on 2026-10-26 from thebcd69's (BCD) tested list for
     /// it (its version 1); not device-tested here.
     static let clairObscurExpedition33 = GameRecommendation(
         id: "clair-obscur-expedition-33", title: "Clair Obscur: Expedition 33", version: 1,
@@ -1931,7 +1933,7 @@ extension GameRecommendations {
         """)
 
     /// GTA San Andreas - The Definitive Edition (Steam) (Steam App ID 1547000). Ported on 2026-10-26 from a
-    /// community tested list for it (its version 1); not device-tested here. Left out: MADEIRA_FEX_AVX (the AVX switch
+    /// thebcd69's (BCD) tested list for it (its version 1); not device-tested here. Left out: MADEIRA_FEX_AVX (the AVX switch
     /// (avx: false) instead).
     static let gtasaDeSteam = GameRecommendation(
         id: "gtasa-de-steam", title: "GTA San Andreas - The Definitive Edition (Steam)", version: 1,
@@ -1950,7 +1952,7 @@ extension GameRecommendations {
         """,
         avx: false)
 
-    /// Unrailed! 2: Back on Track (Steam App ID 2211170). Ported on 2026-10-26 from a community tested list for it
+    /// Unrailed! 2: Back on Track (Steam App ID 2211170). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let unrailed2BackOnTrack = GameRecommendation(
         id: "unrailed-2-back-on-track", title: "Unrailed! 2: Back on Track", version: 1,
@@ -1966,7 +1968,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// BlazBlue Entropy Effect (Steam App ID 2273430). Ported on 2026-10-26 from a community tested list for it
+    /// BlazBlue Entropy Effect (Steam App ID 2273430). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let blazblueEntropyEffect = GameRecommendation(
         id: "blazblue-entropy-effect", title: "BlazBlue Entropy Effect", version: 1,
@@ -1982,7 +1984,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Marvel's Spider-Man Remastered (Steam App ID 1817070). Ported on 2026-10-26 from a community tested list
+    /// Marvel's Spider-Man Remastered (Steam App ID 1817070). Ported on 2026-10-26 from thebcd69's (BCD) tested list
     /// for it (its version 2); not device-tested here.
     static let marvelsSpiderManRemastered = GameRecommendation(
         id: "marvels-spider-man-remastered", title: "Marvel's Spider-Man Remastered", version: 1,
@@ -2002,7 +2004,7 @@ extension GameRecommendations {
         """,
         avx: false, nvidia: true, wineVCRT: false, display: "fit")
 
-    /// Marvel's Spider-Man 2 (Steam App ID 2651280). Ported on 2026-10-26 from a community tested list for it (its
+    /// Marvel's Spider-Man 2 (Steam App ID 2651280). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let marvelsSpiderMan2 = GameRecommendation(
         id: "marvels-spider-man-2", title: "Marvel's Spider-Man 2", version: 1,
@@ -2027,7 +2029,7 @@ extension GameRecommendations {
         avx: false, nvidia: true, wineVCRT: false, display: "fit")
 
     /// RAIDOU Remastered: The Mystery of the Soulless Army (Steam App ID 2288350). Ported on 2026-10-26 from a
-    /// community tested list for it (its version 1); not device-tested here.
+    /// thebcd69's (BCD) tested list for it (its version 1); not device-tested here.
     static let raidouRemastered = GameRecommendation(
         id: "raidou-remastered", title: "RAIDOU Remastered: The Mystery of the Soulless Army", version: 1,
         config: """
@@ -2042,7 +2044,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Yakuza: Like a Dragon (Steam App ID 1235140). Ported on 2026-10-26 from a community tested list for it (its
+    /// Yakuza: Like a Dragon (Steam App ID 1235140). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let yakuzaLikeADragon = GameRecommendation(
         id: "yakuza-like-a-dragon", title: "Yakuza: Like a Dragon", version: 1,
@@ -2059,7 +2061,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Batman: Arkham City GOTY (Steam App ID 200260). Ported on 2026-10-26 from a community tested list for it
+    /// Batman: Arkham City GOTY (Steam App ID 200260). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 2). Version 2 (an iPhone 17 Pro Max, 2026-10-31): with Madeira's own card name, BatmanAC.exe
     /// started its .NET launcher BmLauncher.exe and exited, and the Dock session ended with the launcher still
     /// opening; with "Older NVIDIA card (Direct3D 9)" it started no launcher and the game played. The first
@@ -2079,7 +2081,7 @@ extension GameRecommendations {
         """,
         olderNvidia: true)
 
-    /// Trails in the Sky 1st Chapter (Steam App ID 3375780). Ported on 2026-10-26 from a community tested list for
+    /// Trails in the Sky 1st Chapter (Steam App ID 3375780). Ported on 2026-10-26 from thebcd69's (BCD) tested list for
     /// it (its version 1); not device-tested here.
     static let trailsInTheSky1stChapter = GameRecommendation(
         id: "trails-in-the-sky-1st-chapter", title: "Trails in the Sky 1st Chapter", version: 1,
@@ -2095,7 +2097,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Subnautica 2 (Steam App ID 1962700). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Subnautica 2 (Steam App ID 1962700). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here.
     static let subnautica2 = GameRecommendation(
         id: "subnautica-2", title: "Subnautica 2", version: 1,
@@ -2111,7 +2113,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Red Dead Redemption (Steam) (Steam App ID 2668510). Ported on 2026-10-26 from a community tested list for
+    /// Red Dead Redemption (Steam) (Steam App ID 2668510). Ported on 2026-10-26 from thebcd69's (BCD) tested list for
     /// it (its version 1); not device-tested here.
     static let rdr1Steam = GameRecommendation(
         id: "rdr1-steam", title: "Red Dead Redemption (Steam)", version: 1,
@@ -2129,7 +2131,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Resident Evil Requiem (Steam App ID 3764200). Ported on 2026-10-26 from a community tested list for it (its
+    /// Resident Evil Requiem (Steam App ID 3764200). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 2); not device-tested here.
     static let residentEvilRequiem = GameRecommendation(
         id: "resident-evil-requiem", title: "Resident Evil Requiem", version: 1,
@@ -2147,7 +2149,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Resident Evil Requiem Demo (Steam App ID 4459100). Ported on 2026-10-26 from a community tested list for it
+    /// Resident Evil Requiem Demo (Steam App ID 4459100). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let residentEvilRequiemDemo = GameRecommendation(
         id: "resident-evil-requiem-demo", title: "Resident Evil Requiem Demo", version: 1,
@@ -2164,7 +2166,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Life is Strange Remastered (Steam App ID 1265920). Ported on 2026-10-26 from a community tested list for it
+    /// Life is Strange Remastered (Steam App ID 1265920). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let lifeIsStrangeRemastered = GameRecommendation(
         id: "life-is-strange-remastered", title: "Life is Strange Remastered", version: 1,
@@ -2180,7 +2182,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Life is Strange 2 (Steam App ID 532210). Ported on 2026-10-26 from a community tested list for it (its
+    /// Life is Strange 2 (Steam App ID 532210). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let lifeIsStrange2 = GameRecommendation(
         id: "life-is-strange-2", title: "Life is Strange 2", version: 1,
@@ -2197,7 +2199,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Project Zomboid (Steam App ID 108600). Ported on 2026-10-26 from a community tested list for it (its
+    /// Project Zomboid (Steam App ID 108600). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let projectZomboid = GameRecommendation(
         id: "project-zomboid", title: "Project Zomboid", version: 1,
@@ -2213,7 +2215,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// SpiderHeck (Steam App ID 1329500). Ported on 2026-10-26 from a community tested list for it (its version
+    /// SpiderHeck (Steam App ID 1329500). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here.
     static let spiderheck = GameRecommendation(
         id: "spiderheck", title: "SpiderHeck", version: 1,
@@ -2229,7 +2231,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// ROUNDS (Steam App ID 1557740). Ported on 2026-10-26 from a community tested list for it (its version 1);
+    /// ROUNDS (Steam App ID 1557740). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 1);
     /// not device-tested here.
     static let rounds = GameRecommendation(
         id: "rounds", title: "ROUNDS", version: 1,
@@ -2245,7 +2247,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// PlateUp! (Steam App ID 1599600). Ported on 2026-10-26 from a community tested list for it (its version 1);
+    /// PlateUp! (Steam App ID 1599600). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 1);
     /// not device-tested here.
     static let plateup = GameRecommendation(
         id: "plateup", title: "PlateUp!", version: 1,
@@ -2262,7 +2264,7 @@ extension GameRecommendations {
         """)
 
     /// FINAL FANTASY TACTICS - The Ivalice Chronicles (Steam App ID 1004640). Ported on 2026-10-26 from a
-    /// community tested list for it (its version 1); not device-tested here.
+    /// thebcd69's (BCD) tested list for it (its version 1); not device-tested here.
     static let finalFantasyTacticsIvaliceChronicles = GameRecommendation(
         id: "final-fantasy-tactics-ivalice-chronicles", title: "FINAL FANTASY TACTICS - The Ivalice Chronicles", version: 1,
         config: """
@@ -2277,7 +2279,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Jetboard Joust (Steam App ID 1181600). Ported on 2026-10-26 from a community tested list for it (its
+    /// Jetboard Joust (Steam App ID 1181600). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its
     /// version 1); not device-tested here.
     static let jetboardJoust = GameRecommendation(
         id: "jetboard-joust", title: "Jetboard Joust", version: 1,
@@ -2293,7 +2295,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Dead as Disco (Steam App ID 3404260). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Dead as Disco (Steam App ID 3404260). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here. Left out: MADEIRA_OPTIN_DLLS (the community app-side switch; not in this tree
     /// (opt-in DLLs not merged)).
     static let deadAsDisco = GameRecommendation(
@@ -2310,7 +2312,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// TUNG (Steam folder "tung"). Ported on 2026-10-26 from a community tested list for it (its version 1); not
+    /// TUNG (Steam folder "tung"). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version 1); not
     /// device-tested here.
     static let tung = GameRecommendation(
         id: "tung", title: "TUNG", version: 1,
@@ -2326,7 +2328,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Sekiro: Shadows Die Twice (Steam App ID 814380). Ported on 2026-10-26 from a community tested list for it
+    /// Sekiro: Shadows Die Twice (Steam App ID 814380). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let sekiroShadowsDieTwice = GameRecommendation(
         id: "sekiro-shadows-die-twice", title: "Sekiro: Shadows Die Twice", version: 1,
@@ -2342,7 +2344,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Stardew Valley (Steam App ID 413150). Ported on 2026-10-26 from a community tested list for it (its version
+    /// Stardew Valley (Steam App ID 413150). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
     /// 1); not device-tested here.
     static let stardewValley = GameRecommendation(
         id: "stardew-valley", title: "Stardew Valley", version: 1,
@@ -2358,7 +2360,7 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """)
 
-    /// Glyphica: Typing Survival (Steam App ID 2400160). Ported on 2026-10-26 from a community tested list for it
+    /// Glyphica: Typing Survival (Steam App ID 2400160). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD
     /// (its version 1); not device-tested here.
     static let glyphicaTypingSurvival = GameRecommendation(
         id: "glyphica-typing-survival", title: "Glyphica: Typing Survival", version: 1,
@@ -2375,7 +2377,7 @@ extension GameRecommendations {
         """)
 
     /// The Adventures of Elliot: The Millennium Tales (Steam App ID 3483510). Ported on 2026-10-26 from a
-    /// community tested list for it (its version 1); not device-tested here. Left out: pool-above-window (the
+    /// thebcd69's (BCD) tested list for it (its version 1); not device-tested here. Left out: pool-above-window (the
     /// community app-side switch; not in this tree); MADEIRA_KUSER_KEEP_REGS (its engine code (signal_arm64_ios.c) is
     /// not in this tree yet).
     static let theAdventuresOfElliot = GameRecommendation(

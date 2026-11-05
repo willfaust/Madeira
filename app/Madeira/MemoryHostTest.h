@@ -1,3 +1,5 @@
+/* Copyright 2026 thebcd69 (BCD). This file was taken from https://github.com/thebcd69/bcd-games
+ * under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md. */
 #import <Foundation/Foundation.h>
 
 /// The extension memory experiment (MemoryHostProtocol.h): starts the

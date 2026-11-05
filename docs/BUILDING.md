@@ -67,6 +67,27 @@ git-ignored and consumed by the app project.
      the ARM64EC farm. It is in the default module list; rebuild it explicitly
      with `bash build/wine-pe/build-modules.sh explorerframe`. See
      `docs/TASKBARLIST.md` for the package check and Windows x64 COM fixture.
+   - fx_2_0 effects (2026-11-04): an effect compiled from text at run time
+     (`D3DXCreateEffect` on a `.fx` source) goes d3dx9 -> `d3dcompiler_47` ->
+     the vkd3d-shader copy in `wine/libs/vkd3d`, whose fx_2_0 writer (release
+     1.19) refused sampler state blocks (`sampler2D s { Texture = <t>; ... }`)
+     and pass assignments (`PixelShader = compile ps_3_0 f(); ZEnable = 0;`):
+     the program showed "Error building shader" and ran without the effect.
+     The Wine tree's `libs/vkd3d/libs/vkd3d-shader/fx.c` now writes both,
+     with the resource records d3dx9 reads shader bytecode and `<parameter>`
+     references from, zeros for parameters without an initializer, and
+     `TRUE`/`FALSE` by name for every state. vkd3d-shader is linked into
+     `wined3d.dll` (the `d3dcompiler_*` modules import it from there), so a
+     change in `libs/vkd3d` means rebuilding `wined3d` for both farms
+     (`build/wine-pe/build-modules.sh wined3d` and
+     `build/wine-i386/build.sh wined3d`); the d3dcompiler modules themselves
+     do not change.
+     `tests/host/check-fx2-effects.py` checks the writer's pieces and, with
+     `VKD3D_COMPILER` pointing at a `vkd3d-compiler` built from that tree
+     (upstream vkd3d at tag `vkd3d-1.19` with the tree's `fx.c` copied in;
+     `./configure WIDL=<wine build-tools>/tools/widl/widl --disable-tests`),
+     compiles a sample effect and reads the binary back the way
+     `dlls/d3dx9_36/effect.c` does.
    - Stand-ins for DLLs Wine cannot provide here but games import: `python3 tools/build-stub-dlls.py wine build/stub-dlls toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/arm64ec-w64-mingw32-clang toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/llvm-readobj app/Madeira/arm64ec-windows` builds `vulkan-1.dll` (answers like a PC without a Vulkan driver, so a game falls back to D3D) and, when the farm has no Wine build of them, `d3d10.dll` and `avifil32.dll`; each exports exactly its Wine `.spec`. Crysis Remastered imports all three.
 4. DXMT (submodule, branch ios-port):
    - unix side: `build/dxmt-ios/build.sh` (needs `toolchains/llvm-ios-build`) -> `app/Madeira/libdxmt_combined.a` (ignored; the app links it). Verified this session.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """env.MADEIRA_VCRT_ARM64_KEY, the volatile ARM64 Visual C++ redistributable marker
 (build/ntdll-unix/server_ios.c, ios_vcrt_arm64_key_publish); no Wine runs.
 

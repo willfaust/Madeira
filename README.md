@@ -168,6 +168,7 @@ proposing anything to it.
 - **Jesse** ([@JesseLovelace](https://github.com/JesseLovelace)): Steam Cloud saves, faster game launches, and fixes that let more games run
 - **Dan Perks** ([@danperks](https://github.com/danperks)): in-app JIT without StikDebug, and pairing without a computer
 - **bahacan16** ([@bahacan16](https://github.com/bahacan16)): Direct3D 12 and DXMT fixes, game launcher windows, per-game settings, PlayStation controllers, and save backups
+- **thebcd69 / BCD** ([@thebcd69](https://github.com/thebcd69), also bahacan16 above): engine memory, exception, WoW64, win32u and D3D12 fixes, the memory-host extension experiment, host tests and tested game lists, taken from his [bcd-games](https://github.com/thebcd69/bcd-games) fork and from his pull requests #337 to #346 (credited late; see `THIRD-PARTY-NOTICES.md`)
 - **spitefulowl** ([@spitefulowl](https://github.com/spitefulowl)): Wine and FEX runtime fixes, DXMT texture and memory fixes, audio, the swap tier, and library launch options
 - **meshoklv** ([@meshoklv](https://github.com/meshoklv)): controller fixes for games that ship their own XInput or need focus, touch taps that stay off the mouse, and a crash-guard fix
 - **TheHadesc** ([@TheHadesc](https://github.com/TheHadesc)): Madeira Dock starts for games whose Steam launch entries do not start at zero, and a touch gamepad that survives the in-game keyboard

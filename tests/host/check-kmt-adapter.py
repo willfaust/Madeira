@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """The opt-in D3DKMT adapter (env.MADEIRA_KMT_ADAPTER = 1) in
 build/win32u-unix/d3dkmt_ios.c and sysparams_ios.c; no Wine runs.
 

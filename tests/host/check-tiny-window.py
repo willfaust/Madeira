@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """[win-create] / [tiny-win] and env.MADEIRA_TINY_WINDOW_FIX; no Wine runs.
 
 A 64-bit title opens as a 132x38 window -- Wine's minimum window size -- whose swapchain draws 1024x768,

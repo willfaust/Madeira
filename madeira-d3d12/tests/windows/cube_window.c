@@ -1,3 +1,5 @@
+/* Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+ * under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md. */
 /*  Visible rotating D3D12 cube: an x86-64 Windows program drawing through our
  *  D3D12 interfaces and presenting into the host window.
  *
