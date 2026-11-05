@@ -1422,6 +1422,8 @@ extension GameRecommendations {
                    programs: ["theescapists2.exe"], steamPrograms: [], list: escapists2),
         SteamTitle(appIDs: [4000], folders: ["garrysmod"],
                    programs: ["gmod.exe"], steamPrograms: [], list: garrysMod),
+        SteamTitle(appIDs: [2161700], folders: ["p3r"],
+                   programs: ["p3r.exe"], steamPrograms: [], list: persona3Reload),
         SteamTitle(appIDs: [980610], folders: ["quaver"],
                    programs: ["quaver.exe"], steamPrograms: [], list: quaver),
         SteamTitle(appIDs: [239140], folders: ["dying light"],
@@ -1550,6 +1552,27 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// Persona 3 Reload (Steam App ID 2161700). Device-tested on an iPhone 17 Pro Max (2026-11-04): its logos and movies
+    /// flashed because the quad that shows them reads its UVs from a typed view in an UPLOAD ring, and the converted
+    /// shaders ignore a typed view's element offset, so a view off a 64-byte boundary read the bytes before it (a flat
+    /// texel or streaks in those frames). typed-view-align and typed-view-shadow stop that. Some frame stutters remain
+    /// in the game. This is the owner's working list as it ran, without env.FEX_TSOENABLED = 1 (already FEX's default),
+    /// so it has no block of tested defaults.
+    static let persona3Reload = GameRecommendation(
+        id: "persona-3-reload", title: "Persona 3 Reload", version: 1,
+        config: """
+        # Madeira's recommended settings for Persona 3 Reload.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        typed-view-align = 16
+        typed-view-shadow = 1
+        pool-split = 1
+        real-suspend = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_FEX_AVX = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        """,
+        avx: false, nvidia: false, wineVCRT: false)
 
     /// Garry's Mod (Steam App ID 4000). Device-tested on an iPhone 17 Pro Max (2026-10-31): multiplayer works on Steam's
     /// x86-64 branch (64-bit gmod.exe, 60 FPS against 17-53 on the 32-bit default branch) with the launch option
