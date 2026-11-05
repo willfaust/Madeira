@@ -2,11 +2,12 @@
 """App translations (app/Madeira/Localizable.xcstrings).
 
 SwiftUI looks up every literal Text/Button/Label/Toggle/Section/... title in the string
-catalog, so the app shows German, Spanish, Korean, Brazilian Portuguese or Russian when the
-device uses one, and English otherwise (a text the catalog lacks stays English).
+catalog, so the app shows German, Spanish, Korean, Brazilian Portuguese, Russian or
+Simplified Chinese when the device uses one, and English otherwise (a text the catalog
+lacks stays English).
 
 Checks: the catalog is in the app's resources with its languages; every key is still a
-literal in the app's Swift (so a changed English text is noticed); every key has all five
+literal in the app's Swift (so a changed English text is noticed); every key has all six
 languages; links, line breaks and trailing spaces survive translation. A text with
 interpolations is keyed with %@ for each one (only String interpolations are translated
 this way); its translations use %1$@, %2$@... so the words can move.
@@ -28,12 +29,12 @@ def check(condition, label):
 
 catalog = json.loads((app / 'Localizable.xcstrings').read_text(encoding='utf-8'))
 project = (app.parent / 'Madeira.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
-languages = ['de', 'es', 'ko', 'pt-BR', 'ru']
+languages = ['de', 'es', 'ko', 'pt-BR', 'ru', 'zh-Hans']
 
 check(project.count('A1009C03 /* Localizable.xcstrings in Resources */') == 2 and
       project.count('A2009C03 /* Localizable.xcstrings */') == 3, 'the catalog is in the app resources')
 regions = re.search(r'knownRegions = \((.*?)\);', project, re.S)
-check(regions is not None and all(l in regions.group(1) for l in ['de', 'es', 'ko', '"pt-BR"', 'ru']), 'the project knows the languages')
+check(regions is not None and all(l in regions.group(1) for l in ['de', 'es', 'ko', '"pt-BR"', 'ru', '"zh-Hans"']), 'the project knows the languages')
 check(catalog.get('sourceLanguage') == 'en', 'English is the source language')
 
 # The calls whose first argument SwiftUI reads as a LocalizedStringKey, and L("...")
@@ -56,7 +57,7 @@ stale = [k for k in strings if shape(k) not in literals]
 check(not stale, 'every translated text is still in the app' + (f' (stale: {stale[:5]})' if stale else ''))
 missing = [(k, l) for k, v in strings.items() for l in languages
            if not v.get('localizations', {}).get(l, {}).get('stringUnit', {}).get('value')]
-check(not missing, 'every text has all five languages' + (f' (missing: {missing[:5]})' if missing else ''))
+check(not missing, 'every text has all six languages' + (f' (missing: {missing[:5]})' if missing else ''))
 broken = []
 for k, v in strings.items():
     for l in languages:

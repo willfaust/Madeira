@@ -36,7 +36,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 创意工坊"
+            "value": "%1$@ 创意工坊"
           }
         }
       }
@@ -76,7 +76,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 快捷指令"
+            "value": "%1$@ 快捷指令"
           }
         }
       }
@@ -716,7 +716,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "备份是一个 zip，包含每个 Windows 用户的 Documents、Saved Games 与 AppData（不含缓存），"
+            "value": "备份是一个 zip，包含每个 Windows 用户的 Documents、Saved Games 与 AppData（不含缓存）， "
           }
         }
       }
@@ -1316,7 +1316,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "添加 %lld"
+            "value": "添加 %1$lld"
           }
         }
       }
@@ -1516,7 +1516,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "添加%@快捷指令"
+            "value": "添加%1$@快捷指令"
           }
         }
       }
@@ -1876,7 +1876,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "全部设置（另有 %lld 项）"
+            "value": "全部设置（另有 %1$lld 项）"
           }
         }
       }
@@ -4436,7 +4436,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "使用%@连接"
+            "value": "使用%1$@连接"
           }
         }
       }
@@ -4676,7 +4676,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "手柄控件对应 XInput 1 号玩家。LS 与 RS 是模拟摇杆；"
+            "value": "手柄控件对应 XInput 1 号玩家。LS 与 RS 是模拟摇杆； "
           }
         }
       }
@@ -5036,7 +5036,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "自定义：%@"
+            "value": "自定义：%1$@"
           }
         }
       }
@@ -5716,7 +5716,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "删除“%@”"
+            "value": "删除“%1$@”"
           }
         }
       }
@@ -7156,7 +7156,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在你的%@上输入此验证码"
+            "value": "在你的%1$@上输入此验证码"
           }
         }
       }
@@ -8356,7 +8356,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在%@上找游戏"
+            "value": "在%1$@上找游戏"
           }
         }
       }
@@ -10596,7 +10596,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "安装%@才能下载它的创意工坊内容。"
+            "value": "安装%1$@才能下载它的创意工坊内容。"
           }
         }
       }
@@ -11476,7 +11476,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "JIT 让 Madeira 能运行 Windows 代码。请选择你的%@获取它的方式。"
+            "value": "JIT 让 Madeira 能运行 Windows 代码。请选择你的%1$@获取它的方式。"
           }
         }
       }
@@ -13396,7 +13396,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Madeira 通过 LocalDevVPN 启用 JIT，这个免费 App 为 Madeira 提供到本%@的网络通路。请先从 App Store 安装，然后回来。"
+            "value": "Madeira 通过 LocalDevVPN 启用 JIT，这个免费 App 为 Madeira 提供到本%1$@的网络通路。请先从 App Store 安装，然后回来。"
           }
         }
       }
@@ -15076,7 +15076,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "其他选项没有匹配“%@”的。"
+            "value": "其他选项没有匹配“%1$@”的。"
           }
         }
       }
@@ -15676,7 +15676,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "未上传，Madeira 保持打开：%@"
+            "value": "未上传，Madeira 保持打开：%1$@"
           }
         }
       }
@@ -16356,7 +16356,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开「设置 › 隐私与安全性 › 开发者模式」，向下滚动并点 **与 %@ 配对**。保持 Wi-Fi 开启。"
+            "value": "打开「设置 › 隐私与安全性 › 开发者模式」，向下滚动并点 **与 %1$@ 配对**。保持 Wi-Fi 开启。"
           }
         }
       }
@@ -16676,7 +16676,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "拥有的 DLC（%lld）"
+            "value": "拥有的 DLC（%1$lld）"
           }
         }
       }
@@ -16996,7 +16996,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已在本%@上配对"
+            "value": "已在本%1$@上配对"
           }
         }
       }
@@ -17036,7 +17036,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已与%@配对"
+            "value": "已与%1$@配对"
           }
         }
       }
@@ -18236,7 +18236,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "把%@的一次性安装记为已完成？"
+            "value": "把%1$@的一次性安装记为已完成？"
           }
         }
       }
@@ -19516,7 +19516,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重置%@的一次性安装？"
+            "value": "重置%1$@的一次性安装？"
           }
         }
       }
@@ -22676,7 +22676,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已登录为%@"
+            "value": "已登录为%1$@"
           }
         }
       }
@@ -25596,7 +25596,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "配对文件保存在本%@的钥匙串中。"
+            "value": "配对文件保存在本%1$@的钥匙串中。"
           }
         }
       }
@@ -26996,7 +26996,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "卸载 %@？它下载的文件会从本机删除。存在别处的存档会保留。"
+            "value": "卸载 %1$@？它下载的文件会从本机删除。存在别处的存档会保留。"
           }
         }
       }
@@ -27036,7 +27036,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "卸载 %@？它下载的文件会从安装位置删除。存在别处的存档会保留。"
+            "value": "卸载 %1$@？它下载的文件会从安装位置删除。存在别处的存档会保留。"
           }
         }
       }
@@ -27196,7 +27196,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "最高 %lld×"
+            "value": "最高 %1$lld×"
           }
         }
       }
@@ -27436,7 +27436,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在上传 %lld / %lld"
+            "value": "正在上传 %1$lld / %2$lld"
           }
         }
       }
@@ -28436,7 +28436,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在等待你的 %@…"
+            "value": "正在等待你的 %1$@…"
           }
         }
       }
@@ -28596,7 +28596,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "LocalDevVPN 连不上这台设备时，「启用 JIT」会运行你的 %@ 快捷指令：没有 Wi-Fi 时关掉蜂窝数据并连接 LocalDevVPN，游戏启动后把两者恢复。每次运行都会短暂打开「快捷指令」。"
+            "value": "LocalDevVPN 连不上这台设备时，「启用 JIT」会运行你的 %1$@ 快捷指令：没有 Wi-Fi 时关掉蜂窝数据并连接 LocalDevVPN，游戏启动后把两者恢复。每次运行都会短暂打开「快捷指令」。"
           }
         }
       }
@@ -29196,7 +29196,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "用 %@ 快捷指令时，「启用 JIT」会替你连接 LocalDevVPN、在没有 Wi-Fi 时关掉蜂窝数据，并在游戏启动后把它们连同你原先用的 VPN 一起恢复。"
+            "value": "用 %1$@ 快捷指令时，「启用 JIT」会替你连接 LocalDevVPN、在没有 Wi-Fi 时关掉蜂窝数据，并在游戏启动后把它们连同你原先用的 VPN 一起恢复。"
           }
         }
       }
@@ -29676,7 +29676,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "默认 %@"
+            "value": "默认 %1$@"
           }
         }
       }
@@ -30157,1040 +30157,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "x87 精度"
-          }
-        }
-      }
-    },
-    "All": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部"
-          }
-        }
-      }
-    },
-    "Other": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "其他"
-          }
-        }
-      }
-    },
-    "0.5 s": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "0.5 秒"
-          }
-        }
-      }
-    },
-    "1 s": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "1 秒"
-          }
-        }
-      }
-    },
-    "1% lows: the frame rate of the slowest 1% of frames in the last ten seconds; 1% highs, the fastest. The graph shows each frame's time, newest on the right; a stall is a plateau as long as the stall.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "1% 低帧：最近十秒里最慢的那 1% 帧的帧率；1% 高帧即最快的那些。图表显示每一帧的耗时，最新的在右边；卡顿表现为一段与卡顿时长相当的平台。"
-          }
-        }
-      }
-    },
-    "1.5×": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "1.5×"
-          }
-        }
-      }
-    },
-    "2 s": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "2 秒"
-          }
-        }
-      }
-    },
-    "2×": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "2×"
-          }
-        }
-      }
-    },
-    "32-bit programs": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "32 位程序"
-          }
-        }
-      }
-    },
-    "4 s": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "4 秒"
-          }
-        }
-      }
-    },
-    "8 s": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "8 秒"
-          }
-        }
-      }
-    },
-    "Achievement unlocked": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "解锁成就"
-          }
-        }
-      }
-    },
-    "Add the game to your library first, then open the setup again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请先把游戏加入游戏库，然后重新打开这个设置。"
-          }
-        }
-      }
-    },
-    "Apply Shared Setup": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "应用共享设置"
-          }
-        }
-      }
-    },
-    "Apply a shared setup": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "应用共享设置"
-          }
-        }
-      }
-    },
-    "As Steam saved them on this device the last time the game ran through Madeira Dock. A banner shows each new one while you play.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "就是 Steam 上次通过 Madeira Dock 运行这个游戏时在这台设备上保存的状态。游玩时每解锁一个都会弹出横幅提示。"
-          }
-        }
-      }
-    },
-    "Background": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "后台"
-          }
-        }
-      }
-    },
-    "Big Picture": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "大屏幕模式"
-          }
-        }
-      }
-    },
-    "Button style": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "按钮样式"
-          }
-        }
-      }
-    },
-    "Check these before applying a setup from someone you don't know.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "应用陌生人给的设置之前，请先核对这些内容。"
-          }
-        }
-      }
-    },
-    "Checks every installed file against EA's current build and downloads what is missing or changed.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "逐一核对已安装的文件与 EA 当前版本，并下载缺失或有改动的部分。"
-          }
-        }
-      }
-    },
-    "Choose a File": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "选择文件"
-          }
-        }
-      }
-    },
-    "Colour by frame rate": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "按帧率着色"
-          }
-        }
-      }
-    },
-    "Content ID": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "内容 ID"
-          }
-        }
-      }
-    },
-    "Dismiss": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "关闭"
-          }
-        }
-      }
-    },
-    "Done editing controls": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "完成控制编辑"
-          }
-        }
-      }
-    },
-    "Donor pool": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "捐助内存池"
-          }
-        }
-      }
-    },
-    "Donor pool gives the swap tier RAM that does not count against Madeira's memory limit: memory donated by Madeira's helper extension, which creates it, hands it over and exits, used before the swap file while the phone has memory to spare. It stops taking more when iOS reports memory pressure. Experimental; needs the swap tier on.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "捐助内存池会给交换层提供不计入 Madeira 内存上限的内存：由 Madeira 的辅助扩展创建、交出后即退出所捐赠的内存；手机内存有余时，它会先于交换文件被使用。iOS 报告内存压力时就不再取用。实验性功能，需要开启交换层。"
-          }
-        }
-      }
-    },
-    "Downloads from PCs on this network": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "从本网络内的电脑下载"
-          }
-        }
-      }
-    },
-    "EA app": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "EA 应用"
-          }
-        }
-      }
-    },
-    "Esc": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Esc"
-          }
-        }
-      }
-    },
-    "Every option Madeira reads from madeira.cfg, by subsystem.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Madeira 从 madeira.cfg 读取的全部选项，按子系统分组。"
-          }
-        }
-      }
-    },
-    "From Steam's servers": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "从 Steam 服务器"
-          }
-        }
-      }
-    },
-    "Game language: the language Steam downloads install, and the one Steam tells the game to use. A game without it gets English. Installed games keep their language until you choose Download in their page.\n\nDownloads from PCs on this network: a game's download comes first from a PC on the same network whose Steam has it installed and up to date, through Steam's local network game transfers (Steam on the PC: same account, Settings › Downloads › Game file transfer over local network on, no download or game running). Anything the PC does not have comes from Steam's servers. Madeira finds the PC through Steam and shows up in the account's devices as \"Madeira\". PC address: only when the PC is not found; its IP address on this network.\n\nMadeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "游戏语言：Steam 下载安装时使用的语言，也是 Steam 告诉游戏使用的语言。游戏没有对应语言时用英文。已安装的游戏会保持原语言，直到你在它的页面里选择「下载」。\n\n从本网络内的电脑下载：游戏的下载会优先来自同一网络中装有该游戏且已是最新版本的电脑，走 Steam 的局域网游戏传输（电脑上的 Steam：同一账号，设置 › 下载 › 开启「通过局域网传输游戏文件」，且当时没有在下载或运行游戏）。电脑上没有的部分从 Steam 服务器获取。Madeira 通过 Steam 找到那台电脑，并在账号的设备列表里显示为「Madeira」。电脑地址：仅在找不到电脑时填写，填它在这个网络里的 IP 地址。\n\nMadeira 会把 Steam 登录令牌保存在本机钥匙串里，仅限这台设备。退出登录会删除它。"
-          }
-        }
-      }
-    },
-    "Games download directly from EA with your account into C:\\Program Files\\EA Games. Keep Madeira open while it downloads: in the background iOS allows only a short time, then the download pauses and continues when you return. A download also pauses while a game is running. Games with EA's anti-cheat (Battlefield 2042 and later, EA SPORTS FC) cannot run in Madeira.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "游戏会用你的账号直接从 EA 下载到 C:\\Program Files\\EA Games。下载时请保持 Madeira 打开：在后台 iOS 只允许很短时间，之后下载会暂停，等你回来再继续。游戏运行期间下载也会暂停。带 EA 反作弊的游戏（《战地 2042》及之后的版本、EA SPORTS FC）无法在 Madeira 里运行。"
-          }
-        }
-      }
-    },
-    "Games go back to Wine's own C++ runtime (and the copy bundled with this build, if any) at their next start.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "游戏下次启动时会回到 Wine 自带的 C++ 运行库（以及这个构建里附带的副本，如果有的话）。"
-          }
-        }
-      }
-    },
-    "Glass is the system's Liquid Glass. Solid draws each button as a plain opaque disc; a game's Opacity slider still fades them.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "「玻璃」是系统的液态玻璃。「实心」把每个按钮画成不透明的圆盘；游戏里的不透明度滑块仍会让它们变淡。"
-          }
-        }
-      }
-    },
-    "Graph span": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "图表时间跨度"
-          }
-        }
-      }
-    },
-    "Graphics card the game sees": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "游戏看到的显卡"
-          }
-        }
-      }
-    },
-    "Hidden achievement": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "隐藏成就"
-          }
-        }
-      }
-    },
-    "If the page shows an address that ends in login_successful.html with a code, copy that whole address and paste it here.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "如果页面上显示的地址以 login_successful.html 结尾并带有一串代码，请把整个地址复制下来粘贴到这里。"
-          }
-        }
-      }
-    },
-    "Included": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已包含"
-          }
-        }
-      }
-    },
-    "Installers and launchers that show web pages use Wine Gecko, the Wine project's open-source HTML engine. Madeira gets it from WineHQ by itself on Wi-Fi, so Wine never stops to download it.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会显示网页的安装程序和启动器使用 Wine Gecko，即 Wine 项目的开源 HTML 引擎。Madeira 会在 Wi-Fi 下自行从 WineHQ 获取，Wine 不会因此停下来等下载。"
-          }
-        }
-      }
-    },
-    "Keep playing to reveal it.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "继续游玩即可揭示。"
-          }
-        }
-      }
-    },
-    "Labels": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "标签"
-          }
-        }
-      }
-    },
-    "Layout": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "布局"
-          }
-        }
-      }
-    },
-    "Made for this game": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "为本游戏定制"
-          }
-        }
-      }
-    },
-    "Madeira keeps an EA sign-in token in this device's Keychain, for this device only. Signing out removes it; installed games stay, but need the sign-in to start.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Madeira 会把 EA 登录令牌保存在本机钥匙串里，仅限这台设备。退出登录会删除它；已安装的游戏仍然保留，但需要登录才能启动。"
-          }
-        }
-      }
-    },
-    "Madeira starts the game the way the EA app would: it fetches the game's licence for your account, and stands in for the EA app's local service while the game runs. There is no EA app in Madeira, so friends, the overlay and cloud saves are not available.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Madeira 会像 EA 应用那样启动游戏：为你的账号获取游戏许可，并在游戏运行时充当 EA 应用的本地服务。Madeira 里没有 EA 应用本身，所以好友、叠加层和云存档都不可用。"
-          }
-        }
-      }
-    },
-    "Many Windows games are built with Microsoft Visual C++ and need its 2015-2022 runtime. Madeira downloads Microsoft's own installers and takes the runtime out of them, for 64-bit and 32-bit games alike. Games find it at their next start.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "很多 Windows 游戏用 Microsoft Visual C++ 构建，需要它的 2015-2022 运行库。Madeira 会下载微软自己的安装包，并从中取出运行库，64 位与 32 位游戏都适用。游戏下次启动时就能找到它。"
-          }
-        }
-      }
-    },
-    "Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "「内存+」需要这份已签名的 Madeira 带有「提高内存上限」授权。启用 JIT 并不会带来它。请确认你的签名工具为 Madeira 启用了这项能力，然后在不删除现有安装的情况下重新签名并安装新版本。"
-          }
-        }
-      }
-    },
-    "Mouse sensitivity": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "鼠标灵敏度"
-          }
-        }
-      }
-    },
-    "No achievements on this device yet.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "这台设备上还没有成就。"
-          }
-        }
-      }
-    },
-    "Offer ID": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "优惠 ID"
-          }
-        }
-      }
-    },
-    "Older NVIDIA card (Direct3D 9)": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "较旧的 NVIDIA 显卡（Direct3D 9）"
-          }
-        }
-      }
-    },
-    "Overlay style": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "叠加层样式"
-          }
-        }
-      }
-    },
-    "PC address": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "电脑地址"
-          }
-        }
-      }
-    },
-    "Paste from Clipboard": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "从剪贴板粘贴"
-          }
-        }
-      }
-    },
-    "Pause": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "暂停"
-          }
-        }
-      }
-    },
-    "Pick a folder on a USB or SSD drive, or a whole drive that already has games on it. Windows sees it as a drive letter and as C:\\External\\<name>. Find games adds the games on it to the library; Steam libraries on it (steamapps or SteamLibrary) show up in the Steam section. Install Steam games on picks where new Steam downloads go by default (each install can still pick another place); on a drive they go into <name>\\SteamLibrary. Unplugging the drive while a game runs will close it. Restart Madeira after adding a folder for Windows to list the new drive.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "选一个 U 盘或 SSD 上的文件夹，或者整个已经装了游戏的磁盘。Windows 会把它识别为一个盘符，以及 C:\\External\\<name>。「查找游戏」会把其中的游戏加入游戏库；其中的 Steam 库（steamapps 或 SteamLibrary）会显示在 Steam 区块里。「Steam 游戏安装到」决定新的 Steam 下载默认去哪（每次安装仍可另选位置）；放在磁盘上时会进入 <name>\\SteamLibrary。游戏运行时拔掉磁盘会关闭游戏。添加文件夹后请重启 Madeira，Windows 才会列出新盘符。"
-          }
-        }
-      }
-    },
-    "Play the game once through Madeira Dock: Steam then keeps its achievements here, and a banner shows each one you unlock.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "通过 Madeira Dock 玩一次这个游戏：之后 Steam 就会把成就保存在这里，你每解锁一个都会弹出横幅提示。"
-          }
-        }
-      }
-    },
-    "Refresh your EA library and try again.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请刷新 EA 游戏库后重试。"
-          }
-        }
-      }
-    },
-    "Refreshing EA library": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在刷新 EA 游戏库"
-          }
-        }
-      }
-    },
-    "Refreshing Epic Games library": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在刷新 Epic Games 游戏库"
-          }
-        }
-      }
-    },
-    "Refreshing GOG library": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在刷新 GOG 游戏库"
-          }
-        }
-      }
-    },
-    "Refreshing Steam library": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在刷新 Steam 游戏库"
-          }
-        }
-      }
-    },
-    "Refreshing itch.io library": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在刷新 itch.io 游戏库"
-          }
-        }
-      }
-    },
-    "Remove the Visual C++ runtime?": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "移除 Visual C++ 运行库？"
-          }
-        }
-      }
-    },
-    "Remove the runtime": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "移除运行库"
-          }
-        }
-      }
-    },
-    "Report an NVIDIA GPU": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "报告 NVIDIA 显卡"
-          }
-        }
-      }
-    },
-    "Reset overlay style": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "重置叠加层样式"
-          }
-        }
-      }
-    },
-    "Resume": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "继续"
-          }
-        }
-      }
-    },
-    "See your EA app games here and install them without the EA app.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在这里查看你的 EA 应用游戏，无需 EA 应用即可安装。"
-          }
-        }
-      }
-    },
-    "Send the file, or paste the text in a chat. On the other device, open the file with Madeira, or open the game's details and tap Apply Shared Setup.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "把文件发过去，或在聊天里粘贴文本。在另一台设备上，用 Madeira 打开这个文件，或打开游戏的详情页并点「应用共享设置」。"
-          }
-        }
-      }
-    },
-    "Settings": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "设置"
-          }
-        }
-      }
-    },
-    "Settings files": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "设置文件"
-          }
-        }
-      }
-    },
-    "Settings › Visual C++ runtimes installs Microsoft's runtime again, or removes it.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "「设置 › Visual C++ 运行库」可重新安装微软的运行库，或将其移除。"
-          }
-        }
-      }
-    },
-    "Share Setup": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "分享设置"
-          }
-        }
-      }
-    },
-    "Share as a File": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "作为文件分享"
-          }
-        }
-      }
-    },
-    "Shared Setup": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "共享设置"
-          }
-        }
-      }
-    },
-    "Shared setup": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "共享设置"
-          }
-        }
-      }
-    },
-    "Sign in to EA": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "登录 EA"
-          }
-        }
-      }
-    },
-    "Sign in to EA in Settings › EA app to play or update this game. An EA game needs the sign-in to start.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请在「设置 › EA 应用」里登录 EA，才能游玩或更新这个游戏。EA 游戏需要登录才能启动。"
-          }
-        }
-      }
-    },
-    "Sign out of EA": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "退出 EA 登录"
-          }
-        }
-      }
-    },
-    "Sign out of EA?": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "退出 EA 登录？"
-          }
-        }
-      }
-    },
-    "Store": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "商店"
-          }
-        }
-      }
-    },
-    "The Visual C++ 2015-2022 runtime is installed.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Visual C++ 2015-2022 运行库已安装。"
-          }
-        }
-      }
-    },
-    "Touch control buttons": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "触控操作按钮"
-          }
-        }
-      }
-    },
-    "Touch controls and controller": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "触控操作与手柄"
-          }
-        }
-      }
-    },
-    "Updates": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "更新"
-          }
-        }
-      }
-    },
-    "Visual C++ 2015-2022": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Visual C++ 2015-2022"
-          }
-        }
-      }
-    },
-    "Visual C++ runtimes": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Visual C++ 运行库"
-          }
-        }
-      }
-    },
-    "What it changes": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "它会改动什么"
-          }
-        }
-      }
-    },
-    "Your saves, game files and sign-ins are never included.": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "你的存档、游戏文件和登录状态绝不会包含在内。"
           }
         }
       }
