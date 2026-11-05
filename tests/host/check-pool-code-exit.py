@@ -41,6 +41,7 @@ helpers = ''.join(function(signature) for signature in (
     'static int ios_pool_low_take(',
     'static int ios_tail_carve_in_low(',
     'static int ios_pool_preserve_code_carve(',
+    'static int ios_pool_preserve_big_carve(',
     'static int ios_tail_carve_ready(',
     'static unsigned ios_tail_carves_retire_owner(',
     'static int ios_tail_carve_foreign_release(',
@@ -59,7 +60,7 @@ reclaim = function('void ios_jit_reclaim_process( void *peb )')
 assert reclaim.count('ios_tail_carves_owner_died( peb );') == 1
 assert reclaim.index('ios_tail_carves_owner_died( peb );') > reclaim.rindex('pthread_mutex_unlock( &ios_pool_lock );'), \
     'the carve lock is never taken under the pool lock'
-assert source.count('.retired = 1;') == 1, 'only an exit retires a carve'
+assert source.count('.retired = 1;') == 2, 'an exit, or a release while a thread still runs in the carve, retires it'
 assert source.count('ios_tail_carves[ios_tail_carve_n].retired = 0;') == 4, 'every new carve starts unretired'
 assert source.count('ios_tail_carves[ios_tail_carve_n].peb = carve_peb;') == 3, 'region C, ml1039 and tail carves'
 assert source.count('ios_tail_carves[ios_tail_carve_n].peb = NULL;') == 1, 'a skipped piece has no owner'
@@ -111,6 +112,7 @@ static int ios_tail_carve_occupied(const void *base, size_t size)
 static int allocate(size_t *size_ptr, void **ret)
 {
 ''' + ec + r'''
+    (void)kept_big_carve;  /* read by the production tail path after this prefix */
     return FALLBACK_TAIL;  /* the production tail path starts after this prefix */
 }
 static int release(void *base, unsigned type, void **addr_ptr, size_t *size_ptr)
@@ -361,15 +363,26 @@ static void unit(void)
     owner = 8;
     CHECK(release(rx, MEM_RELEASE, &addr, &size) == FALL_THROUGH && !ios_tail_carves[0].free);
     owner = 0;                                                    /* a thread without a TEB: as before */
+    /* MADEIRA_POOL_CODE_DEFER_FREE=0: refused and left live, as before. */
     occupied = 1;
+    setenv("MADEIRA_POOL_CODE_DEFER_FREE", "0", 1);
     CHECK(release(rx, MEM_RELEASE, &addr, &size) == FALL_THROUGH && !ios_tail_carves[0].free);
+    unsetenv("MADEIRA_POOL_CODE_DEFER_FREE");
+    /* A release while a thread still runs in the buffer frees it as retired: no
+     * owner, and reuse waits out the grace and a strict scan, as for an exit. */
+    CHECK(release(rx, MEM_RELEASE, &addr, &size) == STATUS_SUCCESS && addr == rx && size == 64 * MB);
+    CHECK(ios_tail_carves[0].free && ios_tail_carves[0].retired && !ios_tail_carves[0].peb);
+    CHECK(ios_tail_carves[0].freed_at == fake_now && !ios_tail_carve_ready( &ios_tail_carves[0], fake_now ));
+    CHECK(ios_tail_carve_ready( &ios_tail_carves[0], fake_now + 3 ));
     occupied = 0;
+    ios_tail_carves[0].free = ios_tail_carves[0].retired = 0;   /* live again, owned by 9 */
+    ios_tail_carves[0].peb = (void *)9;
     owner = 9;
     CHECK(release(rx, MEM_RELEASE, &addr, &size) == STATUS_SUCCESS && addr == rx && size == 64 * MB);
     CHECK(ios_tail_carves[0].free && !ios_tail_carves[0].retired);
     owner = 8;
     CHECK(release(rx, MEM_RELEASE, &addr, &size) == FALL_THROUGH);  /* already free */
-    puts("PASS: a release from another process is refused; the owner's (or a TEB-less thread's) works as before");
+    puts("PASS: a release from another process is refused; an occupied one is retired until its thread leaves (refused with MADEIRA_POOL_CODE_DEFER_FREE=0); the owner's (or a TEB-less thread's) works as before");
 }
 
 int main(void)
