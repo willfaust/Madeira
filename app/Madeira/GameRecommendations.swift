@@ -1571,10 +1571,9 @@ extension GameRecommendations {
         pool-split = 1
         real-suspend = 1
         env.MADEIRA_X64_IMAGE_NOCOPY = 1
-        env.MADEIRA_FEX_AVX = 1
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
-        avx: false, nvidia: false, wineVCRT: false)
+        avx: true, nvidia: false, wineVCRT: false)
 
     /// Garry's Mod (Steam App ID 4000). Device-tested on an iPhone 17 Pro Max (2026-10-31): multiplayer works on Steam's
     /// x86-64 branch (64-bit gmod.exe, 60 FPS against 17-53 on the 32-bit default branch) with the launch option
