@@ -264,8 +264,8 @@ struct LibraryGridPageModel: Equatable {
             return
         } else if inputs.others.isEmpty {
             let text = inputs.search.isEmpty
-                ? "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."
-                : "No other games match your search."
+                ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
+                : L("No other games match your search.")
             append(.fixed(.note(id: "others", text: text)), spacing: LibraryGridGeometry.sectionSpacing)
         } else {
             grid("others", inputs.others, spacing: LibraryGridGeometry.sectionSpacing)
