@@ -1,0 +1,27 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 9772757..7b36305 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -4963,7 +4963,21 @@ static uint32_t mvkGetEntryProperty(io_registry_entry_t entry, CFStringRef prope
+ 	}
+ 
+ 	if ([mtlCompOpt respondsToSelector: @selector(optimizationLevel)]) {
+-		mtlCompOpt.optimizationLevel = MTLLibraryOptimizationLevelDefault;
++		// Experimental per-process choice. Preserve the upstream default unless
++		// explicitly requested; size optimization can trade GPU speed for compile time.
++		static const bool useSizeOptimization = [] {
++			const char* policy = getenv("MADEIRA_VK_METAL_LIBRARY_OPTIMIZATION");
++			bool useSize = policy && !strcmp(policy, "size");
++			if (policy && *policy) {
++				fprintf(stderr, "[vk-compiler] Metal library optimization=%s%s\n",
++						useSize ? "size" : "default",
++						useSize ? " (experimental; GPU performance may differ)" :
++						(strcmp(policy, "default") ? " (unrecognized value; using default)" : ""));
++			}
++			return useSize;
++		}();
++		mtlCompOpt.optimizationLevel = useSizeOptimization ?
++			MTLLibraryOptimizationLevelSize : MTLLibraryOptimizationLevelDefault;
+ 	}
+ 
+ 	mtlCompOpt.preserveInvariance = preserveInvariance;

@@ -1,0 +1,29 @@
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -2656,6 +2656,13 @@
+ 
+ 		if ( !pDataSize ) { return VK_SUCCESS; }
+ 
++		if (_dataSize == 0) {
++			mvk::countbuf cb;
++			ostream outStream(&cb);
++			writeData(outStream, true);
++			_dataSize = cb.buffSize;
++		}
++
+ 		if (pData) {
+ 			if (*pDataSize >= _dataSize) {
+ 				mvk::membuf mb((char*)pData, _dataSize);
+@@ -2668,12 +2675,6 @@
+ 				return VK_INCOMPLETE;
+ 			}
+ 		} else {
+-			if (_dataSize == 0) {
+-				mvk::countbuf cb;
+-				ostream outStream(&cb);
+-				writeData(outStream, true);
+-				_dataSize = cb.buffSize;
+-			}
+ 			*pDataSize = _dataSize;
+ 			return VK_SUCCESS;
+ 		}
