@@ -10430,7 +10430,8 @@ static void mad_gw_indirect(struct mad_exec *e, const struct mad_cmd *c) {
 /* Called from the [perf] report with the window's frame count: totals, then the top
  * pipelines of each kind by work, then the table is emptied for the next window. */
 static void mad_gw_report(double frames) {
-    struct top { const char *p; LONG draws; LONG64 work; } tg[4], tc[4];
+    /* madeira-duo: 12 compute entries, so small passes (FSR's RCAS, NIS) show up too */
+    struct top { const char *p; LONG draws; LONG64 work; } tg[4], tc[12];
     unsigned i, j, used = 0;
     LONG d = InterlockedExchange(&g_gw_draws, 0), di = InterlockedExchange(&g_gw_disp, 0), ind = InterlockedExchange(&g_gw_ind, 0);
     LONG full = InterlockedExchange(&g_gw_full, 0);
@@ -10444,16 +10445,17 @@ static void mad_gw_report(double frames) {
         used++;
         dr = InterlockedExchange(&g->draws, 0); w = InterlockedExchange64(&g->work, 0);
         g->pso = NULL;
+        unsigned nt = g->compute ? 12 : 4;
         tt = g->compute ? tc : tg;
-        for (j = 0; j < 4; j++) if (w > tt[j].work || (!tt[j].p && dr)) break;
-        if (j < 4) { memmove(&tt[j + 1], &tt[j], (3 - j) * sizeof *tt); tt[j].p = g->name; tt[j].draws = dr; tt[j].work = w; }
+        for (j = 0; j < nt; j++) if (w > tt[j].work || (!tt[j].p && dr)) break;
+        if (j < nt) { memmove(&tt[j + 1], &tt[j], (nt - 1 - j) * sizeof *tt); tt[j].p = g->name; tt[j].draws = dr; tt[j].work = w; }
     }
     d3d12_log("[gpu-work] per frame: %.0f draws, %.2f M vertices x instances, %.1f dispatches, %.0f threadgroups, %.1f indirect records; %u pipelines used in the window%s\n",
               d / frames, v / 1e6 / frames, di / frames, t / frames, ind / frames, used, full ? " (table full, some not counted)" : "");
     for (j = 0, n = 0; j < 4 && tg[j].p; j++)
         n += snprintf(line + n, sizeof line - n, "%s%s %.0f draws %.2f MV", j ? "; " : "", tg[j].p, tg[j].draws / frames, tg[j].work / 1e6 / frames);
     if (n) d3d12_log("[gpu-work] top render per frame: %s\n", line);
-    for (j = 0, n = 0; j < 4 && tc[j].p; j++)
+    for (j = 0, n = 0; j < 12 && tc[j].p && n < (int)sizeof line - 80; j++)
         n += snprintf(line + n, sizeof line - n, "%s%s %.1f dispatches %.0f tg", j ? "; " : "", tc[j].p, tc[j].draws / frames, tc[j].work / frames);
     if (n) d3d12_log("[gpu-work] top compute per frame: %s\n", line);
 }
