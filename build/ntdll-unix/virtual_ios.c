@@ -1,3 +1,5 @@
+/* Portions copyright 2026 thebcd69 (BCD): code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
+ * under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md. */
 /*
  * Win32 virtual memory functions
  *
@@ -3795,6 +3797,20 @@ static int ios_tail_carve_in_low( size_t off )
 static int ios_pool_preserve_code_carve( size_t available, size_t want, int low_fits )
 {
     return low_fits && want <= 0x10000 && available >= 0x100000 && available / 4 >= want;
+}
+
+/* Nor should any request take a free carve four or more times its size while the pool's
+ * budget still affords a fresh carve of the size asked: the carve stays with its taker for
+ * that process's life. One game's crashpad_handler.exe took a 16 MB carve for its
+ * 16 KB dispatcher and a 128 MB one for a 16 MB code buffer, and the game itself was then
+ * capped at 16 MB. When the fresh carve fails anyway, the allocator retries with every
+ * carve allowed (reuse_all_carves). MADEIRA_POOL_CODE_KEEP_BIG=0 restores the old policy. */
+static int ios_pool_preserve_big_carve( size_t available, size_t want, size_t budget_cap )
+{
+    const char *env = getenv( "MADEIRA_POOL_CODE_KEEP_BIG" );   /* 0: a code buffer request takes the smallest free buffer that fits, however much larger, as before */
+
+    if (env && !strcmp( env, "0" )) return 0;
+    return want && available / 4 >= want && want <= budget_cap;
 }
 
 /* ml557 (#74 REGRESSION): is any thread's PC currently INSIDE this tail carve?
@@ -34362,7 +34378,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
         int low_fits = low_ok && alloc_size <= IOS_POOL_LOW_CARVE_MAX &&
                        alloc_size <= ios_jit_low_size_global &&
                        ios_jit_low_reserved <= ios_jit_low_size_global - alloc_size;
-        int kept_large_carve = 0, reuse_all_carves = 0, retired_busy = 0;
+        int kept_large_carve = 0, kept_big_carve = 0, reuse_all_carves = 0, retired_busy = 0;
         size_t tail_cap = ~(size_t)0, budget_cap = ~(size_t)0;
         void *carve_peb = ios_jit_current_peb();   /* madeira-bcd: the carve's owner, see ios_tail_carve_ready */
         /* ml459 (#75): cap a single EC code buffer at 16MB. FEX asks for 32MB
@@ -34460,6 +34476,12 @@ retry_code_carve_reuse:
                 ios_pool_preserve_code_carve( ios_tail_carves[best].size, alloc_size, low_fits ))
             {
                 kept_large_carve = 1;
+                best = ~0u;
+            }
+            else if (best != ~0u && !reuse_all_carves &&
+                     ios_pool_preserve_big_carve( ios_tail_carves[best].size, alloc_size, budget_cap ))
+            {
+                kept_big_carve = 1;
                 best = ~0u;
             }
             /* madeira-bcd: a dead process's buffer, only when no thread runs in it;
@@ -34668,6 +34690,12 @@ retry_code_carve_reuse:
              * tail reservation — the old path leaked it on every refusal. */
             ios_pool_tail_unreserve( &ios_jit_tail_reserved, reserve_offset + alloc_size, tail_added,
                                      ios_jit_hole_end > ios_jit_hole_off );
+            /* a free carve was kept back for a bigger request: use it after all */
+            if ((kept_large_carve || kept_big_carve) && !reuse_all_carves)
+            {
+                reuse_all_carves = 1;
+                goto retry_code_carve_reuse;
+            }
             ERR("NtAllocateVirtualMemoryEx iOS: JIT-pool tail exhausted for FEX EC_CODE %zu bytes\n",
                 (size_t)*size_ptr);
             /* ml459 (#75): dump the carve table on the FIRST refusal — the
@@ -35574,6 +35602,8 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         size_t off = (size_t)((char *)base - (char *)ios_jit_rx_base_global);
         size_t carve_size = 0;
         void *caller_peb = ios_jit_current_peb();
+        const char *defer_env = getenv( "MADEIRA_POOL_CODE_DEFER_FREE" );   /* 0: a FEX code buffer released while a thread runs in it is refused and stays live, as before */
+        int defer_free = !(defer_env && !strcmp( defer_env, "0" ));
         pthread_mutex_lock( &ios_tail_carve_lock );
         for (i = 0; i < ios_tail_carve_n; i++)
         {
@@ -35590,16 +35620,30 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
                 carve_size = 0;
                 break;
             }
-            /* ml557: do NOT recycle a carve a thread is still executing in. */
+            /* ml557: do NOT recycle a carve a thread is still executing in. Refusing the
+             * release leaked it for good, though: FEX releases a buffer once and never
+             * again, so "freeable on the next release" never came. One game lost a
+             * 128 MB buffer that way and ran its last 4 minutes on 16 MB ones. Free it as
+             * retired instead, so reuse waits out the grace and its strict scan, exactly
+             * as for a dead process's buffer. MADEIRA_POOL_CODE_DEFER_FREE=0 refuses it. */
             if (ios_tail_carve_occupied( base, ios_tail_carves[i].size ))
             {
                 static unsigned long occ_n;
+                if (!defer_free)
+                {
+                    if (++occ_n <= 16 || (occ_n % 256) == 0)
+                        dprintf(2, "[jit-pool] tail FREE REFUSED rx=%p size=0x%lx — a thread's "
+                                   "PC is inside it (occupied=%lu) rev=ml557\n",
+                                base, (unsigned long)ios_tail_carves[i].size, occ_n);
+                    carve_size = 0;
+                    break;
+                }
                 if (++occ_n <= 16 || (occ_n % 256) == 0)
-                    dprintf(2, "[jit-pool] tail FREE REFUSED rx=%p size=0x%lx — a thread's "
-                               "PC is inside it (occupied=%lu) rev=ml557\n",
+                    dprintf(2, "[jit-pool] tail FREE deferred rx=%p size=0x%lx — a thread's "
+                               "PC is inside it (occupied=%lu): retired until it leaves rev=ml557\n",
                             base, (unsigned long)ios_tail_carves[i].size, occ_n);
-                carve_size = 0;
-                break;
+                ios_tail_carves[i].retired = 1;
+                ios_tail_carves[i].peb = NULL;
             }
             ios_tail_carves[i].free = 1;
             ios_tail_carves[i].freed_at = time( NULL );

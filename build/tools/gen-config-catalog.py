@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Portions copyright 2026 thebcd69 (BCD): code taken from pull requests willfaust/Madeira#337 to #346 (thebcd69, 2026-10-15) and https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """Generate app/Madeira/ConfigCatalog.generated.swift: every option Madeira reads.
 
 Two kinds of option live in Documents/madeira.cfg:
@@ -1090,6 +1092,17 @@ OVERLAY = {
                         "gives the next draw a fresh buffer, so draws already recorded keep what they read. "
                         "[d3d9-index-range] lines in the log say how much was copied. 0: the whole-buffer copy, as before. "
                         "Read once per session."},
+    # DXMT's Direct3D 9 format gate reads it (dxmt/src/d3d9/d3d9_format.cpp, isColorRTFormat).
+    "env.MADEIRA_D3D9_LUMINANCE_RT": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Direct3D 9: luminance formats as render targets",
+                "kind": "bool", "default": "1", "sources": ["dxmt/src/d3d9/d3d9_format.cpp"],
+                "note": "On by default. A Direct3D 9 program may render into an L8, A8L8 or L16 texture (one-channel "
+                        "targets for ambient occlusion, blur passes or masks), as native drivers and DXVK allow; DXMT "
+                        "used to refuse the texture, and a program that builds such targets through its engine's "
+                        "format table then got none and could sit on its loading screen for good. The storage is "
+                        "R8Unorm, RG8Unorm or R16Unorm, renderable on every Metal GPU; the shader's .r lands in the "
+                        "luminance channel and samples read back as (L, L, L, 1). 0: refuse them, as before. "
+                        "Read once per session."},
     # Mesa's opengl32 on D3D12 over Wine's stub (WineProcessBridge.m, build/mesa-d3d12).
     "env.MADEIRA_OPENGL": {"category": "Windows, display & input", "title": "OpenGL through Mesa on D3D12",
                 "kind": "bool", "default": "0",
@@ -1155,6 +1168,8 @@ OVERLAY = {
                         "such a request fails (GetCPInfo and MultiByteToWideChar return an error), as before. For a game that "
                         "converts its text in one of those pages. Logged as [nls-extra]; [nls-missing] names a table that was "
                         "not found. Read at every request."},
+    "env.MADEIRA_JAPANESE": {"category": "Wine core (ntdll)", "title": "Japanese locale and fonts", "kind": "bool", "default": "0",
+                "note": "Default off. 1: the game runs with a Japanese system and user locale (LC_ALL = ja_JP.UTF-8, ANSI and OEM code page 932) and the extra code page tables (env.MADEIRA_NLS_EXTRA), and a Japanese font (Noto Sans JP) is installed in C:\\windows\\Fonts with MS Gothic, MS PGothic, MS UI Gothic, MS Mincho, Meiryo and Yu Gothic mapped onto it. For Japanese games and visual novels whose text shows as squares or gibberish, or that do not start. Game details › Compatibility › Japanese locale sets it for one game. Logged as [japanese]. Read at session start."},
     "env.MADEIRA_ALIAS_RELEASE": {"category": "Memory & JIT pool", "title": "Drop a released arena's code copies", "kind": "bool",
                 "default": "0",
                 "note": "Default off. 1: anonymous memory the game made executable (copied into the JIT pool) follows the game's "

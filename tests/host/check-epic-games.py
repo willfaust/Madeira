@@ -78,7 +78,7 @@ require('madeira_redact_arg_a(extra_argv[i]' in bridge and 'madeira_redact.h' in
 library = (app / 'Library.swift').read_text()
 entries = library[library.index('private var entries: [LibraryEntry] {'):]
 entries = entries[:entries.index('var body: some View {')]
-require('$0.desktop != true && $0.steamAppID == nil && $0.epicAppName == nil' in entries,
+require('$0.desktop != true' in entries and '$0.steamAppID == nil && $0.epicAppName == nil' in entries,
         'Other games: no Epic game (it is listed in the Epic Games section)')
 require('static func setTransientArguments(' in library and 'var epicAppName: String?' in library,
         'the sign-in arguments are transient, never part of the saved entry')

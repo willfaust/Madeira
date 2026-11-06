@@ -608,8 +608,10 @@ live Steam, VPN, TLS-handshake or device behaviour.
 
 ## Not included, and limits
 
-- No Steam Cloud, no achievements, no workshop content. Beta branches: see
-  "Version (beta branches)" above. DLC: see "DLC" above.
+- Steam Cloud saves: see `docs/STEAM_CLOUD.md`. Workshop content: see
+  `docs/STEAM_WORKSHOP.md`. Achievements are recorded by Valve's client in
+  Madeira Dock and listed on Game details (`app/Madeira/SteamAchievements.swift`).
+  Beta branches: see "Version (beta branches)" above. DLC: see "DLC" above.
 - A file that a newer build no longer contains is not deleted by an update
   (the install keeps it); **Uninstall** removes the whole folder.
 - Only the account's licenses are read; family sharing and free-on-demand

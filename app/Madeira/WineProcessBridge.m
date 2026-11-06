@@ -517,6 +517,124 @@ static void madeira_ensure_locallow(NSString *prefix)
     ws_log( "[profile] users/%s/AppData/LocalLow %s", name, made ? "created" : "could NOT be created" );
 }
 
+/* Japanese locale (Game details › Compatibility › Japanese locale, or
+ * env.MADEIRA_JAPANESE = 1 in madeira.cfg or the game's own config).
+ *
+ * Japanese games -- visual novels above all -- keep their text in Shift-JIS
+ * (code page 932) and ask GDI for MS Gothic / MS Mincho / MS UI Gothic. On a
+ * phone set to another language Wine runs them with an English or European
+ * ANSI code page, so their text turns into mojibake or squares, and some stop
+ * at start-up because a file name or a script does not convert. This mode:
+ *  - gives Wine a Japanese system and user locale (LC_ALL = ja_JP.UTF-8, so
+ *    ANSI and OEM code page 932), exported in wine_process_thread;
+ *  - turns on env.MADEIRA_NLS_EXTRA, which supplies c_932.nls (and the other
+ *    CJK tables) from the bundle's nls/extra folder;
+ *  - installs a Japanese font (the bundle's fonts-ja/NotoSansJP-Regular.otf,
+ *    SIL OFL 1.1) into C:\windows\Fonts, and maps the Windows Japanese font
+ *    names onto it with HKCU\Software\Wine\Fonts\Replacements. A replacement
+ *    only applies while no real font of that name is installed, so a game that
+ *    ships or installs the real MS Gothic keeps it.
+ * The font and the registry values are written here, before the wineserver
+ * reads the registry (wineserver_start → madeira_seed_prefix_if_needed). They
+ * stay in the prefix afterwards; other games only see them when they ask for
+ * one of those Japanese names or draw Japanese text. Log tag [japanese]. */
+static int madeira_japanese_on(void)
+{
+    const char *e = getenv("MADEIRA_JAPANESE");
+    char v[16];
+    if (e && *e) return e[0] == '1';
+    if (madeira_cfg_get("env.MADEIRA_JAPANESE", v, sizeof v) && v[0]) return v[0] == '1';
+    return 0;
+}
+
+static NSString *madeira_reg_escape(NSString *s)
+{
+    /* Wine's registry text format: \ and " are escaped, characters above 0x7f as \xNNNN */
+    NSMutableString *out = [NSMutableString string];
+    for (NSUInteger i = 0; i < s.length; i++) {
+        unichar c = [s characterAtIndex:i];
+        if (c == '\\') [out appendString:@"\\\\"];
+        else if (c == '"') [out appendString:@"\\\""];
+        else if (c < 0x20 || c > 0x7e) [out appendFormat:@"\\x%04x", c];
+        else [out appendFormat:@"%C", c];
+    }
+    return out;
+}
+
+static void madeira_japanese_prefix(NSString *prefix)
+{
+    if (!madeira_japanese_on()) return;
+    extern void ws_log(const char *fmt, ...);
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    /* 1. the font, into C:\windows\Fonts (copied again when the bundled file changed size) */
+    static NSString *const fontFile = @"NotoSansJP-Regular.otf";
+    static NSString *const family = @"Noto Sans JP";
+    NSString *src = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:
+                     [@"fonts-ja" stringByAppendingPathComponent:fontFile]];
+    NSString *fontsDir = [prefix stringByAppendingPathComponent:@"drive_c/windows/Fonts"];
+    NSString *dst = [fontsDir stringByAppendingPathComponent:fontFile];
+    unsigned long long srcSize = [[fm attributesOfItemAtPath:src error:nil] fileSize];
+    if (!srcSize) {
+        ws_log("[japanese] fonts-ja/%s missing from the bundle; Japanese text needs a font the game brings", fontFile.UTF8String);
+    } else if ([[fm attributesOfItemAtPath:dst error:nil] fileSize] != srcSize) {
+        [fm createDirectoryAtPath:fontsDir withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:dst error:nil];
+        NSError *err = nil;
+        BOOL ok = [fm copyItemAtPath:src toPath:dst error:&err];
+        ws_log("[japanese] %s %s C:\\windows\\Fonts", fontFile.UTF8String, ok ? "copied to" : "could NOT be copied to");
+    }
+
+    /* 2. the Windows Japanese font names → the bundled family (user.reg, HKCU) */
+    NSArray<NSString *> *names = @[
+        @"MS Gothic", @"MS PGothic", @"MS UI Gothic", @"MS Mincho", @"MS PMincho",
+        @"\uFF2D\uFF33 \u30B4\u30B7\u30C3\u30AF",          /* ＭＳ ゴシック */
+        @"\uFF2D\uFF33 \uFF30\u30B4\u30B7\u30C3\u30AF",    /* ＭＳ Ｐゴシック */
+        @"\uFF2D\uFF33 \u660E\u671D",                      /* ＭＳ 明朝 */
+        @"\uFF2D\uFF33 \uFF30\u660E\u671D",                /* ＭＳ Ｐ明朝 */
+        @"Meiryo", @"Meiryo UI", @"\u30E1\u30A4\u30EA\u30AA",   /* メイリオ */
+        @"Yu Gothic", @"Yu Gothic UI", @"Yu Mincho",
+        @"\u6E38\u30B4\u30B7\u30C3\u30AF", @"\u6E38\u660E\u671D",   /* 游ゴシック, 游明朝 */
+    ];
+    NSString *regPath = [prefix stringByAppendingPathComponent:@"user.reg"];
+    NSString *reg = [NSString stringWithContentsOfFile:regPath encoding:NSUTF8StringEncoding error:nil];
+    if (!reg.length) { ws_log("[japanese] user.reg not readable yet; font names not mapped this time"); return; }
+    NSMutableArray<NSString *> *lines = [[reg componentsSeparatedByString:@"\n"] mutableCopy];
+    NSString *header = @"[software\\\\wine\\\\fonts\\\\replacements]";
+    NSInteger start = -1;
+    for (NSUInteger i = 0; i < lines.count; i++)
+        if ([[lines[i] lowercaseString] hasPrefix:header]) { start = (NSInteger)i; break; }
+    if (start < 0) {
+        if (lines.count && [lines.lastObject isEqualToString:@""]) [lines removeLastObject];
+        [lines addObject:@""];
+        [lines addObject:[NSString stringWithFormat:@"[Software\\\\Wine\\\\Fonts\\\\Replacements] %ld", (long)time(NULL)]];
+        start = (NSInteger)lines.count - 1;
+        [lines addObject:@""];
+    }
+    NSUInteger end = (NSUInteger)start + 1;
+    while (end < lines.count && ![lines[end] hasPrefix:@"["]) end++;
+    NSUInteger insertAt = (NSUInteger)start + 1;
+    if (insertAt < lines.count && [lines[insertAt] hasPrefix:@"#time="]) insertAt++;
+    unsigned added = 0;
+    for (NSString *name in names) {
+        NSString *key = [NSString stringWithFormat:@"\"%@\"=", madeira_reg_escape(name)];
+        BOOL present = NO;
+        for (NSUInteger i = (NSUInteger)start + 1; i < end; i++)
+            if ([[lines[i] lowercaseString] hasPrefix:[key lowercaseString]]) { present = YES; break; }
+        if (present) continue;
+        [lines insertObject:[NSString stringWithFormat:@"%@\"%@\"", key, family] atIndex:insertAt++];
+        end++; added++;
+    }
+    if (!added) return;
+    NSString *backup = [regPath stringByAppendingPathExtension:@"madeira-bak"];
+    if (![fm fileExistsAtPath:backup]) [fm copyItemAtPath:regPath toPath:backup error:nil];
+    NSString *text = [lines componentsJoinedByString:@"\n"];
+    if (![text hasSuffix:@"\n"]) text = [text stringByAppendingString:@"\n"];
+    BOOL ok = [text writeToFile:regPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ws_log("[japanese] %u Japanese font names %s %s in user.reg", added, ok ? "mapped to" : "could NOT be mapped to",
+           family.UTF8String);
+}
+
 /***********************************************************************
  *           madeira_seed_prefix_if_needed
  *
@@ -572,6 +690,7 @@ void madeira_seed_prefix_if_needed(const char *prefix_path) {
         /* ml581: see madeira_undo_appdata_skeleton() above. */
         madeira_undo_appdata_skeleton( prefix );
         madeira_ensure_locallow( prefix );
+        madeira_japanese_prefix( prefix );
     }
 }
 
@@ -1877,6 +1996,17 @@ static void *wine_process_thread(void *arg) {
                     setenv(k.UTF8String, v.UTF8String, 1);
                     LOG("game config env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] game %s=%s\n", k.UTF8String, v.UTF8String);
+                }
+                /* Japanese locale (madeira_japanese_prefix above): Wine's system and user
+                 * locale ja-JP (ANSI/OEM code page 932) and the extra code page tables. A
+                 * Japanese LC_ALL the config already chose (ja_JP.SJIS, ...) is kept. */
+                if (madeira_japanese_on()) {
+                    const char *lc = getenv("LC_ALL");
+                    if (!lc || strncmp(lc, "ja", 2)) setenv("LC_ALL", "ja_JP.UTF-8", 1);
+                    setenv("LANG", getenv("LC_ALL"), 1);
+                    setenv("MADEIRA_NLS_EXTRA", "1", 1);
+                    fprintf(stderr, "[japanese] LC_ALL=%s MADEIRA_NLS_EXTRA=1: Japanese system locale, code page 932\n",
+                            getenv("LC_ALL"));
                 }
                 {   /* madeira-bcd: the server's per-launch switches (fd_ios.c, request_ios.c) */
                     const char *ef = getenv("MADEIRA_SRV_ECO_FOLLOW");   /* 1: the server thread runs at utility QoS while ECO is on */

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """A MAP_FIXED over a guest window that the kernel refuses is retried at the next free range (small address maps only).
 
 A 32-bit program on a 63 GB address map: a 0x11000-byte section map inside the guest window

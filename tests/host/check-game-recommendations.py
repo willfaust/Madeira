@@ -74,7 +74,7 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
           'batman-arkham-city-goty', 'trails-in-the-sky-1st-chapter', 'subnautica-2', 'rdr1-steam', 'resident-evil-requiem', 'resident-evil-requiem-demo',
           'life-is-strange-remastered', 'life-is-strange-2', 'project-zomboid', 'spiderheck', 'rounds', 'plateup',
           'final-fantasy-tactics-ivalice-chronicles', 'jetboard-joust', 'dead-as-disco', 'tung', 'sekiro-shadows-die-twice', 'stardew-valley',
-          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod'}
+          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod', 'persona-3-reload'}
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
@@ -166,8 +166,8 @@ for ident, p in presets.items():
     if ident in ('dark-souls-remastered', 'dark-souls-iii'):
         p['tested'], p['fork'] = [line for line in p['lines'][2:] if not line.startswith('#')], []
         continue
-    # The Fallout lists are the standard one plus a switch: the games ran with it.
-    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2'):
+    # The Fallout lists are the standard one plus a switch: the games ran with it. Persona 3 Reload's is the list as it ran.
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2', 'persona-3-reload'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the standard list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -420,8 +420,8 @@ assert got['version'] == 3, got['version']
 assert got['switches'] == ('avx: true, nvidia: true, wineVCRT: false, fastSync: true, semaphoreFastPath: false, '
                            'resolution: "1280x720", display: "fit"'), got['switches']
 assert not any(line.startswith(('view-census', 'typed-view-align', 'typed-view-shadow'))
-               for p in presets.values() if p not in (hzd, got, hfw) for line in p['lines']), \
-    'the typed-view fix is HZD\'s, GoT\'s and HFW\'s only'
+               for p in presets.values() if p not in (hzd, got, hfw, presets['persona-3-reload']) for line in p['lines']), \
+    'the typed-view fix is HZD\'s, GoT\'s, HFW\'s and Persona 3 Reload\'s only'
 # Horizon Forbidden West, version 5 (community builds 517-534): AVX and NVIDIA on, frees released at once,
 # programs from their own image, the swap file and a 3 GB budget with events, the typed-view fix with the
 # large table, float3 copies (typed-view-rgb32) and MipLevels 0 as the full chain (mip0-full).
@@ -800,9 +800,11 @@ check(id(steam + #"\Call of Duty Black Ops"#, 42710) == "none" && id(steam + #"\
       "the first Black Ops' multiplayer shares the folder and has no list")
 check(id(steam + #"\The Escapists 2"#, 641990) == "the-escapists-2" && id(steam + #"\The Escapists 2\TheEscapists2.exe"#) == "the-escapists-2",
       "The Escapists 2 by App ID, folder and program")
-check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod"
-      && id(steam + #"\GarrysMod\hl2.exe"#) == "garrys-mod", "Garry's Mod by App ID, folder and program, both branches")
-check(R.steamTitles.count == 51 && R.all.count == 77, "51 merged titles, 77 lists")
+check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMod\bin\win64\gmod.exe"#) == "garrys-mod",
+      "Garry's Mod by App ID and folder (either branch) and by its 64-bit program")
+check(id(steam + #"\P3R"#, 2161700) == "persona-3-reload" && id(steam + #"\P3R\P3R\Binaries\Win64\P3R.exe"#) == "persona-3-reload",
+      "Persona 3 Reload by App ID, folder and program")
+check(R.steamTitles.count == 52 && R.all.count == 78, "52 merged titles, 78 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 51 merged Steam titles, others none")

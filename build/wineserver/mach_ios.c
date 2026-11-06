@@ -443,6 +443,9 @@ int send_thread_signal( struct thread *thread, int sig )
 #define IOS_SCF_SP    0x0f8
 #define IOS_SCF_PC    0x100
 #define IOS_SCF_CPSR  0x108
+#define IOS_SCF_FPCR  0x128
+#define IOS_SCF_FPSR  0x12c
+#define IOS_SCF_V     0x130                    /* NEON128 v[32] */
 #define IOS_SCF_SIZE  0x330
 #define IOS_SCF_RESTORE_FLAGS 0x10c           /* syscall_frame.restore_flags */
 #define IOS_CTX_ARM64_CONTROL 0x00400001u     /* CONTEXT_ARM64 | CONTEXT_ARM64_CONTROL */
@@ -876,6 +879,26 @@ done:
  * resuming in between. Snapshot-only callers leave it NULL. */
 struct thread *ios_pending_persistent_hold;
 
+/* MADEIRA_CTX_FP=0: a cross-thread GetThreadContext returns zeroed vector registers, as
+ * before. madeira.cfg (and the game's own lines) are read first: this server starts before
+ * the app exports env.* lines (ml1236) and runs again for the next session. The answer is
+ * kept for a second: madeira_cfg_get reads the config files, and a program that samples
+ * its threads' contexts often (a garbage collector, a profiler) would otherwise put that
+ * file I/O on every capture, inside the single-threaded server. */
+static int ios_ctx_fp_enabled(void)
+{
+    static timeout_t checked_at;
+    static int enabled = 1;
+    char buf[16];
+    const char *e;
+
+    if (checked_at && monotonic_time - checked_at < TICKS_PER_SEC) return enabled;
+    e = madeira_cfg_get( "env.MADEIRA_CTX_FP", buf, sizeof(buf) ) ? buf : getenv( "MADEIRA_CTX_FP" );
+    enabled = !(e && e[0] == '0');
+    checked_at = monotonic_time ? monotonic_time : 1;
+    return enabled;
+}
+
 int ios_fill_thread_context( struct thread *thread,
                              struct context_data *native,
                              struct context_data *wow )
@@ -907,6 +930,55 @@ int ios_fill_thread_context( struct thread *thread,
         native->integer.arm64_regs.x[29] = arm.__fp;
         native->integer.arm64_regs.x[30] = arm.__lr;
         have_native = 1;
+    }
+
+    /* The vector registers too: without them every cross-thread floating-point context
+     * came back zeroed. FEX keeps guest XMM0-15 in V0-V15 under ARM64EC, the same mapping
+     * the ARM64EC ABI uses, so these are the guest's XMM registers. One engine moves
+     * code between threads this way: a thread loads it into XMM13, and the main thread
+     * reads its floating-point context into a CONTEXT in the image and jumps to the
+     * XMM13 slot. A thread blocked in a syscall is overridden below from the saved frame.
+     * MADEIRA_CTX_FP=0 restores the zeroed vector registers. */
+    if (have_native && ios_ctx_fp_enabled())
+    {
+        arm_neon_state64_t neon;
+        mach_msg_type_number_t ncount = ARM_NEON_STATE64_COUNT;
+
+        if (!thread_get_state( port, ARM_NEON_STATE64, (thread_state_t)&neon, &ncount ))
+        {
+            unsigned int i;
+            for (i = 0; i < 32; i++)
+            {
+                native->fp.arm64_regs.q[i].low  = (uint64_t)neon.__v[i];
+                native->fp.arm64_regs.q[i].high = (uint64_t)(neon.__v[i] >> 64);
+            }
+            native->fp.arm64_regs.fpcr = neon.__fpcr;
+            native->fp.arm64_regs.fpsr = neon.__fpsr;
+            native->flags |= SERVER_CTX_FLOATING_POINT;
+        }
+    }
+
+    /* Inside a syscall the live vector registers belong to Unix code, which may have
+     * clobbered them; the dispatcher saved the guest's at entry. Same validation as the
+     * ml716 frame substitution below, but not behind its opt-in: only FP is replaced.
+     * A Unix call saves only q8-q15 in that frame, so inside one, q0-q7 are the values of
+     * the thread's last syscall. */
+    if (have_native && thread->teb && (native->flags & SERVER_CTX_FLOATING_POINT))
+    {
+        uint64_t frame = 0, kstack = 0;
+        uint64_t sp = native->ctl.arm64_regs.sp;
+        if (ios_safe_read( (uint64_t)thread->teb + IOS_TEB_SYSCALL_FRAME_OFF, &frame, 8 ) &&
+            ios_safe_read( (uint64_t)thread->teb + IOS_TEB_KERNEL_STACK_OFF, &kstack, 8 ) &&
+            frame && kstack && !(frame & 7) && kstack < frame && sp >= kstack && sp <= frame)
+        {
+            unsigned char f[IOS_SCF_SIZE];
+            if (ios_safe_read( frame, f, sizeof(f) ))
+            {
+                memcpy( native->fp.arm64_regs.q, f + IOS_SCF_V, sizeof(native->fp.arm64_regs.q) );
+                native->fp.arm64_regs.fpcr = *(uint32_t *)(f + IOS_SCF_FPCR);
+                native->fp.arm64_regs.fpsr = *(uint32_t *)(f + IOS_SCF_FPSR);
+            }
+        }
     }
 
     /* ml716: A THREAD PARKED INSIDE A SYSCALL MUST REPORT ITS SYSCALL FRAME.

@@ -18,6 +18,7 @@ enum LibraryPrefs {
     private static let olderNvidiaKey = "madeira.library.olderNvidia"
     private static let realSuspendKey = "madeira.library.realSuspend"
     private static let gpuCardKey = "madeira.library.gpuCard"
+    private static let japaneseKey = "madeira.library.japanese"
 
     private static func dict<T>(_ key: String) -> [String: T] {
         (UserDefaults.standard.dictionary(forKey: key) as? [String: T]) ?? [:]
@@ -42,6 +43,11 @@ enum LibraryPrefs {
     static func olderNvidia(_ windowsPath: String) -> Bool { (dict(olderNvidiaKey) as [String: Bool])[windowsPath] ?? false }
     static func setOlderNvidia(_ on: Bool, for windowsPath: String) { store(on ? true : nil, olderNvidiaKey, windowsPath) }
 
+    /// "Japanese locale": Wine runs the game with a Japanese system locale (code page 932)
+    /// and a Japanese font (MADEIRA_JAPANESE, WineProcessBridge.m madeira_japanese_prefix).
+    static func japanese(_ windowsPath: String) -> Bool { (dict(japaneseKey) as [String: Bool])[windowsPath] ?? false }
+    static func setJapanese(_ on: Bool, for windowsPath: String) { store(on ? true : nil, japaneseKey, windowsPath) }
+
     /// "Graphics card the game sees": a GPUCards id, nil for no choice.
     static func gpuCard(_ windowsPath: String) -> String? { (dict(gpuCardKey) as [String: String])[windowsPath] }
     static func setGPUCard(_ id: String?, for windowsPath: String) { store(id.flatMap { $0.isEmpty ? nil : $0 }, gpuCardKey, windowsPath) }
@@ -58,6 +64,7 @@ enum LibraryPrefs {
         if wineVCRT(windowsPath) { out["wineVCRT"] = true }
         if nvidia(windowsPath) { out["nvidia"] = true }
         if olderNvidia(windowsPath) { out["olderNvidia"] = true }
+        if japanese(windowsPath) { out["japanese"] = true }
         if let suspend = realSuspend(windowsPath) { out["realSuspend"] = suspend }
         return out
     }
@@ -68,6 +75,7 @@ enum LibraryPrefs {
         setWineVCRT(switches["wineVCRT"] as? Bool ?? false, for: windowsPath)
         setNvidia(switches["nvidia"] as? Bool ?? false, for: windowsPath)
         setOlderNvidia(switches["olderNvidia"] as? Bool ?? false, for: windowsPath)
+        setJapanese(switches["japanese"] as? Bool ?? false, for: windowsPath)
         setRealSuspend(switches["realSuspend"] as? Bool, for: windowsPath)
     }
 

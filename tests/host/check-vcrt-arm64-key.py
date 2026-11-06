@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Ported from a community host check; anchors are the merged engine code's.
+# Portions copyright 2026 thebcd69 (BCD): code taken from https://github.com/thebcd69/bcd-games
+# under GPL-3.0-or-later and modified for Madeira in October and November 2026. See THIRD-PARTY-NOTICES.md.
 """env.MADEIRA_VCRT_ARM64_KEY, the volatile ARM64 Visual C++ redistributable marker
 (build/ntdll-unix/server_ios.c, ios_vcrt_arm64_key_publish); no Wine runs.
 
@@ -375,7 +376,9 @@ else:
              "-Wno-unused-but-set-variable", "-Wno-deprecated-declarations", "-Wno-pointer-sign", "-Wno-unknown-pragmas",
              # gcc only: strnlen's bound is the destination's size while the (NUL-terminated) source is smaller
              "-Wno-unknown-warning-option", "-Wno-stringop-overread",
-             "-fshort-wchar", "-D__WINESRC__", "-DWINE_UNIX_LIB", "-I", str(wine / "include"), "-I", str(n_dir)]
+             # clang 21 at -O1 turns init_unicode_string's loop into a call to the C library's wcslen, which
+             # counts 4-byte characters whatever -fshort-wchar says (check-hidpad.py does the same)
+             "-fno-builtin", "-fshort-wchar", "-D__WINESRC__", "-DWINE_UNIX_LIB", "-I", str(wine / "include"), "-I", str(n_dir)]
     cc = subprocess.run([CC] + flags + [str(src), "-o", str(exe)], capture_output=True, text=True)
     if cc.returncode:
         print(cc.stderr[-4000:])
