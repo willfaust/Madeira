@@ -1,5 +1,5 @@
 /* [sc-rph] browser CefApp::GetRenderProcessHandler replacement embedded in
- * virtual_ios.c (ios_sch_thunk, ios_sch296_thunk). check-sc-render-handler.py
+ * virtual_ios.c (ios_sch_thunk, ios_sch296_thunk, ios_sch302_thunk). check-sc-render-handler.py
  * links the symbols to each build's guarded helper RVAs and compares the bytes
  * with the production blob. RDX is the returned CefRefPtr; the renderer app
  * is built once with the helper's own operator new and constructor, and one

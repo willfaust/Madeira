@@ -6,7 +6,7 @@ reject mismatched images without writes. Exercise the preferred-base case with
 DIR64 rebasing of the existing vtable slots, without relocations for the new
 task callbacks: those must already name the mapped image. Every analysed
 helper build (ios_sch_builds) runs: the first build with its .text tail
-layout, 2.4.0.296 with its task callbacks in int3 padding. No supplied binary.
+layout, 2.4.0.296 and 2.4.0.302 with their task callbacks in int3 padding. No supplied binary.
 Requires x86_64 Linux, GNU binutils, Python and a C compiler.
 """
 from pathlib import Path
@@ -61,16 +61,24 @@ region = native[native.index('#define IOS_SCH_IMAGE_BASE'):
 # Per build: what the fixture needs beyond ios_sch_builds (helper routines the
 # adapter calls and the regions the zero tails must stay in).
 BUILDS = [
-    dict(name='first build', prefix='IOS_SCH_', table='ios_sch_code', defsym=[],
+    dict(name='first build', prefix='IOS_SCH_', suffix='', table='ios_sch_code', defsym=[],
          helper_new=0x13e708, run_until_idle=0x1728b0, global_drain=0x11be60, global_loop=0x1cea00,
          text_vs=0x17f34c, text_raw=0x17f400, data=define('IOS_SCH_DATA'), data_vs=0x43bc, data_raw=0x1a00,
          loop=['ios_sch_loop_thunk'], diagnostics=True),
-    dict(name='2.4.0.296', prefix='IOS_SCH296_', table='ios_sch296_code', defsym=['--defsym', 'SCH296=1'],
+    dict(name='2.4.0.296', prefix='IOS_SCH296_', suffix='296', table='ios_sch296_code', defsym=['--defsym', 'SCH296=1'],
          helper_new=0x1622b8, run_until_idle=0x1965d0, global_drain=0x13eec0, global_loop=0x1f6a10,
          text_vs=define('IOS_SCH296_TEXT_VS'), text_raw=define('IOS_SCH296_TEXT_RAW'),
          data=define('IOS_SCH296_DATA'), data_vs=define('IOS_SCH296_DATA_VS'), data_raw=0x1a00,
          loop=['ios_sch296_loop_thunk', 'ios_sch296_task_add', 'ios_sch296_task_release',
                'ios_sch296_task_one', 'ios_sch296_task_any'], diagnostics=False),
+    # 2.4.0.302 is 2.4.0.296 with 0x670 bytes inserted into .text: the same compact variant
+    # (SCH296 selects it), the routines above the insertion moved by 0x670 and .rdata/.data by 0x1000.
+    dict(name='2.4.0.302', prefix='IOS_SCH302_', suffix='302', table='ios_sch302_code', defsym=['--defsym', 'SCH296=1'],
+         helper_new=0x162928, run_until_idle=0x196c40, global_drain=0x13f410, global_loop=0x1f7a10,
+         text_vs=define('IOS_SCH302_TEXT_VS'), text_raw=define('IOS_SCH302_TEXT_RAW'),
+         data=define('IOS_SCH302_DATA'), data_vs=define('IOS_SCH302_DATA_VS'), data_raw=0x1a00,
+         loop=['ios_sch302_loop_thunk', 'ios_sch302_task_add', 'ios_sch302_task_release',
+               'ios_sch302_task_one', 'ios_sch302_task_any'], diagnostics=False),
 ]
 
 # The helper's code stays out of the tree: each build's table holds each range's
@@ -200,7 +208,7 @@ def check_build(index, build, folder):
     assert out['.text'] == array_bytes(P.lower().rstrip('_') + '_render_drain')
 
     # --- every blob sits in its section's zero tail or in guarded RET+int3 padding ---
-    blobs = re.search(r'ios_sch%s_blob\[\] =\n\{(.*?)\n\};' % ('' if build['diagnostics'] else '296'), native, re.S)[1]
+    blobs = re.search(r'ios_sch%s_blob\[\] =\n\{(.*?)\n\};' % build['suffix'], native, re.S)[1]
     placed = []
     entries = list(re.finditer(r'\{ (IOS_SCH\w+), (ios_sch\w+), sizeof\(\2\),\s*(0x[\da-f]+|0),\s*([01]),', blobs))
     assert len(entries) == blobs.count('{ IOS_SCH'), (build['name'], 'unparsed blob entries')

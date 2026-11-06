@@ -1,7 +1,7 @@
 /* Win64 renderer-loop adapter embedded in virtual_ios.c.
  * check-sc-render-loop.py links the symbols to the guarded helper RVAs and
  * checks these bytes against the production blob before executing it.
- * With --defsym SCH296=1 (Social Club 2.4.0.296) the four task callbacks are
+ * With --defsym SCH296=1 (Social Club 2.4.0.296 and 2.4.0.302) the four task callbacks are
  * in sections of their own, linked at verified int3 padding between helper
  * functions; the adapter itself is unchanged. */
 .intel_syntax noprefix
