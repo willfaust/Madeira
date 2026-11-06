@@ -10,7 +10,9 @@ checks, in a temporary install folder:
     (empty path, no pending chunks) and kept by B;
   - files only one depot lists, and directories, are untouched (a directory's
     path entry is empty by design: it has no chunks);
-  - one depot alone is unchanged.
+  - one depot alone is unchanged;
+  - a redistributable in its owner's folder and a game depot that list the
+    same name each write their own copy, in their own folder.
 Needs swiftc (SWIFTC=wrapper, see the host-tests notes) and python3.
 """
 from pathlib import Path
@@ -70,13 +72,13 @@ final class DepotDownloader {
         try! FileManager.default.createDirectory(at: jdir, withIntermediateDirectories: true)
         func chunk() -> DepotManifest.ChunkEntry { .init(sha: Data(count: 20), crc: 0, offset: 0, compressedSize: 8, uncompressedSize: 16) }
         func file(_ n: String, dir: Bool = false) -> DepotManifest.FileEntry { .init(filename: n, size: dir ? 0 : 16, flags: dir ? 0x40 : 0, chunks: dir ? [] : [chunk()]) }
-        func plan(_ id: UInt32, _ files: [DepotManifest.FileEntry]) -> DepotPlan {
+        func plan(_ id: UInt32, _ files: [DepotManifest.FileEntry], into folder: URL? = nil) -> DepotPlan {
             DepotPlan(depotID: id, manifestGID: UInt64(id), key: Data(), manifest: .init(files: files), hosts: [], auth: [:],
-                      declaredSize: 0, health: ContentHostHealth())
+                      declaredSize: 0, health: ContentHostHealth(), installURL: folder ?? game)
         }
         let a = plan(1, [file("Binaries", dir: true), file("Binaries\\Win32\\Game.exe"), file("WillowGame/CookedPCConsole/a.upk"), file("only-a.txt")])
         let b = plan(2, [file("binaries/win32/game.EXE"), file("WillowGame\\CookedPCConsole\\A.upk"), file("only-b.txt")])
-        let p = try! prepare(plans: [a, b], installURL: game, journalDir: jdir)
+        let p = try! prepare(plans: [a, b], journalDir: jdir)
         var fails = 0
         func check(_ ok: Bool, _ what: String) { if !ok { print("FAIL: \(what)"); fails += 1 } }
         check(p.paths[0][1] == "" && p.paths[0][2] == "", "depot A still writes the shared files: \(p.paths[0])")
@@ -86,8 +88,19 @@ final class DepotDownloader {
         check(p.paths[1].allSatisfy { !$0.isEmpty }, "depot B lost a file: \(p.paths[1])")
         check(Set(p.pending[0].map(\.file)) == [3], "depot A pending chunks: \(p.pending[0].map(\.file))")
         check(Set(p.pending[1].map(\.file)) == [0, 1, 2], "depot B pending chunks: \(p.pending[1].map(\.file))")
-        let solo = try! prepare(plans: [a], installURL: game, journalDir: jdir)
+        let solo = try! prepare(plans: [a], journalDir: jdir)
         check(solo.paths[0].dropFirst().allSatisfy { !$0.isEmpty }, "a lone depot skipped files: \(solo.paths[0])")
+        // A redistributable goes to its owner's folder (Steamworks Shared), planned after the game's depots.
+        let shared = dir.appendingPathComponent("Steamworks Shared")
+        let own = plan(5, [file("_CommonRedist/vcredist/2019/VC_redist.x64.exe"), file("Game.exe")])
+        let redist = plan(6, [file("_CommonRedist\\vcredist\\2019\\VC_redist.x64.exe")], into: shared)
+        let two = try! prepare(plans: [own, redist], journalDir: jdir)
+        check(two.paths[0][0] == game.appendingPathComponent("_CommonRedist/vcredist/2019/VC_redist.x64.exe").path,
+              "the game's own copy is not written to its folder: \(two.paths[0])")
+        check(two.paths[1][0] == shared.appendingPathComponent("_CommonRedist/vcredist/2019/VC_redist.x64.exe").path,
+              "the redistributable's copy is not written to its owner's folder: \(two.paths[1])")
+        check(Set(two.pending[0].map(\.file)) == [0, 1] && Set(two.pending[1].map(\.file)) == [0],
+              "pending chunks across two folders: \(two.pending.map { $0.map(\.file) })")
         return fails == 0 ? 0 : 1
     }
 }
@@ -102,5 +115,6 @@ with tempfile.TemporaryDirectory(prefix='madeira-depot-overlap-', dir='/tmp') as
     assert r.returncode == 0, r.stdout + r.stderr
     r = subprocess.run([str(folder / 'check')], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert '[steam-depot] overlap files=2' in r.stdout, r.stdout
-print('PASS: a file two depots list is written only by the later depot (any case, either slash); other files untouched')
+    assert '[steam-depot] overlap files=2' in r.stdout and 'overlap files=1' not in r.stdout, r.stdout
+print('PASS: a file two depots list is written only by the later depot (any case, either slash); other files untouched; '
+      'a redistributable in its owner\'s folder does not replace the game\'s own copy')
