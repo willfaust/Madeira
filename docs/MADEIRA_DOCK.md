@@ -29,8 +29,8 @@ them.
 ## Source and licence
 
 - Source: the `madeira-dock` submodule
-  (canonical repository `https://github.com/125hz/madeira-dock`; this repository
-  pins the commit, and `.gitmodules` names where it is fetched from), in C.
+  (`https://github.com/willfaust/madeira-dock`, the URL in `.gitmodules`; this
+  repository pins the commit), in C.
   Copyright 2026 125hz, **GPL-3.0-or-later with the Madeira
   Converter Exception** (the owner open-sourced it on 2026-09-27; it used to
   be a closed executable).
@@ -117,23 +117,31 @@ launch configuration, or key 0 when none can be picked; extra arguments from the
 library profile go to Valve's `LaunchApp` through
 `MADEIRA_STEAM_HOST_ARGUMENTS` (bounded; see the Dock README).
 
-**Friends.** While the game runs, Dock signs in to Friends the way desktop
-Steam's Friends window does, so friends see the account with the chosen status
-and the session receives friends' status. Settings › Steam › Status chooses it
-(passed as `MADEIRA_DOCK_PERSONA_STATE`). Offline turns friends off for the whole
-session; Online, Away and Invisible can also be changed from the Friends page.
-Dock writes the friends list to `C:\madeira-friends.bin` and accepts commands in
-`C:\madeira-friends-cmd.bin` (formats, limits and the `friends-*` report lines in
-the Dock README, "Friends"). In a lobby, Invite sends a real lobby invite. Join
-goes through the client's own accepted-invite path to the running game. January
-client build only; elsewhere `friends-available=0` and the launch is unchanged.
-The in-game Session menu's Friends page (`DockFriends.swift`) reads the feed and
-sends the commands; incoming lobby invites show at the top with Accept. Tested:
-sending an invite, receiving one and joining with it, joining a friend without an
-invite, being joined without sending one, and the Offline status turning friends
-off (Dock `docs/HANDOFF.md`). Friends'
-status comes from Dock, not Steam's Web API: a trial of Web API presence got a
-refresh token revoked (2026-10-29).
+**Friends.** Off unless chosen: Settings › Steam › Status is Offline by default,
+and Offline (`MADEIRA_DOCK_PERSONA_STATE=0`, or the variable missing) leaves
+Friends off for the whole session, as before Friends existed: Dock sends Steam
+nothing of its own and the game's menu has no Friends page. Online, Away or
+Invisible makes Dock sign in to Friends while the game runs the way desktop
+Steam's Friends window does, with the messages that window sends over the
+client's own connection (status, persona data for unnamed friends, the
+friends-status subscription and lobby invites; Dock README, "Friends"), so
+friends see the chosen status and the session receives theirs. Online, Away
+and Invisible can also be changed from the Friends page. Dock writes the
+friends list to `C:\madeira-friends.bin` every 3 s (online, invited and
+same-game friends first when there are more than 250) and accepts commands in
+`C:\madeira-friends-cmd.bin` (formats, limits and the `friends-*` report lines
+in the Dock README). In a lobby, Invite sends a real lobby invite. Join goes
+through the client's own accepted-invite path to the running game. January
+client build only; elsewhere `friends-available=0` and the launch is
+unchanged. The in-game Session menu's Friends page (`DockFriends.swift`) reads
+the feed and sends the commands; incoming lobby invites show at the top with
+Accept. A missing, invalid or stale feed (older than 15 s: a host that did not
+end cleanly) shows no list, and `MadeiraDock.cleanup()` (session end, app
+start, sign-out) removes the feed and any unread command. Tested: sending an
+invite, receiving one and joining with it, joining a friend without an invite,
+being joined without sending one, and the Offline status turning friends off
+(Dock `docs/HANDOFF.md`). Friends' status comes from Dock, not Steam's Web
+API: a trial of Web API presence got a refresh token revoked (2026-10-29).
 
 ## How a launch works
 
@@ -578,6 +586,12 @@ credentials:
 - `check-dock-report.py`: the report parser, its messages (including 34),
   the ordered callback IDs, rejection of private and malformed fields, and that every report round the pinned host
   writes is accepted.
+- `check-dock-friends.py`: the Friends model (`DockFriends.swift` compiled on
+  the host against a temporary drive): feed bounds, display order, the command
+  bytes and 31-bit sequences, matching a command to its own result after it
+  was sent, the timeout, reset and session end, no list from a missing,
+  invalid or stale feed, no names or SteamIDs in the log, and Offline (friends
+  off) as the default status.
 - `check-dock-path.py`: the transfer path through Wine's own path resolver
   (`WINE_FILE_C` can point at `dlls/ntdll/unix/file.c` when the wine
   submodule is not checked out).

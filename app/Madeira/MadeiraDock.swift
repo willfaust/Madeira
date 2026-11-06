@@ -421,6 +421,9 @@ enum MadeiraDock {
         if let url = transferURL { try? FileManager.default.removeItem(at: url) }
         unsetenv("MADEIRA_DOCK_AUTH_FILE")
         unsetenv("MADEIRA_DOCK_OFFLINE")
+        // The friends feed and command too: a host that did not end cleanly
+        // leaves them, and a later session must not show its list.
+        DockFriends.shared.endSession()
     }
 
     /// Writes the one-use transfer to protected Application Support storage
@@ -430,7 +433,6 @@ enum MadeiraDock {
     @MainActor static func writeHandoff(account: String, token: String, appID: Int) throws {
         cleanup()
         lastReport = Report()
-        DockFriends.shared.reset()
         let report = drive.appendingPathComponent("madeira-dock.txt")
         if FileManager.default.fileExists(atPath: report.path) { try FileManager.default.removeItem(at: report) }
         guard let url = transferURL else { throw DockError.message("Dock's private transfer folder is unavailable.") }
@@ -634,4 +636,18 @@ enum DockOffline {
         NotificationCenter.default.post(name: changed, object: nil)
     }
     static let changed = Notification.Name("MadeiraDockOfflineChanged")
+}
+
+/// The Steam status Dock signs in to Friends with (Settings › Steam › Status),
+/// passed to Dock as MADEIRA_DOCK_PERSONA_STATE; the raw value is Steam's
+/// persona state. Offline, the default, leaves Friends off for the session:
+/// Dock then sends Steam nothing of its own (madeira-dock README, "Friends").
+enum SteamOnlineStatus: Int, CaseIterable, Identifiable {
+    case online = 1, away = 3, invisible = 7, offline = 0
+    var id: Int { rawValue }
+    private static let key = "steamOnlineStatus"
+    static var current: SteamOnlineStatus {
+        get { (UserDefaults.standard.object(forKey: key) as? Int).flatMap(SteamOnlineStatus.init(rawValue:)) ?? .offline }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
 }

@@ -5966,11 +5966,13 @@ struct LibraryHUD: View {
                 ForEach(SteamOnlineStatus.allCases.filter { $0 != .offline }) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented).padding(.horizontal, 22).padding(.bottom, 8)
-            .disabled(dockFriends.pending != nil)
+            .disabled(dockFriends.pending != nil || !dockFriends.available)
             if dockFriends.friends.isEmpty {
                 Spacer()
-                Text(dockFriends.available ? "No friends yet" : "Friends are available while the game runs")
-                    .foregroundStyle(.secondary)
+                Group {
+                    if dockFriends.available { Text("No friends yet") } else { Text("Friends are available while the game runs") }
+                }
+                .foregroundStyle(.secondary)
                 Spacer()
             } else {
                 List(dockFriends.friends, id: \.steamID) { friend in
@@ -6024,7 +6026,7 @@ struct LibraryHUD: View {
                 }
                 Button("Keyboard", systemImage: "keyboard") { model.menu = false; LibraryKeyboard.show() }
                 if dockFriends.available {
-                    Button("Friends", systemImage: "person.2") { friendsPage = true }
+                    Button("Friends", systemImage: "person.2") { steamStatus = SteamOnlineStatus.current; friendsPage = true }
                 }
                 Divider()
                 FPSChoice(mode: Binding(get: { model.fpsMode }, set: { model.setFPS($0) }))
