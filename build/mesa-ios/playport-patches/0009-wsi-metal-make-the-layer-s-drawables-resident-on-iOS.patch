@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 20:43:47 +0200
+Subject: [PATCH] wsi/metal: make the layer's drawables resident on iOS too
+
+wsi_metal_layer_make_queue_resident and its remove counterpart add the
+CAMetalLayer's residency set to KosmicKrisp's Metal 4 queue. Both were
+compiled only when __MAC_OS_X_VERSION_MIN_REQUIRED says macOS 26, so on
+iOS, which has Metal 4 and CAMetalLayer.residencySet from iOS 26, they
+compiled to nothing: the swapchain's drawables were never resident on the
+queue that renders to them.
+
+On an iPhone (A19 Pro, iOS 27) a DXVK game created its device and swap
+chain and presented its first frame, then showed only black; DXVK's
+frame thread waited for that present to complete, and the swap chain
+recreation that followed waited for the frame thread, for good. Test
+the iOS 26 SDK macro as well.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-vulkan-backend-build.md
+Offered-upstream: no
+---
+ src/vulkan/wsi/wsi_common_metal_layer.m | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal_layer.m b/src/vulkan/wsi/wsi_common_metal_layer.m
+index 3b103b7..3f978e8 100644
+--- a/src/vulkan/wsi/wsi_common_metal_layer.m
++++ b/src/vulkan/wsi/wsi_common_metal_layer.m
+@@ -377,8 +377,11 @@ void
+ wsi_metal_layer_make_queue_resident(const CAMetalLayer *metal_layer,
+    void *mtl4_command_queue)
+ {
+-/* Metal4 was introduced in macOS26 */
+-#if defined(MAC_OS_VERSION_26_0) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_26_0
++/* Metal4 was introduced in macOS 26 and iOS 26. Without this the layer's
++ * drawables are never resident on the Metal 4 queue: on iOS, where the
++ * macOS-only test was false, nothing drawn to a drawable was ever shown. */
++#if (defined(MAC_OS_VERSION_26_0) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_26_0) || \
++    (defined(__IPHONE_26_0) && __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_26_0)
+    @autoreleasepool {
+       id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)mtl4_command_queue;
+       [queue addResidencySet:metal_layer.residencySet];
+@@ -391,8 +394,11 @@ void
+ wsi_metal_layer_remove_queue_resident(const CAMetalLayer *metal_layer,
+    void *mtl4_command_queue)
+ {
+-/* Metal4 was introduced in macOS26 */
+-#if defined(MAC_OS_VERSION_26_0) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_26_0
++/* Metal4 was introduced in macOS 26 and iOS 26. Without this the layer's
++ * drawables are never resident on the Metal 4 queue: on iOS, where the
++ * macOS-only test was false, nothing drawn to a drawable was ever shown. */
++#if (defined(MAC_OS_VERSION_26_0) && __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_26_0) || \
++    (defined(__IPHONE_26_0) && __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_26_0)
+    @autoreleasepool {
+       id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)mtl4_command_queue;
+       [queue removeResidencySet:metal_layer.residencySet];

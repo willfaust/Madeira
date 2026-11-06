@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sun, 4 Oct 2026 20:00:00 +0200
+Subject: [PATCH] kk: MESA_KK_DEBUG=compile counts shader sources and slow
+ Metal builds
+
+With the flag set, the driver logs to stderr:
+
+- every 64 shaders, the running totals of shaders translated from NIR
+  (kk_compile_shaders) and read back from the pipeline cache
+  (kk_deserialize_shader), the time spent in each, and the time spent
+  building Metal libraries and pipelines, which both paths do. A
+  disk-cache hit shows as a deserialized shader;
+- each Metal library plus pipeline build over 20 ms, as
+  "[kk-compile] render|compute ms=... wall_ms=... msl=...": the wall-clock
+  end, to match against the frame times, and a hash of the MSL. Render
+  builds exclude the pre-render compute stages, which are logged on their
+  own; the hash does not tell apart pipeline-state variants of the same
+  shaders.
+
+Without the flag nothing is timed or hashed.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-04-portal2-shader-cache.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_debug.c  |   1 +
+ src/kosmickrisp/vulkan/kk_debug.h  |   2 +
+ src/kosmickrisp/vulkan/kk_shader.c | 115 ++++++++++++++++++++++++++++-
+ 3 files changed, 115 insertions(+), 3 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_debug.c b/src/kosmickrisp/vulkan/kk_debug.c
+index 1805d66..4bc4232 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.c
++++ b/src/kosmickrisp/vulkan/kk_debug.c
+@@ -11,6 +11,7 @@ const struct debug_named_value debug_flags[] = {
+    {"nir", KK_DEBUG_NIR},
+    {"msl", KK_DEBUG_MSL},
+    {"force_robustness", KK_DEBUG_FORCE_ROBUSTNESS},
++   {"compile", KK_DEBUG_COMPILE},
+    {NULL, 0},
+ };
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug.h
+index f454804..668a77d 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.h
++++ b/src/kosmickrisp/vulkan/kk_debug.h
+@@ -12,6 +12,8 @@ enum kk_debug {
+    KK_DEBUG_MSL = 1ull << 1,
+    /* Forces robustness for all shaders */
+    KK_DEBUG_FORCE_ROBUSTNESS = 1ull << 2,
++   /* Count translated and cached shaders; log Metal builds over 20 ms */
++   KK_DEBUG_COMPILE = 1ull << 3,
+ };
+ 
+ extern enum kk_debug kk_mesa_debug_flags;
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 7f1fc4f..fb7b82c 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -28,6 +28,9 @@
+ #include "poly/nir/poly_nir.h"
+ 
+ #include "c11/threads.h"
++#include "util/mesa-blake3.h"
++#include "util/os_time.h"
++#include "util/u_atomic.h"
+ 
+ #include <math.h>
+ 
+@@ -1433,6 +1436,72 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
+    return nir;
+ }
+ 
++/* MESA_KK_DEBUG=compile: where shaders come from and what Metal costs.
++ * kk_compile_shaders translates NIR to MSL; kk_deserialize_shader reads the
++ * MSL back from the pipeline cache (on disk). Both then build the Metal
++ * library and pipeline. A pipeline found in the in-memory cache passes
++ * through neither. */
++static struct {
++   uint32_t events;
++   uint32_t translated, deserialized;
++   uint64_t translate_ns, deserialize_ns, metal_ns;
++} kk_compile_stats;
++
++static void
++kk_note_shader_source(bool deserialized, int64_t start)
++{
++   const int64_t ns = os_time_get_nano() - start;
++   if (deserialized) {
++      p_atomic_inc(&kk_compile_stats.deserialized);
++      p_atomic_add(&kk_compile_stats.deserialize_ns, ns);
++   } else {
++      p_atomic_inc(&kk_compile_stats.translated);
++      p_atomic_add(&kk_compile_stats.translate_ns, ns);
++   }
++   if (p_atomic_inc_return(&kk_compile_stats.events) % 64u == 0u)
++      fprintf(stderr,
++              "[kk-compile] totals translated=%u (%.0f ms) deserialized=%u "
++              "(%.0f ms) metal=%.0f ms\n",
++              p_atomic_read(&kk_compile_stats.translated),
++              p_atomic_read(&kk_compile_stats.translate_ns) / 1e6,
++              p_atomic_read(&kk_compile_stats.deserialized),
++              p_atomic_read(&kk_compile_stats.deserialize_ns) / 1e6,
++              p_atomic_read(&kk_compile_stats.metal_ns) / 1e6);
++}
++
++/* The Metal library and pipeline build of one shader; one built in more than
++ * 20 ms is logged with its wall-clock end, for matching against the frame
++ * times, and a hash of its MSL (not of the whole pipeline state). */
++static void
++kk_note_metal_build(const char *kind, int64_t start,
++                    const struct msl_compile_data *first,
++                    const struct msl_compile_data *second)
++{
++   if (!KK_DEBUG(COMPILE))
++      return;
++
++   const int64_t elapsed = os_time_get_nano() - start;
++   p_atomic_add(&kk_compile_stats.metal_ns, elapsed);
++   if (elapsed <= 20000000)
++      return;
++
++   struct timespec wall = {0};
++   timespec_get(&wall, TIME_UTC);
++   const int64_t wall_ms = wall.tv_sec * INT64_C(1000) + wall.tv_nsec / 1000000;
++
++   struct mesa_blake3 ctx;
++   blake3_hash hash;
++   char hex[BLAKE3_HEX_LEN];
++   _mesa_blake3_init(&ctx);
++   _mesa_blake3_update(&ctx, first->code, strlen(first->code) + 1);
++   if (second)
++      _mesa_blake3_update(&ctx, second->code, strlen(second->code) + 1);
++   _mesa_blake3_final(&ctx, hash);
++   _mesa_blake3_format(hex, hash);
++   fprintf(stderr, "[kk-compile] %s ms=%.1f wall_ms=%lld msl=%.16s\n", kind,
++           elapsed / 1e6, (long long)wall_ms, hex);
++}
++
+ static VkResult
+ kk_compile_compute_pipeline(struct kk_device *device,
+                             const struct msl_compile_data *data,
+@@ -1440,6 +1509,7 @@ kk_compile_compute_pipeline(struct kk_device *device,
+                             mtl_compute_pipeline_state **pipe)
+ {
+    struct kk_physical_device *pdev = kk_device_physical(device);
++   const int64_t start = KK_DEBUG(COMPILE) ? os_time_get_nano() : 0;
+ 
+    mtl_library *library = mtl_new_library(
+       device->mtl_compiler_handle, data->code, pdev->info.msl_version,
+@@ -1458,6 +1528,7 @@ kk_compile_compute_pipeline(struct kk_device *device,
+       return VK_ERROR_INVALID_SHADER_NV;
+ 
+    *pipe = pipeline;
++   kk_note_metal_build("compute", start, data, NULL);
+ 
+    return VK_SUCCESS;
+ }
+@@ -1744,6 +1815,8 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+          return VK_ERROR_INVALID_SHADER_NV;
+    }
+ 
++   /* The pre-render compute stages above are timed on their own. */
++   const int64_t start = KK_DEBUG(COMPILE) ? os_time_get_nano() : 0;
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+    mtl_library *vertex_library = mtl_new_library(
+       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
+@@ -1811,6 +1884,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    mtl_release(pipeline_descriptor);
+    mtl_release(fragment_function);
+    mtl_release(fragment_library);
++   kk_note_metal_build("render", start, vs_data, fs_data);
+ destroy_vertex:
+    mtl_release(vertex_function);
+    mtl_release(vertex_library);
+@@ -2524,15 +2598,50 @@ static const struct vk_shader_ops kk_shader_ops = {
+       kk_shader_get_executable_internal_representations,
+ };
+ 
++static VkResult
++kk_compile_shaders_noted(struct vk_device *device, uint32_t shader_count,
++                         struct vk_shader_compile_info *infos,
++                         const struct vk_graphics_pipeline_state *state,
++                         const struct vk_features *enabled_features,
++                         const VkAllocationCallbacks *pAllocator,
++                         struct vk_shader **shaders_out)
++{
++   if (!KK_DEBUG(COMPILE))
++      return kk_compile_shaders(device, shader_count, infos, state,
++                                enabled_features, pAllocator, shaders_out);
++   const int64_t start = os_time_get_nano();
++   VkResult result = kk_compile_shaders(device, shader_count, infos, state,
++                                        enabled_features, pAllocator,
++                                        shaders_out);
++   kk_note_shader_source(false, start);
++   return result;
++}
++
++static VkResult
++kk_deserialize_shader_noted(struct vk_device *vk_dev, struct blob_reader *blob,
++                            uint32_t binary_version,
++                            const VkAllocationCallbacks *pAllocator,
++                            struct vk_shader **shader_out)
++{
++   if (!KK_DEBUG(COMPILE))
++      return kk_deserialize_shader(vk_dev, blob, binary_version, pAllocator,
++                                   shader_out);
++   const int64_t start = os_time_get_nano();
++   VkResult result = kk_deserialize_shader(vk_dev, blob, binary_version,
++                                           pAllocator, shader_out);
++   kk_note_shader_source(true, start);
++   return result;
++}
++
+ const struct vk_device_shader_ops kk_device_shader_ops = {
+    .get_nir_options = kk_get_nir_options,
+    .get_spirv_options = kk_get_spirv_options,
+    .preprocess_nir = kk_preprocess_nir,
+    .hash_state = kk_hash_graphics_state,
+    .compile =
+-      kk_compile_shaders, /* This will only generate the MSL string we need
+-                             to use for actual library generation */
+-   .deserialize = kk_deserialize_shader,
++      kk_compile_shaders_noted, /* This will only generate the MSL string we
++                                   need to use for actual library generation */
++   .deserialize = kk_deserialize_shader_noted,
+    .cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,
+    .cmd_bind_shaders = kk_cmd_bind_shaders,
+ };

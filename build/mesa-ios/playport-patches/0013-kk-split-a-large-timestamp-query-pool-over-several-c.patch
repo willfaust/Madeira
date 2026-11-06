@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Wed, 30 Sep 2026 01:32:18 +0200
+Subject: [PATCH] kk: split a large timestamp query pool over several counter
+ heaps
+
+A timestamp query pool is backed by one Metal 4 counter heap with an
+entry per query. On the A19 Metal refuses a heap of more than 4096
+entries ("Requested Heap size is too large (requested 8192 max is
+4096)"), so vkCreateQueryPool failed with VK_ERROR_OUT_OF_DEVICE_MEMORY
+for a larger pool. vkd3d-proton makes an 8192-query pool for a Direct3D
+12 timestamp query heap, and Unreal Engine 5 then stopped with "Out of
+video memory trying to allocate a rendering resource".
+
+Back such a pool with as many heaps of at most 4096 entries as it
+needs: query q is entry q % 4096 of heap q / 4096. The writes and the
+resolves already carry their heap with each entry.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-30-d3d12-feature-level-12.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_query_pool.c | 53 +++++++++++++++++---------
+ src/kosmickrisp/vulkan/kk_query_pool.h | 12 ++++--
+ 2 files changed, 44 insertions(+), 21 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index 987b1b2..6039fda 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -207,13 +207,28 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
+          remap_index[pool->oq.queries++] = index;
+       }
+    } else if (kk_pool_is_ts(pool)) {
+-      /* Timestamps are sampled into a Metal counter heap (one entry per query)
+-       * and resolved into `bo` after the GPU writes them. */
+-      pool->ts.heap =
+-         mtl_new_timestamp_counter_heap(dev->mtl_handle, pool->vk.query_count);
+-      if (pool->ts.heap == NULL) {
++      /* Timestamps are sampled into Metal counter heaps (one entry per query)
++       * and resolved into `bo` after the GPU writes them. Metal caps a heap's
++       * entries, so a larger pool takes several. */
++      uint32_t n = DIV_ROUND_UP(pool->vk.query_count, KK_TS_HEAP_ENTRIES);
++      pool->ts.heaps = vk_zalloc2(&dev->vk.alloc, pAllocator,
++                                  n * sizeof(*pool->ts.heaps), 8,
++                                  VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++      if (pool->ts.heaps == NULL) {
+          kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool), pAllocator);
+-         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
++      }
++      for (uint32_t i = 0; i < n; i++) {
++         uint32_t entries = MIN2(pool->vk.query_count - i * KK_TS_HEAP_ENTRIES,
++                                 KK_TS_HEAP_ENTRIES);
++         pool->ts.heaps[i] =
++            mtl_new_timestamp_counter_heap(dev->mtl_handle, entries);
++         if (pool->ts.heaps[i] == NULL) {
++            kk_DestroyQueryPool(device, kk_query_pool_to_handle(pool),
++                                pAllocator);
++            return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         }
++         pool->ts.heap_count = i + 1;
+       }
+    }
+ 
+@@ -240,9 +255,10 @@ kk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
+       for (unsigned i = 0; i < pool->oq.queries; ++i) {
+          kk_query_table_remove(dev, &dev->occlusion_queries, remap_index[i]);
+       }
+-   } else if (kk_pool_is_ts(pool)) {
+-      if (pool->ts.heap)
+-         mtl_release(pool->ts.heap);
++   } else if (kk_pool_is_ts(pool) && pool->ts.heaps) {
++      for (uint32_t i = 0; i < pool->ts.heap_count; i++)
++         mtl_release(pool->ts.heaps[i]);
++      vk_free2(&dev->vk.alloc, pAllocator, pool->ts.heaps);
+    }
+ 
+    kk_destroy_bo(dev, pool->bo);
+@@ -369,13 +385,14 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+-   assert(kk_pool_is_ts(pool) && pool->ts.heap);
++   assert(kk_pool_is_ts(pool) && pool->ts.heaps);
+ 
+    uint32_t count = kk_mv_query_count(cmd);
+    enum mtl_render_stages mtl_stage =
+       kk_pipeline_stages_to_mtl_render_stage(stage);
+ 
+-   uint32_t heap_index = query;
++   mtl_counter_heap *heap = pool->ts.heaps[query / KK_TS_HEAP_ENTRIES];
++   uint32_t heap_index = query % KK_TS_HEAP_ENTRIES;
+ 
+    if (cmd->metal.render) {
+       /* If we've already issued a timestamp write for a render stage, reuse it
+@@ -384,7 +401,7 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+       bool reused = false;
+       util_dynarray_foreach(&cmd->ts_stage_map, struct kk_ts_stage_entry,
+                             entry) {
+-         if (entry->stage == mtl_stage && entry->heap == pool->ts.heap) {
++         if (entry->stage == mtl_stage && entry->heap == heap) {
+             heap_index = entry->index;
+             reused = true;
+             break;
+@@ -392,13 +409,13 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+       }
+ 
+       if (!reused) {
+-         struct kk_ts_stage_entry entry = {.heap = pool->ts.heap,
++         struct kk_ts_stage_entry entry = {.heap = heap,
+                                            .stage = mtl_stage,
+-                                           .index = query};
++                                           .index = heap_index};
+          util_dynarray_append(&cmd->ts_stage_map, entry);
+ 
+-         mtl_render_write_timestamp(cmd->metal.render, mtl_stage, pool->ts.heap,
+-                                    query);
++         mtl_render_write_timestamp(cmd->metal.render, mtl_stage, heap,
++                                    heap_index);
+       }
+    } else {
+       /* compute encoder active or nothing active. If the latter, the write will
+@@ -410,14 +427,14 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+                       kk_query_report_addr(dev, pool, query),
+                       (uint32_t)LIBKK_QUERY_UNAVAILABLE);
+ 
+-      mtl_compute_write_timestamp(cmd->metal.compute, pool->ts.heap, query);
++      mtl_compute_write_timestamp(cmd->metal.compute, heap, heap_index);
+    }
+ 
+    /* Resolve the Metal timestamp value to all multiview query indices so that
+     * they all become available. */
+    for (uint32_t i = 0; i < count; i++) {
+       struct kk_ts_resolve resolve = {
+-         .heap = pool->ts.heap,
++         .heap = heap,
+          .index = heap_index,
+          .dst_addr = kk_query_report_addr(dev, pool, query + i),
+       };
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.h b/src/kosmickrisp/vulkan/kk_query_pool.h
+index 0670fd5..febafb8 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.h
++++ b/src/kosmickrisp/vulkan/kk_query_pool.h
+@@ -12,11 +12,17 @@
+ 
+ #include "vulkan/runtime/vk_query_pool.h"
+ 
++/* The most entries one Metal timestamp counter heap may have on iOS (the
++ * A19's limit is 4096); a larger pool is split over several heaps. */
++#define KK_TS_HEAP_ENTRIES 4096
++
+ struct kk_ts_state {
+-   /* Metal 4 counter heap backing VK_QUERY_TYPE_TIMESTAMP pools. Timestamps are
+-    * sampled into this heap and later resolved into `bo` (see kk_query_pool.c).
++   /* Metal 4 counter heaps backing VK_QUERY_TYPE_TIMESTAMP pools, query q in
++    * heaps[q / KK_TS_HEAP_ENTRIES] at q % KK_TS_HEAP_ENTRIES. Timestamps are
++    * sampled into them and later resolved into `bo` (see kk_query_pool.c).
+     * NULL for non-timestamp pools. */
+-   mtl_counter_heap *heap;
++   mtl_counter_heap **heaps;
++   uint32_t heap_count;
+ };
+ 
+ struct kk_oq_state {

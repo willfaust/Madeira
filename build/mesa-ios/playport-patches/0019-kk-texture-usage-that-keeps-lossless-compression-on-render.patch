@@ -1,0 +1,280 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Thu, 8 Oct 2026 10:22:21 +0200
+Subject: [PATCH] kk: texture usage that keeps lossless compression on render
+ targets
+
+KosmicKrisp gives every image a transfer can write the shader write
+usage, and every mutable-format image the pixel format view usage.
+Apple's "Optimizing texture data" says Metal does not compress a
+texture with either usage losslessly. DXVK makes every TYPELESS texture
+mutable, with the family as its format list (R8G8B8A8_TYPELESS:
+UNORM, SNORM, SRGB, UINT, SINT), and Unity makes its render textures
+TYPELESS, so Hollow Knight's full-resolution scene targets were 0x17
+where DXMT's are 0x5, and its native King's Pass GPU time doubled as
+DXMT's did before patches/dxmt 0009.
+
+Now:
+- shader write only for storage images: transfers into an image are
+  Metal copies or render passes (clears, blits, resolves);
+- no pixel format view when every format in the image's format list
+  keeps the image format's component layout: the same number of
+  components, in the same order, each of the same size and bit
+  position. Metal's MTLTextureUsage.pixelFormatView documentation needs
+  the usage only for a view with a different component layout ("if the
+  number of components differs, or if their size or order is
+  different"), and none for a linear/sRGB change, so UNORM, SNORM,
+  SRGB, UINT, SINT and FLOAT views of one layout need none. This is
+  the rule of patches/dxmt 0009 (colour typeless families), narrowed
+  to what the format list says: a list with a format of another layout
+  (DXVK adds R32_UINT and friends for a UAV of an R32-compatible
+  format) keeps the usage, and so do an image with no format list
+  (any compatible format may come), a block-texel-view-compatible
+  image, depth/stencil and every non-plain format (block compressed,
+  packed shared-exponent, planar). Z32_FLOAT_S8X24 keeps it as before.
+
+MESA_KK_DEBUG=wide_usage restores both usages as upstream sets them.
+A view that changes the format of a texture made without pixel format
+view, other than to its sRGB or linear twin, is logged as
+[kk-pfv-view], the first 32 such views, as DXMT logs [pfv-view].
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-08-vulkan-perf-typeless-usage.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_debug.c        |  1 +
+ src/kosmickrisp/vulkan/kk_debug.h        |  4 ++
+ src/kosmickrisp/vulkan/kk_image.c        | 69 ++++++++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_image_layout.c | 18 +++++--
+ src/kosmickrisp/vulkan/kk_image_layout.h |  1 +
+ src/kosmickrisp/vulkan/kk_image_view.c   | 18 +++++++
+ 6 files changed, 106 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_debug.c b/src/kosmickrisp/vulkan/kk_debug.c
+index 4bc4232..4e76727 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.c
++++ b/src/kosmickrisp/vulkan/kk_debug.c
+@@ -12,6 +12,7 @@ const struct debug_named_value debug_flags[] = {
+    {"msl", KK_DEBUG_MSL},
+    {"force_robustness", KK_DEBUG_FORCE_ROBUSTNESS},
+    {"compile", KK_DEBUG_COMPILE},
++   {"wide_usage", KK_DEBUG_WIDE_USAGE},
+    {NULL, 0},
+ };
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug.h
+index 668a77d..d812284 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.h
++++ b/src/kosmickrisp/vulkan/kk_debug.h
+@@ -14,6 +14,10 @@ enum kk_debug {
+    KK_DEBUG_FORCE_ROBUSTNESS = 1ull << 2,
+    /* Count translated and cached shaders; log Metal builds over 20 ms */
+    KK_DEBUG_COMPILE = 1ull << 3,
++   /* Shader write usage for every image a transfer can write and pixel format
++    * view usage for every mutable-format image, as upstream sets them: both
++    * turn off Metal's lossless compression */
++   KK_DEBUG_WIDE_USAGE = 1ull << 4,
+ };
+ 
+ extern enum kk_debug kk_mesa_debug_flags;
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index de27a6d..ccd4349 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -7,6 +7,7 @@
+ 
+ #include "kk_image.h"
+ 
++#include "kk_debug.h"
+ #include "kk_device.h"
+ #include "kk_device_memory.h"
+ #include "kk_entrypoints.h"
+@@ -522,6 +523,73 @@ kk_GetPhysicalDeviceSparseImageFormatProperties2(
+    return;
+ }
+ 
++/* Whether a view in format view keeps the component layout of an image in
++ * format image: the same number of components, in the same order, each of
++ * the same size. Metal needs no pixel format view usage for such a view
++ * (MTLTextureUsage.pixelFormatView: a layout differs "if the number of
++ * components differs, or if their size or order is different"), so the
++ * numeric type (UNORM, SNORM, UINT, SINT, FLOAT) and sRGB may change. */
++static bool
++kk_format_keeps_layout(enum pipe_format image, enum pipe_format view)
++{
++   if (util_format_linear(view) == util_format_linear(image))
++      return true;
++
++   const struct util_format_description *a = util_format_description(image);
++   const struct util_format_description *b = util_format_description(view);
++   if (a == NULL || b == NULL || a->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
++       b->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
++       util_format_is_depth_or_stencil(image) ||
++       util_format_is_depth_or_stencil(view))
++      return false;
++
++   if (a->block.bits != b->block.bits || a->nr_channels != b->nr_channels)
++      return false;
++
++   for (unsigned c = 0u; c < a->nr_channels; ++c) {
++      if (a->channel[c].size != b->channel[c].size ||
++          a->channel[c].shift != b->channel[c].shift)
++         return false;
++   }
++   for (unsigned c = 0u; c < 4u; ++c) {
++      if (a->swizzle[c] != b->swizzle[c])
++         return false;
++   }
++
++   return true;
++}
++
++/* Whether every view of a mutable-format image keeps the image format's
++ * component layout, as with DXVK's TYPELESS colour textures (the format list
++ * R8G8B8A8_{UNORM,SNORM,SRGB,UINT,SINT}) and its typed ones (UNORM and SRGB).
++ * The format list names the formats views may use; without one any
++ * compatible format may come, and a block-texel-view-compatible image may
++ * be viewed as an uncompressed format. */
++static bool
++kk_image_views_keep_layout(const VkImageCreateInfo *pCreateInfo)
++{
++   if (KK_DEBUG(WIDE_USAGE))
++      return false;
++
++   if (pCreateInfo->flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT)
++      return false;
++
++   const VkImageFormatListCreateInfo *format_list =
++      vk_find_struct_const(pCreateInfo->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
++   if (format_list == NULL || format_list->viewFormatCount == 0u)
++      return false;
++
++   enum pipe_format image = vk_format_to_pipe_format(pCreateInfo->format);
++   for (uint32_t i = 0u; i < format_list->viewFormatCount; ++i) {
++      enum pipe_format view =
++         vk_format_to_pipe_format(format_list->pViewFormats[i]);
++      if (!kk_format_keeps_layout(image, view))
++         return false;
++   }
++
++   return true;
++}
++
+ static VkResult
+ kk_image_init(struct kk_device *dev, struct kk_image *image,
+               const VkImageCreateInfo *pCreateInfo)
+@@ -562,6 +630,7 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
+          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
+       kk_image_layout_init(dev, &image->vk, vk_format_to_pipe_format(format),
+                            width_scale, height_scale,
++                           kk_image_views_keep_layout(pCreateInfo),
+                            &image->planes[plane].layout);
+    }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+index f91bfa8..4162bd3 100644
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c
+@@ -42,12 +42,16 @@ vk_image_to_mtl_texture_type(const struct vk_image *image)
+ static enum mtl_texture_usage
+ vk_image_usage_flags_to_mtl_texture_usage(VkImageUsageFlags usage_flags,
+                                           VkImageCreateFlags create_flags,
++                                          bool views_keep_layout,
+                                           bool supports_atomics)
+ {
+    enum mtl_texture_usage usage = 0u;
+ 
+-   const VkImageUsageFlags shader_write =
+-      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
++   /* Transfers into an image are Metal copies or render passes (clears,
++    * blits, resolves), so only storage images need shader write. */
++   VkImageUsageFlags shader_write = VK_IMAGE_USAGE_STORAGE_BIT;
++   if (KK_DEBUG(WIDE_USAGE))
++      shader_write |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (usage_flags & shader_write)
+       usage |= MTL_TEXTURE_USAGE_SHADER_WRITE;
+ 
+@@ -65,7 +69,9 @@ vk_image_usage_flags_to_mtl_texture_usage(VkImageUsageFlags usage_flags,
+    if (usage_flags & render_attachment)
+       usage |= MTL_TEXTURE_USAGE_RENDER_TARGET;
+ 
+-   if (create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
++   /* Metal needs pixel format view usage only for a view that changes the
++    * component layout. */
++   if ((create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !views_keep_layout)
+       usage |= MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW;
+ 
+    if (supports_atomics) {
+@@ -213,7 +219,8 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
+ void
+ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+                      enum pipe_format format, const uint8_t width_scale,
+-                     const uint8_t height_scale, struct kk_image_layout *layout)
++                     const uint8_t height_scale, bool views_keep_layout,
++                     struct kk_image_layout *layout)
+ {
+    const struct kk_physical_device *pdev = kk_device_physical(dev);
+    const struct kk_va_format *supported_format = kk_get_va_format(format);
+@@ -227,7 +234,8 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+    layout->optimized_layout = kk_image_layout_can_optimize(
+       pdev, image->usage, image->tiling, image->create_flags, format);
+    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
+-      image->usage, image->create_flags, supported_format->atomic);
++      image->usage, image->create_flags, views_keep_layout,
++      supported_format->atomic);
+    layout->create_flags = image->create_flags;
+    layout->format.pipe = format;
+    layout->format.mtl = supported_format->mtl_pixel_format;
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.h b/src/kosmickrisp/vulkan/kk_image_layout.h
+index 0e2a054..f964fdb 100644
+--- a/src/kosmickrisp/vulkan/kk_image_layout.h
++++ b/src/kosmickrisp/vulkan/kk_image_layout.h
+@@ -219,6 +219,7 @@ bool kk_image_layout_can_optimize(const struct kk_physical_device *pdev,
+ void kk_image_layout_init(const struct kk_device *dev,
+                           const struct vk_image *image, enum pipe_format format,
+                           const uint8_t width_scale, const uint8_t height_scale,
++                          bool views_keep_layout,
+                           struct kk_image_layout *layout);
+ 
+ #endif /* KK_IMAGE_LAYOUT_H */
+diff --git a/src/kosmickrisp/vulkan/kk_image_view.c b/src/kosmickrisp/vulkan/kk_image_view.c
+index 90eb6f6..52e04fb 100644
+--- a/src/kosmickrisp/vulkan/kk_image_view.c
++++ b/src/kosmickrisp/vulkan/kk_image_view.c
+@@ -16,8 +16,11 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_format.h"
+ 
++#include "util/u_atomic.h"
+ #include "vk_format.h"
+ 
++#include <stdio.h>
++
+ static enum pipe_swizzle
+ vk_swizzle_to_pipe(VkComponentSwizzle swizzle)
+ {
+@@ -144,6 +147,21 @@ kk_image_view_init(struct kk_device *dev, struct kk_image_view *view,
+             view_layout.swizzle.alpha = PIPE_SWIZZLE_0;
+       }
+ 
++      /* A view that changes the format of a texture made without pixel format
++       * view usage (kk_image_views_keep_layout), other than to its sRGB or
++       * linear twin, is reported, the first 32 such views, so a view
++       * Metal might not take shows in the log. */
++      if (!(plane->layout.usage & MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW) &&
++          util_format_linear(p_format) !=
++             util_format_linear(plane->layout.format.pipe)) {
++         static uint32_t reported = 0u;
++         if (p_atomic_inc_return(&reported) <= 32u)
++            fprintf(stderr, "[kk-pfv-view] %s viewed as %s without pixel "
++                    "format view\n",
++                    util_format_short_name(plane->layout.format.pipe),
++                    util_format_short_name(p_format));
++      }
++
+       mtl_texture *mtl_handle = image->planes[image_plane].mtl_handle;
+       if (image->vk.image_type == VK_IMAGE_TYPE_3D &&
+           view->vk.view_type != VK_IMAGE_VIEW_TYPE_3D)
+-- 
+2.55.0
+

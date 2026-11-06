@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 20:09:20 +0200
+Subject: [PATCH] kk: export vkGetInstanceProcAddr and vkGetDeviceProcAddr
+
+A program that dlopens the driver itself, with no Vulkan loader, looks
+up these two by name. Wine's win32u does exactly that (vulkan_init_once:
+dlsym of vkGetInstanceProcAddr and vkGetDeviceProcAddr), and on iOS
+there is no loader for it to go through: the app embeds the driver as a
+framework and win32u dlopens it. The ICD's own vk_icd* exports stay.
+
+vkGetDeviceProcAddr answers as kk_GetDeviceProcAddr does, from the
+device's exposed table. That table's command entry points are
+KosmicKrisp's trampolines, which record a secondary command buffer's
+commands so vkCmdExecuteCommands can replay them; the device's internal
+table (vk_device_get_proc_addr) has none. Through it, DXVK's tiler mode,
+which records every render pass into secondary command buffers, drew
+nothing: Hollow Knight and The Witcher 3 showed only the DXVK HUD.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-vulkan-backend-build.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_instance.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_instance.c b/src/kosmickrisp/vulkan/kk_instance.c
+index 90abd52..7100d5d 100644
+--- a/src/kosmickrisp/vulkan/kk_instance.c
++++ b/src/kosmickrisp/vulkan/kk_instance.c
+@@ -242,3 +242,27 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
+ {
+    return kk_GetInstanceProcAddr(instance, pName);
+ }
++
++/* The two entry points a program that loads the driver itself, with no
++ * Vulkan loader, looks up by name. Wine's win32u does that on iOS (dlsym of
++ * vkGetInstanceProcAddr and vkGetDeviceProcAddr in the library it dlopens),
++ * where there is no loader to go through. Device entry points come from the
++ * device's exposed table, as kk_GetDeviceProcAddr gives them: its command
++ * trampolines record secondary command buffers for vkCmdExecuteCommands. */
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName);
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetInstanceProcAddr(VkInstance instance, const char *pName)
++{
++   return vk_icdGetInstanceProcAddr(instance, pName);
++}
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetDeviceProcAddr(VkDevice device, const char *pName);
++
++PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
++vkGetDeviceProcAddr(VkDevice device, const char *pName)
++{
++   return kk_GetDeviceProcAddr(device, pName);
++}

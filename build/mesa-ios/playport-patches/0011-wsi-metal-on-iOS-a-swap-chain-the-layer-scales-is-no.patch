@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 23:43:43 +0200
+Subject: [PATCH] wsi/metal: on iOS a swap chain the layer scales is not
+ suboptimal
+
+vkQueuePresentKHR returned VK_SUBOPTIMAL_KHR whenever the layer's
+bounds, in pixels, differed from the swap chain's extent. On iOS the
+layer is the embedding app's, and it scales the drawable to its bounds
+(drawableSize is the extent), so another size still shows whole. Wine's
+surface reports the window's client size as the current extent, so a
+game whose window is smaller than the screen got a swap chain of that
+size, a suboptimal result on every present and a recreation after each:
+The Witcher 3 under DXVK presented two frames and stopped. Do not
+report suboptimal for the size on iOS.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-vulkan-d3d11-d3d12.md
+Offered-upstream: no
+---
+ src/vulkan/wsi/wsi_common_metal.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 08f4cee..50bac21 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -741,7 +741,18 @@ wsi_metal_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
+ 
+    uint32_t width = 0u, height = 0u;
+    wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
++#if TARGET_OS_IPHONE
++   /* On iOS the layer belongs to the app that embeds the driver, and it
++    * scales the drawable (drawableSize is the swap chain's extent) to its
++    * bounds, as CAMetalLayer's contentsGravity says. A swap chain of another
++    * size is presented whole, so it is not suboptimal. Reporting it so made
++    * a caller whose window is smaller than the screen (Wine's surface
++    * reports the window's client size) recreate its swap chain after every
++    * present: The Witcher 3 under DXVK presented two frames and stopped. */
++   bool is_optimal = true;
++#else
+    bool is_optimal = (width == chain->extent.width && height == chain->extent.height);
++#endif
+    kk_wsi_trace(1, "present image=%u id=%llu wait=%d layer=%ux%u chain=%ux%u\n", image_index,
+                 (unsigned long long)present_id, present_id && wsi_chain->present_wait_enabled,
+                 width, height, chain->extent.width, chain->extent.height);
