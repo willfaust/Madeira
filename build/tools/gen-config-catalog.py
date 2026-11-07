@@ -1081,6 +1081,12 @@ OVERLAY = {
                         "Launcher 132 MB, Social Club 68 MB through a whole RDR2 session). Larger uploads still get a "
                         "block of their own; each named program logs one [small-rings] line. Unset or 0 (default): "
                         "32 MB, as before. Set it in the game's own file; read when the program starts."},
+    "env.MADEIRA_D3D11_NO_VIDEO_DEVICE": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Direct3D 11: use software video presentation",
+                "kind": "bool", "default": "0",
+                "sources": ["build/dxmt-patches/0002-d3d11-video-device-fallback.patch"],
+                "note": "1: reject D3D11 devices explicitly requested with VIDEO_SUPPORT so Unity can fall back "
+                        "to CPU-backed Media Foundation samples. Direct3D rendering still uses Metal. Set per game."},
     # DXMT's Direct3D 9 index buffers read it (dxmt, build/dxmt-patches/0001-d3d9-index-range-per-draw.patch).
     "env.MADEIRA_D3D9_INDEX_RANGE": {"category": "Direct3D 9/10/11 (DXMT)",
                 "title": "Direct3D 9: upload only the index bytes a draw reads",
