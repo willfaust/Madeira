@@ -9914,6 +9914,7 @@ static void exec_resolve(struct mad_exec *e, const struct mad_cmd *c) {
     if (dview) NSObject_release(dview);
 }
 
+static int g_cs_concurrent = -1;   /* madeira-duo cs-concurrent, see exec_dispatch */
 static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_compute_setpso c_pso;
     e->wr_all = 1;   /* ml1116: a dispatch writes through UAVs we do not enumerate here */
@@ -9952,7 +9953,20 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     if (!e->cenc) {
         if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
         exec_end(e);
-        e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false); if (e->cenc) g_enc_seq++;
+        /* madeira-duo cs-concurrent: D3D12 orders dispatches only at a UAV or
+         * transition barrier, and every barrier here ends the compute encoder
+         * (fence-chain 1..5; f6 keeps it open, so stays serial). Inside one
+         * encoder the dispatches are independent, so a concurrent encoder lets
+         * the GPU overlap them. PoE2 fights issue 2,500-5,300 dispatches a frame
+         * of ~4 threadgroups each in ~35 encoders; serial, each waits for the
+         * last to drain (text14: GPU 72-116 ms a frame). Opt-in:
+         * madeira.cfg cs-concurrent = 1 (default 0 = serial encoders, as before). */
+        if (g_cs_concurrent < 0) {
+            g_cs_concurrent = mad_cfg_int_pe("cs-concurrent", 0) ? 1 : 0;   /* 1 = compute encoders are concurrent between barriers (fence modes 1-5); 0 = serial, as before (default) */
+            if (g_cs_concurrent)
+                d3d12_log("[madeira-d3d12] cs-concurrent: compute encoders are concurrent between barriers (madeira.cfg cs-concurrent)\n");
+        }
+        e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, g_cs_concurrent > 0 && e->mode != 6); if (e->cenc) g_enc_seq++;
         e->cenc_pso = e->cpso; e->cenc_seq = g_enc_seq;
         if (g_fault_diag) mad_label(e->cenc, "C#%u %s fn=%llx:%s", g_enc_seq, e->cpso->vs_name,
                                     (unsigned long long)e->cpso->vs_fn, e->cpso->vs_name);
