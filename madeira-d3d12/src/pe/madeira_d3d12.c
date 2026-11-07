@@ -1243,6 +1243,7 @@ struct mad_resource {
     UINT samples;
     struct mad_device *owner;
     int borrowed;              /* texture belongs to a drawable; do not release */
+    volatile LONG rpl_state, rpl_wasted;   /* madeira-duo rp-learn-store */
     obj_handle_t resolve_tmp;  /* exec_resolve: render-target stand-in when this is a resolve destination without that usage */
     UINT resolve_tmp_w, resolve_tmp_h, resolve_tmp_pf;   /* the stand-in's size and pixel format, to replace it when they change */
     D3D12_RESOURCE_DESC desc;  /* as created; answered by GetDesc */
@@ -1365,10 +1366,14 @@ struct mad_pso {
     int lazy_cs;                                    /* compute pipeline built at its first dispatch (mad_cpso_realize) */
     UINT64 cs_hash; UINT cs_len;   /* madeira-bcd: FNV-1a of the CS bytecode, for GPU fault reports */
     UINT64 vs_hash;                /* madeira-bcd skin-check: FNV-1a of the VS bytecode (0 unless skin-check is on) */
+    UINT ps_id, vs_id;             /* madeira-duo gpu-pass-timing: the first 4 bytes of each DXBC container digest, to tell PoE2's all-"main" shaders apart in encoder labels */
+    UINT vary_out, vary_unused;    /* madeira-duo vtx-census: bytes per vertex the VS writes (signature components x 4) and how many of them the PS never reads */
+    UINT vary_flags;               /* madeira-duo vtx-census: 1 VS min precision, 2 VS native 16-bit, 4 PS min precision, 8 PS native 16-bit, 16 VS has 16-bit outputs */
     char *il_tag; int il_int;      /* madeira-bcd skin-check-trace: the input layout in short; il_int: an integer element (blend indices) */
     LONG first_used; LONG64 born_present; DWORD born_tick;   /* madeira-bcd: pso-first-use */
     SRWLOCK rlock;                                  /* serialises this pipeline's lazy build (zero = SRWLOCK_INIT) */
-    volatile LONG async_q;                          /* pso-async: handed to the background builders */
+    volatile LONG async_q;                          /* pso-async: handed to the background builders (1; 2 = pso-create-build's low-priority queue) */
+    UINT64 seen_key; LONG seen_mark;                /* madeira-duo pso-create-build: the pipeline's content key, and drawn once this session */
     /* madeira-bcd pso-lazy-libs: lz = the stage libraries were dropped once the
      * pipeline was created and come back from the shader cache under these keys
      * at its first draw (mad_lzlib_restore); lz_has_ps never changes after creation */
@@ -2284,6 +2289,8 @@ struct mad_exec {
     UINT64 vis_prev;            /* ml1088: the visibility slot the open encoder was last told to count into, ~0 = disabled */
     obj_handle_t enc_vis_buf;   /* ml1088: the slot chunk attached to the open encoder (a pass attribute) */
     unsigned pass_draws;        /* ml1098: draws encoded into the open render pass */
+    UINT vc_ps, vc_vs, vc_w, vc_h; UINT64 vc_draws, vc_verts, vc_inst, vc_indirect, vc_idx32;   /* madeira-duo vtx-census */
+    UINT64 vc_outb, vc_unusedb, vc_v16;   /* madeira-duo vtx-census: vertex output bytes (verts x VS output size), the part the PS never reads, verts drawn by a VS with 16-bit types */
     /* ml1134: fence-chain = 6 */
     int f6_sync_needed;         /* a ResourceBarrier (or the list start) since the last sync point */
     int f6_list_start;          /* the next sync also waits for the device fence (other queue, earlier batch) */
@@ -2710,6 +2717,170 @@ static void f7_store_census(struct mad_exec *e, const struct mad_resource *r, UI
 done:
     InterlockedExchangeAdd64(cls, b);
 }
+/* madeira-duo vtx-census (diagnostic, opt-in: madeira.cfg vtx-census = N seconds
+ * between reports, 0 = off). What each render pass asks the vertex stage for,
+ * keyed like gpu-pass-timing's labels (the pass's first pipeline digests and
+ * its size), so the two reports line up: draws, vertices (index count x
+ * instances), instances and indirect draws per frame. GPU vertex time divided
+ * by vertices says whether a vertex-heavy pass is the game's geometry or the
+ * cost of each vertex here. */
+/* madeira-duo vtx-census: what a VS writes per vertex and what the PS reads, from
+ * the DXIL container's signatures (ISG1/OSG1: Mask = allocated components; an
+ * output's NeverWrites mask and an input's AlwaysReads mask, as DXC writes them,
+ * give the components actually written and read). Apple's GPU stores every vertex
+ * output for the tiler, so written-but-never-read components are pure cost. SFI0
+ * says whether the shader uses minimum-precision or native 16-bit types. */
+static const BYTE *mad_dxbc_chunk(const void *bc, SIZE_T len, const char *cc, UINT *clen) {
+    const BYTE *b = bc; UINT n, i, off;
+    if (!b || len < 32 || memcmp(b, "DXBC", 4)) return NULL;
+    memcpy(&n, b + 28, 4);
+    if (n > 64 || 32 + (SIZE_T)n * 4 > len) return NULL;
+    for (i = 0; i < n; i++) {
+        memcpy(&off, b + 32 + i * 4, 4);
+        if ((SIZE_T)off + 8 > len) return NULL;
+        if (!memcmp(b + off, cc, 4)) {
+            UINT sz; memcpy(&sz, b + off + 4, 4);
+            if ((SIZE_T)off + 8 + sz > len) return NULL;
+            *clen = sz; return b + off + 8;
+        }
+    }
+    return NULL;
+}
+struct mad_sig_el { const char *name; UINT index, sv, reg; BYTE mask, rw; UINT minp; };
+static UINT mad_sig_read(const BYTE *c, UINT clen, struct mad_sig_el *el, UINT cap) {
+    UINT n, off, i, k = 0;
+    if (!c || clen < 8) return 0;
+    memcpy(&n, c, 4); memcpy(&off, c + 4, 4);
+    for (i = 0; i < n && k < cap; i++) {
+        const BYTE *e = c + off + i * 32; UINT nmo;
+        if ((SIZE_T)(off + i * 32 + 32) > clen) break;
+        memcpy(&nmo, e + 4, 4);
+        el[k].name = nmo < clen ? (const char *)c + nmo : "";
+        if (!memchr(el[k].name, 0, clen - (nmo < clen ? nmo : clen))) el[k].name = "";
+        memcpy(&el[k].index, e + 8, 4); memcpy(&el[k].sv, e + 12, 4); memcpy(&el[k].reg, e + 20, 4);
+        el[k].mask = e[24]; el[k].rw = e[25]; memcpy(&el[k].minp, e + 28, 4);
+        k++;
+    }
+    return k;
+}
+static UINT mad_bits4(UINT m) { m &= 15; return (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1); }
+static void mad_vary_measure(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
+    struct mad_sig_el vo[32], pi[32];
+    UINT nvo, npi = 0, i, j, cl, out = 0, unused = 0, fl = 0;
+    const BYTE *c;
+    UINT64 sf;
+    if (!desc->VS.pShaderBytecode || desc->GS.pShaderBytecode || desc->HS.pShaderBytecode || desc->DS.pShaderBytecode) return;
+    c = mad_dxbc_chunk(desc->VS.pShaderBytecode, desc->VS.BytecodeLength, "OSG1", &cl);
+    nvo = mad_sig_read(c, c ? cl : 0, vo, 32);
+    if (!nvo) return;
+    if (desc->PS.pShaderBytecode) {
+        c = mad_dxbc_chunk(desc->PS.pShaderBytecode, desc->PS.BytecodeLength, "ISG1", &cl);
+        npi = mad_sig_read(c, c ? cl : 0, pi, 32);
+        if ((c = mad_dxbc_chunk(desc->PS.pShaderBytecode, desc->PS.BytecodeLength, "SFI0", &cl)) && cl >= 8) {
+            memcpy(&sf, c, 8);
+            if (sf & 0x10) fl |= 4;
+            if (sf & 0x40000) fl |= 8;
+        }
+    }
+    if ((c = mad_dxbc_chunk(desc->VS.pShaderBytecode, desc->VS.BytecodeLength, "SFI0", &cl)) && cl >= 8) {
+        memcpy(&sf, c, 8);
+        if (sf & 0x10) fl |= 1;
+        if (sf & 0x40000) fl |= 2;
+    }
+    for (i = 0; i < nvo; i++) {
+        UINT wr = vo[i].mask & ~vo[i].rw & 15, rd = 0, nw = mad_bits4(wr);
+        out += nw * 4;
+        if (vo[i].minp) fl |= 16;
+        if (vo[i].sv) continue;   /* system values (position, clip/cull distances, RT/viewport index) are the rasteriser's */
+        for (j = 0; j < npi; j++)
+            if (pi[j].index == vo[i].index && !_stricmp(pi[j].name, vo[i].name)) rd |= pi[j].rw & pi[j].mask;
+        unused += mad_bits4(wr & ~rd) * 4;
+    }
+    p->vary_out = out; p->vary_unused = unused; p->vary_flags = fl;
+}
+struct mad_vxc_ent { UINT ps, vs, w, h; UINT64 passes, draws, verts, inst, indirect, idx32, outb, unusedb, v16; };
+#define MAD_VXC_MAX 512
+static struct mad_vxc_ent g_vxc[MAD_VXC_MAX];
+static UINT g_vxc_n;
+static SRWLOCK g_vxc_lock = SRWLOCK_INIT;
+static int g_vxc_secs = -1;
+static ULONGLONG g_vxc_last_tick; static LONG64 g_vxc_last_present;
+static int mad_vxc_on(void) {
+    if (g_vxc_secs < 0) {
+        long long s = mad_cfg_int_pe("vtx-census", 0);   /* madeira-duo diagnostic: seconds between vertex census reports (0 = off) */
+        g_vxc_secs = s <= 0 ? 0 : s > 3600 ? 3600 : (int)s;
+        if (g_vxc_secs) d3d12_log("[madeira-d3d12] vtx-census = %d: per-pass vertex work reported every %d s\n", g_vxc_secs, g_vxc_secs);
+    }
+    return g_vxc_secs;
+}
+static int mad_vxc_cmp(const void *a, const void *b) {
+    const struct mad_vxc_ent *x = a, *y = b;
+    return x->verts < y->verts ? 1 : x->verts > y->verts ? -1 : 0;
+}
+static void mad_vxc_report_locked(void) {
+    static struct mad_vxc_ent v[MAD_VXC_MAX];
+    LONG64 pres = g_presents_now - g_vxc_last_present;
+    UINT i, n = g_vxc_n;
+    UINT64 tv = 0, td = 0;
+    double f = pres > 0 ? 1.0 / (double)pres : 0.0;
+    if (pres <= 0 || !n) return;
+    memcpy(v, g_vxc, n * sizeof *v);
+    qsort(v, n, sizeof *v, mad_vxc_cmp);
+    {
+        UINT64 to = 0, tu = 0, t16 = 0;
+        for (i = 0; i < n; i++) { tv += v[i].verts; td += v[i].draws; to += v[i].outb; tu += v[i].unusedb; t16 += v[i].v16; }
+        d3d12_log("[vtx-census] window: %lld presents, %u pass kinds; per frame %.0f draws, %.2f M vertices; vertex outputs %.1f MB/f "
+                  "(%.0f B/vertex), %.0f%% of it never read by the pixel shader; %.0f%% of vertices from a VS with 16-bit types\n",
+                  (long long)pres, n, td * f, tv * f / 1e6, to * f / 1048576.0, tv ? (double)to / tv : 0.0,
+                  to ? 100.0 * tu / to : 0.0, tv ? 100.0 * t16 / tv : 0.0);
+    }
+    for (i = 0; i < n && i < 25; i++)
+        d3d12_log("[vtx-census] %2u  %8.0f verts/f  %6.1f draws/f  %8.0f inst/f  indirect %.1f/f  idx32 %.0f%%  passes %.2f/f  out %.0f B/v unused %.0f B/v | R ps:%08x vs:%08x %ux%u\n",
+                  i + 1, v[i].verts * f, v[i].draws * f, v[i].inst * f, v[i].indirect * f,
+                  v[i].draws ? 100.0 * v[i].idx32 / v[i].draws : 0.0, v[i].passes * f,
+                  v[i].verts ? (double)v[i].outb / v[i].verts : 0.0, v[i].verts ? (double)v[i].unusedb / v[i].verts : 0.0,
+                  v[i].ps, v[i].vs, v[i].w, v[i].h);
+    g_vxc_n = 0;
+    memset(g_vxc, 0, sizeof g_vxc);
+}
+/* exec_end: one render pass's totals. */
+static void exec_vc_pass(struct mad_exec *e) {
+    struct mad_vxc_ent *x = NULL; UINT i;
+    ULONGLONG now;
+    if (!e->vc_draws) return;
+    AcquireSRWLockExclusive(&g_vxc_lock);
+    for (i = 0; i < g_vxc_n; i++)
+        if (g_vxc[i].ps == e->vc_ps && g_vxc[i].vs == e->vc_vs && g_vxc[i].w == e->vc_w && g_vxc[i].h == e->vc_h) { x = &g_vxc[i]; break; }
+    if (!x && g_vxc_n < MAD_VXC_MAX) { x = &g_vxc[g_vxc_n++]; x->ps = e->vc_ps; x->vs = e->vc_vs; x->w = e->vc_w; x->h = e->vc_h; }
+    if (x) { x->passes++; x->draws += e->vc_draws; x->verts += e->vc_verts; x->inst += e->vc_inst; x->indirect += e->vc_indirect; x->idx32 += e->vc_idx32;
+             x->outb += e->vc_outb; x->unusedb += e->vc_unusedb; x->v16 += e->vc_v16; }
+    e->vc_outb = e->vc_unusedb = e->vc_v16 = 0;
+    now = GetTickCount64();
+    if (!g_vxc_last_tick) { g_vxc_last_tick = now; g_vxc_last_present = g_presents_now; }
+    else if (now - g_vxc_last_tick >= (ULONGLONG)g_vxc_secs * 1000) {
+        mad_vxc_report_locked();
+        g_vxc_last_tick = now; g_vxc_last_present = g_presents_now;
+    }
+    ReleaseSRWLockExclusive(&g_vxc_lock);
+    e->vc_draws = 0;
+}
+/* A draw that is encoded. */
+static void exec_vc_draw(struct mad_exec *e, const struct mad_cmd *c) {
+    UINT64 nv = 0;
+    switch (c->kind) {
+    case MC_DRAW: nv = (UINT64)c->u.draw.vcount * (c->u.draw.icount ? c->u.draw.icount : 1); e->vc_inst += c->u.draw.icount; break;
+    case MC_DRAW_INDEXED: nv = (UINT64)c->u.drawi.icount * (c->u.drawi.inst ? c->u.drawi.inst : 1); e->vc_inst += c->u.drawi.inst;
+        if (e->ib_type == WMTIndexTypeUInt32) e->vc_idx32++;
+        break;
+    default: e->vc_indirect++; break;
+    }
+    e->vc_verts += nv;
+    if (nv && e->pso) {   /* the pipeline this draw runs, not the pass's first */
+        e->vc_outb += nv * e->pso->vary_out; e->vc_unusedb += nv * e->pso->vary_unused;
+        if (e->pso->vary_flags & 3) e->vc_v16 += nv;
+    }
+    e->vc_draws++;
+}
 static volatile LONG g_fault_diag;   /* madeira-bcd: GPU fault attribution, below */
 static void mad_fault_label_render(struct mad_exec *e);
 static void exec_rp_late_store(struct mad_exec *e);   /* madeira-bcd rp-discard, below */
@@ -2724,6 +2895,7 @@ static void exec_end(struct mad_exec *e) {
         if (e->enc_depth && e->enc_depth->texture) f7_store_census(e, e->enc_depth, e->enc_dp.level);
     }
     e->f7_next_rts = 0;
+    if (e->renc && e->vc_draws) exec_vc_pass(e);   /* madeira-duo vtx-census */
     if (e->renc && g_fault_diag && e->diag_npso) mad_fault_label_render(e);   /* madeira-bcd */
     if (e->renc) {
         if (g_capture_on) { cn = e->enc_nrt; memcpy(crt, e->enc_rt, sizeof crt); memcpy(crtp, e->enc_rtp, sizeof crtp); cdepth = e->enc_depth; cdp = e->enc_dp; cseq = e->renc_seq; cdraws = e->pass_draws; }
@@ -3931,6 +4103,8 @@ static const struct mad_list *mad_rp_list_at(const struct mad_queue *q, UINT i) 
  * aspect (0 colour, 1 depth, 2 stencil), so the store is moot; 0 = a draw
  * while it is bound (a pass loads it), a barrier, copy or partial discard or
  * clear naming it, the end of the call, or 8192 commands. */
+static int mad_rpc_on(void);   /* madeira-duo rp-learn-census, below */
+static int g_rpd_why;   /* madeira-duo rp-learn-census: the command kind that decided exec_rp_dead's last 0 (replay threads race; counts only) */
 static int exec_rp_dead(const struct mad_exec *e, const struct mad_resource *r, const struct mad_rtvp *v, int aspect) {
     const struct mad_queue *q = e->q;
     const struct mad_list *l = e->l;
@@ -3939,32 +4113,261 @@ static int exec_rp_dead(const struct mad_exec *e, const struct mad_resource *r, 
     while (l) {
         for (; j < l->ncmds; j++) {
             const struct mad_cmd *c = &l->cmds[j];
-            if (++n > 8192) return 0;
+            if (++n > 8192) return 3;   /* madeira-duo: undecided at the look-ahead limit (kept, as 0; rp-learn-store watches it) */
             switch (c->kind) {
             case MC_RTS:
                 bound = c->u.rts.depth == r;
                 for (k = 0; k < c->u.rts.n && k < 8; k++) if (c->u.rts.rt[k] == r) bound = 1;
                 break;
             case MC_DRAW: case MC_DRAW_INDEXED: case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT:
-                if (bound) return 0;   /* a pass loads it */
+                if (bound) { g_rpd_why = c->kind; return 0; }   /* a pass loads it */
                 break;
             case MC_DISCARD:
                 if (c->u.discard.res == r) return c->u.discard.whole != 0;
                 break;
             case MC_CLEAR_RT: case MC_CLEAR_DS:
                 if (c->u.clear.res != r) break;
-                if (c->u.clear.nrect || !mad_rtvp_eq(&c->u.clear.v, v)) return 0;
+                if (c->u.clear.nrect || !mad_rtvp_eq(&c->u.clear.v, v)) { g_rpd_why = c->kind; return 0; }
                 if (!aspect) return c->kind == MC_CLEAR_RT;
                 return c->kind == MC_CLEAR_DS && (c->u.clear.flags & (aspect == 1 ? D3D12_CLEAR_FLAG_DEPTH : D3D12_CLEAR_FLAG_STENCIL)) != 0;
             default:
-                if (mad_cmd_names(c, r)) return 0;
+                if (mad_cmd_names(c, r)) {
+                    g_rpd_why = c->kind;
+                    if (c->kind == MC_BARRIER) {   /* rp-learn-census: 64 + the barrier's state class for r (BC_*), 64 + 4 = a global barrier */
+                        g_rpd_why = 64 + BC_ALL;
+                        for (k = 0; k < c->u.barrier.n && k < 8; k++) if (c->u.barrier.res[k] == r) { g_rpd_why = 64 + (c->u.barrier.cls[k] < BC_ALL ? c->u.barrier.cls[k] : BC_ALL); break; }
+                    }
+                    return 0;
+                }
                 break;
             }
         }
         for (l = NULL; !l && ++li < q->rp_nlists; ) l = mad_rp_list_at(q, li);
         j = 0; bound = 0;   /* a list binds its own targets */
     }
-    return 0;
+    return 2;   /* madeira-duo rp-learn-store: no use to the end of the call (kept, as 0) */
+}
+/* madeira-duo rp-learn-store (opt-in, default 0). The census (ml1137) shows
+ * PoE2 storing ~82 MB of attachments a frame, ~48 MB of them with no use in the
+ * rest of their batch: exec_rp_dead has to keep those, it cannot see the next
+ * frame. Many are cleared or discarded whole at their next use (a depth buffer
+ * cleared at the next frame's start), so the store was wasted bandwidth.
+ * With rp-learn-store = 1 every such store is watched: what the next command
+ * naming the texture does decides it -- a whole clear or discard (or a pass that
+ * does not load it) is a wasted store, anything else (a barrier, copy, a pass
+ * that loads it) a needed one. After rp-learn-store-n wasted stores in a row
+ * (default 16), with none ever needed, the texture's batch-end stores become
+ * DontCare. One needed use rules a texture out for the session, and if that use
+ * meets a store we skipped it is logged as a misprediction (one frame of that
+ * texture is then undefined). Single-mip, single-layer textures only; never a
+ * drawable. Needs MadeiraCtl op 24 (the late store, rp-discard's mechanism).
+ * rp-learn-log = 1 lists every texture as it is learned or ruled out. */
+enum { RPL_PEND = 1, RPL_ELIDED = 2, RPL_NEEDED = 4, RPL_ON = 8, RPL_WATCH = 16 };
+static int g_rpl = -1, g_rpl_n = 16, g_rpl_log;
+static volatile LONG g_rpl_learned, g_rpl_ruled_out, g_rpl_mispredict, g_rpl_nwatch;
+static volatile LONG64 g_rpl_elided_b, g_rpl_elided_n;
+#define MAD_RPL_WATCH_MAX 64
+static struct mad_resource *g_rpl_watch[MAD_RPL_WATCH_MAX];
+static SRWLOCK g_rpl_lock = SRWLOCK_INIT;
+static int mad_rpl_on(void) {
+    if (g_rpl < 0) {
+        long long n = mad_cfg_int_pe("rp-learn-store-n", 16);   /* madeira-duo: rp-learn-store: wasted stores in a row before a texture's batch-end stores are skipped (4-1000) */
+        g_rpl_n = n < 4 ? 4 : n > 1000 ? 1000 : (int)n;
+        g_rpl_log = mad_cfg_int_pe("rp-learn-log", 0) > 0;   /* madeira-duo: rp-learn-store: log each texture learned or ruled out */
+        g_rpl = mad_cfg_int_pe("rp-learn-store", 0) > 0 && mad_rp_late_ok();   /* madeira-duo: 1 = learn which batch-end attachment stores are always wasted and skip them */
+        if (g_rpl) mad_rpc_on();   /* rp-learn-census rides on the late-store path */
+        if (g_rpl) d3d12_log("[madeira-d3d12] rp-learn-store = 1: batch-end stores of a texture whose next use was a whole clear or discard %d times "
+                             "in a row (and never a load) are skipped\n", g_rpl_n);
+    }
+    return g_rpl;
+}
+static int mad_rpl_eligible(const struct mad_resource *r) {
+    return r && r->texture && !r->borrowed && r->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+           r->desc.MipLevels <= 1 && r->desc.DepthOrArraySize <= 1;
+}
+static void mad_rpl_name(const struct mad_resource *r, char *out, size_t cap) {
+    snprintf(out, cap, "#%u %s %ux%u fmt %u%s", r->serial, r->name ? r->name : "", r->width, r->height,
+             (unsigned)r->desc.Format, r->is_depth ? " depth" : "");
+}
+static void mad_rpl_watch(struct mad_resource *r, LONG bit) {
+    AcquireSRWLockExclusive(&g_rpl_lock);
+    if (r->rpl_state & RPL_WATCH) {   /* already watched: a second store before its next use */
+        r->rpl_state |= bit;
+        ReleaseSRWLockExclusive(&g_rpl_lock);
+        return;
+    }
+    r->rpl_state |= bit | RPL_WATCH;
+    if (g_rpl_nwatch < MAD_RPL_WATCH_MAX) {
+        g_rpl_watch[g_rpl_nwatch] = r;   /* res_Release takes it off before the texture goes (mad_rpl_forget) */
+        InterlockedIncrement(&g_rpl_nwatch);
+    } else r->rpl_state &= ~(RPL_WATCH | RPL_PEND | RPL_ELIDED);   /* no room: this store goes unjudged */
+    ReleaseSRWLockExclusive(&g_rpl_lock);
+}
+/* res_Release, at the last reference: a freed texture leaves the watch list. */
+static void mad_rpl_forget(struct mad_resource *r) {
+    LONG i;
+    AcquireSRWLockExclusive(&g_rpl_lock);
+    for (i = 0; i < g_rpl_nwatch; i++)
+        if (g_rpl_watch[i] == r) { g_rpl_watch[i] = g_rpl_watch[g_rpl_nwatch - 1]; InterlockedDecrement(&g_rpl_nwatch); break; }
+    r->rpl_state = 0;
+    ReleaseSRWLockExclusive(&g_rpl_lock);
+}
+/* The watched texture's next use: wasted = 1 (whole clear / discard / not loaded), 0 = needed.
+ * Everything that touches r happens under the lock, where it is still on the list. */
+static void mad_rpl_settle(struct mad_resource *r, int wasted) {
+    LONG st, i, n;
+    int said = 0;   /* 1 misprediction, 2 ruled out, 3 learned */
+    char nm[160];
+    AcquireSRWLockExclusive(&g_rpl_lock);
+    for (i = 0; i < g_rpl_nwatch && g_rpl_watch[i] != r; i++) ;
+    if (i == g_rpl_nwatch) { ReleaseSRWLockExclusive(&g_rpl_lock); return; }
+    g_rpl_watch[i] = g_rpl_watch[g_rpl_nwatch - 1];
+    InterlockedDecrement(&g_rpl_nwatch);
+    st = r->rpl_state;
+    r->rpl_state = st & ~(RPL_WATCH | RPL_PEND | RPL_ELIDED);
+    if (!wasted) {
+        if (st & RPL_ELIDED) { n = InterlockedIncrement(&g_rpl_mispredict); if (n <= 16) said = 1; }
+        if (!(st & RPL_NEEDED)) {
+            n = InterlockedIncrement(&g_rpl_ruled_out);
+            if (st & RPL_ON) InterlockedDecrement(&g_rpl_learned);
+            if (!said && g_rpl_log && n <= 200) said = 2;
+        }
+        r->rpl_state = (r->rpl_state | RPL_NEEDED) & ~RPL_ON;
+    } else if (!(st & (RPL_NEEDED | RPL_ON)) && ++r->rpl_wasted >= g_rpl_n) {
+        r->rpl_state |= RPL_ON;
+        n = InterlockedIncrement(&g_rpl_learned);
+        if (g_rpl_log || n <= 8) said = 3;
+    }
+    if (said) mad_rpl_name(r, nm, sizeof nm);
+    ReleaseSRWLockExclusive(&g_rpl_lock);
+    if (said == 1) d3d12_log("[madeira-d3d12] rp-learn-store: MISPREDICTION %s -- a skipped store was needed (one frame of it undefined); ruled out\n", nm);
+    else if (said == 2) d3d12_log("[madeira-d3d12] rp-learn-store: ruled out %s\n", nm);
+    else if (said == 3) d3d12_log("[madeira-d3d12] rp-learn-store: learned %s: its batch-end stores are skipped from now on (%ld learned, %ld ruled out)\n",
+                                  nm, (long)g_rpl_learned, (long)g_rpl_ruled_out);
+}
+/* Replay: does this command settle a watched texture? */
+static void exec_rpl_note(const struct mad_cmd *c) {
+    struct mad_resource *hit[MAD_RPL_WATCH_MAX]; int wasted[MAD_RPL_WATCH_MAX]; LONG i, n = 0;
+    switch (c->kind) {   /* the commands that never name a texture */
+    case MC_DRAW: case MC_DRAW_INDEXED: case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: case MC_DISPATCH: case MC_DISPATCH_INDIRECT:
+    case MC_PSO: case MC_ROOT: case MC_CROOT: case MC_ROOT_CONST: case MC_CROOT_CONST: case MC_RTS: return;
+    default: break;
+    }
+    AcquireSRWLockShared(&g_rpl_lock);
+    for (i = 0; i < g_rpl_nwatch; i++) {
+        struct mad_resource *r = g_rpl_watch[i];
+        if (!mad_cmd_names(c, r)) continue;
+        hit[n] = r;
+        if (c->kind == MC_DISCARD) wasted[n] = c->u.discard.whole != 0;
+        else if (c->kind == MC_CLEAR_RT) wasted[n] = !c->u.clear.nrect;
+        else if (c->kind == MC_CLEAR_DS) wasted[n] = !c->u.clear.nrect && (c->u.clear.flags & D3D12_CLEAR_FLAG_DEPTH) &&
+                                                     (!r->has_stencil || (c->u.clear.flags & D3D12_CLEAR_FLAG_STENCIL));
+        else wasted[n] = 0;
+        n++;
+    }
+    ReleaseSRWLockShared(&g_rpl_lock);
+    for (i = 0; i < n; i++) mad_rpl_settle(hit[i], wasted[i]);
+}
+/* A pass begins on a watched texture: loading it means the store was needed. */
+static void exec_rpl_begin(struct mad_resource *r, int loads) {
+    if (r && (r->rpl_state & RPL_WATCH)) mad_rpl_settle(r, !loads);
+}
+/* A texture whose stores the learner wants decided at the pass's end. */
+static int exec_rpl_want(const struct mad_exec *e) {
+    UINT i;
+    if (!mad_rpl_on()) return 0;
+    for (i = 0; i < e->nrt; i++) if (mad_rpl_eligible(e->rt[i]) && !(e->rt[i]->rpl_state & RPL_NEEDED)) return 1;
+    return mad_rpl_eligible(e->depth) && !(e->depth->rpl_state & RPL_NEEDED);
+}
+/* exec_rp_late_store: a store exec_rp_dead could not decide (2 = no use to the end of the call). */
+static enum WMTStoreAction exec_rpl_store(struct mad_resource *r, int dead, LONG64 bytes) {
+    if (dead == 1) return WMTStoreActionDontCare;
+    if (dead < 2 || !mad_rpl_on() || !mad_rpl_eligible(r) || (r->rpl_state & RPL_NEEDED)) return WMTStoreActionStore;
+    if (r->rpl_state & RPL_ON) {
+        mad_rpl_watch(r, RPL_ELIDED);
+        if (r->rpl_state & RPL_WATCH) {   /* only a skip whose fate is watched */
+            InterlockedExchangeAdd64(&g_rpl_elided_b, bytes);
+            if (!(InterlockedIncrement64(&g_rpl_elided_n) % 5000))
+                d3d12_log("[madeira-d3d12] rp-learn-store: %lld stores skipped, %lld MB (%ld textures learned, %ld ruled out, %ld mispredictions)\n",
+                          (long long)g_rpl_elided_n, (long long)(g_rpl_elided_b >> 20), (long)g_rpl_learned, (long)g_rpl_ruled_out, (long)g_rpl_mispredict);
+            return WMTStoreActionDontCare;
+        }
+        return WMTStoreActionStore;
+    }
+    mad_rpl_watch(r, RPL_PEND);
+    return WMTStoreActionStore;
+}
+/* madeira-duo rp-learn-census = N (opt-in, default 0; seconds between reports):
+ * what exec_rp_dead decides for every batch-end store the late-store path sees,
+ * so rp-learn-store's reach can be judged: dead (DontCare already), needed (and
+ * the command that needed it first: a draw with it bound, a copy, a partial
+ * clear, or a barrier by its state class), end of call / look-ahead limit (the
+ * stores rp-learn-store watches). Counts color stores and depth only. */
+static int g_rpc_secs = -1;
+static volatile LONG64 g_rpc_n[4], g_rpc_b[4], g_rpc_why[72], g_rpc_whyb[72];
+static volatile LONG64 g_rpc_last;
+static SRWLOCK g_rpc_lock = SRWLOCK_INIT;
+static int mad_rpc_on(void) {
+    if (g_rpc_secs < 0) {
+        long long n = mad_cfg_int_pe("rp-learn-census", 0);   /* madeira-duo: seconds between rp-learn-census reports (0 = off) */
+        g_rpc_secs = n < 0 ? 0 : n > 3600 ? 3600 : (int)n;
+        if (g_rpc_secs) d3d12_log("[madeira-d3d12] rp-learn-census = %d: batch-end store decisions reported every %d s\n", g_rpc_secs, g_rpc_secs);
+    }
+    return g_rpc_secs;
+}
+static const char *mad_rpc_kind(int k, char *buf, size_t cap) {
+    static const char *const bc[] = { "barrier read-after-read", "barrier to read (from attachment)", "barrier to read (from copy)", "barrier UAV", "barrier global/other" };
+    switch (k) {
+    case MC_DRAW: case MC_DRAW_INDEXED: case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: return "draw with it bound";
+    case MC_CLEAR_RT: case MC_CLEAR_DS: return "partial or other-view clear";
+    case MC_COPY_T2T: case MC_COPY_T2B: case MC_COPY_B2T: return "copy";
+    case MC_RESOLVE: return "resolve";
+    case MC_FILL_TEX: return "UAV clear";
+    case MC_DISCARD: return "partial discard";
+    case MC_FX_TEMPORAL: return "MetalFX temporal";
+    default: break;
+    }
+    if (k >= 64 && k <= 64 + BC_ALL) return bc[k - 64];
+    snprintf(buf, cap, "kind %d", k);
+    return buf;
+}
+static void mad_rpc_note(int dead, LONG64 bytes) {
+    LONG64 now, last;
+    if (dead < 0 || dead > 3) return;
+    InterlockedIncrement64(&g_rpc_n[dead]); InterlockedExchangeAdd64(&g_rpc_b[dead], bytes);
+    if (dead == 0) {
+        int w = g_rpd_why;
+        if (w < 0 || w >= 72) w = 71;
+        InterlockedIncrement64(&g_rpc_why[w]); InterlockedExchangeAdd64(&g_rpc_whyb[w], bytes);
+    }
+    now = (LONG64)GetTickCount64(); last = g_rpc_last;
+    if (!last) { InterlockedCompareExchange64(&g_rpc_last, now, 0); return; }
+    if (now - last < (LONG64)g_rpc_secs * 1000 || InterlockedCompareExchange64(&g_rpc_last, now, last) != last) return;
+    if (!TryAcquireSRWLockExclusive(&g_rpc_lock)) return;
+    {
+        char line[1024], buf[32]; int len, i, j, top[6], nt = 0;
+        LONG64 tot = g_rpc_n[0] + g_rpc_n[1] + g_rpc_n[2] + g_rpc_n[3];
+        len = snprintf(line, sizeof line, "[madeira-d3d12] rp-learn-census: %lld stores: dead %lld (%lld MB), needed %lld (%lld MB), end of call %lld (%lld MB), "
+                       "look-ahead limit %lld (%lld MB); watched %ld, learned %ld, ruled out %ld | needed first by:",
+                       (long long)tot, (long long)g_rpc_n[1], (long long)(g_rpc_b[1] >> 20), (long long)g_rpc_n[0], (long long)(g_rpc_b[0] >> 20),
+                       (long long)g_rpc_n[2], (long long)(g_rpc_b[2] >> 20), (long long)g_rpc_n[3], (long long)(g_rpc_b[3] >> 20),
+                       (long)g_rpl_nwatch, (long)g_rpl_learned, (long)g_rpl_ruled_out);
+        for (j = 0; j < 6; j++) {   /* the six biggest by bytes */
+            int best = -1;
+            for (i = 0; i < 72; i++) {
+                int used = 0, t;
+                for (t = 0; t < nt; t++) if (top[t] == i) used = 1;
+                if (!used && g_rpc_whyb[i] && (best < 0 || g_rpc_whyb[i] > g_rpc_whyb[best])) best = i;
+            }
+            if (best < 0) break;
+            top[nt++] = best;
+            if (len < (int)sizeof line)
+                len += snprintf(line + len, sizeof line - len, " %s %lld (%lld MB);", mad_rpc_kind(best, buf, sizeof buf),
+                                (long long)g_rpc_why[best], (long long)(g_rpc_whyb[best] >> 20));
+        }
+        d3d12_log("%s\n", line);
+    }
+    ReleaseSRWLockExclusive(&g_rpc_lock);
 }
 /* exec_end, before endEncoding: the store actions the pass left open. */
 static void exec_rp_late_store(struct mad_exec *e) {
@@ -3975,14 +4378,27 @@ static void exec_rp_late_store(struct mad_exec *e) {
     memset(&r, 0xff, sizeof r); r.enc = (UINT64)e->renc; memset(r.pad, 0, sizeof r.pad);
     for (i = 0; i < e->enc_nrt && i < 8; i++) {
         if (!e->enc_rt[i] || !e->enc_rt[i]->texture) continue;
-        r.color[i] = exec_rp_dead(e, e->enc_rt[i], &e->enc_rtp[i], 0) ? WMTStoreActionDontCare : WMTStoreActionStore;
+        {
+            int dead = exec_rp_dead(e, e->enc_rt[i], &e->enc_rtp[i], 0);
+            LONG64 nb = mad_tr_bytes(e->enc_rt[i], e->enc_rtp[i].level, e->enc_rtp[i].layers, 0);
+            if (g_rpc_secs > 0) mad_rpc_note(dead, nb);   /* madeira-duo rp-learn-census */
+            r.color[i] = exec_rpl_store(e->enc_rt[i], dead, nb);   /* madeira-duo rp-learn-store */
+        }
         if (r.color[i] == WMTStoreActionDontCare) moved += mad_tr_bytes(e->enc_rt[i], e->enc_rtp[i].level, e->enc_rtp[i].layers, 0);
     }
     if (e->enc_depth && e->enc_depth->texture) {
-        r.depth = exec_rp_dead(e, e->enc_depth, &e->enc_dp, 1) ? WMTStoreActionDontCare : WMTStoreActionStore;
+        int dd = exec_rp_dead(e, e->enc_depth, &e->enc_dp, 1), sd;
+        if (g_rpc_secs > 0) mad_rpc_note(dd, mad_tr_bytes(e->enc_depth, e->enc_dp.level, e->enc_dp.layers, 0));   /* madeira-duo rp-learn-census: depth aspect */
+        sd = e->enc_depth->has_stencil ? exec_rp_dead(e, e->enc_depth, &e->enc_dp, 2) : dd;
+        /* madeira-duo rp-learn-store: depth and stencil are learned together, so both must be undecided */
+        if (dd >= 2 && sd >= 2) {
+            enum WMTStoreAction a2 = exec_rpl_store(e->enc_depth, 2, mad_tr_bytes(e->enc_depth, e->enc_dp.level, e->enc_dp.layers, 0));
+            dd = sd = a2 == WMTStoreActionDontCare ? 1 : 0;
+        }
+        r.depth = dd == 1 ? WMTStoreActionDontCare : WMTStoreActionStore;
         if (r.depth == WMTStoreActionDontCare) moved += mad_tr_bytes(e->enc_depth, e->enc_dp.level, e->enc_dp.layers, 0);
         if (e->enc_depth->has_stencil) {
-            r.stencil = exec_rp_dead(e, e->enc_depth, &e->enc_dp, 2) ? WMTStoreActionDontCare : WMTStoreActionStore;
+            r.stencil = sd == 1 ? WMTStoreActionDontCare : WMTStoreActionStore;
             if (r.stencil == WMTStoreActionDontCare) moved += mad_tr_bytes(e->enc_depth, e->enc_dp.level, e->enc_dp.layers, 1);
         }
     }
@@ -4752,8 +5168,13 @@ static int exec_begin_render(struct mad_exec *e) {
         for (i = 0; i < e->nrt; i++) if (e->rt[i]) exec_disc_forget(e, e->rt[i]);   /* this pass defines them again */
         if (e->depth) exec_disc_forget(e, e->depth);
     }
+    if (g_rpl_nwatch) {   /* madeira-duo rp-learn-store: a watched texture's next pass loads it or not */
+        for (i = 0; i < e->nrt; i++) if (rpi.colors[i].texture) exec_rpl_begin(e->rt[i], rpi.colors[i].load_action == WMTLoadActionLoad);
+        if (rpi.depth.texture) exec_rpl_begin(e->depth, rpi.depth.load_action == WMTLoadActionLoad ||
+                                                        (rpi.stencil.texture && rpi.stencil.load_action == WMTLoadActionLoad));
+    }
     e->rp_late = 0;   /* madeira-bcd rp-discard: a texture the game discards: the store is decided when the pass ends */
-    if (mad_rp_discard_on() && !g_capture_on && exec_rp_late_want(e) && mad_rp_late_ok()) {
+    if (((mad_rp_discard_on() && exec_rp_late_want(e)) || exec_rpl_want(e)) && !g_capture_on && mad_rp_late_ok()) {   /* madeira-duo: or rp-learn-store */
         for (i = 0; i < e->nrt; i++) if (rpi.colors[i].texture) rpi.colors[i].store_action = WMTStoreActionUnknown;
         if (rpi.depth.texture) rpi.depth.store_action = WMTStoreActionUnknown;
         if (rpi.stencil.texture) rpi.stencil.store_action = WMTStoreActionUnknown;
@@ -4763,6 +5184,10 @@ static int exec_begin_render(struct mad_exec *e) {
     rpi.render_target_width = w; rpi.render_target_height = h;
     rpi.default_raster_sample_count = (e->nrt && e->rt[0] && e->rt[0]->samples) ? e->rt[0]->samples
                                     : (e->depth && e->depth->samples) ? e->depth->samples : 1;
+    if (g_vxc_secs && mad_vxc_on()) {   /* madeira-duo vtx-census: keyed as the encoder label */
+        e->vc_ps = e->pso ? e->pso->ps_id : 0; e->vc_vs = e->pso ? e->pso->vs_id : 0; e->vc_w = w; e->vc_h = h;
+        e->vc_draws = e->vc_verts = e->vc_inst = e->vc_indirect = e->vc_idx32 = 0;
+    }
     e->enc_vis_buf = 0;
     if (e->q->device->has_query_heaps) {   /* ml1088: every pass carries the slot buffer, so a Begin mid-pass costs nothing */
         struct mad_vis_batch *v = mad_vis_get(e);
@@ -4779,7 +5204,7 @@ static int exec_begin_render(struct mad_exec *e) {
     e->renc = MTLCommandBuffer_renderCommandEncoder(e->cb, &rpi); if (e->renc) e->renc_seq = ++g_enc_seq;
     if (e->renc) mad_tr_pass(&rpi, e->rt, e->rtp, e->nrt, e->depth, &e->dp);   /* madeira-bcd gpu-traffic */
     e->rp_from = e->cur + 1;   /* madeira-bcd rp-discard */
-    if (g_enc_labels) mad_label(e->renc, "R#%u %s|%s %ux%u", e->renc_seq, e->pso ? e->pso->vs_name : "-", e->pso ? e->pso->ps_name : "-", w, h);   /* ml1142 */
+    if (g_enc_labels) mad_label(e->renc, "R#%u ps:%08x vs:%08x %ux%u", e->renc_seq, e->pso ? e->pso->ps_id : 0, e->pso ? e->pso->vs_id : 0, w, h);   /* ml1142; madeira-duo: digests, PoE2's entries are all "main" */
     e->diag_npso = 0; e->diag_more = 0;   /* madeira-bcd: GPU fault attribution */
     e->f6_natt = 0;   /* ml1134: what this pass writes, for the same-attachment ordering rule */
     for (i = 0; i < e->nrt && e->f6_natt < 8; i++) if (e->rt[i]) e->f6_att[e->f6_natt++] = e->rt[i];
@@ -6420,10 +6845,16 @@ static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
 static int g_pso_async = -1;
 static struct mad_pso *g_pa_q[MAD_PA_MAX];
 static LONG g_pa_head, g_pa_tail;
+/* madeira-duo pso-create-build: pipelines queued when the game creates them wait
+ * here, behind everything a draw is waiting for (g_pa_q is always taken first) */
+#define MAD_PCB_MAX 16384
+static struct mad_pso *g_pcb_q[MAD_PCB_MAX];
+static LONG g_pcb_head, g_pcb_tail;
 static SRWLOCK g_pa_lock = SRWLOCK_INIT;
 static HANDLE g_pa_sem;
 static volatile LONG g_pa_queued, g_pa_built, g_pa_failed, g_pa_inline, g_pa_skips;
 static ULONG STDMETHODCALLTYPE pso_Release(ID3D12PipelineState *T);
+static void mad_pcb_built(struct mad_pso *p);   /* madeira-duo pso-create-build */
 static int mad_pso_async_on(void) {
     if (g_pso_async < 0) {
         int on = mad_pso_lazy_on() && mad_cfg_int_pe("pso-async", 0) > 0;   /* madeira.cfg pso-async: 1 = a new render pipeline is built on a background thread and its draws are skipped until it is ready (no frame waits for the compiler); 0 = built at its first draw */
@@ -6448,14 +6879,16 @@ static DWORD WINAPI mad_pa_worker(void *arg) {
     (void)arg;
     mad_name_self(L"MadeiraPSO");   /* madeira-duo: classed by MADEIRA_THREAD_QOS */
     for (;;) {
-        struct mad_pso *p = NULL; obj_handle_t pool; LONG n = 0;
+        struct mad_pso *p = NULL; obj_handle_t pool; LONG n = 0; int low = 0;
         WaitForSingleObject(g_pa_sem, INFINITE);
         AcquireSRWLockExclusive(&g_pa_lock);
         if (g_pa_head != g_pa_tail) { p = g_pa_q[(ULONG)g_pa_head % MAD_PA_MAX]; g_pa_head++; }
+        else if (g_pcb_head != g_pcb_tail) { p = g_pcb_q[(ULONG)g_pcb_head % MAD_PCB_MAX]; g_pcb_head++; low = 1; }   /* pso-create-build */
         ReleaseSRWLockExclusive(&g_pa_lock);
         if (!p) continue;
         pool = NSAutoreleasePool_alloc_init();
-        if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pa_built);
+        if (low) mad_pcb_built(p);   /* pso-create-build: counted on its own */
+        else if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pa_built);
         else InterlockedIncrement(&g_pa_failed);
         if (n == 1 || (n && !(n % 250)))
             d3d12_log("[madeira-d3d12] pso-async: %ld pipelines built off the render thread (%ld failed, %ld waiting, %ld built at the draw with the queue full); "
@@ -6477,7 +6910,7 @@ static int mad_pa_start(void) {
          * stayed invisible for seconds (text15: 11k draws skipped). */
         unsigned want = (unsigned)mad_cfg_int_pe("pso-async-threads", 2);
         if (want < 1) want = 1; if (want > 8) want = 8;
-        g_pa_sem = CreateSemaphoreA(NULL, 0, MAD_PA_MAX, NULL);
+        g_pa_sem = CreateSemaphoreA(NULL, 0, MAD_PA_MAX + MAD_PCB_MAX, NULL);
         d3d12_log("[madeira-d3d12] pso-async: %u builder threads (madeira.cfg pso-async-threads)\n", want);
         for (t = 0; g_pa_sem && t < want; t++) {
             HANDLE h = CreateThread(NULL, 256 << 10, mad_pa_worker, NULL, 0, NULL);
@@ -6492,8 +6925,13 @@ static int mad_pa_start(void) {
 }
 /* 1: the pipeline is queued (now or earlier) or built; 0: the caller builds it itself. */
 static int mad_pso_async_queue(struct mad_pso *p) {
+    LONG was;
     if (p->rps || !p->lazy) return 1;
-    if (InterlockedCompareExchange(&p->async_q, 1, 0)) return 1;   /* queued earlier */
+    was = InterlockedCompareExchange(&p->async_q, 1, 0);
+    /* pso-create-build: waiting in the low-priority queue and now drawn -- queue it
+     * again at the front; whichever entry a builder reaches first builds it */
+    if (was == 2 && InterlockedCompareExchange(&p->async_q, 1, 2) == 2) was = 0;
+    if (was) return 1;   /* queued earlier */
     if (!mad_pa_start()) { InterlockedExchange(&p->async_q, 0); return 0; }
     AcquireSRWLockExclusive(&g_pa_lock);
     if (g_pa_tail - g_pa_head >= MAD_PA_MAX) {
@@ -6508,6 +6946,224 @@ static int mad_pso_async_queue(struct mad_pso *p) {
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_pa_queued) == 1)
         d3d12_log("[madeira-d3d12] pso-async: first pipeline handed to the background builders\n");
+    return 1;
+}
+
+/* madeira-duo PIPELINES BUILT WHEN THE GAME CREATES THEM (madeira.cfg
+ * pso-create-build, opt-in, default 0). With pso-async a lazy pipeline is built
+ * once a draw asks for it, and its draws are skipped until then: on a new PoE2
+ * map enemies and effects stayed invisible for seconds (prof13: 3,505 draws
+ * skipped). PoE2 creates its pipelines well before it draws with them (~10,000
+ * created, ~2,700 drawn a session), so the build can start at creation instead.
+ *   1 = pipelines drawn in an earlier session. Every pipeline drawn is
+ *       remembered by a key of its content (shader digests and fixed-function
+ *       state) in %LOCALAPPDATA%\Madeira\pso-seen-<exe>.bin; at creation, a
+ *       pipeline on that list is queued for the background builders.
+ *   2 = every plain render pipeline at creation (Metal memory for all of them).
+ * Create-time builds wait in a queue of their own, behind everything a draw is
+ * waiting for, and a queued pipeline that gets drawn is moved to the front.
+ * Needs pso-async = 1. pso-seen-record = 1 keeps the list with the build off,
+ * to collect it before trying 1. */
+static int g_pcb_mode = -1, g_seen_record;
+static volatile LONG g_pcb_queued, g_pcb_built_n, g_pcb_failed, g_pcb_full, g_pcb_hits, g_pcb_misses;
+#define MAD_SEEN_CAP 131072   /* table slots, a power of two; at most half are used */
+static UINT64 *g_seen_tab;
+static LONG g_seen_n, g_seen_dirty;
+static SRWLOCK g_seen_lock = SRWLOCK_INIT;
+static WCHAR g_seen_path[MAX_PATH];
+static HANDLE g_seen_evt;
+static int mad_pcb_mode(void) {
+    if (g_pcb_mode < 0) {
+        long long m = mad_cfg_int_pe("pso-create-build", 0);   /* madeira-duo: 1 = pipelines drawn in an earlier session are built in the background when the game creates them, 2 = every plain render pipeline; 0 = at their first draw (as before) */
+        int v = m <= 0 ? 0 : m >= 2 ? 2 : 1;
+        g_seen_record = v == 1 || mad_cfg_int_pe("pso-seen-record", 0) > 0;   /* madeira-duo: 1 = remember the pipelines drawn (pso-create-build = 1 does it anyway) */
+        if (v || g_seen_record)
+            d3d12_log("[madeira-d3d12] pso-create-build = %d%s: %s\n", v, g_seen_record ? ", pso-seen-record" : "",
+                      v == 2 ? "every plain render pipeline is queued for the background builders when the game creates it"
+                      : v == 1 ? "pipelines drawn in earlier sessions are queued for the background builders when the game creates them"
+                               : "pipelines drawn are remembered for pso-create-build = 1");
+        MemoryBarrier();
+        g_pcb_mode = v;
+    }
+    return g_pcb_mode;
+}
+static UINT64 mad_seen_fnv(UINT64 h, const void *data, SIZE_T n) {
+    const BYTE *b = data; SIZE_T i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+static UINT64 mad_seen_u32(UINT64 h, UINT v) { return mad_seen_fnv(h, &v, sizeof v); }
+/* A DXBC/DXIL container carries a 16-byte digest of its contents at offset 4;
+ * anything else is hashed whole. */
+static UINT64 mad_seen_shader(UINT64 h, const D3D12_SHADER_BYTECODE *bc) {
+    const BYTE *b = bc->pShaderBytecode;
+    if (!b || !bc->BytecodeLength) return mad_seen_u32(h, 0);
+    h = mad_seen_u32(h, (UINT)bc->BytecodeLength);
+    if (bc->BytecodeLength >= 20 && !memcmp(b, "DXBC", 4)) return mad_seen_fnv(h, b + 4, 16);
+    return mad_seen_fnv(h, b, bc->BytecodeLength);
+}
+/* Field by field: the D3D12 structs have padding whose bytes are not the game's. */
+static UINT64 mad_seen_key(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d) {
+    UINT64 h = 1469598103934665603ull; UINT i;
+    const D3D12_DEPTH_STENCIL_DESC *ds = &d->DepthStencilState;
+    h = mad_seen_shader(h, &d->VS); h = mad_seen_shader(h, &d->PS);
+    h = mad_seen_u32(h, d->BlendState.AlphaToCoverageEnable); h = mad_seen_u32(h, d->BlendState.IndependentBlendEnable);
+    for (i = 0; i < 8; i++) {
+        const D3D12_RENDER_TARGET_BLEND_DESC *b = &d->BlendState.RenderTarget[i];
+        h = mad_seen_u32(h, b->BlendEnable); h = mad_seen_u32(h, b->LogicOpEnable);
+        h = mad_seen_u32(h, b->SrcBlend); h = mad_seen_u32(h, b->DestBlend); h = mad_seen_u32(h, b->BlendOp);
+        h = mad_seen_u32(h, b->SrcBlendAlpha); h = mad_seen_u32(h, b->DestBlendAlpha); h = mad_seen_u32(h, b->BlendOpAlpha);
+        h = mad_seen_u32(h, b->LogicOp); h = mad_seen_u32(h, b->RenderTargetWriteMask);
+    }
+    h = mad_seen_u32(h, d->SampleMask);
+    h = mad_seen_fnv(h, &d->RasterizerState, sizeof d->RasterizerState);   /* 4-byte fields only, no padding */
+    h = mad_seen_u32(h, ds->DepthEnable); h = mad_seen_u32(h, ds->DepthWriteMask); h = mad_seen_u32(h, ds->DepthFunc);
+    h = mad_seen_u32(h, ds->StencilEnable); h = mad_seen_u32(h, ds->StencilReadMask); h = mad_seen_u32(h, ds->StencilWriteMask);
+    h = mad_seen_fnv(h, &ds->FrontFace, sizeof ds->FrontFace); h = mad_seen_fnv(h, &ds->BackFace, sizeof ds->BackFace);
+    h = mad_seen_u32(h, d->InputLayout.NumElements);
+    for (i = 0; d->InputLayout.pInputElementDescs && i < d->InputLayout.NumElements; i++) {
+        const D3D12_INPUT_ELEMENT_DESC *e = &d->InputLayout.pInputElementDescs[i];
+        if (e->SemanticName) h = mad_seen_fnv(h, e->SemanticName, strlen(e->SemanticName));
+        h = mad_seen_u32(h, e->SemanticIndex); h = mad_seen_u32(h, e->Format); h = mad_seen_u32(h, e->InputSlot);
+        h = mad_seen_u32(h, e->AlignedByteOffset); h = mad_seen_u32(h, e->InputSlotClass); h = mad_seen_u32(h, e->InstanceDataStepRate);
+    }
+    h = mad_seen_u32(h, d->IBStripCutValue); h = mad_seen_u32(h, d->PrimitiveTopologyType);
+    h = mad_seen_u32(h, d->NumRenderTargets);
+    for (i = 0; i < 8; i++) h = mad_seen_u32(h, d->RTVFormats[i]);
+    h = mad_seen_u32(h, d->DSVFormat); h = mad_seen_u32(h, d->SampleDesc.Count); h = mad_seen_u32(h, d->SampleDesc.Quality);
+    return h ? h : 1;   /* 0 marks an empty slot */
+}
+static UINT64 *mad_seen_slot(UINT64 *tab, UINT64 k) {
+    ULONG i = (ULONG)(k ^ (k >> 29)) & (MAD_SEEN_CAP - 1);
+    while (tab[i] && tab[i] != k) i = (i + 1) & (MAD_SEEN_CAP - 1);
+    return &tab[i];
+}
+static void mad_seen_save(void) {
+    struct { UINT magic, version, count, reserved; } hdr = { 0x4e53504du /* "MPSN" */, 1, 0, 0 };
+    UINT64 *keys; LONG n = 0, i; WCHAR tmp[MAX_PATH + 8]; HANDLE f; DWORD wr; BOOL ok;
+    if (!g_seen_path[0] || !(keys = malloc(sizeof *keys * (MAD_SEEN_CAP / 2)))) return;
+    AcquireSRWLockShared(&g_seen_lock);
+    for (i = 0; i < MAD_SEEN_CAP && n < MAD_SEEN_CAP / 2; i++) if (g_seen_tab[i]) keys[n++] = g_seen_tab[i];
+    InterlockedExchange(&g_seen_dirty, 0);
+    ReleaseSRWLockShared(&g_seen_lock);
+    hdr.count = (UINT)n;
+    _snwprintf(tmp, MAX_PATH + 8, L"%ls.tmp", g_seen_path);
+    f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) { free(keys); return; }
+    ok = WriteFile(f, &hdr, sizeof hdr, &wr, NULL) && wr == sizeof hdr &&
+         WriteFile(f, keys, (DWORD)(n * sizeof *keys), &wr, NULL) && wr == (DWORD)(n * sizeof *keys);
+    CloseHandle(f);
+    free(keys);
+    if (!ok || !MoveFileExW(tmp, g_seen_path, MOVEFILE_REPLACE_EXISTING)) DeleteFileW(tmp);
+}
+static DWORD WINAPI mad_seen_saver(void *arg) {
+    (void)arg;
+    mad_name_self(L"MadeiraPSOSeen");
+    for (;;) {
+        WaitForSingleObject(g_seen_evt, 30000);
+        if (g_seen_dirty) mad_seen_save();
+    }
+    return 0;
+}
+/* Loads the list once; 0 when there is none to use. */
+static int mad_seen_ready(void) {
+    static volatile LONG state;   /* 0 not loaded, 1 loading, 2 ready, 3 unavailable */
+    LONG s = InterlockedCompareExchange(&state, 1, 0);
+    if (s == 0) {
+        WCHAR exe[MAX_PATH], base[MAX_PATH]; DWORD n, i; UINT64 h = 1469598103934665603ull;
+        UINT64 *tab = calloc(MAD_SEEN_CAP, sizeof *tab);
+        LONG loaded = 0;
+        n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+        for (i = 0; i < n && n < MAX_PATH; i++) if (exe[i] >= 'A' && exe[i] <= 'Z') exe[i] += 'a' - 'A';
+        if (n && n < MAX_PATH) h = mad_seen_fnv(h, exe, n * sizeof(WCHAR));
+        n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+        if (tab && n && n < MAX_PATH - 64) {
+            HANDLE f; DWORD rd;
+            struct { UINT magic, version, count, reserved; } hdr;
+            _snwprintf(g_seen_path, MAX_PATH, L"%ls\\Madeira", base);
+            CreateDirectoryW(g_seen_path, NULL);
+            _snwprintf(g_seen_path, MAX_PATH, L"%ls\\Madeira\\pso-seen-%016llx.bin", base, (unsigned long long)h);
+            f = CreateFileW(g_seen_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (f != INVALID_HANDLE_VALUE) {
+                if (ReadFile(f, &hdr, sizeof hdr, &rd, NULL) && rd == sizeof hdr && hdr.magic == 0x4e53504du && hdr.version == 1) {
+                    UINT64 k; UINT c;
+                    for (c = 0; c < hdr.count && loaded < MAD_SEEN_CAP / 2; c++) {
+                        if (!ReadFile(f, &k, sizeof k, &rd, NULL) || rd != sizeof k) break;
+                        if (k && !*mad_seen_slot(tab, k)) { *mad_seen_slot(tab, k) = k; loaded++; }
+                    }
+                }
+                CloseHandle(f);
+            }
+            g_seen_tab = tab; g_seen_n = loaded;
+            if (g_seen_record && (g_seen_evt = CreateEventA(NULL, FALSE, FALSE, NULL))) {
+                HANDLE t = CreateThread(NULL, 64 << 10, mad_seen_saver, NULL, 0, NULL);
+                if (t) CloseHandle(t);
+            }
+            d3d12_log("[madeira-d3d12] pso-create-build: %ld pipelines on the list of ones drawn before (%ls)\n", (long)loaded, g_seen_path);
+        } else free(tab);
+        MemoryBarrier();
+        InterlockedExchange(&state, g_seen_tab ? 2 : 3);
+        return g_seen_tab != NULL;
+    }
+    while (s == 1) { Sleep(0); s = InterlockedCompareExchange(&state, 1, 1); }
+    return s == 2;
+}
+static int mad_seen_has(UINT64 k) {
+    int hit;
+    if (!mad_seen_ready()) return 0;
+    AcquireSRWLockShared(&g_seen_lock);
+    hit = *mad_seen_slot(g_seen_tab, k) == k;
+    ReleaseSRWLockShared(&g_seen_lock);
+    return hit;
+}
+/* A draw used this pipeline: put it on the list (first draw of the session only). */
+static void mad_seen_mark(struct mad_pso *p) {
+    UINT64 *slot; LONG n = 0;
+    if (InterlockedExchange(&p->seen_mark, 1) || !mad_seen_ready()) return;
+    AcquireSRWLockExclusive(&g_seen_lock);
+    slot = mad_seen_slot(g_seen_tab, p->seen_key);
+    if (!*slot && g_seen_n < MAD_SEEN_CAP / 2) { *slot = p->seen_key; n = ++g_seen_n; }
+    ReleaseSRWLockExclusive(&g_seen_lock);
+    if (n && !(InterlockedIncrement(&g_seen_dirty) % 64) && g_seen_evt) SetEvent(g_seen_evt);
+}
+static void mad_pcb_built(struct mad_pso *p) {
+    LONG n = 0;
+    if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pcb_built_n);
+    else InterlockedIncrement(&g_pcb_failed);
+    if (n == 1 || (n && !(n % 500)))
+        d3d12_log("[madeira-d3d12] pso-create-build: %ld pipelines built ahead of their first draw (%ld failed, %ld queued, %ld not queued with the queue "
+                  "full; on the drawn-before list %ld, not on it %ld)\n", (long)g_pcb_built_n, (long)g_pcb_failed, (long)g_pcb_queued,
+                  (long)g_pcb_full, (long)g_pcb_hits, (long)g_pcb_misses);
+}
+/* At creation: 1 when the pipeline went to the low-priority queue. */
+static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
+    int mode = mad_pcb_mode();
+    static int said_noasync;
+    if (g_seen_record) p->seen_key = mad_seen_key(desc);   /* drawn ones go on the list (mad_seen_mark) */
+    if (!mode) return 0;
+    if (mode == 1) {
+        if (!mad_seen_has(p->seen_key)) { InterlockedIncrement(&g_pcb_misses); return 0; }
+        InterlockedIncrement(&g_pcb_hits);
+    }
+    if (!mad_pso_async_on()) {
+        if (!said_noasync++) d3d12_log("[madeira-d3d12] pso-create-build needs pso-async = 1; pipelines are built at their first draw\n");
+        return 0;
+    }
+    if (p->rps || !p->lazy || InterlockedCompareExchange(&p->async_q, 2, 0)) return 0;
+    if (!mad_pa_start()) { InterlockedExchange(&p->async_q, 0); return 0; }
+    AcquireSRWLockExclusive(&g_pa_lock);
+    if (g_pcb_tail - g_pcb_head >= MAD_PCB_MAX) {
+        ReleaseSRWLockExclusive(&g_pa_lock);
+        InterlockedExchange(&p->async_q, 0);
+        InterlockedIncrement(&g_pcb_full);
+        return 0;
+    }
+    InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
+    g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
+    ReleaseSRWLockExclusive(&g_pa_lock);
+    ReleaseSemaphore(g_pa_sem, 1, NULL);
+    if (InterlockedIncrement(&g_pcb_queued) == 1)
+        d3d12_log("[madeira-d3d12] pso-create-build: first pipeline queued at creation\n");
     return 1;
 }
 
@@ -8732,6 +9388,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
      * (Astra). An engine that zeroes the count of a culled draw would have drawn
      * one instance of it. Not a skip: there is nothing to draw. */
     if ((c->kind == MC_DRAW && !c->u.draw.icount) || (c->kind == MC_DRAW_INDEXED && !c->u.drawi.inst)) { InterlockedIncrement(&g_zero_inst); return; }
+    if (e->pso && e->pso->seen_key && !e->pso->seen_mark) mad_seen_mark(e->pso);   /* madeira-duo pso-create-build */
     if (e->pso && !e->pso->rps && e->pso->lazy) {
         if (!e->pso->tess && mad_pso_async_on() && mad_pso_async_queue(e->pso)) {
             if (!e->pso->rps) { InterlockedIncrement(&g_pa_skips); MAD_SKIP(e); return; }   /* pso-async: still being built */
@@ -8742,6 +9399,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
         MAD_SKIP(e);
         return;
     }
+    if (g_vxc_secs > 0) exec_vc_draw(e, c);   /* madeira-duo vtx-census */
     if (g_fault_diag) {   /* madeira-bcd: GPU fault attribution */
         if (mad_fault_skip_pso(e->pso)) { MAD_SKIP(e); return; }
         mad_fault_note(e, e->pso);
@@ -10140,7 +10798,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
         e->cenc_pso = e->cpso; e->cenc_seq = g_enc_seq;
         if (g_fault_diag) mad_label(e->cenc, "C#%u %s fn=%llx:%s", g_enc_seq, e->cpso->vs_name,
                                     (unsigned long long)e->cpso->vs_fn, e->cpso->vs_name);
-        else if (g_enc_labels) mad_label(e->cenc, "C#%u %s", g_enc_seq, e->cpso->vs_name);   /* ml1142 */
+        else if (g_enc_labels) mad_label(e->cenc, "C#%u %s cs:%08x", g_enc_seq, e->cpso->vs_name, (unsigned)e->cpso->cs_hash);   /* ml1142; madeira-duo: + bytecode hash */
         if (!e->cenc) { d3d12_log("[madeira-d3d12] no compute encoder\n"); MAD_SKIP(e); return; }
         exec_fence_compute(e, e->cenc, 0);   /* ml1091 */
     }
@@ -10465,8 +11123,8 @@ static void mad_gw_note(struct mad_pso *p, LONG64 work) {
             if (cur && cur != p) continue;
             if (!cur) {
                 g->compute = p->is_compute;
-                if (p->is_compute) snprintf(g->name, sizeof g->name, "%.48s", p->vs_name);
-                else snprintf(g->name, sizeof g->name, "%.40s/%.40s", p->vs_name, p->ps_name);
+                if (p->is_compute) snprintf(g->name, sizeof g->name, "%.40s cs:%08x", p->vs_name, (unsigned)p->cs_hash);
+                else snprintf(g->name, sizeof g->name, "ps:%08x vs:%08x", p->ps_id, p->vs_id);   /* madeira-duo: matches the encoder labels */
             }
         }
         InterlockedIncrement(&g->draws);
@@ -10707,6 +11365,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
         if (g_capture_on) mad_capture_log_op(c);   /* madeira-bcd */
         if (g_ffx_exp > 0 && c->kind == MC_DISPATCH) mad_ffx_before(&e, c);   /* fi-setup-zero, fi-field-check */
         if ((e.npend | e.rp_ndisc) || c->kind == MC_DISCARD) exec_rp_note(&e, c);   /* madeira-bcd clear-defer, rp-discard */
+        if (g_rpl_nwatch) exec_rpl_note(c);   /* madeira-duo rp-learn-store */
         switch (c->kind) {
         case MC_PSO: if (c->u.pso && c->u.pso->is_compute) e.cpso = c->u.pso; else e.pso = c->u.pso;
             if (g_sd_state > 0 && g_pso_first && c->u.pso && !c->u.pso->first_used) mad_pso_first(c->u.pso);   /* madeira-bcd: pso-first-use */
@@ -12981,13 +13640,37 @@ static void mad_mheap_reclaim(struct mad_device *d, int all) {
     }
 }
 static void mad_hp_reclaim_locked(struct mad_device *d) {
-    UINT64 done = mad_gpu_completed(d); unsigned i = 0;
+    UINT64 done = mad_gpu_completed(d); unsigned i = 0, freed = 0, spare = 0;
     while (i < d->nhret) {
         if (d->hret[i].serial <= done) {
             mad_hp_free_locked(&d->theaps[d->hret[i].heap], d->hret[i].off, d->hret[i].size);
             InterlockedExchangeAdd64(&d->hp_live_bytes, -(LONG64)d->hret[i].size);
             d->hret[i] = d->hret[--d->nhret];
+            freed++;
         } else i++;
+    }
+    /* madeira-duo hp-release: a runtime texture heap with nothing left in it goes back
+     * to the system (one empty heap is kept as a spare). The heaps used to stay at the
+     * peak of every area load: 8 x 64 MB reserved for 163 MB live in prof12b, all of it
+     * GPU memory inside the footprint that sets the video budget. Its slot stays (index
+     * 0 heap, size 0) so live textures' heap indices don't move; mad_hp_alloc skips it
+     * and reuses it for the next heap. The release waits for the GPU like a D3D12
+     * heap's (mhret). madeira.cfg hp-release = 0 keeps every heap. */
+    if (freed) {
+        static int on = -1;
+        if (on < 0) on = mad_cfg_int_pe("hp-release", 1) ? 1 : 0;
+        for (i = 0; on && i < d->ntheaps; i++) {
+            struct mad_texheap *h = &d->theaps[i];
+            if (!h->heap || h->nfl != 1 || h->fl[0].off != 0 || h->fl[0].size != h->size) continue;
+            if (!spare++) continue;
+            if (!mad_grow((void **)&d->mhret, &d->mhret_cap, d->nmhret + 1, sizeof *d->mhret)) break;
+            d->mhret[d->nmhret].heap = h->heap; d->mhret[d->nmhret].mem = NULL;
+            d->mhret[d->nmhret].serial = (UINT64)d->gpu_serial; d->nmhret++;
+            InterlockedExchangeAdd64(&d->hp_total_bytes, -(LONG64)h->size);
+            d3d12_log("[madeira-d3d12] hp-release: empty texture heap #%u (%llu MB) released; %lld MB in heaps, %lld MB live\n",
+                      i + 1, (unsigned long long)(h->size >> 20), (long long)(d->hp_total_bytes >> 20), (long long)(d->hp_live_bytes >> 20));
+            h->heap = 0; h->size = 0; h->nfl = 0;
+        }
     }
 }
 /* Returns the heap index or -1; *off is the placed offset. */
@@ -12998,6 +13681,7 @@ static int mad_hp_alloc(struct mad_device *d, UINT64 size, UINT64 align, UINT64 
     mad_hp_reclaim_locked(d);
     for (hi = 0; hi < d->ntheaps && found < 0; hi++) {
         struct mad_texheap *h = &d->theaps[hi];
+        if (!h->heap) continue;   /* madeira-duo hp-release: a released slot */
         for (bi = 0; bi < h->nfl; bi++) {
             UINT64 a = (h->fl[bi].off + align - 1) & ~(align - 1);
             if (a + size <= h->fl[bi].off + h->fl[bi].size) {
@@ -13014,20 +13698,25 @@ static int mad_hp_alloc(struct mad_device *d, UINT64 size, UINT64 align, UINT64 
     if (found < 0) {
         UINT64 hs = size > MAD_HP_HEAP_BYTES ? size : MAD_HP_HEAP_BYTES;
         obj_handle_t heap = MTLDevice_newPlacementHeap(d->mtl_device, hs, WMTResourceStorageModePrivate);
-        if (heap && mad_grow((void **)&d->theaps, &d->theaps_cap, d->ntheaps + 1, sizeof *d->theaps)) {
-            struct mad_texheap *h = &d->theaps[d->ntheaps];
+        unsigned slot = d->ntheaps;
+        for (hi = 0; hi < d->ntheaps; hi++) if (!d->theaps[hi].heap) { slot = hi; break; }   /* madeira-duo hp-release: reuse a released slot */
+        if (heap && (slot < d->ntheaps || mad_grow((void **)&d->theaps, &d->theaps_cap, d->ntheaps + 1, sizeof *d->theaps))) {
+            struct mad_texheap *h = &d->theaps[slot];
+            struct mad_hblk *keep_fl = h->fl; unsigned keep_cap = slot < d->ntheaps ? h->fl_cap : 0;
             memset(h, 0, sizeof *h);
+            if (slot < d->ntheaps) { h->fl = keep_fl; h->fl_cap = keep_cap; }   /* the old free list's storage */
             h->heap = heap; h->size = hs;
             mad_hp_free_locked(h, 0, hs);
             mad_resident(d, heap);   /* residency follows the heap, not its textures */
             InterlockedExchangeAdd64(&d->hp_total_bytes, (LONG64)hs);
-            found = (int)d->ntheaps++;
+            found = (int)slot;
+            if (slot == d->ntheaps) d->ntheaps++;
             /* the whole heap is free, so the first block fits by construction */
             memmove(&h->fl[0], &h->fl[1], (h->nfl - 1) * sizeof *h->fl); h->nfl--;
             if (hs > size) mad_hp_free_locked(h, size, hs - size);
             *off = 0;
             d3d12_log("[madeira-d3d12] ml1072 texture heap #%u created (%llu MB; %lld MB in heaps, %ld small textures placed so far)\n",
-                      d->ntheaps, (unsigned long long)(hs >> 20), (long long)(d->hp_total_bytes >> 20), d->hp_textures);
+                      slot + 1, (unsigned long long)(hs >> 20), (long long)(d->hp_total_bytes >> 20), d->hp_textures);
         } else if (heap) NSObject_release(heap);
     }
     if (found >= 0) InterlockedExchangeAdd64(&d->hp_live_bytes, (LONG64)size);
@@ -15211,6 +15900,7 @@ static ULONG STDMETHODCALLTYPE res_Release(ID3D12Resource *This) {
     struct mad_resource *r = (struct mad_resource *)This;
     LONG n = InterlockedDecrement(&r->refs);
     if (n == 0) { mad_pd_purge(This);   /* ml1143 */
+        if (r->rpl_state & RPL_WATCH) mad_rpl_forget(r);   /* madeira-duo rp-learn-store */
         /* The backend owns the storage, so releasing the buffer is the whole
          * teardown; there is no separate free to order against it. */
         mad_untrack(r->owner, r);
@@ -17275,6 +17965,20 @@ static void mad_resolve_target(struct mad_device *d) {
          * PSO as fatal. Every device this runtime targets runs iOS 26+. */
         snprintf(g_target.os_version, sizeof g_target.os_version, "18.0");
     }
+    /* madeira-duo msc-gpu-family / msc-min-os (opt-in): convert for a newer GPU
+     * family or OS than the defaults above, so the converter may use what they
+     * add. A family the device does not report is refused. Both are part of
+     * every shader cache key already (the conversion target is). */
+    {
+        long long fam = mad_cfg_int_pe("msc-gpu-family", 0);   /* madeira-duo: 0 = the device's newest of Apple7-9 (as before); 1006-1010 = convert for that Apple GPU family, if the device reports it */
+        char ver[16];
+        if (fam >= 1006 && fam <= 1010 && g_target.os == MADEIRA_IR_OS_IOS) {
+            if (MTLDevice_supportsFamily(d->mtl_device, (enum WMTGPUFamily)fam)) g_target.family = (uint32_t)fam;
+            else d3d12_log("[madeira-d3d12] msc-gpu-family = %lld: the device does not report it; kept family %u\n", fam, g_target.family);
+        }
+        if (mad_cfg_str_pe("msc-min-os", ver, sizeof ver) && ver[0] >= '1' && ver[0] <= '9')   /* madeira-duo: minimum OS the conversion targets, e.g. 26.0 (default 18.0 on iOS) */
+            snprintf(g_target.os_version, sizeof g_target.os_version, "%s", ver);
+    }
     g_target.resolved = 1;
     d3d12_log("[madeira-d3d12] conversion target: %s, family %u, min %s "
               "(device reports mac2=%d apple9=%d apple8=%d apple7=%d)\n",
@@ -17412,7 +18116,7 @@ static char g_sc_stamp[96] = "madeira_d3d12 bc1 converter " MAD_SC_CONVERTER_ID;
 #else
 static char g_sc_stamp[96] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;
 #endif
-static char g_sc_rt[96];
+static char g_sc_rt[160];   /* madeira-duo: 96 -> 160, room for the msc-* additions */
 /* madeira-bcd shader-cache-native (see mad_scn_init): winemetal's handle for the
  * build directory (MadeiraCtl op 20); 0 = Wine's file API. */
 static UINT32 g_scn;
@@ -17445,7 +18149,7 @@ static void mad_sc_key(const struct madeira_ir_convert_args *a, UINT64 key[2]) {
     struct mad_sc_hash h = { 0xcbf29ce484222325ull, 0x84222325cbf29ce4ull };
     const struct madeira_ir_input_layout *lay = (const struct madeira_ir_input_layout *)(uintptr_t)a->layout;
     mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
-    mad_sc_feed(&h, g_sc_rt, sizeof g_sc_rt);
+    mad_sc_feed(&h, g_sc_rt, strlen(g_sc_rt) < 96 ? 96 : sizeof g_sc_rt);   /* madeira-duo: the old 96 bytes while it fits, so the default keys stay */
     mad_sc_feed_blob(&h, a->dxil, a->dxil_len);
     mad_sc_feed_str(&h, a->entry_point);
     mad_sc_feed_blob(&h, a->params, a->num_params * sizeof(struct madeira_ir_root_param));
@@ -17631,6 +18335,16 @@ static int mad_sc_init(void) {
                 size_t l = strlen(g_sc_rt);
                 snprintf(g_sc_rt + l, sizeof g_sc_rt - l, ", dxbc-spaces 1");
             }
+            /* madeira-duo: converter switches read only by madeira_ir_unix.mm; like
+             * dxbc-spaces, a non-default value gets a cache identity of its own */
+            if (mad_cfg_int_pe("msc-ignore-debug-info", 0)) {
+                size_t l = strlen(g_sc_rt);
+                snprintf(g_sc_rt + l, sizeof g_sc_rt - l, ", msc-nodebug 1");
+            }
+            if (!mad_cfg_int_pe("msc-validation", 1)) {
+                size_t l = strlen(g_sc_rt);
+                snprintf(g_sc_rt + l, sizeof g_sc_rt - l, ", msc-novalidate 1");
+            }
             /* The build directory is the converter's identity alone -- this DLL's
              * stamp and the app image the converter's unix half is linked into
              * (MADEIRA_APP_IMAGE_UUID, from the bridge) -- and only other builds'
@@ -17643,7 +18357,7 @@ static int mad_sc_init(void) {
                 if (!ul || ul >= sizeof uuid) uuid[0] = 0;
                 mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
                 mad_sc_feed(&h, uuid, strlen(uuid) + 1);
-                mad_sc_feed(&hr, g_sc_rt, sizeof g_sc_rt);
+                mad_sc_feed(&hr, g_sc_rt, strlen(g_sc_rt) < 96 ? 96 : sizeof g_sc_rt);   /* madeira-duo: as in mad_sc_key */
                 n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
                 if (!n || n >= MAX_PATH - 112) on = 0;
                 else {
@@ -19597,6 +20311,9 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
     if (!p) return E_OUTOFMEMORY;
     p->vtbl = &g_pso_vtbl; p->refs = 1; p->iid = &IID_ID3D12PipelineState; p->name = "PipelineState";
     p->born_present = g_presents_now; p->born_tick = GetTickCount();   /* madeira-bcd: pso-first-use */
+    if (desc->VS.BytecodeLength >= 8) memcpy(&p->vs_id, (const BYTE *)desc->VS.pShaderBytecode + 4, 4);   /* madeira-duo gpu-pass-timing */
+    if (desc->PS.pShaderBytecode && desc->PS.BytecodeLength >= 8) memcpy(&p->ps_id, (const BYTE *)desc->PS.pShaderBytecode + 4, 4);
+    if (g_vxc_secs && mad_vxc_on()) mad_vary_measure(p, desc);   /* madeira-duo vtx-census: vertex output bytes */
     if (mad_skin_on()) {   /* madeira-bcd skin-check: the vertex shader's bytecode, by hash */
         p->vs_hash = mad_fnv64(desc->VS.pShaderBytecode, desc->VS.BytecodeLength);
         mad_skin_layout(p, &desc->InputLayout);   /* skin-check-trace: an integer input keeps the bytecode past the shared store */
@@ -20066,7 +20783,11 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
     }
     /* madeira-bcd pso-lazy-libs: built at its first draw, so its libraries can go
      * until then (pso-warm, above, holds its own references to the functions) */
-    if (lz_on && p->lazy && !p->rps && mad_lzlib_can_drop(p, &lzv, &lzp)) mad_lzlib_drop(p, &lzv, &lzp);
+    {
+        /* madeira-duo pso-create-build: queued now, so its libraries stay */
+        int queued = p->lazy && !p->rps && !p->tess && !p->gs_emu && mad_pcb_on_create(p, desc);
+        if (!queued && lz_on && p->lazy && !p->rps && mad_lzlib_can_drop(p, &lzv, &lzp)) mad_lzlib_drop(p, &lzv, &lzp);
+    }
     hr = pso_QI((ID3D12PipelineState *)p, riid, out);
     pso_Release((ID3D12PipelineState *)p);
     return hr;
