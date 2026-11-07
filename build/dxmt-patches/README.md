@@ -12,6 +12,7 @@ patch that is already applied, and `apply.sh --revert` takes them out. The
 | Patch | What it fixes |
 |---|---|
 | `0001-d3d9-index-range-per-draw.patch` | A 32-bit Direct3D 9 indexed draw copies only the index bytes it reads, instead of the whole index buffer before every draw after a lock (Call of Duty: Black Ops drew at 2 to 20 FPS). `env.MADEIRA_D3D9_INDEX_RANGE = 0` goes back to the whole copy. Checked by `tests/host/check-d3d9-index-range.py` |
+| `0002-d3d11-video-device-fallback.patch` | With `env.MADEIRA_D3D11_NO_VIDEO_DEVICE = 1`, refuse a Direct3D 11 device explicitly requested for video so Unity can fall back to CPU-backed Media Foundation samples. Ordinary rendering devices still work. |
 
 A patch must apply on the current `dxmt` pin. When the pin moves, rebase the
 patches onto it (or drop a patch the new pin already covers).

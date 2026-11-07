@@ -1088,6 +1088,22 @@ enum GameRecommendations {
         """,
         avx: true, nvidia: false, wineVCRT: false, display: "fit")
 
+    /// Unity's menu needs gradual underflow for Mathf.Approximately. On hosts
+    /// with AFP, opt in so FEX can keep x86 FTZ and DAZ independent.
+    /// The 64-bit media parser supplies ARGB32 frames. Keep video samples
+    /// CPU-backed so Unity does not expect a D3D11 decoder transform.
+    static let aviciiInvector = GameRecommendation(
+        id: "avicii-invector", title: "AVICII Invector", version: 1,
+        config: """
+        # Madeira's recommended settings for AVICII Invector.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.FEX_HOSTFEATURES = enableafp
+        env.MADEIRA_WG_64BIT = 1
+        env.MADEIRA_WG_VIDEO_FORMAT = argb32
+        env.MADEIRA_D3D11_NO_VIDEO_DEVICE = 1
+        """)
+
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games
     /// the owner tried outside these lists closed at start until the [ec-hook]
     /// reporter was off. It reads code a game's protection rewrites at run time
@@ -1394,6 +1410,8 @@ extension GameRecommendations {
     }
 
     static let steamTitles: [SteamTitle] = [
+        SteamTitle(appIDs: [986800], folders: ["avicii - invector"],
+                   programs: ["avicii invector.exe"], steamPrograms: [], list: aviciiInvector),
         SteamTitle(appIDs: [2537590], folders: ["msfs2024"],
                    programs: ["flightsimulator2024.exe"], steamPrograms: [], list: msfs2024),
         SteamTitle(appIDs: [730], folders: ["counter-strike global offensive"],
