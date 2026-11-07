@@ -17,7 +17,7 @@ import UIKit
 
 /// How the guest surface is mapped into the view's bounds.
 enum DisplayMode: String, CaseIterable {
-    case fit, fill, stretch, aspect
+    case fit, fill, stretch, aspect, blend
 
     /// Older settings stored "fitHeight" (Fill height); it behaved as Fit in
     /// landscape and is gone from the picker, so it decodes to Fit.
@@ -27,6 +27,7 @@ enum DisplayMode: String, CaseIterable {
         case "fill": self = .fill
         case "stretch": self = .stretch
         case "aspect": self = .aspect
+        case "blend": self = .blend
         default: return nil
         }
     }
@@ -37,6 +38,7 @@ enum DisplayMode: String, CaseIterable {
         case .fill:      return "Fill"
         case .stretch:   return "Stretch"
         case .aspect:    return "Aspect"
+        case .blend:     return "Blend"
         }
     }
     var symbol: String {
@@ -45,6 +47,7 @@ enum DisplayMode: String, CaseIterable {
         case .fill:      return "arrow.up.left.and.arrow.down.right"
         case .stretch:   return "rectangle.expand.vertical"
         case .aspect:    return "rectangle.ratio.16.to.9"
+        case .blend:     return "rectangle.compress.vertical"
         }
     }
 }
@@ -65,14 +68,24 @@ enum GameSurfaceLayout {
     ///   game whose back buffer is 4:3 on a 16:9 monitor is stretched by the
     ///   layer in every other mode; here it is scaled uniformly. Falls back to
     ///   the guest shape until a drawable size is known (`aspect == .zero`).
+    /// - Blend: halfway between Fill and Stretch. The picture takes the
+    ///   geometric mean of the guest's shape and `bounds`'s and covers
+    ///   `bounds`, so half of the shape difference is cropped and half is
+    ///   stretched (madeira-duo: PoE2 draws 16:10 at the narrowest, the
+    ///   unfolded Duo is ~1.42:1; Stretch squashed it 11%, Fill cropped 5.5%
+    ///   a side, Blend is ~5.5% squash and ~3% a side).
     static func rect(guest: CGSize, aspect: CGSize = .zero, bounds: CGRect, mode: DisplayMode) -> CGRect {
         guard guest.width > 0, guest.height > 0,
               bounds.width > 0, bounds.height > 0 else { return bounds }
         if mode == .stretch { return bounds }
         let useDrawable = mode == .aspect && aspect.width > 0 && aspect.height > 0
-        let shape = useDrawable ? aspect : guest
+        var shape = useDrawable ? aspect : guest
+        if mode == .blend {
+            let guestAspect = guest.width / guest.height, boundsAspect = bounds.width / bounds.height
+            shape = CGSize(width: (guestAspect * boundsAspect).squareRoot(), height: 1)
+        }
         let sx = bounds.width / shape.width, sy = bounds.height / shape.height
-        let scale = mode == .fill ? max(sx, sy) : min(sx, sy)
+        let scale = mode == .fill || mode == .blend ? max(sx, sy) : min(sx, sy)
         let w = shape.width * scale, h = shape.height * scale
         return CGRect(x: bounds.minX + (bounds.width - w) / 2,
                       y: bounds.minY + (bounds.height - h) / 2,
