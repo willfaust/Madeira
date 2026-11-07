@@ -24,6 +24,7 @@
 #include <d3d12.h>
 #include <dxgi1_5.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16584,6 +16585,33 @@ static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UI
     if (red >= 2 || g_smp_census) mad_sampler_log(si, filter, cmp, who ? who : "?");
 }
 
+#define MAD_SMP_CACHE_N 512
+struct mad_smp_cache_ent { unsigned char key[offsetof(struct WMTSamplerInfo, gpu_resource_id)]; UINT64 id; obj_handle_t smp; };
+static struct mad_smp_cache_ent g_smp_cache[MAD_SMP_CACHE_N];
+static LONG g_smp_cache_n, g_smp_cache_said;
+static SRWLOCK g_smp_cache_lock = SRWLOCK_INIT;
+static int mad_smp_cache_get(struct WMTSamplerInfo *si, obj_handle_t *out) {
+    LONG i, n; int hit = 0;
+    AcquireSRWLockShared(&g_smp_cache_lock);
+    n = g_smp_cache_n;
+    for (i = 0; i < n; i++)
+        if (!memcmp(g_smp_cache[i].key, si, sizeof g_smp_cache[i].key)) {
+            si->gpu_resource_id = g_smp_cache[i].id; *out = g_smp_cache[i].smp; hit = 1; break;
+        }
+    ReleaseSRWLockShared(&g_smp_cache_lock);
+    if (hit && !g_smp_cache_said && !InterlockedExchange(&g_smp_cache_said, 1))
+        d3d12_log("[madeira-d3d12] sampler-cache: identical CreateSampler descriptions share one Metal sampler\n");
+    return hit;
+}
+static void mad_smp_cache_put(const struct WMTSamplerInfo *si, obj_handle_t smp) {
+    AcquireSRWLockExclusive(&g_smp_cache_lock);
+    if (g_smp_cache_n < MAD_SMP_CACHE_N) {
+        struct mad_smp_cache_ent *e = &g_smp_cache[g_smp_cache_n];
+        memcpy(e->key, si, sizeof e->key); e->id = si->gpu_resource_id; e->smp = smp;
+        MemoryBarrier(); g_smp_cache_n++;
+    }
+    ReleaseSRWLockExclusive(&g_smp_cache_lock);
+}
 static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
         const D3D12_SAMPLER_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE h) {
     struct mad_device *d = (struct mad_device *)This;
@@ -16592,12 +16620,21 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
     if (g_sd_state > 0) mad_dg_write(e, 1, "CreateSampler");   /* madeira-bcd: desc-guard */
 
     struct WMTSamplerInfo si;
+    obj_handle_t smp = 0; int cached = 0;
+    memset(&si, 0, sizeof si);   /* madeira-duo sampler-cache: the padding takes part in the key */
     if (desc) {
         UINT border = (desc->BorderColor[0] > 0.5f) ? 2u : (desc->BorderColor[3] > 0.5f) ? 1u : 0u;
         mad_sampler_info(&si, desc->Filter, desc->AddressU, desc->AddressV, desc->AddressW, desc->MaxAnisotropy, desc->ComparisonFunc, border, desc->MinLOD, desc->MaxLOD, "CreateSampler");
     } else mad_sampler_info(&si, D3D12_FILTER_MIN_MAG_MIP_LINEAR, 3, 3, 3, 1, 0, 0, 0.0f, 1000.0f, "CreateSampler (no description)");
 
-    obj_handle_t smp = MTLDevice_newSamplerState(d->mtl_device, &si);
+    /* madeira-duo sampler-cache: PoE2 creates ~16 samplers a frame from a handful of
+     * descriptions; each was a new Metal sampler (a host call) kept for the process's
+     * life. Identical descriptions now share the first one (samplers are immutable). */
+    cached = mad_smp_cache_get(&si, &smp);
+    if (!cached) {
+        smp = MTLDevice_newSamplerState(d->mtl_device, &si);
+        if (smp && si.gpu_resource_id) mad_smp_cache_put(&si, smp);
+    }
     if (!smp || !si.gpu_resource_id) {
         d3d12_log("[madeira-d3d12] CreateSampler: the backend gave no argument-buffer sampler\n");
         memset(e, 0, sizeof *e);
@@ -16623,7 +16660,7 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
      * life. Samplers are few and immutable, and tying one to a descriptor slot
      * that the application may overwrite would need a lifetime story that this
      * milestone does not have. */
-    mad_note_sampler(d, smp);
+    if (!cached) mad_note_sampler(d, smp);
 }
 
 /* ---- pipeline state -------------------------------------------------------
