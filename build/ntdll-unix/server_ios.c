@@ -3649,6 +3649,254 @@ static void ios_stuck_store_check( void )
     vm_deallocate( mach_task_self(), (vm_address_t)tl, tc * sizeof(*tl) );
 }
 
+/* madeira-duo [prof]: a CPU-time-weighted sampling profiler for every thread of
+ * the task, for finding where a game's CPU really goes (MADEIRA_PROF=1).
+ *
+ * Why not [cpu-split]: that one counts a sample whenever run_state says RUNNING,
+ * which includes threads that are only runnable (a thread in swtch_pri yielding
+ * the core looks as busy as one computing), and it keeps only the top 64 JIT
+ * buckets per burst, about a quarter of the samples. Here every pass reads each
+ * thread's CPU time first (THREAD_EXTENDED_INFO, no suspend) and samples only the
+ * threads whose CPU time moved; the sample's weight is the CPU time used since the
+ * thread's previous sample. Threads that stay idle are looked at every 50th pass.
+ * MADEIRA_PROF_HZ sets the pass rate (default 100, 20-1000); every busy thread costs
+ * a suspend, a state read and a resume per pass, so keep it low on a hot phone.
+ *
+ * Output, next to the stderr log (fcntl F_GETPATH on fd 2):
+ *   madeira-prof-<time>.bin  32-byte records: u64 host pc, u64 guest rip (x28+0x18,
+ *       0 when not a FEX thread), u64 extra (class 1: PE address of the ARM64EC
+ *       image copy; else lr), u32 weight ns, u16 thread slot, u8 class (0 = FEX JIT
+ *       code, 1 = ARM64EC image copy in the pool, 2 = native, 0xfe = time mark:
+ *       pc = mach time ns, rip = wall clock ms), u8 flags (bit 0: guest rip valid,
+ *       bit 1: running when sampled; a thread that ran and then blocked is caught in
+ *       its wait, so its pc says nothing about where the weight was spent).
+ *   madeira-prof-<time>.txt  "T slot port name" thread names, "S key fbase file
+ *       symbol+off" dladdr names of native pc/lr (16-byte keys), "J rx size" pool,
+ *       "P slot peb" the Wine process of a thread (its TEB's PEB) and "M peb base size
+ *       name" that process's modules (PEB loader list, again every 30 s): Wine's
+ *       processes share this task and reuse each other's PE addresses, so a PE address
+ *       is only named through its own process's list.
+ * Nothing between thread_suspend and thread_resume takes a lock (see
+ * ios_guest_rip_profile): records are buffered and written after the resume. */
+#define IOS_PROF_SLOTS 256
+#define IOS_PROF_SYMS  16384
+struct ios_prof_slot { mach_port_t port; int used, idle, seen, peb_done; uint64_t cpu_ns, peb; char name[64]; };
+struct ios_prof_rec { uint64_t pc, rip, extra; uint32_t weight_ns; uint16_t slot; uint8_t cls, flags; };
+
+static void ios_prof_symbolize( FILE *txt, uint64_t *keys, uint64_t a )
+{
+    uint64_t key = a & ~0xfull, h;
+    Dl_info di;
+    if (!a) return;
+    h = (key >> 4) * 0x9e3779b97f4a7c15ull;
+    for (h >>= 50;; h = (h + 1) & (IOS_PROF_SYMS - 1)) {
+        if (keys[h] == key) return;
+        if (!keys[h]) break;
+    }
+    keys[h] = key;
+    if (dladdr( (void *)(uintptr_t)key, &di ) && di.dli_fname) {
+        const char *f = strrchr( di.dli_fname, '/' );
+        fprintf( txt, "S %#llx %#llx %s %s+%#llx\n", (unsigned long long)key, (unsigned long long)(uintptr_t)di.dli_fbase,
+                 f ? f + 1 : di.dli_fname, di.dli_sname ? di.dli_sname : "?",
+                 (unsigned long long)(key - (uintptr_t)(di.dli_saddr ? di.dli_saddr : di.dli_fbase)) );
+    } else fprintf( txt, "S %#llx 0 ? ?\n", (unsigned long long)key );
+}
+
+static void ios_prof_dump_modules( FILE *txt, uint64_t peb )
+{
+    uint64_t ldr = 0, head, cur;
+    int guard = 0;
+    if (!ios_ts_read( peb + 0x18, &ldr, 8 ) || !ldr) return;
+    head = ldr + 0x10;
+    if (!ios_ts_read( head, &cur, 8 )) return;
+    while (cur && cur != head && guard++ < 400) {
+        uint64_t base = 0, buf = 0, next = 0; uint32_t size = 0; uint16_t len = 0, w[64]; char name[65]; int k;
+        if (!ios_ts_read( cur + 0x30, &base, 8 ) || !ios_ts_read( cur + 0x40, &size, 4 ) ||
+            !ios_ts_read( cur + 0x58, &len, 2 ) || !ios_ts_read( cur + 0x60, &buf, 8 )) break;
+        if (base && size) {
+            len /= 2; if (len > 64) len = 64;
+            if (len && ios_ts_read( buf, w, len * 2 )) { for (k = 0; k < len; k++) name[k] = w[k] > 32 && w[k] < 127 ? (char)w[k] : '_'; name[len] = 0; }
+            else strcpy( name, "?" );
+            fprintf( txt, "M %#llx %#llx %#x %s\n", (unsigned long long)peb, (unsigned long long)base, size, name );
+        }
+        if (!ios_ts_read( cur, &next, 8 )) break;
+        cur = next;
+    }
+}
+
+static void ios_prof_main(void)
+{
+    extern void *ios_jit_rx_base_global; extern size_t ios_jit_pool_size_global;
+    extern int ios_jit_pool_image_pc( uintptr_t pc, uintptr_t *pe_addr_out );
+    extern int ios_jit_low_contains( uintptr_t a );
+    static struct ios_prof_slot slots[IOS_PROF_SLOTS];
+    static struct ios_prof_rec recs[IOS_PROF_SLOTS + 1];
+    static uint64_t symkeys[IOS_PROF_SYMS];
+    static uint64_t pebs[32];
+    int npebs = 0;
+    const char *hz_env = getenv( "MADEIRA_PROF_HZ" );
+    int hz = hz_env ? atoi( hz_env ) : 100;
+    mach_port_t self_port = pthread_mach_thread_np( pthread_self() );
+    char path[1024], base[1100];
+    FILE *bin, *txt;
+    mach_timebase_info_data_t tb;
+    uint64_t pass = 0, last_mark = 0, last_sum = 0, kept_ns[3] = {0, 0, 0}, capped_ns = 0, nsamples = 0;
+    unsigned period_us;
+
+    if (hz < 20) hz = 20;
+    if (hz > 1000) hz = 1000;
+    period_us = 1000000 / hz;
+    mach_timebase_info( &tb );
+    if (fcntl( STDERR_FILENO, F_GETPATH, path ) == -1 || !strrchr( path, '/' )) {
+        const char *t = getenv( "TMPDIR" );
+        snprintf( path, sizeof(path), "%s/x", t ? t : "/tmp" );
+    }
+    *strrchr( path, '/' ) = 0;
+    snprintf( base, sizeof(base), "%s/madeira-prof-%ld", path, (long)time( NULL ) );
+    {
+        char p[1200];
+        snprintf( p, sizeof(p), "%s.bin", base ); bin = fopen( p, "wb" );
+        snprintf( p, sizeof(p), "%s.txt", base ); txt = fopen( p, "w" );
+    }
+    if (!bin || !txt) {
+        wine_log_write( "[prof] cannot open %s.bin/.txt: %s", base, strerror( errno ) );
+        if (bin) fclose( bin );
+        if (txt) fclose( txt );
+        return;
+    }
+    setvbuf( bin, NULL, _IOFBF, 1 << 18 );
+    fprintf( txt, "J %#llx %#llx\nP %u\n", (unsigned long long)(uintptr_t)ios_jit_rx_base_global,
+             (unsigned long long)ios_jit_pool_size_global, period_us );
+    wine_log_write( "[prof] sampling every thread at %d Hz, CPU-time weighted -> %s.bin/.txt", hz, base );
+
+    for (;; pass++) {
+        uint64_t t0 = mach_absolute_time() * tb.numer / tb.denom;
+        int s, nrec = 0;
+
+        if (pass % hz == 0) {   /* once a second: refresh the thread list */
+            thread_act_array_t tl; mach_msg_type_number_t tc; unsigned k;
+            for (s = 0; s < IOS_PROF_SLOTS; s++) slots[s].seen = 0;
+            if (task_threads( mach_task_self(), &tl, &tc ) == KERN_SUCCESS) {
+                for (k = 0; k < tc; k++) {
+                    int free_slot = -1;
+                    if (tl[k] == self_port) continue;
+                    for (s = 0; s < IOS_PROF_SLOTS; s++) {
+                        if (slots[s].used && slots[s].port == tl[k]) break;
+                        if (!slots[s].used && free_slot < 0) free_slot = s;
+                    }
+                    if (s < IOS_PROF_SLOTS) { slots[s].seen = 1; continue; }
+                    if (free_slot < 0) continue;
+                    mach_port_mod_refs( mach_task_self(), tl[k], MACH_PORT_RIGHT_SEND, 1 );   /* keep it */
+                    memset( &slots[free_slot], 0, sizeof(slots[free_slot]) );
+                    slots[free_slot].port = tl[k];
+                    slots[free_slot].used = slots[free_slot].seen = 1;
+                    slots[free_slot].cpu_ns = ~0ull;   /* first read only sets the baseline */
+                }
+                for (k = 0; k < tc; k++) mach_port_deallocate( mach_task_self(), tl[k] );
+                vm_deallocate( mach_task_self(), (vm_address_t)tl, tc * sizeof(*tl) );
+            }
+            for (s = 0; s < IOS_PROF_SLOTS; s++)
+                if (slots[s].used && !slots[s].seen) { mach_port_deallocate( mach_task_self(), slots[s].port ); slots[s].used = 0; }
+            /* The Wine process of each new thread (no thread is suspended here, so the
+             * pthread lookup may take libpthread's lock). The TSD offset comes from the
+             * thread sampler's calibration, so early threads are retried until it is set. */
+            for (s = 0; s < IOS_PROF_SLOTS; s++) {
+                uint64_t teb, peb = 0; pthread_t pt; int q;
+                if (!slots[s].used || slots[s].peb_done) continue;
+                pt = pthread_from_mach_thread_np( slots[s].port );
+                if (!pt) { slots[s].peb_done = 1; continue; }   /* not a pthread: never a Wine thread */
+                if (!(teb = ios_ts_teb( pt ))) { if (ios_ts_tsd_off >= 0) slots[s].peb_done = 1; continue; }
+                slots[s].peb_done = 1;
+                if (!ios_ts_read( teb + 0x60, &peb, 8 ) || !peb) continue;
+                slots[s].peb = peb;
+                fprintf( txt, "P %d %#llx\n", s, (unsigned long long)peb );
+                for (q = 0; q < npebs; q++) if (pebs[q] == peb) break;
+                if (q == npebs && npebs < 32) { pebs[npebs++] = peb; ios_prof_dump_modules( txt, peb ); }
+            }
+        }
+
+        for (s = 0; s < IOS_PROF_SLOTS; s++) {
+            struct ios_prof_slot *sl = &slots[s];
+            thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
+            arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+            uint64_t cpu, delta, rip = 0;
+            uintptr_t pe_at = 0;
+            int got, cls = 2;
+
+            if (!sl->used) continue;
+            if (sl->idle >= 50 && (pass + s) % 50) continue;
+            if (thread_info( sl->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc ) != KERN_SUCCESS) continue;
+            if (strncmp( sl->name, xi.pth_name, sizeof(sl->name) - 1 )) {
+                snprintf( sl->name, sizeof(sl->name), "%s", xi.pth_name );
+                fprintf( txt, "T %d %#x %s\n", s, sl->port, sl->name );
+            }
+            cpu = xi.pth_user_time + xi.pth_system_time;
+            if (sl->cpu_ns == ~0ull || cpu < sl->cpu_ns) { sl->cpu_ns = cpu; continue; }
+            delta = cpu - sl->cpu_ns;
+            sl->cpu_ns = cpu;
+            if (!delta) { sl->idle++; continue; }
+            sl->idle = 0;
+            if (delta > 2ull * period_us * 1000) { capped_ns += delta - 2ull * period_us * 1000; delta = 2ull * period_us * 1000; }
+
+            if (thread_suspend( sl->port ) != KERN_SUCCESS) continue;
+            got = thread_get_state( sl->port, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt ) == KERN_SUCCESS;
+            if (got && !(ios_ts_read( st.__x[28] + 0x18, &rip, 8 ) && rip > 0x10000 && rip < 0x8000000000ull)) rip = 0;
+            if (got) {
+                uintptr_t rx0 = (uintptr_t)ios_jit_rx_base_global;
+                if (st.__pc >= rx0 && st.__pc < rx0 + ios_jit_pool_size_global)
+                    cls = ios_jit_pool_image_pc( st.__pc, &pe_at ) ? 1 : 0;
+                else cls = ios_jit_low_contains( st.__pc ) ? 0 : 2;
+            }
+            thread_resume( sl->port );
+            if (!got) continue;
+
+            recs[nrec].pc = st.__pc;
+            recs[nrec].rip = rip;
+            recs[nrec].extra = cls == 1 ? pe_at : st.__lr;
+            recs[nrec].weight_ns = (uint32_t)delta;
+            recs[nrec].slot = (uint16_t)s;
+            recs[nrec].cls = (uint8_t)cls;
+            recs[nrec].flags = (rip ? 1 : 0) | (xi.pth_run_state == TH_STATE_RUNNING ? 2 : 0);
+            kept_ns[cls] += delta;
+            nrec++;
+        }
+        nsamples += nrec;
+
+        if (t0 - last_mark >= 1000000000ull) {
+            struct timeval tv;
+            gettimeofday( &tv, NULL );
+            recs[nrec].pc = t0;
+            recs[nrec].rip = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            recs[nrec].extra = 0; recs[nrec].weight_ns = 0; recs[nrec].slot = 0;
+            recs[nrec].cls = 0xfe; recs[nrec].flags = 0;
+            nrec++;
+            last_mark = t0;
+        }
+        if (nrec) fwrite( recs, sizeof(recs[0]), nrec, bin );
+        for (s = 0; s < nrec; s++)   /* after the resumes: dladdr takes dyld's lock */
+            if (recs[s].cls == 2) { ios_prof_symbolize( txt, symkeys, recs[s].pc ); ios_prof_symbolize( txt, symkeys, recs[s].extra ); }
+
+        if (t0 - last_sum >= 30000000000ull) {
+            uint64_t all = kept_ns[0] + kept_ns[1] + kept_ns[2];
+            thread_extended_info_data_t me; mach_msg_type_number_t mc = THREAD_EXTENDED_INFO_COUNT;
+            uint64_t own = thread_info( self_port, THREAD_EXTENDED_INFO, (thread_info_t)&me, &mc ) == KERN_SUCCESS
+                           ? me.pth_user_time + me.pth_system_time : 0;
+            if (last_sum)
+                wine_log_write( "[prof] %llu samples, %.1f CPU s: JIT %.0f%%, ARM64EC images %.0f%%, native %.0f%% (%.1f s over the cap); "
+                                "the profiler itself %.1f CPU s",
+                                (unsigned long long)nsamples, all / 1e9, all ? 100.0 * kept_ns[0] / all : 0,
+                                all ? 100.0 * kept_ns[1] / all : 0, all ? 100.0 * kept_ns[2] / all : 0, capped_ns / 1e9, own / 1e9 );
+            { int q; for (q = 0; q < npebs; q++) ios_prof_dump_modules( txt, pebs[q] ); }   /* modules loaded since */
+            fflush( bin ); fflush( txt );
+            last_sum = t0;
+        }
+        {
+            uint64_t spent = mach_absolute_time() * tb.numer / tb.denom - t0;
+            if (spent < period_us * 1000ull) usleep( (useconds_t)((period_us * 1000ull - spent) / 1000) );
+        }
+    }
+}
+
 static void ios_thread_sampler_main(void)
 {
     int gen = 0;
@@ -6909,6 +7157,11 @@ void server_init_process_done(void)
             ios_frame_stats_arm();   /* [frame]: off unless MADEIRA_FRAME_STATS is set */
             if (probes >= 2) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
             if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_xprobe_main(); });   /* ml1128 */
+            {   /* madeira-duo [prof]: MADEIRA_PROF=1, CPU-time weighted samples of every thread to madeira-prof-*.bin */
+                const char *prof_env = getenv("MADEIRA_PROF");
+                if (prof_env && *prof_env && strcmp(prof_env, "0") != 0)
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ ios_prof_main(); });
+            }
             if (probes >= 2 && !ios_lean_diag) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_wprof_main(); });   /* ml1129 */
         }
         if (!getenv("MADEIRA_QUIET"))
