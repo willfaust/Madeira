@@ -154,14 +154,14 @@ import SwiftUI
     /// chosen before launch and turns friends off for the session.
     func setStatus(_ status: SteamOnlineStatus, now: Date = Date()) {
         guard status != .offline else { return }
-        send(.setStatus, id: UInt64(status.rawValue), now: now)
-        SteamOnlineStatus.current = status
+        if send(.setStatus, id: UInt64(status.rawValue), now: now) { SteamOnlineStatus.current = status }
     }
 
     func send(_ action: Action, to friend: DockFriends.Friend, now: Date = Date()) { send(action, id: friend.steamID, now: now) }
 
-    private func send(_ action: Action, id: UInt64, now: Date) {
-        guard pending == nil, available else { return }
+    @discardableResult
+    private func send(_ action: Action, id: UInt64, now: Date) -> Bool {
+        guard pending == nil, available else { return false }
         sequence = DockFriends.nextSequence(after: sequence)
         let offset = (try? FileManager.default.attributesOfItem(atPath: reportURL.path))?[.size] as? UInt64 ?? 0
         do {
@@ -169,13 +169,14 @@ import SwiftUI
         } catch {
             SteamLog.event("[dock-friends] command not written")
             outcome = (id, action, 6)
-            return
+            return false
         }
         pending = Pending(action: action, steamID: id, sequence: sequence)
         sentAt = now
         reportOffset = offset
         outcome = nil
         SteamLog.event("[dock-friends] \(action) sent")
+        return true
     }
 
     /// Dock answers with friends-cmd-seq (this command's sequence), then
