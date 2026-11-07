@@ -1442,6 +1442,24 @@ static int mad_dxc_dir(char *out, size_t cap)
     return snprintf(out, cap, "%s/shadercache", docs) < (int)cap;
 }
 
+static void *mad_dxc_initial_prune(void *arg)
+{
+    char dir[1200];
+    unsigned nfiles = 0, removed = 0;
+    uint64_t left;
+    if (!mad_dxc_dir(dir, sizeof dir)) return NULL;
+    pthread_setname_np("MadeiraDxilScan");
+    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    pthread_mutex_lock(&g_dxc_prune_lock);
+    left = mad_dxc_prune(dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target, &nfiles, &removed);
+    __atomic_store_n(&g_dxc_bytes, left, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&g_dxc_prune_lock);
+    dprintf(2, "[d3d12-dxil-cache] ml1990 enabled: %u entries, %llu KB, bound %llu MB, %u evicted; retry slots %s (scanned off the caller's thread)\n",
+            nfiles, (unsigned long long)(left >> 10), (unsigned long long)(uintptr_t)arg,
+            removed, g_dxc_slot_on ? "on" : "off");
+    return NULL;
+}
+
 static void mad_dxc_init_once(void)
 {
     char dir[1200];
@@ -1468,12 +1486,19 @@ static void mad_dxc_init_once(void)
         return;
     }
     mkdir(dir, 0755);
+    /* madeira-duo (6 Nov 2026): the first scan stats every loose entry (17k on the Duo,
+     * over a second), and this runs inside the first pipeline creation, on the game's
+     * Main thread in PoE2: one 2.3 s hitch. It runs on its own thread now. Until it
+     * finishes g_dxc_bytes counts only this run's stores, so the bound is checked late,
+     * never early; the store path skips its own prune while this holds the lock. */
     {
-        unsigned nfiles = 0, removed = 0;
-        g_dxc_bytes = mad_dxc_prune(dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target, &nfiles, &removed);
-        dprintf(2, "[d3d12-dxil-cache] ml1990 enabled: %u entries, %llu KB, bound %llu MB, %u evicted; retry slots %s\n",
-                nfiles, (unsigned long long)(g_dxc_bytes >> 10), cap_mb,
-                removed, g_dxc_slot_on ? "on" : "off");
+        pthread_t scanner;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        if (pthread_create(&scanner, &attr, mad_dxc_initial_prune, (void *)(uintptr_t)cap_mb) != 0)
+            mad_dxc_initial_prune((void *)(uintptr_t)cap_mb);
+        pthread_attr_destroy(&attr);
     }
 }
 
