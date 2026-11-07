@@ -303,6 +303,7 @@ final class MetalBackedView: UIView {
             }
             v = s.superview
         }
+        installPencilMouse()
         let host = MetalHostView.shared
         if host.superview !== w {
             host.removeFromSuperview()
@@ -418,6 +419,72 @@ final class MetalBackedView: UIView {
         let (x, y) = mapPoint(p)
         postSurfacePointer(x, y, down | F_ABS)
         postSurfacePointer(x, y, up | F_ABS)
+    }
+
+    // ==================================================================
+    // Apple Pencil as a mouse (madeira.cfg or a game's own config:
+    // `pencil-mouse = 1`). Off by default.
+    //   Pencil touching the glass — already a left press/drag/release through
+    //                               the touch paths above, unchanged
+    //   Pencil hovering above it  — moves the pointer, no button pressed
+    //   Pencil Pro squeeze        — right click where the Pencil is
+    // A hovering Pencil is told apart from a mouse or trackpad by its height
+    // (UIHoverGestureRecognizer.zOffset > 0), the same test HardwareInput's
+    // pointer hover uses to ignore it. Skipped in mouse-look (relative) mode,
+    // where the pointer position is not what the program reads.
+    // ==================================================================
+    private var pencilMouseOn = false
+    private var pencilHover: UIHoverGestureRecognizer?
+    private var pencilInteraction: UIPencilInteraction?
+    private var pencilLastPoint: CGPoint?
+
+    /// Read at every attach, so a game's own `pencil-mouse` line applies to that game.
+    private static func pencilMouseWanted() -> Bool {
+        let v = MadeiraConfig.gameValue("pencil-mouse") ?? MadeiraConfig.get("pencil-mouse")
+        return ["1", "on", "true", "yes"].contains(v ?? "")
+    }
+
+    private func installPencilMouse() {
+        pencilMouseOn = Self.pencilMouseWanted()
+        if pencilHover == nil {
+            let hover = UIHoverGestureRecognizer(target: self, action: #selector(pencilHovered(_:)))
+            addGestureRecognizer(hover)
+            pencilHover = hover
+            let interaction = UIPencilInteraction()
+            interaction.delegate = self
+            addInteraction(interaction)
+            pencilInteraction = interaction
+        }
+        if pencilMouseOn {
+            LogStore.shared.log("[pencil] the Apple Pencil is a mouse (hover moves the pointer, squeeze: right click)")
+        }
+    }
+
+    @objc private func pencilHovered(_ g: UIHoverGestureRecognizer) {
+        guard pencilMouseOn, !InputSettings.shared.relative else { return }
+        // Pencil only: mouse and trackpad hover have no height.
+        guard #available(iOS 16.1, *), g.zOffset > 0 else { return }
+        guard g.state == .began || g.state == .changed else { return }
+        let p = g.location(in: self)
+        pencilLastPoint = p
+        movePencilPointer(to: p)
+    }
+
+    private func movePencilPointer(to p: CGPoint) {
+        let (x, y) = mapPoint(p)
+        if touchPointerMode { winios_cursor_move(x, y) }   // the drawn cursor follows the Pencil
+        if desktopMode {
+            postPointer(F_MOVE | F_ABS)                     // mapPoint left the cursor at (x, y)
+        } else {
+            postSurfacePointer(x, y, F_MOVE | F_ABS)
+        }
+    }
+
+    fileprivate func pencilSqueezed(at hover: CGPoint?) {
+        guard pencilMouseOn, !InputSettings.shared.relative,
+              let p = hover ?? pencilLastPoint else { return }
+        pencilLastPoint = p
+        tmAbsoluteClick(down: F_RDOWN, up: F_RUP, at: p)
     }
 
     private func touchModeBegan(_ touches: Set<UITouch>) {
@@ -817,6 +884,15 @@ final class MetalBackedView: UIView {
         if dragActive { postPointer(F_LUP); dragActive = false }
         dragTouch = nil
         twoFingerActive = false
+    }
+}
+
+/// Apple Pencil Pro squeeze (see "Apple Pencil as a mouse" in MetalBackedView).
+extension MetalBackedView: UIPencilInteractionDelegate {
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        // One right click per squeeze, on release.
+        guard squeeze.phase == .ended else { return }
+        pencilSqueezed(at: squeeze.hoverPose?.location)
     }
 }
 
