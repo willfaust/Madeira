@@ -44,6 +44,9 @@ later_blob, later_hook = sch_table('ios_sch296_blob'), sch_table('ios_sch296_hoo
 assert '{ IOS_SCH_UI_TRACE, ios_sch_ui_trace, sizeof(ios_sch_ui_trace), 0, 0,' in first_blob
 assert '{ IOS_SCH_UI_CTOR, IOS_SCH_UI_TRACE, 5, 0xe9, 0 },' in first_hook
 assert 'ui_trace' not in later_blob and 'UI_' not in later_hook and not re.search(r'#define IOS_SCH296_UI', native)
+# 2.4.0.302 (296's layout plus 0x670 bytes of .text) carries neither, for the same reason.
+blob302, hook302 = sch_table('ios_sch302_blob'), sch_table('ios_sch302_hook')
+assert 'ui_trace' not in blob302 and 'UI_' not in hook302 and not re.search(r'#define IOS_SCH302_UI', native)
 
 with tempfile.TemporaryDirectory(prefix='madeira-ui-close-') as tmp:
     folder = Path(tmp)

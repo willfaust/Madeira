@@ -87,6 +87,8 @@ BUILDS = [
          data_vs=0x43bc, new=0x13e708, ctor=0x69a0),
     dict(name='2.4.0.296', prefix='IOS_SCH296_', suffix='296', text_vs=define('IOS_SCH296_TEXT_VS'),
          text_raw=define('IOS_SCH296_TEXT_RAW'), data_vs=define('IOS_SCH296_DATA_VS'), new=0x1622b8, ctor=0x73c0),
+    dict(name='2.4.0.302', prefix='IOS_SCH302_', suffix='302', text_vs=define('IOS_SCH302_TEXT_VS'),
+         text_raw=define('IOS_SCH302_TEXT_RAW'), data_vs=define('IOS_SCH302_DATA_VS'), new=0x162928, ctor=0x73c0),
 ]
 builds = re.search(r'ios_sch_builds\[\] =\n\{(.*?)\n\};', native, re.S)[1]
 assert re.findall(r'\n    \{ (IOS_SCH\w*?)STAMP,', builds) == [b['prefix'] for b in BUILDS], \

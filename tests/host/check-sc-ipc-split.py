@@ -5,7 +5,7 @@ Use the actual image guard/patch and assembled production hooks. The fixture
 models the helper ABI, consumed CefRefPtr, per-thread manager, initialization
 reentry, handlers and ordered destruction; no supplied binary is executed.
 Every analysed helper build (ios_sch_builds) runs: the first build's getter
-preserves every register, 2.4.0.296's compact getter is a plain Win64
+preserves every register, 2.4.0.296's (and 302's) compact getter is a plain Win64
 function and its two IPC stubs sit in int3 padding.
 """
 from pathlib import Path
@@ -80,6 +80,22 @@ BUILDS = [
                 ('.text.global_loop', 'IPC_GLOBAL_LOOP', 'ios_sch296_ipc_global_loop'),
                 ('.text.initial_connect', 'IPC_INITIAL_CONNECT', 'ios_sch296_ipc_initial_connect'),
                 ('.text.direct', 'IPC_DIRECT', 'ios_sch296_ipc_direct')]),
+    # 2.4.0.302: 296's code with 0x670 bytes inserted into .text. The manager routines below the insertion
+    # keep their RVAs; operator new/delete and the global loop routine moved (+0x670, +0x550), the
+    # imports and .data globals by 0x1000.
+    dict(name='2.4.0.302', prefix='IOS_SCH302_', table='ios_sch302_code', hooks='ios_sch302_hook',
+         defsym=['--defsym', 'SCH296=1'],
+         currently_on=0x1a5b00, browser=0x1f6ba0, helper_new=0x162928, helper_delete=0x162964,
+         ctor=0x4af20, init=0x4c840, ctor_store=0x4b0e3, role_store=0x4c8a6,
+         global_loop=0x13f090, loop_call=0x4e097, connect_call=0x4e143, connect=0x4ba30,
+         dtor=0x4b240, dtor_store=0x4b279, getter=0x4c0d0, direct=0x4e76a, log=0,
+         text_vs=define('IOS_SCH302_TEXT_VS'), text_raw=define('IOS_SCH302_TEXT_RAW'),
+         data=define('IOS_SCH302_DATA'), data_vs=define('IOS_SCH302_DATA_VS'),
+         full_preserve=0, creation_log=0, rebind_trace=0,
+         split=[('.text', 'IPC_SPLIT', 'ios_sch302_ipc_split'),
+                ('.text.global_loop', 'IPC_GLOBAL_LOOP', 'ios_sch302_ipc_global_loop'),
+                ('.text.initial_connect', 'IPC_INITIAL_CONNECT', 'ios_sch302_ipc_initial_connect'),
+                ('.text.direct', 'IPC_DIRECT', 'ios_sch302_ipc_direct')]),
 ]
 
 # The helper's code stays out of the tree: each build's table holds each range's
@@ -463,8 +479,7 @@ int main(int argc, char **argv)
 #if REBIND_TRACE
         assert((unsigned char)image[R_CONNECT] == 0xe9);
 #endif
-        assert((unsigned char)image[sch_build == &ios_sch_builds[0] ? IOS_SCH_RENDER_DRAIN_SITE
-                                                                     : IOS_SCH296_RENDER_DRAIN_SITE] == 0xe8);
+        assert((unsigned char)image[R_DRAIN_SITE] == 0xe8);
         assert(!memcmp(image + R_KEEP, before + R_KEEP, 7));
         free(before);
         assert(!munmap(image, B_SIZE));
@@ -637,7 +652,7 @@ def check_build(index, build, folder):
         'B_TEXT_END': text_end, 'FULL_PRESERVE': build['full_preserve'],
         'CREATION_LOG': build['creation_log'], 'REBIND_TRACE': build['rebind_trace'],
         'R_BROWSER': build['browser'], 'R_CONTEXT': d('IPC_CONTEXT'), 'R_CURRENTLY_ON': build['currently_on'],
-        'R_NEW': build['helper_new'], 'R_DELETE': build['helper_delete'], 'R_CTOR': build['ctor'],
+        'R_DRAIN_SITE': d('RENDER_DRAIN_SITE'), 'R_NEW': build['helper_new'], 'R_DELETE': build['helper_delete'], 'R_CTOR': build['ctor'],
         'R_INIT': build['init'], 'R_CTOR_STORE': build['ctor_store'], 'R_ROLE_STORE': build['role_store'],
         'R_GLOBAL_LOOP': build['global_loop'], 'R_LOOP_CALL': build['loop_call'],
         'R_CONNECT_CALL': build['connect_call'], 'R_CONNECT': build['connect'], 'R_DTOR': build['dtor'],
