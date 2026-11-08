@@ -3769,13 +3769,13 @@ struct LibraryView: View {
             if settingsShow("diagnostics", "extended logging", "logging", "log", "help", "Claude") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
-                    // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
+                    // ClaudeHelp.swift: one file with the fixes guide and the player's report, for a chat.
                     ClaudeHelpButton(entry: nil)
                     NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
                         Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
                     }
                 } header: { Text("Diagnostics") } footer: {
-                    Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
+                    Text("Get Help from Claude makes one small file: a guide to known fixes, your settings and the key lines of the last game log, with personal details taken out. For one game's config too, use the button on its Game details page.")
                 }
             }
             if settingsShow("pointer", "mouse", "cursor", "touch", "trackpad", "sensitivity") {

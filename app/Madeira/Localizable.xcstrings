@@ -10321,42 +10321,42 @@
         }
       }
     },
-    "Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.": {
+    "Get Help from Claude makes one small file: a guide to known fixes, your settings and the key lines of the last game log, with personal details taken out. For one game's config too, use the button on its Game details page.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hilfe von Claude holen teilt eine Anleitung zu bekannten Lösungen, die letzten Protokolle und madeira.cfg. Für die Konfiguration eines Spiels nutze die Taste auf dessen Spieldetails-Seite."
+            "value": "Hilfe von Claude holen erstellt eine kleine Datei: eine Anleitung zu bekannten Lösungen, deine Einstellungen und die wichtigen Zeilen des letzten Spielprotokolls, ohne persönliche Daten. Für die Konfiguration eines Spiels nutze die Taste auf dessen Spieldetails-Seite."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pedir ayuda a Claude comparte una guía de soluciones conocidas, los últimos registros y madeira.cfg. Para incluir también la configuración de un juego, usa el botón de su página de detalles."
+            "value": "Pedir ayuda a Claude crea un solo archivo pequeño: una guía de soluciones conocidas, tus ajustes y las líneas clave del último registro de juego, sin datos personales. Para incluir también la configuración de un juego, usa el botón de su página de detalles."
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Claude에게 도움 받기는 알려진 해결 방법 안내, 최근 로그와 madeira.cfg를 공유합니다. 게임 하나의 설정도 함께 보내려면 그 게임의 게임 세부 정보 페이지에 있는 버튼을 사용하세요."
+            "value": "Claude에게 도움 받기는 작은 파일 하나를 만듭니다. 알려진 해결 방법 안내, 설정, 마지막 게임 로그의 핵심 줄이 들어 있으며 개인 정보는 제거됩니다. 게임 하나의 설정도 함께 보내려면 그 게임의 게임 세부 정보 페이지에 있는 버튼을 사용하세요."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pedir ajuda ao Claude compartilha um guia de correções conhecidas, os últimos registros e o madeira.cfg. Para incluir também a configuração de um jogo, use o botão na página de detalhes dele."
+            "value": "Pedir ajuda ao Claude cria um único arquivo pequeno: um guia de correções conhecidas, suas configurações e as linhas principais do último registro de jogo, sem dados pessoais. Para incluir também a configuração de um jogo, use o botão na página de detalhes dele."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "«Помощь от Claude» отправляет руководство по известным исправлениям, последние журналы и madeira.cfg. Чтобы добавить настройки одной игры, нажмите эту кнопку на странице сведений об игре."
+            "value": "«Помощь от Claude» создаёт один небольшой файл: руководство по известным исправлениям, ваши настройки и главные строки последнего журнала игры, без личных данных. Чтобы добавить настройки одной игры, нажмите эту кнопку на странице сведений об игре."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "「向 Claude 求助」会分享已知修复指南、最近的日志与 madeira.cfg。若还要带上某个游戏的配置，请用它「游戏详情」页上的按钮。"
+            "value": "「向 Claude 求助」会生成一个小文件：已知修复指南、你的设置和上次游戏日志中的关键行，并去除个人信息。若还要带上某个游戏的配置，请用它「游戏详情」页上的按钮。"
           }
         }
       }

@@ -2,15 +2,20 @@
 // Copyright 2026 ft7t8drgwf-wq
 // Madeira Converter Exception: see LICENSE-EXCEPTION.md
 //
-//  Get Help from Claude: a short guide to every known Madeira fix and setting
-//  (Give-to-Claude-with-log-and-cfg.txt, bundled with the app), handed to a
-//  chat together with the session log, the summary and the game's config, so
-//  a fresh Claude chat on anyone's phone can troubleshoot their game.
+//  Get Help from Claude: one text file for a fresh Claude chat on anyone's
+//  phone. At the top, a short guide to every known Madeira fix and setting
+//  (Give-to-Claude-with-log-and-cfg.txt, bundled with the app); below it the
+//  player's report (HelpReport.swift): device and build, the session summary,
+//  the game's config and the log lines that usually explain a problem.
+//
+//  It used to share six files, two of them whole logs of 1 to 20 MB, which
+//  filled a free plan's chat after one message. The report is about 30 KB and
+//  has personal details taken out (PrivacyScrub.swift).
 //
 //  The guide is copied into Documents at every start, beside madeira-log.txt,
 //  so it can also be shared from the Files app. Game details and Settings ›
-//  Diagnostics share it with the log files through the system share sheet.
-//  Nothing is sent anywhere by Madeira itself.
+//  Diagnostics share the file through the system share sheet. Nothing is sent
+//  anywhere by Madeira itself.
 //
 //  The guide's cfg keys are checked against the code by
 //  tests/host/check-claude-help-guide.py.
@@ -51,9 +56,10 @@ enum ClaudeHelp {
         "controls", "zones", "controlLayout", "controllerBinds", "config",
     ]
 
-    /// What to share: the guide, the summary, the logs, madeira.cfg and, for a
-    /// game, a text file with its config and Game details settings.
-    static func files(for entry: LibraryEntry?) -> [URL] {
+    /// The one file to share: the guide, then the player's report. Reads a log
+    /// of up to tens of MB, so it is called off the main thread; `game` and
+    /// `device` are read on the main thread first (gameText, deviceLine).
+    static func files(for entry: LibraryEntry?, game: String?, device: String) -> [URL] {
         install()
         let fm = FileManager.default
         guard let docs = documents else { return [] }
@@ -61,43 +67,55 @@ enum ClaudeHelp {
         try? fm.removeItem(at: folder)
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
-        var out: [URL] = []
-        let guide = docs.appendingPathComponent(fileName)
-        if fm.fileExists(atPath: guide.path) { out.append(guide) } else if let copy = bundled { out.append(copy) }
+        let guideFile = docs.appendingPathComponent(fileName)
+        let guide = (try? String(contentsOf: guideFile, encoding: .utf8))
+            ?? bundled.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+        let log = chosenLog(in: docs).map(HelpReport.read)
+        let cfg = try? String(contentsOf: docs.appendingPathComponent(MadeiraConfig.fileName), encoding: .utf8)
+        let report = HelpReport.text(build: BuildStamp.text, device: device, log: log,
+                                     game: game, cfg: cfg)
+        let header = """
+        Get Help from Claude: give this whole file to Claude and say what went wrong.
+        Part 1 is the help guide (for Claude). Part 2, at the end, is the player's report.
 
-        if let entry {
-            let name = safeName(entry.title) + " - game cfg and settings.txt"
-            let file = folder.appendingPathComponent(name)
-            if (try? gameText(entry).write(to: file, atomically: true, encoding: .utf8)) != nil { out.append(file) }
-        }
-        // Chats take .txt files more readily than .cfg ones.
-        let cfg = docs.appendingPathComponent(MadeiraConfig.fileName)
-        let cfgCopy = folder.appendingPathComponent("madeira.cfg.txt")
-        if let text = try? String(contentsOf: cfg, encoding: .utf8),
-           (try? ("# Documents/madeira.cfg (global settings)\n" + text).write(to: cfgCopy, atomically: true, encoding: .utf8)) != nil {
-            out.append(cfgCopy)
-        }
-        // The logs are shared where they are: they can be tens of MB.
-        // The last log with a game in it, then this run's log (a session may be
-        // running or just ended). madeira-log.prev.txt is often a run with no game.
-        for log in [LogSummary.fileName, LogSummary.gameLogName, "madeira-log.txt"] {
-            let url = docs.appendingPathComponent(log)
-            if fm.fileExists(atPath: url.path) { out.append(url) }
-        }
-        LogStore.shared.log("[claude-help] share: \(out.map(\.lastPathComponent).joined(separator: ", "))")
-        return out
+
+        """
+        let name = (entry.map { safeName($0.title) } ?? "Madeira") + " - Get Help from Claude.txt"
+        let file = folder.appendingPathComponent(name)
+        guard (try? (header + guide + "\n\n" + report).write(to: file, atomically: true, encoding: .utf8)) != nil else { return [] }
+        LogStore.shared.log("[claude-help] share: \(name) (\(log?.name ?? "no log"), \(log?.lines ?? 0) lines -> "
+                            + "\((try? fm.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0) bytes)")
+        return [file]
+    }
+
+    /// This run's log while it has a game in it (a session running, or just
+    /// ended); otherwise the last log that had one (madeira-log.txt is often a
+    /// run with no game, after Madeira was opened again).
+    static func chosenLog(in docs: URL) -> URL? {
+        let fm = FileManager.default
+        let current = docs.appendingPathComponent("madeira-log.txt")
+        let game = docs.appendingPathComponent(LogSummary.gameLogName)
+        let hasGame = fm.fileExists(atPath: game.path)
+        guard fm.fileExists(atPath: current.path) else { return hasGame ? game : nil }
+        guard hasGame else { return current }
+        func modified(_ url: URL) -> Date { (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast }
+        if modified(current) > modified(game).addingTimeInterval(5), hasSession(current) { return current }
+        return game
+    }
+
+    /// Whether a log started Wine: the markers LogSummary.Reader takes as a session.
+    static func hasSession(_ url: URL) -> Bool {
+        LogLines.contains(in: url) { $0.contains("Running full Wine sequence") || $0.contains("[WineProc] Target exe: ") }
     }
 
     /// The game's own config, then its Game details settings, as plain text.
     static func gameText(_ entry: LibraryEntry) -> String {
         var lines = [
-            "# \(entry.title): this game's config and settings, for Claude",
+            "## \(entry.title): this game's config and settings",
             "# Program: \(entry.windowsPath)",
             "# Bits: \(entry.bits)",
         ]
         if let appID = entry.steamAppID { lines.append("# Steam App ID: \(appID)") }
-        lines.append("# Madeira build: \(BuildStamp.text)")
-        lines.append("# Game in the shared summary and last game log: \(lastProgram() ?? "none yet")")
         lines.append("")
         lines.append("## This game's config (Game details > Advanced > This game's config)")
         let config = GameProfile(windowsPath: entry.windowsPath).text
@@ -113,13 +131,6 @@ enum ClaudeHelp {
             lines.append(json(fields.filter { !skippedEntryKeys.contains($0.key) }) ?? "(could not be read)")
         }
         return lines.joined(separator: "\n") + "\n"
-    }
-
-    /// The "Program:" line of madeira-summary.txt: which game the shared logs are from.
-    static func lastProgram() -> String? {
-        guard let docs = documents,
-              let text = try? String(contentsOf: docs.appendingPathComponent(LogSummary.fileName), encoding: .utf8) else { return nil }
-        return text.split(separator: "\n").first { $0.hasPrefix("Program: ") }.map { String($0.dropFirst("Program: ".count)) }
     }
 
     private static func json(_ value: [String: Any]) -> String? {
@@ -143,14 +154,42 @@ struct ClaudeHelpFiles: Identifiable {
     let urls: [URL]
 }
 
-/// "Get Help from Claude": a button and its share sheet.
+/// "Get Help from Claude": a button and its share sheet. The file is made in
+/// the background (it reads the log), with a spinner meanwhile.
 struct ClaudeHelpButton: View {
     let entry: LibraryEntry?
     @State private var files: ClaudeHelpFiles?
+    @State private var preparing = false
     var body: some View {
-        Button("Get Help from Claude", systemImage: "questionmark.bubble") {
-            files = ClaudeHelpFiles(urls: ClaudeHelp.files(for: entry))
+        Button {
+            guard !preparing else { return }
+            preparing = true
+            let entry = entry
+            let game = entry.map(ClaudeHelp.gameText)
+            let device = ClaudeHelp.deviceLine()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let urls = ClaudeHelp.files(for: entry, game: game, device: device)
+                DispatchQueue.main.async {
+                    preparing = false
+                    if !urls.isEmpty { files = ClaudeHelpFiles(urls: urls) }
+                }
+            }
+        } label: {
+            HStack {
+                Label("Get Help from Claude", systemImage: "questionmark.bubble")
+                if preparing { Spacer(); ProgressView() }
+            }
         }
+        .disabled(preparing)
         .sheet(item: $files) { ActivitySheet(items: $0.urls) }
+    }
+}
+
+extension ClaudeHelp {
+    /// Model, system and memory: what the guide's fixes depend on. No names or identifiers.
+    static func deviceLine() -> String {
+        let process = ProcessInfo.processInfo
+        return "\(DeviceDiagnostics.machine()), \(UIDevice.current.systemName) \(process.operatingSystemVersionString), "
+            + "\(process.physicalMemory >> 20) MB RAM"
     }
 }

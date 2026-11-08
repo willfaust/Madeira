@@ -1,13 +1,14 @@
 MADEIRA HELP GUIDE FOR CLAUDE
-Give this file to Claude together with your log and your cfg.
-Updated 2026-11-02.
+Get Help from Claude puts this guide and the player's report in one file.
+Updated 2026-11-06.
 
 ==========================================================================
 0. FOR THE PERSON
 ==========================================================================
 Right after the game goes wrong, open its page in Madeira and tap "Get
 Help from Claude" at the bottom. Pick the Claude app, start a new chat
-and say what went wrong. That's it.
+and say what went wrong. That's it: one small file, with personal
+details taken out.
 
 ==========================================================================
 1. FOR CLAUDE: READ THIS FIRST
@@ -36,7 +37,7 @@ When settings can't fix it:
   or 3 tries have failed. Then stop suggesting settings.
 - Tell them in one or two sentences: "This needs a fix inside Madeira.
   I've written a note for the Madeira team. Post it in the Madeira
-  Discord (https://discord.gg/4t5mNjwCn7) with your log files." Then
+  Discord (https://discord.gg/4t5mNjwCn7) with the Get Help file." Then
   give the DEVELOPER HANDOFF from section 10, in one code block they
   can copy. Never give the person code to change themselves, and never
   tell them to change Madeira's code or open pull requests.
@@ -45,19 +46,25 @@ Never suggest: deleting or reinstalling Madeira (their games and saves
 are inside it and would be lost), cracking or removing DRM, or editing
 Steam's files. Don't promise it will work.
 
-Check you have the right logs first. The game file's line "Game in
-the shared summary and last game log" must be this game, and the logs
-must show it starting. If not, reply only: "These logs don't include
-your game. Play it once until it goes wrong, then open its page and
-tap Get Help from Claude again before closing Madeira."
+Check you have the right log first. The report's line "Game in this
+report" must be this game, and the key log lines must show it
+starting. If not, reply only: "This report doesn't include your game.
+Play it once until it goes wrong, then open its page and tap Get Help
+from Claude again before closing Madeira."
 
 How to work it out (for you):
-- Read madeira-summary.txt first, then search madeira-last-game-log.txt
-  (the last run with a game) or madeira-log.txt (this run) for the tags
-  in section 6. The
-  "[build] ..." line near the top says which build they have; an older
-  build may lack a fix listed here (section 8).
-- Check whether the game is 32- or 64-bit (the game file says "Bits")
+- The player's report is at the end of this file: the session
+  summary, the game's config, madeira.cfg, then the key log lines (the
+  tags in section 6; a repeat shows once with "(xN)") and the last
+  lines before Wine exited. Read the summary first. The "[build] ..."
+  line says which build they have; an older build may lack a fix
+  listed here (section 8).
+- The whole log is left out to keep the chat small. Only if the key
+  lines can't settle it, ask for it: Files app > On My iPad (or On My
+  iPhone) > Madeira > madeira-last-game-log.txt, shared into the chat.
+- <user>, <email>, <ip>, <steam-id>, <hidden>, <app> and <long-id>
+  stand for personal details Madeira took out. Ignore them.
+- Check whether the game is 32- or 64-bit (the report says "Bits")
   before choosing memory lines (section 5).
 - Start from the closest working game in section 7. Keep the lines that
   are already in their config unless one of them is the problem.
@@ -335,7 +342,7 @@ Stores and launchers:
 ==========================================================================
 Write it as one block the person can copy, with exact log lines. The
 developer reads it with no other context. The person posts it in the
-Madeira Discord (https://discord.gg/4t5mNjwCn7) together with the files
+Madeira Discord (https://discord.gg/4t5mNjwCn7) together with the file
 from Get Help from Claude. Template:
 
   MADEIRA HANDOFF

@@ -85,7 +85,7 @@ struct SigningStatus {
 /// says by itself which device and set-up produced it. No names, identifiers or
 /// account data: the model code, versions, sizes and switches only.
 enum DeviceDiagnostics {
-    private static func machine() -> String {
+    static func machine() -> String {
         var sysinfo = utsname()
         uname(&sysinfo)
         return withUnsafePointer(to: &sysinfo.machine) {

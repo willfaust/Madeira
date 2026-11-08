@@ -194,6 +194,7 @@
 		A100CA04 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA04 /* LogsView.swift */; };
 		A100CA01 /* ClaudeHelp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA01 /* ClaudeHelp.swift */; };
 		A100CA02 /* PrivacyScrub.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA02 /* PrivacyScrub.swift */; };
+		A100CA03 /* HelpReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA03 /* HelpReport.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
@@ -495,6 +496,7 @@
 		A200CA04 /* LogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsView.swift; sourceTree = "<group>"; };
 		A200CA01 /* ClaudeHelp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHelp.swift; sourceTree = "<group>"; };
 		A200CA02 /* PrivacyScrub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyScrub.swift; sourceTree = "<group>"; };
+		A200CA03 /* HelpReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpReport.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
@@ -743,6 +745,7 @@
 				A200CA04 /* LogsView.swift */,
 				A200CA01 /* ClaudeHelp.swift */,
 				A200CA02 /* PrivacyScrub.swift */,
+				A200CA03 /* HelpReport.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
@@ -1213,6 +1216,7 @@
 				A100CA04 /* LogsView.swift in Sources */,
 				A100CA01 /* ClaudeHelp.swift in Sources */,
 				A100CA02 /* PrivacyScrub.swift in Sources */,
+				A100CA03 /* HelpReport.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,
