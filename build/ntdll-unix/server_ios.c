@@ -3546,7 +3546,7 @@ static int ios_ldst_ea( uint32_t insn, const arm_thread_state64_t *st, uint64_t 
 }
 
 int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st, const arm_neon_state64_t *neon,
-                              uintptr_t rx, uintptr_t rw, size_t sz );   /* ml1289, signal_arm64_ios.c */
+                              uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked );   /* ml1289, signal_arm64_ios.c */
 
 static void ios_stuck_store_check( void )
 {
@@ -3616,7 +3616,7 @@ static void ios_stuck_store_check( void )
             unsigned hits = ++ios_stuck[slot].hits;
             int r = ios_store_split_crossing( insn, &st, have_neon ? &neon : NULL,
                                               (uintptr_t)ios_jit_rx_base_global, (uintptr_t)ios_jit_rw_base_global,
-                                              ios_jit_pool_size_global );
+                                              ios_jit_pool_size_global, NULL );
             if (r > 0)
             {
                 __darwin_arm_thread_state64_set_pc_fptr( st, (void *)(uintptr_t)(pc + 4) );

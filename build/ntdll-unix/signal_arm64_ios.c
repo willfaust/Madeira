@@ -616,8 +616,22 @@ unsigned long long ios_get_real_usd(void)
  * boot one-shot VAs alone overflowed 64 slots, and the two-cube DXMT
  * fault storm's VA (child winemetal IAT → child EC ntdll map VA,
  * 315K faults) arrived late and was silently dropped — never tracked,
- * never healed. */
-#define IOS_STALE_VA_MAX 256
+ * never healed.
+ * 256 flat → 4096 hashed (2026-11-06): one Mach handler serves every
+ * pseudo-process, and a queued VA keeps its slot for good (so it is never
+ * healed twice). After Steam's dockhost had queued 155 VAs and filled the
+ * rest with cold ones, Slay the Spire 2's main thread called into its
+ * ucrtbase copy through dozens of stale PE VAs in turn. Each new VA evicted
+ * the coldest entry, which was always the previous newcomer at 1 hit, so
+ * none of them ever reached the threshold: 3.3 million exec faults in 35 s
+ * (one VA alone ~480K), nothing healed, the game crawled at ~1/20 speed
+ * and never showed a window. Now each VA hashes to its own short probe
+ * window in a 4096-slot table, so a newcomer only competes with the few
+ * VAs that share its window, and the cold entries it pushes out are old
+ * ones, not the VA that faulted a moment ago. */
+#define IOS_STALE_VA_MAX 4096                 /* table slots, power of two */
+#define IOS_STALE_VA_PROBE 16                 /* slots searched per VA */
+#define IOS_STALE_VA_QUEUE 256                /* heal requests in flight */
 /* Only heal a VA once it has exec-faulted this many times. Boot-time
  * one-shot redirects (thread entry points, DLL entry calls) fault a
  * handful of times and must NOT be healed — pool slots legitimately hold
@@ -626,48 +640,68 @@ unsigned long long ios_get_real_usd(void)
  * livelock). The pathological stale pointers fault thousands of times per
  * second; a threshold cleanly separates the two populations. */
 #define IOS_STALE_VA_HEAL_THRESHOLD 256
-static uint64_t ios_stale_va_seen[IOS_STALE_VA_MAX];
+static uint64_t ios_stale_va_seen[IOS_STALE_VA_MAX];   /* 0 = empty */
 static uint32_t ios_stale_va_hits[IOS_STALE_VA_MAX];
+static uint32_t ios_stale_va_clock[IOS_STALE_VA_MAX];  /* last fault, in enqueue calls */
+static uint32_t ios_stale_va_now = 0;
 static volatile int ios_stale_va_seen_count = 0;
-static uint64_t ios_stale_va_queue[IOS_STALE_VA_MAX];
+static uint64_t ios_stale_va_queue[IOS_STALE_VA_QUEUE];
 static volatile int ios_stale_va_head = 0;   /* written by scanner */
 static volatile int ios_stale_va_tail = 0;   /* written by exc handler */
 
+static inline unsigned ios_stale_va_slot( uint64_t va )
+{
+    return (unsigned)(((va >> 2) * 0x9E3779B97F4A7C15ull) >> 52) & (IOS_STALE_VA_MAX - 1);
+}
+
+/* Only the single mach-handler thread calls this, so the read-modify-writes
+ * are safe; the scanner thread reads only the queue. */
 static void ios_stale_va_enqueue( uint64_t va )
 {
-    int i, n = ios_stale_va_seen_count;
-    for (i = 0; i < n; i++)
+    unsigned start = ios_stale_va_slot( va ), i, victim = IOS_STALE_VA_MAX;
+    uint32_t now = ++ios_stale_va_now, victim_age = 0;
+    if (!va) return;
+    for (i = 0; i < IOS_STALE_VA_PROBE; i++)
     {
-        if (ios_stale_va_seen[i] == va)
+        unsigned s = (start + i) & (IOS_STALE_VA_MAX - 1);
+        if (ios_stale_va_seen[s] == va)
         {
-            if (++ios_stale_va_hits[i] == IOS_STALE_VA_HEAL_THRESHOLD)
+            ios_stale_va_clock[s] = now;
+            if (ios_stale_va_hits[s] >= IOS_STALE_VA_HEAL_THRESHOLD) return;   /* already queued */
+            if (++ios_stale_va_hits[s] == IOS_STALE_VA_HEAL_THRESHOLD)
             {
-                ios_stale_va_queue[ios_stale_va_tail % IOS_STALE_VA_MAX] = va;
+                if (ios_stale_va_tail - ios_stale_va_head >= IOS_STALE_VA_QUEUE)
+                {
+                    /* Queue full: try again on a later fault, don't lose it. */
+                    ios_stale_va_hits[s] = IOS_STALE_VA_HEAL_THRESHOLD - 1;
+                    return;
+                }
+                ios_stale_va_queue[ios_stale_va_tail % IOS_STALE_VA_QUEUE] = va;
                 ios_stale_va_tail++;
                 fprintf( stderr, "[stale-heal] 0x%llx crossed %d faults — queued for heal\n",
                          (unsigned long long)va, IOS_STALE_VA_HEAL_THRESHOLD );
             }
             return;
         }
+        if (!ios_stale_va_seen[s])
+        {
+            if (victim == IOS_STALE_VA_MAX || victim_age != 0xffffffffu)
+            { victim = s; victim_age = 0xffffffffu; }   /* an empty slot beats any eviction */
+            continue;
+        }
+        /* Eviction candidate: the not-yet-queued entry that faulted longest ago. */
+        if (ios_stale_va_hits[s] < IOS_STALE_VA_HEAL_THRESHOLD && victim_age != 0xffffffffu &&
+            (victim == IOS_STALE_VA_MAX || now - ios_stale_va_clock[s] > victim_age))
+        {
+            victim = s;
+            victim_age = now - ios_stale_va_clock[s];
+        }
     }
-    if (n >= IOS_STALE_VA_MAX)
-    {
-        /* Table full: evict the coldest entry (boot one-shots sit at a
-         * handful of hits) so pathological late-comers — a new child's
-         * DXMT IAT — still get tracked. Only the single mach-handler
-         * thread calls this, so the read-modify-write is safe. */
-        int min_i = 0;
-        uint32_t min_h = ios_stale_va_hits[0];
-        for (i = 1; i < n; i++)
-            if (ios_stale_va_hits[i] < min_h) { min_h = ios_stale_va_hits[i]; min_i = i; }
-        if (min_h >= IOS_STALE_VA_HEAL_THRESHOLD) return;  /* everything hot — drop */
-        ios_stale_va_seen[min_i] = va;
-        ios_stale_va_hits[min_i] = 1;
-        return;
-    }
-    ios_stale_va_seen[n] = va;
-    ios_stale_va_hits[n] = 1;
-    ios_stale_va_seen_count = n + 1;
+    if (victim == IOS_STALE_VA_MAX) return;   /* window holds only queued VAs — drop */
+    if (!ios_stale_va_seen[victim]) ios_stale_va_seen_count++;
+    ios_stale_va_seen[victim] = va;
+    ios_stale_va_hits[victim] = 1;
+    ios_stale_va_clock[victim] = now;
 }
 
 static void *ios_stale_va_scanner( void *arg )
@@ -682,13 +716,15 @@ static void *ios_stale_va_scanner( void *arg )
      * MADEIRA_NO_HEAL=1 reverts to dry-run reporting. */
     int do_heal = getenv( "MADEIRA_NO_HEAL" ) == NULL;
     pthread_setname_np( "wine-stale-heal" );
+    fprintf( stderr, "[stale-heal] table %d slots hashed, probe %d, LRU eviction (stale-heal-table)\n",
+             IOS_STALE_VA_MAX, IOS_STALE_VA_PROBE );
     { extern void ios_eco_native_self( const char *who ); ios_eco_native_self( "wine-stale-heal" ); }   /* madeira-bcd eco-native */
     for (;;)
     {
         usleep( 100000 );
         while (ios_stale_va_head != ios_stale_va_tail)
         {
-            uint64_t va = ios_stale_va_queue[ios_stale_va_head % IOS_STALE_VA_MAX];
+            uint64_t va = ios_stale_va_queue[ios_stale_va_head % IOS_STALE_VA_QUEUE];
             ios_stale_va_head++;
             if (do_heal)
                 ios_jit_patch_stale_pointer( va );
@@ -3043,10 +3079,19 @@ static inline void ios_note_guest_delivery( uint64_t thread )
  * Returns 1 (written), -1 (refused: a page of the store has no alias) or 0
  * (not a crossing store this helper decodes; the per-encoding cases run).
  * ml1292: also called by the thread sampler (server_ios.c) to complete a store
- * the kernel keeps faulting on, with the thread suspended. */
+ * the kernel keeps faulting on, with the thread suspended.
+ *
+ * When it refuses because a page of the store still has FEX's write
+ * protection (it holds translated code), *blocked (if given) names that page,
+ * so the caller can hand FEX that page's fault. The host reports the store's
+ * first byte as the fault address, so without this FEX only ever sees the
+ * first page, which is already writable: it "handles" the fault, the store
+ * retries, and the thread loops on it forever. Slay the Spire 2 sat on its
+ * first frame that way (2.1 million retries of one STUR at ...fffc) with
+ * env.MADEIRA_SMC_HOT_PAGE = 0, where no page ever stops being protected. */
 int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
                                      const arm_neon_state64_t *neon,
-                                     uintptr_t rx, uintptr_t rw, size_t sz )
+                                     uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked )
 {
     extern uintptr_t ios_jit_anon_alias_lookup( uintptr_t fault_addr );
     extern void ios_jit_anon_alias_note_write( unsigned long long );
@@ -3105,6 +3150,7 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
     }
     else return 0;
 
+    if (blocked) *blocked = 0;
     if (ea > UINTPTR_MAX - (bytes - 1)) return -1;
     if (((ea ^ (ea + bytes - 1)) & ~(uint64_t)0x3fff) == 0) return 0;   /* within one page */
     if (v && !neon) return 0;
@@ -3129,9 +3175,21 @@ int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st,
         if (len > 0x4000 - (a & 0x3fff)) len = 0x4000 - (unsigned)(a & 0x3fff);
         part_rw[parts] = (rx && rw && len <= sz && a >= rx && a - rx <= sz - len)
                          ? rw + (a - rx) : ios_write_alias( (uintptr_t)a );
-        if (part_rw[parts] && (ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1 ||
-            (honor_guest_prot && (ios_alias_write_is_trapped( a ) || ios_alias_write_is_trapped( a + len - 1 )))))
+        if (part_rw[parts] && ios_write_alias( a + len - 1 ) != part_rw[parts] + len - 1)
             return -1;
+        if (part_rw[parts] && honor_guest_prot)
+        {
+            /* A part is at most 32 bytes, so its two ends cover every 4 KB
+             * protection page it touches. Name the protected one. */
+            uintptr_t trap = ios_alias_write_is_trapped( a ) ? (uintptr_t)a
+                           : ios_alias_write_is_trapped( a + len - 1 ) ? (uintptr_t)(a + len - 1) & ~(uintptr_t)0xfff
+                           : 0;
+            if (trap)
+            {
+                if (blocked) *blocked = trap;
+                return -1;
+            }
+        }
         if (!part_rw[parts])
         {
             /* A page with no alias that is plain writable memory (the aliased page is
@@ -5245,11 +5303,26 @@ static void *ios_mach_exception_thread( void *arg )
                      * 16-byte copies are correct. Rn==31 is SP, never __x[31]. */
                     /* ml1289: a store that crosses a 16 KB page is written per page here;
                      * every other store goes on to its per-encoding case below. */
+                    uintptr_t split_blocked = 0;
                     const int split_r = ios_store_split_crossing( insn, &state, have_neon ? &neon_state : NULL,
-                                                                  rx, rw, sz );
+                                                                  rx, rw, sz, &split_blocked );
                     if (split_r)
                     {
                         if (split_r > 0) emulated = 1;
+                        /* A later page of the store still holds FEX's write
+                         * protection: give FEX that page's fault (it invalidates
+                         * the page and restores write), and the retried store
+                         * then completes here. PC and registers are untouched. */
+                        else if (split_blocked && honor_guest_prot)
+                        {
+                            static unsigned split_blocked_logs;
+                            if (split_blocked_logs++ < 16)
+                                dprintf( STDERR_FILENO, "[split-store] dispatching the protected page 0x%llx "
+                                         "of a crossing store (insn=0x%08x fault=0x%llx)\n",
+                                         (unsigned long long)split_blocked, insn, (unsigned long long)fault_addr );
+                            fault_addr = split_blocked;
+                            goto dispatch_guest_fault;
+                        }
                     }
                     else if (have_neon && (insn & 0xFE400000) == 0xAC000000)
                     {
