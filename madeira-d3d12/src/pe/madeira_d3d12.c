@@ -2100,6 +2100,8 @@ static ULONG STDMETHODCALLTYPE list_Release(ID3D12GraphicsCommandList *This) {
     return (ULONG)r;
 }
 static void mad_list_wait_idle(struct mad_list *l);
+static int mad_reset_wait_event_on(void);   /* madeira-duo reset-wait-event */
+static void mad_list_idle_wake(void);
 static HRESULT STDMETHODCALLTYPE list_Close(ID3D12GraphicsCommandList *This) {
     struct mad_list *l = (struct mad_list *)This;
     if (l->closed) return E_FAIL;          /* double Close is a caller bug */
@@ -12589,7 +12591,7 @@ static DWORD WINAPI mad_sub_worker(void *arg) {
             UINT i;
             mad_ecl_run((ID3D12CommandQueue *)q, j->count, (ID3D12CommandList *const *)j->lists);
             for (i = 0; i < j->count; i++) {
-                InterlockedDecrement(&j->lists[i]->inflight);
+                if (!InterlockedDecrement(&j->lists[i]->inflight) && mad_reset_wait_event_on()) mad_list_idle_wake();   /* madeira-duo reset-wait-event */
                 list_Release((ID3D12GraphicsCommandList *)j->lists[i]);
             }
             break;
@@ -12687,9 +12689,45 @@ static void mad_present_throttle(struct mad_queue *q) {
     InterlockedExchangeAdd64(&g_xp.t_thr, t1.QuadPart - t0.QuadPart);   /* ml1128 */
     InterlockedExchangeAdd64(&g_perf_drain_ticks, t1.QuadPart - t0.QuadPart);
 }
+/* madeira-duo RESET-WAIT-EVENT (madeira.cfg reset-wait-event, opt-in, default 0).
+ * A list Reset while the submission worker still replays it spun: 256 pauses,
+ * then up to 3,840 Sleep(0) yields, then Sleep(1) until the worker let go. In
+ * PoE2 that happens 0.1-0.2 times a frame but lasts 100-400 ms (the replay is
+ * compiling a pipeline), and the yields burn an E-core under the power cap
+ * while Sleep(1) adds its own wake-up lag. With the switch the Reset sleeps on
+ * a condition variable that the worker wakes when a list it released has no
+ * jobs left (only while someone waits: one interlocked read per list
+ * otherwise). The wait re-checks every 2 ms as a safety net. 0 (the default):
+ * the spin, as before. */
+static int g_rwe = -1;
+static volatile LONG g_rwe_waiters;
+static SRWLOCK g_rwe_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE g_rwe_cv = CONDITION_VARIABLE_INIT;
+static int mad_reset_wait_event_on(void) {
+    if (g_rwe < 0) {
+        int on = mad_cfg_int_pe("reset-wait-event", 0) > 0;   /* madeira-duo: 1 = a command list Reset that waits for the submission worker sleeps until the worker wakes it; 0 = it spins (pauses, Sleep(0), then Sleep(1)) as before */
+        if (on) d3d12_log("[madeira-d3d12] reset-wait-event = 1: a list Reset waiting for the submission worker sleeps on a condition variable\n");
+        g_rwe = on;
+    }
+    return g_rwe;
+}
+/* reset-wait-event: the worker dropped a list's last job (inflight just reached 0). */
+static void mad_list_idle_wake(void) {
+    if (!InterlockedCompareExchange(&g_rwe_waiters, 0, 0)) return;   /* after the decrement: a waiter that registered later sees inflight == 0 */
+    AcquireSRWLockExclusive(&g_rwe_lock);   /* a waiter between its check and its sleep holds the lock: no lost wake-up */
+    ReleaseSRWLockExclusive(&g_rwe_lock);
+    WakeAllConditionVariable(&g_rwe_cv);
+}
 static void mad_list_wait_idle(struct mad_list *l) {
     LARGE_INTEGER t0, t1; unsigned spins = 0;
     QueryPerformanceCounter(&t0);
+    if (mad_reset_wait_event_on()) {
+        InterlockedIncrement(&g_rwe_waiters);   /* before reading inflight (Dekker with mad_list_idle_wake) */
+        AcquireSRWLockExclusive(&g_rwe_lock);
+        while (InterlockedCompareExchange(&l->inflight, 0, 0)) SleepConditionVariableSRW(&g_rwe_cv, &g_rwe_lock, 2, 0);
+        ReleaseSRWLockExclusive(&g_rwe_lock);
+        InterlockedDecrement(&g_rwe_waiters);
+    }
     while (l->inflight) {
         if (++spins < 256) YieldProcessor();
         else if (spins < 4096) Sleep(0);
