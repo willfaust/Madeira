@@ -2601,6 +2601,27 @@ static void f7_census_barrier(struct mad_exec *e, const struct mad_cmd *c) {
     }
     e->f7_reason |= 1;
 }
+/* madeira-duo FENCE-CHAIN-FRAG (madeira.cfg fence-chain-frag, opt-in, default 0).
+ * Mode 3 waits only after a barrier on a resource written since the last wait,
+ * but a render pass that waits always waits at its VERTEX stage, so its vertex
+ * and tiling work can't overlap the previous pass's fragment work. In PoE2
+ * fight dumps 52-66 render encoders a frame start exactly when everything before
+ * them ends (e.g. a 330 us vertex stage behind a 1092 us fragment stage). With
+ * the switch, mode 3 uses ml1118's rule: the wait moves to the FRAGMENT stage
+ * unless a compute or blit encoder ended since the last vertex-stage wait
+ * (skinning, culling, uploads, indirect arguments keep the vertex wait). Hazard
+ * it does not cover, as in mode 5: a vertex shader reading a texture or buffer
+ * the previous render pass wrote. 0 (the default): mode 3 as before. */
+static int g_fc3_frag = -1;
+static volatile LONG g_fc3_frag_waits;
+static int mad_fc3_frag_on(void) {
+    if (g_fc3_frag < 0) {
+        int on = mad_cfg_int_pe("fence-chain-frag", 0) > 0;   /* madeira-duo: 1 = with fence-chain 3, a render pass waits at its fragment stage unless a compute/blit encoder ended since the last vertex-stage wait (ml1118's rule); 0 = at its vertex stage (as before) */
+        if (on) d3d12_log("[madeira-d3d12] fence-chain-frag = 1: with fence-chain 3, render passes wait at the fragment stage unless a compute/blit encoder ran since the last vertex-stage wait\n");
+        g_fc3_frag = on;
+    }
+    return g_fc3_frag;
+}
 static void exec_fence_render(struct mad_exec *e, obj_handle_t enc, int update) {
     struct wmtcmd_render_fence_op f;
     obj_handle_t fence;
@@ -2622,9 +2643,10 @@ static void exec_fence_render(struct mad_exec *e, obj_handle_t enc, int update) 
      * vertex-stage wait (skinning, culling, indirect arguments). Hazard it does
      * not cover: a vertex shader reading a texture the previous render pass
      * just drew. */
-    if (!update && e->mode == 5) {
+    /* madeira-duo fence-chain-frag: the same rule in mode 3 (see mad_fc3_frag_on) */
+    if (!update && (e->mode == 5 || (e->mode == 3 && mad_fc3_frag_on()))) {
         if (InterlockedExchange(&e->q->device->f5_nonrender, 0)) f.stages = (enum WMTRenderStages)(WMTRenderStageVertex | WMTRenderStageObject);
-        else f.stages = WMTRenderStageFragment;
+        else { f.stages = WMTRenderStageFragment; if (e->mode == 3) InterlockedIncrement(&g_fc3_frag_waits); }
     }
     MTLRenderCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&f);
     InterlockedIncrement(update ? &g_fence_updates : &g_fence_waits);
@@ -11933,6 +11955,9 @@ static void mad_perf_present(void) {
                       g_perf_presents ? (double)(cw - lw) / g_perf_presents : 0.0, g_perf_presents ? (double)(cu - lu) / g_perf_presents : 0.0,
                       g_perf_presents ? (double)(cb - lb) / g_perf_presents : 0.0, g_fence_chain);
             lw = cw; lu = cu; lb = cb;
+            if (g_fc3_frag > 0 && g_perf_presents)   /* madeira-duo fence-chain-frag */
+                d3d12_log("[perf] fence-chain-frag per frame: %.1f render waits at the fragment stage (the rest of the waits above stay at the vertex stage)\n",
+                          (double)InterlockedExchange(&g_fc3_frag_waits, 0) / g_perf_presents);
             if (g_f6_used && g_perf_presents) {   /* ml1134 */
                 double np = (double)g_perf_presents;
                 LONG b = InterlockedExchange(&g_f6_begins, 0), sy = InterlockedExchange(&g_f6_synced, 0), at = InterlockedExchange(&g_f6_att_sync, 0);
