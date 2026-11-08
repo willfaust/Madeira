@@ -1088,20 +1088,16 @@ enum GameRecommendations {
         """,
         avx: true, nvidia: false, wineVCRT: false, display: "fit")
 
-    /// Unity's menu needs gradual underflow for Mathf.Approximately. On hosts
-    /// with AFP, opt in so FEX can keep x86 FTZ and DAZ independent.
-    /// The 64-bit media parser supplies ARGB32 frames. Keep video samples
-    /// CPU-backed so Unity does not expect a D3D11 decoder transform.
+    /// Unity's menu needs independent x86 FTZ and DAZ for Mathf.Approximately.
+    /// Its cutscenes use CPU-backed Media Foundation video samples.
     static let aviciiInvector = GameRecommendation(
         id: "avicii-invector", title: "AVICII Invector", version: 1,
         config: """
         # Madeira's recommended settings for AVICII Invector.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
-        env.FEX_HOSTFEATURES = enableafp
-        env.MADEIRA_WG_64BIT = 1
-        env.MADEIRA_WG_VIDEO_FORMAT = argb32
-        env.MADEIRA_D3D11_NO_VIDEO_DEVICE = 1
+        env.MADEIRA_FEX_INDEPENDENT_DENORMALS = 1
+        env.MADEIRA_MF_CPU_VIDEO = 1
         """)
 
     /// Every other game, and the Desktop (owner's decisions, 2026-10-12): most games

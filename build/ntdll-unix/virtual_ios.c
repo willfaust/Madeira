@@ -12674,9 +12674,9 @@ extern const void *winegstreamer_unix_call_wow64_funcs[];
 /* MADEIRA: winegstreamer's unix side is bound for 32-bit (wow64) callers, and for
  * 64-bit (ARM64EC) ones too: without it an x64 program's xWMA voices (FAudio's
  * WMA decoder DMO, wmadmod -> winegstreamer) decode to silence. A 64-bit caller
- * gets the WMA transform; its wg_parser stays refused unless MADEIRA_WG_64BIT=1
- * (winegstreamer_unixlib_ios.c, wgp_create64). MADEIRA_WG_64BIT=0 keeps the
- * generic stub table for 64-bit callers, as before. */
+ * gets the WMA transform; its wg_parser is opt-in via MADEIRA_MF_CPU_VIDEO=1
+ * or MADEIRA_WG_64BIT=1 (winegstreamer_unixlib_ios.c, wgp_create64).
+ * MADEIRA_WG_64BIT=0 keeps the generic stub table for 64-bit callers, as before. */
 static BOOL ios_wg_64bit_enabled(void)
 {
     const char *e = getenv( "MADEIRA_WG_64BIT" );
@@ -12951,7 +12951,8 @@ static NTSTATUS load_builtin_unixlib( void *module, BOOL wow, const void **funcs
              * pointers that the 32-bit layouts place at different offsets.
              *
              * 64-bit (ARM64EC) callers take it too unless MADEIRA_WG_64BIT=0
-             * (ios_wg_64bit_enabled); their parser needs MADEIRA_WG_64BIT=1. */
+             * (ios_wg_64bit_enabled). Their parser is opt-in via
+             * MADEIRA_MF_CPU_VIDEO=1 or MADEIRA_WG_64BIT=1. */
             libname = wow ? "winegstreamer (wma + wg_parser, libav*)"
                           : "winegstreamer (wma, libav*; 64-bit)";
             funcs64 = (const void *)winegstreamer_unix_call_funcs;

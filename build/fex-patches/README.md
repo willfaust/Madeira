@@ -12,6 +12,7 @@ These patches are for Madeira only and are not to be sent to FEX-Emu.
 | Patch | What it fixes |
 |---|---|
 | `0001-windows-ios-smc-traps-per-16k-host-page.patch` | Self-modifying-code write traps per 16 KB iOS host page, both modules (The Escapists 2, Project Zomboid) |
+| `0002-ios-arm64ec-independent-denormals.patch` | `env.MADEIRA_FEX_INDEPENDENT_DENORMALS = 1` opts ARM64EC games into independent x86 FTZ and DAZ after a positive AFP probe. Default off because AFP adds FPCR writes at native transitions. `FEX_HOSTFEATURES=disableafp` overrides it. |
 
 A patch must apply on the current FEX pin. When the pin moves, rebase the
 patches onto it (or drop a patch the new pin already covers).

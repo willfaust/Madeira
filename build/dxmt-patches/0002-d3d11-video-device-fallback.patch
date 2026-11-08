@@ -1,5 +1,5 @@
 diff --git a/src/d3d11/d3d11.cpp b/src/d3d11/d3d11.cpp
-index 85cbc03..1baa6f8 100644
+index 85cbc03..b8601e8 100644
 --- a/src/d3d11/d3d11.cpp
 +++ b/src/d3d11/d3d11.cpp
 @@ -3,6 +3,7 @@
@@ -10,16 +10,17 @@ index 85cbc03..1baa6f8 100644
  #include "util_string.hpp"
  #include "dxmt_capture.hpp"
  #include <exception>
-@@ -16,6 +17,13 @@ D3D11CoreCreateDevice(IDXGIFactory *pFactory, IDXGIAdapter *pAdapter,
+@@ -16,6 +17,14 @@ D3D11CoreCreateDevice(IDXGIFactory *pFactory, IDXGIAdapter *pAdapter,
                        UINT FeatureLevels, ID3D11Device **ppDevice) {
    InitReturnPtr(ppDevice);
 
-+  // Allow Media Foundation clients to fall back to CPU-backed samples when
-+  // the D3D11 video-device path cannot supply the transforms they expect.
-+  // A normal rendering device does not request VIDEO_SUPPORT.
-+  if ((Flags & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) &&
-+      env::getEnvVar("MADEIRA_D3D11_NO_VIDEO_DEVICE") == "1")
-+    return DXGI_ERROR_UNSUPPORTED;
++  // Media clients opting into CPU-backed samples can decline an explicit
++  // video device without changing ordinary D3D11 device creation.
++  if (Flags & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) {
++    const auto override = env::getEnvVar("MADEIRA_D3D11_NO_VIDEO_DEVICE");
++    if (override == "1" || (override.empty() && env::getEnvVar("MADEIRA_MF_CPU_VIDEO") == "1"))
++      return DXGI_ERROR_UNSUPPORTED;
++  }
 +
    Com<IMTLDXGIAdapter> dxgi_adapter;
 
