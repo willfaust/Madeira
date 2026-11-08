@@ -2921,6 +2921,46 @@
         }
       }
     },
+    "Could not make the logs file": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Protokolldatei konnte nicht erstellt werden"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se pudo crear el archivo de registros"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그 파일을 만들 수 없습니다"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível criar o arquivo de registros"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось создать файл журналов"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法生成日志文件"
+          }
+        }
+      }
+    },
     "CPU": {
       "localizations": {
         "de": {
@@ -6801,6 +6841,46 @@
         }
       }
     },
+    "Each game session's own log, newest first. Tap one to read its end. The same files are in the Files app: On My iPhone or On My iPad > Madeira.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das eigene Protokoll jeder Spielsitzung, das neueste zuerst. Tippe auf eines, um sein Ende zu lesen. Dieselben Dateien findest du in der Dateien-App: Auf meinem iPhone oder Auf meinem iPad > Madeira."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El registro propio de cada sesión de juego, el más reciente primero. Toca uno para leer el final. Los mismos archivos están en la app Archivos: En mi iPhone o En mi iPad > Madeira."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 세션마다 남는 로그이며 최신 순입니다. 하나를 탭하면 끝부분을 볼 수 있습니다. 같은 파일이 파일 앱의 나의 iPhone 또는 나의 iPad > Madeira에도 있습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O registro próprio de cada sessão de jogo, o mais recente primeiro. Toque em um para ler o final. Os mesmos arquivos estão no app Arquivos: No Meu iPhone ou No Meu iPad > Madeira."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Собственный журнал каждого игрового сеанса, сначала новые. Нажмите на журнал, чтобы прочитать его конец. Те же файлы есть в приложении «Файлы»: «На iPhone» или «На iPad» > Madeira."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每次游戏会话自己的日志，最新的在前。轻点一个可查看结尾。同样的文件也在「文件」App 中：我的 iPhone 或我的 iPad > Madeira。"
+          }
+        }
+      }
+    },
     "ECO": {
       "localizations": {
         "de": {
@@ -9357,6 +9437,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "功能键"
+          }
+        }
+      }
+    },
+    "Game sessions": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spielsitzungen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sesiones de juego"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 세션"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sessões de jogo"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игровые сеансы"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏会话"
           }
         }
       }
@@ -13121,6 +13241,46 @@
         }
       }
     },
+    "Logs": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protokolle"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registros"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registros"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журналы"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "日志"
+          }
+        }
+      }
+    },
     "Looking for .ini files": {
       "localizations": {
         "de": {
@@ -14757,6 +14917,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "新库网格"
+          }
+        }
+      }
+    },
+    "No logs yet. Play a game once and its log shows here.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Protokolle. Spiele einmal ein Spiel, dann erscheint sein Protokoll hier."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún no hay registros. Juega una vez a un juego y su registro aparecerá aquí."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 로그가 없습니다. 게임을 한 번 실행하면 여기에 로그가 표시됩니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ainda não há registros. Jogue um jogo uma vez e o registro dele aparece aqui."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журналов пока нет. Запустите игру один раз, и её журнал появится здесь."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还没有日志。玩一次游戏后，它的日志会显示在这里。"
           }
         }
       }
@@ -21521,6 +21721,126 @@
         }
       }
     },
+    "Share": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartir"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Поделиться"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分享"
+          }
+        }
+      }
+    },
+    "Share Logs": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protokolle teilen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartir registros"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그 공유"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar registros"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Поделиться журналами"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分享日志"
+          }
+        }
+      }
+    },
+    "Share Logs makes one .zip with the session summary, the last game log, this run's log and madeira.cfg, with personal details taken out. Post it with your bug report.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protokolle teilen erstellt eine .zip-Datei mit der Sitzungszusammenfassung, dem letzten Spielprotokoll, dem Protokoll dieses Starts und madeira.cfg, ohne persönliche Daten. Hänge sie an deinen Fehlerbericht an."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartir registros crea un .zip con el resumen de la sesión, el último registro de juego, el registro de esta ejecución y madeira.cfg, sin datos personales. Adjúntalo a tu informe de error."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "로그 공유는 세션 요약, 마지막 게임 로그, 이번 실행의 로그와 madeira.cfg를 담은 .zip 파일 하나를 만들며 개인 정보는 제거됩니다. 버그 신고에 첨부하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compartilhar registros cria um .zip com o resumo da sessão, o último registro de jogo, o registro desta execução e o madeira.cfg, sem dados pessoais. Anexe-o ao seu relato de erro."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "«Поделиться журналами» создаёт один .zip со сводкой сеанса, последним журналом игры, журналом этого запуска и madeira.cfg, без личных данных. Приложите его к сообщению об ошибке."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「分享日志」会生成一个 .zip：会话摘要、上次游戏日志、本次运行日志和 madeira.cfg，并去除个人信息。请把它附在错误报告里。"
+          }
+        }
+      }
+    },
     "Shortcuts › Open URLs › paste › Add to Home Screen.": {
       "localizations": {
         "de": {
@@ -21757,6 +22077,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "显示 %1$lld / %2$lld。请细化搜索，或打开全部设置。"
+          }
+        }
+      }
+    },
+    "Showing the last %lld lines, with personal details taken out.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die letzten %lld Zeilen, ohne persönliche Daten."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se muestran las últimas %lld líneas, sin datos personales."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "개인 정보를 제거한 마지막 %lld줄입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mostrando as últimas %lld linhas, sem dados pessoais."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Последние строки (%lld), без личных данных."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示最后 %lld 行，已去除个人信息。"
           }
         }
       }

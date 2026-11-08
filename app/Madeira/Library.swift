@@ -3688,6 +3688,9 @@ struct LibraryView: View {
                     Toggle("Extended logging", isOn: $input.diagnostics)
                     // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
                     ClaudeHelpButton(entry: nil)
+                    NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
+                        Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
+                    }
                 } header: { Text("Diagnostics") } footer: {
                     Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
                 }

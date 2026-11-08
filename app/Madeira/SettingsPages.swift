@@ -16,7 +16,7 @@ enum SettingsPages {
 
     enum Page: Hashable, CaseIterable {
         case steam, gog, itch, epic, ea, runtimes, displayGraphics, memory, pointer, jit, signing, saves, drives,
-             appearance, advanced, credits
+             appearance, advanced, logs, credits
 
         var title: String {
             switch self {
@@ -35,6 +35,7 @@ enum SettingsPages {
             case .drives: return "External drives"
             case .appearance: return "Appearance"
             case .advanced: return "Advanced"
+            case .logs: return "Logs"
             case .credits: return "Credits"
             }
         }
@@ -56,6 +57,7 @@ enum SettingsPages {
             case .drives: return "externaldrive"
             case .appearance: return "paintpalette"
             case .advanced: return "wrench.and.screwdriver"
+            case .logs: return "doc.text.magnifyingglass"
             case .credits: return "heart"
             }
         }
@@ -82,7 +84,7 @@ enum SettingsPages {
         ("Getting games", [.steam, .gog, .itch, .epic, .ea, .runtimes]),
         ("Running games", [.displayGraphics, .memory, .pointer]),
         ("Device", [.jit, .signing, .saves, .drives]),
-        (nil, [.appearance, .advanced, .credits]),
+        (nil, [.appearance, .advanced, .logs, .credits]),
     ]
 }
 
@@ -187,6 +189,9 @@ struct SettingsPageView: View {
                 Toggle("Extended logging", isOn: $input.diagnostics)
                 // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
                 ClaudeHelpButton(entry: nil)
+                NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
+                    Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
+                }
             } header: { Text("Diagnostics") } footer: {
                 Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
             }
@@ -195,6 +200,7 @@ struct SettingsPageView: View {
             } footer: {
                 Text("Every option Madeira reads from madeira.cfg, by subsystem.")
             }
+        case .logs: LogsSection()
         case .credits: SettingsCreditsSection()
         }
     }
