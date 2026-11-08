@@ -6816,6 +6816,8 @@ static enum WMTPrimitiveType mad_prim(D3D12_PRIMITIVE_TOPOLOGY t) {
  * logged and its draws are skipped. madeira.cfg pso-lazy = 0 restores eager
  * creation. */
 static volatile LONG g_pso_lazy_built, g_pso_lazy_failed;
+static volatile LONG g_csb_queued, g_csb_built, g_csb_failed, g_csb_full, g_csb_waited, g_csb_inline;   /* madeira-duo cs-create-build */
+static volatile LONG64 g_csb_wait_t;
 static int mad_lzlib_restore(struct mad_pso *p);   /* madeira-bcd pso-lazy-libs */
 static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     if (p->rps || !p->lazy) return p->rps;
@@ -6844,9 +6846,19 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     return p->rps;
 }
 
-static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
+/* bg: a cs-create-build builder (mad_csb_built), not a dispatch. */
+static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
     if (p->cps || !p->lazy_cs) return p->cps;
-    AcquireSRWLockExclusive(&p->rlock);
+    if (p->async_q == 2 && !bg) {   /* madeira-duo cs-create-build: a builder may be compiling it; wait for that build */
+        if (!TryAcquireSRWLockExclusive(&p->rlock)) {
+            LONG64 tw = mad_qpc();
+            AcquireSRWLockExclusive(&p->rlock);
+            tw = mad_qpc() - tw;
+            InterlockedExchangeAdd64(&g_hz_cs_realize_t, tw); InterlockedIncrement(&g_hz_cs_realize_n);   /* hitch recorder: the dispatch did wait */
+            InterlockedIncrement(&g_csb_waited);
+            InterlockedExchangeAdd64(&g_csb_wait_t, tw);
+        }
+    } else AcquireSRWLockExclusive(&p->rlock);
     if (!p->cps && p->lazy_cs) {
         struct WMTComputePipelineInfo ci; obj_handle_t err = 0;
         memset(&ci, 0, sizeof ci);
@@ -6854,18 +6866,23 @@ static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
             LONG64 t0 = mad_qpc();   /* madeira-duo hitch recorder */
             ci.compute_function = p->vs_fn;
             p->cps = MTLDevice_newComputePipelineState(p->device_handle, &ci, &err);
-            InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n);
+            if (!bg) { InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n); }
+            else if (p->cps) InterlockedIncrement(&g_csb_built);
+            if (!bg && p->async_q == 2) InterlockedIncrement(&g_csb_inline);   /* queued, but its dispatch came first */
         }
         if (err) mad_log_nserror("compute pipeline", err);
         if (!p->cps) {
             LONG n = InterlockedIncrement(&g_pso_lazy_failed);
             p->lazy_cs = 0;   /* dispatches with it are skipped from now on */
-            if (n <= 8) d3d12_log("[madeira-d3d12] lazy compute pipeline failed at first dispatch (%s); its dispatches are skipped\n", p->vs_name);
+            if (bg) InterlockedIncrement(&g_csb_failed);
+            if (n <= 8) d3d12_log("[madeira-d3d12] lazy compute pipeline failed %s (%s); its dispatches are skipped\n",
+                                  bg ? "in its build at creation (cs-create-build)" : "at first dispatch", p->vs_name);
         } else InterlockedIncrement(&g_pso_lazy_built);
     }
     ReleaseSRWLockExclusive(&p->rlock);
     return p->cps;
 }
+static obj_handle_t mad_cpso_realize(struct mad_pso *p) { return mad_cpso_build(p, 0); }
 
 /* PIPELINES BUILT OFF THE RENDER THREAD (madeira.cfg pso-async, opt-in, default
  * 0). A lazy pipeline Metal has not compiled before takes 35-50 ms at its first
@@ -6894,6 +6911,7 @@ static HANDLE g_pa_sem;
 static volatile LONG g_pa_queued, g_pa_built, g_pa_failed, g_pa_inline, g_pa_skips;
 static ULONG STDMETHODCALLTYPE pso_Release(ID3D12PipelineState *T);
 static void mad_pcb_built(struct mad_pso *p);   /* madeira-duo pso-create-build */
+static void mad_csb_built(struct mad_pso *p);   /* madeira-duo cs-create-build */
 static int mad_pso_async_on(void) {
     if (g_pso_async < 0) {
         int on = mad_pso_lazy_on() && mad_cfg_int_pe("pso-async", 0) > 0;   /* madeira.cfg pso-async: 1 = a new render pipeline is built on a background thread and its draws are skipped until it is ready (no frame waits for the compiler); 0 = built at its first draw */
@@ -6926,7 +6944,8 @@ static DWORD WINAPI mad_pa_worker(void *arg) {
         ReleaseSRWLockExclusive(&g_pa_lock);
         if (!p) continue;
         pool = NSAutoreleasePool_alloc_init();
-        if (low) mad_pcb_built(p);   /* pso-create-build: counted on its own */
+        if (low && p->is_compute) mad_csb_built(p);   /* madeira-duo cs-create-build */
+        else if (low) mad_pcb_built(p);   /* pso-create-build: counted on its own */
         else if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pa_built);
         else InterlockedIncrement(&g_pa_failed);
         if (n == 1 || (n && !(n % 250)))
@@ -7203,6 +7222,62 @@ static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_ST
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_pcb_queued) == 1)
         d3d12_log("[madeira-d3d12] pso-create-build: first pipeline queued at creation\n");
+    return 1;
+}
+
+/* madeira-duo COMPUTE PIPELINES BUILT WHEN THE GAME CREATES THEM (madeira.cfg
+ * cs-create-build, opt-in, default 0). A lazy compute pipeline is built at its
+ * first dispatch, on the thread replaying the frame: a dispatch can produce data
+ * later passes read, so unlike a draw it can't be skipped while a builder works
+ * (pso-async is render-only). Each such build that misses Metal's caches holds
+ * the frame for hundreds of ms (PoE2 hitches over 250 ms on new maps). With the
+ * switch, a compute pipeline is queued at CreateComputePipelineState on the
+ * background builders' low-priority queue (the one pso-create-build uses; draws
+ * waiting for a pipeline still go first), and keeps its libraries for that build
+ * (pso-lazy-libs does not drop them; pso-warm's separate warm-up compile is not
+ * sent either). A dispatch that arrives while a builder compiles it waits for
+ * that build on the pipeline's lock instead of compiling it again; one that
+ * arrives before a builder took it builds it itself, as before, and the queued
+ * entry then finds it built. Not needing pso-async: the builder threads start on
+ * the first queued pipeline. A full queue builds at the first dispatch as before.
+ * Memory: every compute pipeline the game creates is built, not only the ones it
+ * dispatches. 0 (the default): built at the first dispatch, as before. */
+static int g_csb = -1;
+static int mad_csb_on(void) {
+    if (g_csb < 0) {
+        int on = mad_pso_lazy_on() && mad_cfg_int_pe("cs-create-build", 0) > 0;   /* madeira-duo: 1 = compute pipelines are built on the background builders when the game creates them; a first dispatch waits for that build instead of compiling; 0 = built at the first dispatch (as before) */
+        if (on) d3d12_log("[madeira-d3d12] cs-create-build = 1: compute pipelines are built in the background when the game creates them\n");
+        g_csb = on;
+    }
+    return g_csb;
+}
+static void mad_csb_built(struct mad_pso *p) {
+    LONG n, before = g_csb_built;
+    LARGE_INTEGER f;
+    if (!mad_cpso_build(p, 1) || g_csb_built == before) return;   /* failed, or a dispatch built it first */
+    n = g_csb_built;
+    if ((n == 1 || (n && !(n % 250))) && QueryPerformanceFrequency(&f) && f.QuadPart)
+        d3d12_log("[madeira-d3d12] cs-create-build: %ld compute pipelines built at creation (%ld failed, %ld queued, %ld not queued with the queue full); "
+                  "dispatches that waited for a build in progress %ld (%.1f ms in all), that built it first %ld\n", (long)n, (long)g_csb_failed,
+                  (long)g_csb_queued, (long)g_csb_full, (long)g_csb_waited, (double)g_csb_wait_t * 1000.0 / (double)f.QuadPart, (long)g_csb_inline);
+}
+/* At creation: 1 when the compute pipeline went to the low-priority queue. */
+static int mad_csb_queue(struct mad_pso *p) {
+    if (!mad_csb_on() || p->cps || !p->lazy_cs || InterlockedCompareExchange(&p->async_q, 2, 0)) return 0;
+    if (!mad_pa_start()) { InterlockedExchange(&p->async_q, 0); return 0; }
+    AcquireSRWLockExclusive(&g_pa_lock);
+    if (g_pcb_tail - g_pcb_head >= MAD_PCB_MAX) {
+        ReleaseSRWLockExclusive(&g_pa_lock);
+        InterlockedExchange(&p->async_q, 0);
+        InterlockedIncrement(&g_csb_full);
+        return 0;
+    }
+    InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
+    g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
+    ReleaseSRWLockExclusive(&g_pa_lock);
+    ReleaseSemaphore(g_pa_sem, 1, NULL);
+    if (InterlockedIncrement(&g_csb_queued) == 1)
+        d3d12_log("[madeira-d3d12] cs-create-build: first compute pipeline queued at creation\n");
     return 1;
 }
 
@@ -21108,12 +21183,14 @@ static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,
     if (!p->tg[1]) { p->tg[1] = 1; }
     if (!p->tg[2]) { p->tg[2] = 1; }
     if (mad_pso_lazy_on()) {   /* built at its first dispatch (mad_cpso_realize) */
+        int queued;
         p->lazy_cs = 1; p->device_handle = d->mtl_device;
         memset(&ci, 0, sizeof ci);   /* the descriptor mad_cpso_realize builds */
         ci.compute_function = p->vs_fn;
-        mad_pso_warm(p->device_handle, &ci, NULL, 2);   /* pso-warm */
+        queued = mad_csb_queue(p);   /* madeira-duo cs-create-build: a builder compiles it now */
+        if (!queued) mad_pso_warm(p->device_handle, &ci, NULL, 2);   /* pso-warm */
         hr = pso_QI((ID3D12PipelineState *)p, riid, out);
-        if (lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);   /* madeira-bcd pso-lazy-libs */
+        if (!queued && lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);   /* madeira-bcd pso-lazy-libs; a queued build reads them */
         pso_Release((ID3D12PipelineState *)p);
         return hr;
     }
