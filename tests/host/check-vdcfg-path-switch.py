@@ -49,7 +49,27 @@ check('if (!monitor->source && ios_vdcfg_lists_sourceless( ios_vdcfg_path_enable
 check('if (ret != STATUS_SUCCESS && ios_vdcfg_path_enabled())' in src
       and 'if (!memcmp( &adapter_name->header.adapterId, &virtual_luid, sizeof(virtual_luid) ))' in src,
       'adapter name: only on, only for the virtual LUID')
-check(src.count('ios_vdcfg_path_enabled()') == 4, 'the switch has four gates: the path and three device-info answers')
+check(src.count('ios_vdcfg_path_enabled()') == 5,
+      'the switch has five gates: the path, three device-info names and the preferred mode / colour answers')
+vdi = body('static NTSTATUS ios_vdcfg_virtual_device_info( DISPLAYCONFIG_DEVICE_INFO_HEADER *packet )')
+check('packet->type != DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE' in vdi
+      and 'packet->type != DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO' in vdi,
+      'preferred mode / colour: only those two packet types')
+check('list_head( &monitors ) == &virtual_monitor.entry && !virtual_monitor.source' in vdi
+      and 'packet->id == virtual_monitor.output_id' in vdi
+      and '!memcmp( &packet->adapterId, &virtual_luid, sizeof(virtual_luid) )' in vdi,
+      "preferred mode / colour: only the virtual monitor's target on the virtual adapter LUID")
+check('ios_virtual_enum_display_settings( ENUM_CURRENT_SETTINGS, &devmode, 0 )' in vdi
+      and 'preferred->width = devmode.dmPelsWidth;' in vdi and 'preferred->height = devmode.dmPelsHeight;' in vdi,
+      'preferred mode: the current virtual mode, the one the path carries (never 0x0)')
+check('if (!ours || !devmode.dmPelsWidth || !devmode.dmPelsHeight) return STATUS_UNSUCCESSFUL;' in vdi,
+      'preferred mode / colour: a zero-size mode is never answered')
+check('monitor->source' not in vdi, 'preferred mode / colour: the source-less monitor is never dereferenced')
+wrap = body('NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEADER *packet )\n{\n    NTSTATUS ret = display_config_get_device_info')
+check('if (ret != STATUS_SUCCESS && packet && packet->size >= sizeof(*packet) && ios_vdcfg_path_enabled())' in wrap,
+      'preferred mode / colour: only on, and only when the generic answer failed')
+check('"[vdcfg] MADEIRA_VDCFG_PATH=1: DisplayConfigGetDeviceInfo type=%d answered for the "' in wrap,
+      'preferred mode / colour: logged as [vdcfg]')
 check('"[vdcfg-mismatch] QueryDisplayConfig flags=%#x answered success with 0 paths 0 modes' in src
       and 'if (ret == ERROR_SUCCESS && !path_index && ios_vdcfg_sizes_paths)' in src,
       'off, the disagreement with the sizes call is logged as [vdcfg-mismatch]')

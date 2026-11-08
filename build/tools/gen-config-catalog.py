@@ -1315,7 +1315,8 @@ OVERLAY = {
                 "kind": "bool", "default": "0",
                 "note": "Default off: success with no path, as before. 1: QueryDisplayConfig returns the virtual monitor's one path "
                         "(source and target mode, the desktop size) and DisplayConfigGetDeviceInfo names its source, target and "
-                        "adapter, for a game that builds its fullscreen window from the paths."},
+                        "adapter and answers its preferred mode and colour info, for a game that builds its fullscreen window from "
+                        "the paths (Unity, e.g. REPLACED: white screen)."},
     "env.MADEIRA_REDELIV_CHILD_ONLY": {"category": "Exceptions & threads", "title": "A fault storm in a helper program ends only that program",
                 "kind": "bool", "default": "1",
                 "note": "Default on: when the fault-storm guard gives up on a thread of a program the session started (a "

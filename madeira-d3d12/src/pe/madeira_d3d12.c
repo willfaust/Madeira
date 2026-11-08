@@ -12288,6 +12288,31 @@ static const D3D12_RESOURCE_DESC *mad_desc_mips(const D3D12_RESOURCE_DESC *in, D
     return tmp;
 }
 
+/* bc-footprint: a block-compressed footprint is whole blocks. D3D12 answers a
+ * BC texture's footprint Width and Height rounded up to the 4x4 block, so a 2x2
+ * or 1x1 mip reports 4x4, and Unreal checks it ("Footprint.Width %
+ * Format.BlockSizeX == 0", Satisfactory's first BC upload after the logo). The
+ * copy that comes back with that footprint is cut to the level again in
+ * CopyTextureRegion (mad_bc_clip), because Metal refuses a copy that runs past
+ * the level. madeira.cfg / the game's config bc-footprint-align = 0 restores
+ * the texel size. */
+static int g_bc_fp_align = -1;
+static int mad_bc_footprint_align(void) {
+    if (g_bc_fp_align < 0) {
+        g_bc_fp_align = mad_cfg_int_pe("bc-footprint-align", 1) ? 1 : 0;   /* fix: BC footprints in whole 4x4 blocks, as D3D12 reports them (Satisfactory / Unreal "Footprint.Width % Format.BlockSizeX" assert); 0 = the mip's texel size */
+        d3d12_log("[madeira-d3d12] bc-footprint-align = %d (BC footprints %s)\n", g_bc_fp_align,
+                  g_bc_fp_align ? "in whole 4x4 blocks, as D3D12" : "in texels");
+    }
+    return g_bc_fp_align;
+}
+/* A copy into or out of a BC level may name the block-rounded footprint (or a
+ * box out to the block edge); keep only the part inside the level. */
+static void mad_bc_clip(UINT block, UINT mw, UINT mh, UINT x, UINT y, UINT *w, UINT *h) {
+    if (block <= 1) return;
+    if (x < mw && *w > mw - x) *w = mw - x;
+    if (y < mh && *h > mh - y) *h = mh - y;
+}
+
 /* The standard subresource layout: rows padded to 256 bytes, each subresource
  * starting on a 512-byte boundary. Both constants are the API's own. */
 static void STDMETHODCALLTYPE device_GetCopyableFootprints(ID3D12Device *This,
@@ -12319,6 +12344,10 @@ static void STDMETHODCALLTYPE device_GetCopyableFootprints(ID3D12Device *This,
         rows = (h + block - 1) / block;
         pitch = mad_align(rowbytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
         offset = mad_align(offset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (block > 1 && desc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER && mad_bc_footprint_align()) {
+            w = mad_align(w, block);   /* bc-footprint: whole blocks; rowbytes and rows already are */
+            h = mad_align(h, block);
+        }
         if (layouts) {
             layouts[i].Offset = offset;
             layouts[i].Footprint.Format = desc->Format;
@@ -20400,6 +20429,7 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
             c->u.bt.w = box->right - box->left; c->u.bt.h = box->bottom - box->top; c->u.bt.d = box->back - box->front;
         }
         c->u.bt.x = x; c->u.bt.y = y; c->u.bt.z = z;
+        mad_bc_clip(block, w, h, x, y, &c->u.bt.w, &c->u.bt.h);   /* bc-footprint */
         return;
     }
     if (s->texture && !d->texture) {           /* readback: texture -> buffer */
@@ -20421,6 +20451,7 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
             c->u.bt.rows = (fh + block - 1) / block;
             c->u.bt.off += (UINT64)z * c->u.bt.row * c->u.bt.rows + (UINT64)(y / block) * c->u.bt.row + (UINT64)(x / block) * bytes;
         }
+        mad_bc_clip(block, w, h, c->u.bt.x, c->u.bt.y, &c->u.bt.w, &c->u.bt.h);   /* bc-footprint */
         return;
     }
     if (s->texture && d->texture) {            /* texture -> texture */
