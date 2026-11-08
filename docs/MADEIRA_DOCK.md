@@ -164,8 +164,14 @@ arguments are not supported.
    C:\madeira-dock-installers.cmd & C:\windows\system32\dockhost.exe`: the
    installers first, then the host, in the same session.
 
-   madeira-bcd: such a start runs only the installers (`... cmd.exe /c call
-   C:\madeira-dock-installers.cmd`, `MADEIRA_DOCK_INSTALL_SEPARATE`). In one
+   A game whose own lines hold an address-space layout line
+   (`env.MADEIRA_RDR2_VA_HOLD`, `env.MADEIRA_SC_PA_POOLS`) instead runs only the
+   installers (`... cmd.exe /c call C:\madeira-dock-installers.cmd`); every other
+   game runs them and then starts, in one session and with no restart.
+   `MADEIRA_DOCK_INSTALL_SEPARATE` (the game's lines, else madeira.cfg) decides
+   when set: `1` always runs them alone, `0` never does.
+
+   madeira-bcd: why such a start runs only the installers. In one
    session, the installers' copies in the JIT pool left Red Dead Redemption 2
    too little room, and it stopped while loading (`[jit-pool] EXHAUSTED`). The
    session ends after the batch; the app runs one session per run, so Madeira
@@ -462,7 +468,7 @@ Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_INSTALL_SCM` | on | `0`: the batch records "services off" instead of starting the service manager (also read by the host's `--start-services`) |
 | `MADEIRA_DOCK_INSTALL_SERVER_SYNC` | on | `0`: a start that runs installers keeps madsync and leaves the service step out |
 | `MADEIRA_DOCK_INSTALL_REGISTRY` | on | Before each Dock start the app writes the "Registry" values of the install scripts in the game's folder, as Valve's client does when it installs a game (a launcher that reads its folder there offered to install the game). Missing values are added, a path that follows the install folder is corrected, any other value stays; per-language values follow the install's language. `0`: only the programs' records are written, as before 2026-11-02 |
-| `MADEIRA_DOCK_INSTALL_SEPARATE` | on | madeira-bcd. `0`: the host follows the installers in the same session |
+| `MADEIRA_DOCK_INSTALL_SEPARATE` | auto | unset: only a game whose own lines hold `env.MADEIRA_RDR2_VA_HOLD` or `env.MADEIRA_SC_PA_POOLS` runs its one-time installs in a session of their own (and starts after a restart); `1`: every game does; `0`: none does, the host follows the installers in the same session |
 | `MADEIRA_DOCK_INSTALL_LAYOUT` | on | madeira-bcd. `0`: a session of one-time installs keeps the game's `env.MADEIRA_SC_PA_POOLS` and `env.MADEIRA_RDR2_VA_HOLD` lines |
 | `MADEIRA_TIMER_FAIRNESS` | on | madeira-bcd, read by the wineserver. `0`: a WM_PAINT that is always pending keeps every timer of its thread waiting, as Windows' order says |
 | `MADEIRA_DOCK_RESET_CLEAN` | on | madeira-bcd. `0`: Reset only forgets the records; installed files stay |

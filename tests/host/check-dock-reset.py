@@ -61,7 +61,7 @@ project = (app.parent / 'Madeira.xcodeproj/project.pbxproj').read_text(encoding=
 catalog = (app / 'ConfigCatalog.generated.swift').read_text(encoding='utf-8')
 
 # ------------------------------------------------------------------ source checks
-for switch in ('MADEIRA_DOCK_RESET_CLEAN', 'MADEIRA_DOCK_INSTALL_SEPARATE', 'MADEIRA_DOCK_VULKAN_STANDIN',
+for switch in ('MADEIRA_DOCK_RESET_CLEAN', 'MADEIRA_DOCK_VULKAN_STANDIN',
                'MADEIRA_DOCK_INSTALL_LAYOUT'):
     check(f'flag("{switch}")' in installers, f'{switch} is read (default on, env.{switch} = 0 turns it off)')
     check(f'key: "env.{switch}"' in catalog, f'{switch} is in the config catalog')
@@ -93,7 +93,15 @@ check('others: MadeiraDock.games(drive: MadeiraDock.drive)' in content, 'the Doc
 check('Button("Reset and sign out of Rockstar", role: .destructive) { dock.setInstallRequest(appID, .resetSignOut) }' in view,
       'the Reset dialog offers sign-out')
 check('madeira-reset-backup' in view and 'madeira-reset-backup' in reset, 'the dialog names the backup folder')
-check('installsOnly = flag("MADEIRA_DOCK_INSTALL_SEPARATE")' in installers, 'only a start that writes a batch runs installs only')
+check('installsOnly = separateSession()' in installers, 'only a start that writes a batch runs installs only')
+# A session of its own only where it is needed: the setting (game's lines, then madeira.cfg, then the
+# environment) decides when set; unset, only a game whose own lines hold a layout key does.
+sep = installers[installers.index('nonisolated static func separateSession('):]
+sep = sep[:sep.index('\n    }\n')]
+check('let key = "env.MADEIRA_DOCK_INSTALL_SEPARATE"' in sep and 'game(key) ?? global(key)' in sep and
+      'return set != "0"' in sep and 'return installSessionDroppedKeys.contains { game($0) != nil }' in sep,
+      'MADEIRA_DOCK_INSTALL_SEPARATE: set wins; unset, only a game with an address-space layout line runs installs alone')
+check('key: "env.MADEIRA_DOCK_INSTALL_SEPARATE"' in catalog, 'MADEIRA_DOCK_INSTALL_SEPARATE is in the config catalog')
 check('host: !DockInstallers.installsOnly' in content, 'the session command line follows installsOnly')
 m = re.search(r'static func launchArguments\(width: Int, height: Int, installers: String\? = nil, host: Bool = true\) -> String \{(.*?)\n    \}', dock, re.S)
 check(m and 'guard host else { return "/desktop=madeira,\\(width)x\\(height) C:\\\\windows\\\\system32\\\\cmd.exe /c call \\(installers)" }' in m.group(1),
@@ -109,9 +117,17 @@ check('if allSucceeded { return "One-time installs completed successfully. Close
 check(re.search(r'if DockInstallers\.installsOnly, running, !offered, let finished = DockInstallers\.finishedAt,\s*'
                 r'Date\(\)\.timeIntervalSince\(finished\) >= 45 \{\s*offered = true', view) is not None,
       'a session an installer\'s program keeps open: the restart is offered 45 s after the installs (after a registry save)')
-check('restartHint: DockInstallers.installsOnly ? DockInstallers.closingWords : nil' in library and
+check('restartHint: DockInstallers.installsOnly\n' in library and
+      '? (model.installsRestartReady ? DockInstallers.closeWords : DockInstallers.closingWords) : nil)' in library and
       'if let restartHint { return' in screen,
       'the starting screen says the session closes (no restart before Wine has saved the registry)')
+# The starting screen's Close Madeira: 45 s after the batch, by its own poll, so it needs neither
+# the report watch nor the alert; both of the watch's restart paths set it too.
+check('MainActor.assumeIsolated { (DockInstallers.installsOnly, DockInstallers.finishedAt) }' in screen and
+      'if installsOnly, !model.installsRestartReady, let finished = installsFinished,' in screen and
+      'Date().timeIntervalSince(finished) >= 45' in screen and view.count('LibraryModel.shared.installsRestartReady = true') == 2 and
+      library.count('if model.installsRestartReady {') == 2 and 'installsRestartReady = false' in library,
+      'the starting screen offers Close Madeira 45 s after the installs (after a registry save)')
 check('restartWords' not in library and 'restartWords' not in screen, 'only the end of the session asks for the restart')
 check('nonisolated static let restartWords' in installers and 'nonisolated static let closingWords' in installers,
       'the restart and closing words can be read outside the main actor')

@@ -45,6 +45,13 @@ INT_READERS = {"madeira_cfg_int", "mad_cfg_int_pe"}
 # Titles, kinds and fixed choices for options with a dedicated Settings row.
 # "choices" are (value, label); the empty value means "remove the key".
 OVERLAY = {
+    # Read through DockInstallers.separateSession (a key string, not flag("...")), so the scan does not find it.
+    "env.MADEIRA_DOCK_INSTALL_SEPARATE": {"category": "Steam & Dock", "title": "", "kind": "bool", "default": "",
+                "sources": ["app/Madeira/DockInstallers.swift"],
+                "note": "unset: only a game whose own lines hold an address-space layout line (env.MADEIRA_RDR2_VA_HOLD, "
+                        "env.MADEIRA_SC_PA_POOLS) runs its one-time installs in a session of their own and starts after a "
+                        "restart; every other game starts right after them in the same session. 1: always a session of their "
+                        "own; 0: never"},
     # Madeira in the background (app/Madeira/BackgroundRun.swift, build/ntdll-unix/audio_null_ios.c).
     "background-run": {"category": "App & front end", "title": "Keep a game running in the background (minutes)",
                 "kind": "int", "default": "10", "sources": ["app/Madeira/BackgroundRun.swift"],

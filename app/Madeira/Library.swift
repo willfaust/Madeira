@@ -1659,6 +1659,10 @@ final class LibraryModel: ObservableObject {
     static var sessionsThisRun = 0
     static let restartMessage = L("Restart Madeira to start another game: swipe Madeira away in the app switcher, then open it again.")
     @Published var restartNotice: String? { didSet { if restartNotice != nil { preparing = nil } } }
+    /// A session of one-time installs (DockInstallers.installsOnly) has ended its batch and
+    /// its registry is on disk (MadeiraDockModel.watchReport): the starting screen shows Close
+    /// Madeira beside the live log, so the restart it asks for does not depend on the alert.
+    @Published var installsRestartReady = false
     /// CS_DEBUGGED is set but no debugger is attached (JIT was enabled outside
     /// Madeira): the text of the alert that offers Madeira's own Enable JIT.
     @Published var jitNotice: String? { didSet { if jitNotice != nil { preparing = nil } } }
@@ -1710,7 +1714,7 @@ final class LibraryModel: ObservableObject {
         wine_exit_status_reset()
         JITPoolMeter.reset(); smallPoolNoted = false; poolAutoChecked = false; poolAutoTitle = nil
         quitRequested = false
- quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
+ quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil; installsRestartReady = false
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
         launchPresent = madeira_frame_count(); launchStarted = Date(); launchSlow = false; launchLogs = entry.liveLogs
@@ -1881,6 +1885,12 @@ final class LibraryModel: ObservableObject {
         LibraryKeyboard.hide()
         LibraryController.shared.configure(enabled: enabled, ownsInput: true)
         menu = true
+    }
+    /// Close Madeira on the starting screen of a finished session of one-time installs: the
+    /// same exit as the Restart Madeira alert's Close Madeira (ContentView).
+    func closeForInstallsRestart() {
+        LogStore.shared.log("[session-once] closed by the user for a restart (one-time installs finished)")
+        exit(0)
     }
     func requestQuit() {
         LibraryKeyboard.hide()
@@ -5759,6 +5769,9 @@ struct LibraryHUD: View {
                     if dockStart.failure != nil {
                         launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
                     }
+                    if model.installsRestartReady {
+                        launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
+                    }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
                     }
@@ -5809,6 +5822,9 @@ struct LibraryHUD: View {
                 HStack(spacing: 12) {
                     if dockStart.failure != nil {
                         launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
+                    }
+                    if model.installsRestartReady {
+                        launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
                     }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
@@ -5912,7 +5928,8 @@ struct LibraryHUD: View {
             return DockStartStatus.text(MadeiraDock.pollReport().fields, installers: DockInstallers.script != nil,
                                         installerProgress: progress, installsFinished: DockInstallers.finishedAt != nil,
                                         waited: Date().timeIntervalSince(hostDue),
-                                        restartHint: DockInstallers.installsOnly ? DockInstallers.closingWords : nil)
+                                        restartHint: DockInstallers.installsOnly
+                                            ? (model.installsRestartReady ? DockInstallers.closeWords : DockInstallers.closingWords) : nil)
         }
     }
 
