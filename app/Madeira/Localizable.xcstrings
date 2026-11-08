@@ -4721,6 +4721,126 @@
         }
       }
     },
+    "Copied": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kopiert"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copiado"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "복사됨"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copiado"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Скопировано"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已复制"
+          }
+        }
+      }
+    },
+    "Copies this device, iOS version, Madeira version and the game's store in the format the Madeira Discord's game-compatibility posts use. Fill in Results before posting.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kopiert dieses Gerät, die iOS-Version, die Madeira-Version und den Store des Spiels im Format der game-compatibility-Beiträge im Madeira-Discord. Fülle vor dem Posten Results aus."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copia este dispositivo, la versión de iOS, la versión de Madeira y la tienda del juego en el formato de las publicaciones de game-compatibility del Discord de Madeira. Rellena Results antes de publicar."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 기기, iOS 버전, Madeira 버전, 게임 스토어를 Madeira Discord의 game-compatibility 게시물 형식으로 복사합니다. 게시하기 전에 Results를 채우세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copia este dispositivo, a versão do iOS, a versão do Madeira e a loja do jogo no formato das postagens de game-compatibility do Discord do Madeira. Preencha Results antes de postar."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Копирует устройство, версию iOS, версию Madeira и магазин игры в формате постов game-compatibility в Discord Madeira. Перед публикацией заполните Results."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按 Madeira Discord 中 game-compatibility 帖子的格式复制本设备、iOS 版本、Madeira 版本和游戏商店。发布前请填写 Results。"
+          }
+        }
+      }
+    },
+    "Copy Compat Report": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kompatibilitätsbericht kopieren"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copiar informe de compatibilidad"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "호환성 보고서 복사"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copiar relatório de compatibilidade"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Копировать отчёт о совместимости"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制兼容性报告"
+          }
+        }
+      }
+    },
     "Copy Home Screen shortcut link": {
       "localizations": {
         "de": {

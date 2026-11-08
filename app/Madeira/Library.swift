@@ -76,6 +76,50 @@ enum DeviceLoadDiagnostics {
     }
 }
 
+/// (compat-report) The report format pinned in the Madeira Discord's #game-compatibility forum
+/// (Device, iOS version, Madeira version, DRM (yes/no), Results), filled in for one game.
+/// Results stays empty for the player. The text is English on purpose: the server is English only.
+enum CompatReport {
+    /// The Copy Compat Report button on a game's Advanced page (copies the Discord report format). 0 hides it.
+    static let enabled = MadeiraConfig.flag("MADEIRA_COMPAT_REPORT")
+
+    /// The model identifier (iPad16,9, iPhone17,1), the same one the logs show.
+    static var device: String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafePointer(to: &info.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+    }
+
+    /// "Yes (Steam)" for a store with DRM, "No (GOG)" for a DRM-free one, "" when Madeira can't tell.
+    static func drm(_ entry: LibraryEntry) -> String {
+        if entry.steamAppID != nil { return "Yes (Steam)" }
+        if entry.epicAppName != nil { return "Yes (Epic Games)" }
+        if entry.eaOfferID != nil { return "Yes (EA app)" }
+        if entry.gogProductID != nil { return "No (GOG)" }
+        if entry.itchGameID != nil { return "No (itch.io)" }
+        return ""
+    }
+
+    static func text(for entry: LibraryEntry) -> String {
+        format(title: entry.title, device: device,
+               system: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
+               build: BuildStamp.text, drm: drm(entry))
+    }
+
+    static func format(title: String, device: String, system: String, build: String, drm: String) -> String {
+        """
+        \(title)
+        - Device: \(device)
+        - iOS version: \(system)
+        - Madeira version: \(build)
+        - DRM (yes/no): \(drm)
+        - Results:
+        """
+    }
+}
+
 /// Which build is installed, shown in light grey in the developer interface, and
 /// logged once at start ([build]). A build that
 /// writes `MadeiraBuild` into Info.plist (a round tag and build time) shows that;
@@ -4026,6 +4070,8 @@ struct LibraryDetail: View {
     /// (GameRecommendations.swift), and the question before Reset to Recommended.
     @State private var recommended: GameRecommendation?
     @State private var confirmReset = false
+    /// (compat-report) "Copied" on the button for 2 s after a tap.
+    @State private var compatCopied = false
     @State private var leaving = false
     @State private var error: String?
     @State private var copiedLink = false
@@ -4541,6 +4587,26 @@ struct LibraryDetail: View {
             }
         } header: { Text("Advanced") } footer: {
             Text("Per-game madeira.cfg lines; they override the global file.")
+        }
+        // (compat-report) Discord: a one-tap copy of #game-compatibility's report format. Here and not in
+        // Game details' last group, which stays short with Uninstall on its own. env.MADEIRA_COMPAT_REPORT = 0 hides it.
+        if CompatReport.enabled {
+            Section {
+                Button {
+                    UIPasteboard.general.string = CompatReport.text(for: entry)
+                    LogStore.shared.log("[compat-report] copied for \(entry.title)")
+                    compatCopied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { compatCopied = false }
+                } label: {
+                    if compatCopied {
+                        Label("Copied", systemImage: "checkmark")
+                    } else {
+                        Label("Copy Compat Report", systemImage: "doc.on.clipboard")
+                    }
+                }
+            } footer: {
+                Text("Copies this device, iOS version, Madeira version and the game's store in the format the Madeira Discord's game-compatibility posts use. Fill in Results before posting.")
+            }
         }
     }
 
