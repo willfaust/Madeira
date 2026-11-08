@@ -1027,6 +1027,9 @@ final class LibraryModel: ObservableObject {
     @Published var error: String? { didSet { if error != nil { preparing = nil } } }
     @Published var sessionMessage = ""
     private var smallPoolNoted = false
+    /// The session's JIT pool ran out and was checked (JITPoolAuto); the game whose config got the lines.
+    private var poolAutoChecked = false
+    private var poolAutoTitle: String?
     /// Quit game was asked for and the program is still running after `forceCloseAfter`
     /// seconds: a frozen program never handles Alt+F4, so the menu offers to close Madeira.
     @Published var forceCloseOffered = false
@@ -1705,7 +1708,7 @@ final class LibraryModel: ObservableObject {
     /// `dock`: the game a Madeira Dock start launches (DockStartScreen).
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
-        JITPoolMeter.reset(); smallPoolNoted = false
+        JITPoolMeter.reset(); smallPoolNoted = false; poolAutoChecked = false; poolAutoTitle = nil
         quitRequested = false
  quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
@@ -1781,6 +1784,14 @@ final class LibraryModel: ObservableObject {
             sessionMessage = words
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
                 if self?.sessionMessage == words { self?.sessionMessage = "" }
+            }
+        }
+        // The JIT pool ran out: a library game gets the bigger-pool lines for its next start.
+        if !poolAutoChecked, JITPoolMeter.current.exhausted > 0 {
+            poolAutoChecked = true
+            if let entry = activeEntry, entry.desktop != true, entries.contains(where: { $0.id == entry.id }),
+               JITPoolAuto.apply(windowsPath: entry.windowsPath, title: entry.title) {
+                poolAutoTitle = entry.title
             }
         }
         if wine_process_is_running() != 0 {
@@ -1907,7 +1918,9 @@ final class LibraryModel: ObservableObject {
     }
     private func finish() {
         if sawProcess, let next = steamRunRequest() { restartNotice = next }
+        else if let title = poolAutoTitle { error = JITPoolAuto.message(title) }
         else if sawProcess, let report = exitReport() { error = report }
+        poolAutoTitle = nil
         timer?.invalidate(); timer = nil
         saveCurrentProfile()
         controllerMode = nil

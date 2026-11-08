@@ -136,6 +136,12 @@ OVERLAY = {
                         "pool: reusable 3 seconds later, once no thread runs in them. Before, they stayed in use "
                         "until Madeira closed, and a game started after many such exits got 16 MB code buffers and "
                         "ran slowly. 0 keeps them in use, as before."},
+    "env.MADEIRA_JIT_POOL_AUTO": {"category": "Memory & JIT pool", "title": "Bigger JIT pool for a game that ran out",
+                "kind": "bool", "default": "1",
+                "note": "Default on. A library game whose session logs [jit-pool] EXHAUSTED gets pool-split = 1 and "
+                        "env.MADEIRA_X64_IMAGE_NOCOPY = 1 added to its own config (a key it already sets, to any value, "
+                        "stays as it is), and the alert after the session asks for Madeira to be reopened, since the pool "
+                        "is set up once per app run. 0: nothing is added. Read when the pool runs out."},
     "env.MADEIRA_X64_IMAGE_NOCOPY": {"category": "Memory & JIT pool", "title": "Pure-x64 images without a JIT-pool copy",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: an x64-only image (not ARM64EC hybrid, not a Wine builtin) in a 64-bit "
@@ -1290,8 +1296,14 @@ OVERLAY = {
                         "a second) or presenting makes no progress, and the 5-repeat guard counts per thread within 5 ms; for a "
                         "Unity title that throws managed exceptions through null-check traps while it keeps drawing. Read once "
                         "per session."},
+    "env.MADEIRA_VCRT_ARM64_AUTO": {"category": "Wine core (ntdll)", "title": "ARM64 Visual C++ marker for Unreal games", "kind": "bool", "default": "1",
+                "note": "Default on: a game with an Unreal Engine folder (Engine\\Binaries or Engine\\Extras) starts with "
+                        "env.MADEIRA_VCRT_ARM64_KEY = 1, so its bootstrap stops asking for the ARM64 Visual C++ redistributable "
+                        "(Satisfactory, Subnautica 2). A MADEIRA_VCRT_ARM64_KEY line in madeira.cfg or the game's config wins. "
+                        "0: only such a line sets it. Read at launch."},
     "env.MADEIRA_VCRT_ARM64_KEY": {"category": "Wine core (ntdll)", "title": "ARM64 Visual C++ runtime marker", "kind": "text", "default": "",
-                "note": "Default empty: nothing written. 1 (or a version such as 14.50.35717): the session has the ARM64 Visual "
+                "note": "Default empty: nothing written, except for an Unreal Engine game, which gets 1 automatically "
+                        "(env.MADEIRA_VCRT_ARM64_AUTO). 0 turns it off for a game. 1 (or a version such as 14.50.35717): the session has the ARM64 Visual "
                         "C++ 2015-2022 redistributable's Installed marker (volatile keys; one the prefix has is left alone), for "
                         "an Unreal bootstrap program that sees an ARM64 machine and stops asking for that redistributable "
                         "(exit 0x2329). Read at session start."},
