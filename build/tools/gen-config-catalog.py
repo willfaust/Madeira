@@ -59,6 +59,12 @@ OVERLAY = {
                         "finishes while you are away. Loading and other CPU work go on; drawing waits until Madeira is "
                         "back (background-pause). The game's sound is muted meanwhile. 0: iOS pauses the game within "
                         "seconds, as before. A game's own config can set it. [bg-run] lines in the log."},
+    # Apple Pencil as a mouse (app/Madeira/ContentView.swift, MetalBackedView).
+    "pencil-mouse": {"category": "App & front end", "title": "Apple Pencil as a mouse",
+                "kind": "bool", "default": "0", "sources": ["app/Madeira/ContentView.swift"],
+                "note": "1: the Apple Pencil acts as a mouse. Touching the screen is a left press and drag as before; "
+                        "hovering above it moves the pointer; squeezing an Apple Pencil Pro right-clicks where it is. "
+                        "Ignored in mouse-look (relative) mode. A game's own config can set it. [pencil] line in the log."},
     "background-gpu-gate": {"category": "App & front end", "title": "Hold GPU work in the background",
                 "kind": "bool", "default": "1", "sources": ["app/Madeira/BackgroundRun.swift"],
                 "note": "On by default. While Madeira is not the active app, any thread other than the app's main "

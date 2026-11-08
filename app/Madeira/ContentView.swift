@@ -303,6 +303,7 @@ final class MetalBackedView: UIView {
             }
             v = s.superview
         }
+        installPencilMouse()
         let host = MetalHostView.shared
         if host.superview !== w {
             host.removeFromSuperview()
@@ -418,6 +419,72 @@ final class MetalBackedView: UIView {
         let (x, y) = mapPoint(p)
         postSurfacePointer(x, y, down | F_ABS)
         postSurfacePointer(x, y, up | F_ABS)
+    }
+
+    // ==================================================================
+    // Apple Pencil as a mouse (madeira.cfg or a game's own config:
+    // `pencil-mouse = 1`). Off by default.
+    //   Pencil touching the glass — already a left press/drag/release through
+    //                               the touch paths above, unchanged
+    //   Pencil hovering above it  — moves the pointer, no button pressed
+    //   Pencil Pro squeeze        — right click where the Pencil is
+    // A hovering Pencil is told apart from a mouse or trackpad by its height
+    // (UIHoverGestureRecognizer.zOffset > 0), the same test HardwareInput's
+    // pointer hover uses to ignore it. Skipped in mouse-look (relative) mode,
+    // where the pointer position is not what the program reads.
+    // ==================================================================
+    private var pencilMouseOn = false
+    private var pencilHover: UIHoverGestureRecognizer?
+    private var pencilInteraction: UIPencilInteraction?
+    private var pencilLastPoint: CGPoint?
+
+    /// Read at every attach, so a game's own `pencil-mouse` line applies to that game.
+    private static func pencilMouseWanted() -> Bool {
+        let v = MadeiraConfig.gameValue("pencil-mouse") ?? MadeiraConfig.get("pencil-mouse")
+        return ["1", "on", "true", "yes"].contains(v ?? "")
+    }
+
+    private func installPencilMouse() {
+        pencilMouseOn = Self.pencilMouseWanted()
+        if pencilHover == nil {
+            let hover = UIHoverGestureRecognizer(target: self, action: #selector(pencilHovered(_:)))
+            addGestureRecognizer(hover)
+            pencilHover = hover
+            let interaction = UIPencilInteraction()
+            interaction.delegate = self
+            addInteraction(interaction)
+            pencilInteraction = interaction
+        }
+        if pencilMouseOn {
+            LogStore.shared.log("[pencil] the Apple Pencil is a mouse (hover moves the pointer, squeeze: right click)")
+        }
+    }
+
+    @objc private func pencilHovered(_ g: UIHoverGestureRecognizer) {
+        guard pencilMouseOn, !InputSettings.shared.relative else { return }
+        // Pencil only: mouse and trackpad hover have no height.
+        guard #available(iOS 16.1, *), g.zOffset > 0 else { return }
+        guard g.state == .began || g.state == .changed else { return }
+        let p = g.location(in: self)
+        pencilLastPoint = p
+        movePencilPointer(to: p)
+    }
+
+    private func movePencilPointer(to p: CGPoint) {
+        let (x, y) = mapPoint(p)
+        if touchPointerMode { winios_cursor_move(x, y) }   // the drawn cursor follows the Pencil
+        if desktopMode {
+            postPointer(F_MOVE | F_ABS)                     // mapPoint left the cursor at (x, y)
+        } else {
+            postSurfacePointer(x, y, F_MOVE | F_ABS)
+        }
+    }
+
+    fileprivate func pencilSqueezed(at hover: CGPoint?) {
+        guard pencilMouseOn, !InputSettings.shared.relative,
+              let p = hover ?? pencilLastPoint else { return }
+        pencilLastPoint = p
+        tmAbsoluteClick(down: F_RDOWN, up: F_RUP, at: p)
     }
 
     private func touchModeBegan(_ touches: Set<UITouch>) {
@@ -817,6 +884,15 @@ final class MetalBackedView: UIView {
         if dragActive { postPointer(F_LUP); dragActive = false }
         dragTouch = nil
         twoFingerActive = false
+    }
+}
+
+/// Apple Pencil Pro squeeze (see "Apple Pencil as a mouse" in MetalBackedView).
+extension MetalBackedView: UIPencilInteractionDelegate {
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        // One right click per squeeze, on release.
+        guard squeeze.phase == .ended else { return }
+        pencilSqueezed(at: squeeze.hoverPose?.location)
     }
 }
 
@@ -4364,8 +4440,25 @@ struct TouchControlsOverlay: View {
     }
 
     /// The dismissal gesture must never take a control's drag on iOS 26.
+    ///
+    /// Nor a tap meant for the top bar or the open panel: on iOS 26 this tap
+    /// recognises together with a button drawn over it, so the bar's "+" added a
+    /// control and the same tap selected nothing again (no panel opened), and the
+    /// panel's own options lost taps to it. Only Done seemed to work, because
+    /// clearing the selection is what Done does anyway. The bar's strip (the
+    /// same 68 pt hitsInteractive gives it) and the panel are left out.
     private func editorCanvas(_ screen: CGSize) -> Path {
         var area = Path(CGRect(origin: .zero, size: screen))
+        area = area.subtracting(Path(CGRect(x: 0, y: 0, width: screen.width, height: 68)))
+        // The open panel's place comes from the same arithmetic that places it,
+        // not from a measured frame: publishing a measured frame back into the
+        // model re-rendered the whole overlay from inside its own layout.
+        if let i = m.index(of: m.selected) {
+            area = area.subtracting(Path(MappingPanel.frame(control: m.controls[i], screen: screen)
+                .insetBy(dx: -4, dy: -4)))
+        } else if GestureZonesModel.enabled, let i = zones.index(of: zones.selected) {
+            area = area.subtracting(Path(GestureZonePanel.column(zone: zones.zones[i], screen: screen)))
+        }
         for control in m.controls {
             let size = TouchControlsModel.size(control)
             let frame = CGRect(x: CGFloat(control.nx) * screen.width - size.width / 2,
@@ -4613,6 +4706,11 @@ struct TouchControlButton: View {
     @State private var dragBase: CGPoint?
     @State private var stickDir: Int = -1
     @State private var padVector = CGSize.zero
+    /// When the current press went down, and the action whose release is being
+    /// held back to the minimum hold (TouchControlButton.minimumHold).
+    @State private var downAt: CFTimeInterval = 0
+    @State private var heldAction: ControlAction?
+    @State private var holdToken = 0
 
     private var solid: Bool { TouchControlStyle.isSolid(style) }
     private var diameter: CGFloat { TouchControlsModel.diameter(control) }
@@ -4746,7 +4844,10 @@ struct TouchControlButton: View {
                 }
             }
         }
-        .onDisappear { if control.action.isPad { padVector = .zero; isDown = false } }
+        .onDisappear {
+            if control.action.isPad { padVector = .zero; isDown = false }
+            releaseHeldNow()             // never leave a key down behind a removed control
+        }
         .onChange(of: m.editing) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
         .onChange(of: screen) { _, _ in if control.action.isPad { padVector = .zero; isDown = false } }
         .onChange(of: control.action) { old, new in
@@ -4834,17 +4935,34 @@ struct TouchControlButton: View {
 
     /// Haptic on the DOWN edge only — a held movement key would otherwise buzz
     /// continuously for as long as you walk.
+    ///
+    /// A key or mouse button stays down for at least `minimumHold`. A quick tap
+    /// otherwise put its press and its release into the same input drain, and a
+    /// game that reads key state once a frame (GetAsyncKeyState, DirectInput's
+    /// device state, many engines' input polling) never saw the key down: the tap
+    /// buzzed but did nothing, and only a long hold registered (0.2.0 reports).
     private func press(_ down: Bool) {
         if down && TouchControlsModel.shared.hapticsEnabled {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
         switch control.action {
-        case .key(let vk):
-            winios_post_key(vk, down ? 1 : 0)
-        case .mouseLeft:
-            winios_pointer(0, 0, down ? 0x0002 : 0x0004, 0)   // LEFTDOWN / LEFTUP
-        case .mouseRight:
-            winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0)   // RIGHTDOWN / RIGHTUP
+        case .key, .mouseLeft, .mouseRight:
+            if down {
+                releaseHeldNow()         // a new tap while the last one is held back: release it first
+                downAt = CACurrentMediaTime()
+                send(control.action, down: true)
+                return
+            }
+            let left = Self.minimumHold - (CACurrentMediaTime() - downAt)
+            guard left > 0 else { send(control.action, down: false); return }
+            let token = holdToken &+ 1
+            holdToken = token; heldAction = control.action
+            DispatchQueue.main.asyncAfter(deadline: .now() + left) {
+                // A newer press (or a removed control) has already sent this release.
+                guard holdToken == token, let action = heldAction else { return }
+                heldAction = nil
+                send(action, down: false)
+            }
         case .keyboardToggle:
             if down { MetalBackedView.toggleKeyboard() }
         case .none, .joystickWASD, .joystickArrows:
@@ -4852,6 +4970,41 @@ struct TouchControlButton: View {
         case .pad:
             break     // TouchPadSurface owns pad presses and cancellation.
         }
+    }
+
+    private func send(_ action: ControlAction, down: Bool) {
+        switch action {
+        case .key(let vk):
+            winios_post_key(vk, down ? 1 : 0)
+        case .mouseLeft:
+            winios_pointer(0, 0, down ? 0x0002 : 0x0004, 0)   // LEFTDOWN / LEFTUP
+        case .mouseRight:
+            winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0)   // RIGHTDOWN / RIGHTUP
+        default:
+            break
+        }
+    }
+
+    /// Sends a release that is being held back, at once; the delayed one then
+    /// finds its token stale and does nothing.
+    private func releaseHeldNow() {
+        guard let action = heldAction else { return }
+        heldAction = nil
+        holdToken &+= 1
+        send(action, down: false)
+    }
+
+    /// The shortest press a touch key or mouse button sends:
+    /// `env.MADEIRA_TOUCH_KEY_MIN_HOLD_MS` in milliseconds (0 to 500; a game's
+    /// own config can set it), 60 ms by default, about two frames at 30 fps.
+    /// 0: a release is sent the moment the finger lifts, as before. Returned in
+    /// seconds. The session's environment comes first: it already holds
+    /// madeira.cfg's value with the game's own line exported over it.
+    static var minimumHold: Double {
+        let raw = getenv("MADEIRA_TOUCH_KEY_MIN_HOLD_MS").map { String(cString: $0) }
+            ?? MadeiraConfig.get("env.MADEIRA_TOUCH_KEY_MIN_HOLD_MS")
+        let ms = raw.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? 60
+        return Double(min(max(ms, 0), 500)) / 1000
     }
 }
 
@@ -4918,12 +5071,21 @@ struct MappingPanel: View {
         .background(GlassShape())
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18), lineWidth: 1))
+        // Panel gaps must not dismiss the selection beneath them: the editor's
+        // dismissal area leaves the panel out (MappingPanel.frame). No tap gesture
+        // of its own here; on iOS 26 one took taps from the panel's buttons.
         .contentShape(Rectangle())
-        .onTapGesture { } // Panel gaps must not dismiss the selection beneath them.
         .position(layout.center)
     }
 
-    private struct Placement { var center: CGPoint; var size: CGSize }
+    struct Placement { var center: CGPoint; var size: CGSize }
+
+    /// Where the panel for `control` sits at rest, for the editor's dismissal area.
+    static func frame(control: TouchControl, screen: CGSize) -> CGRect {
+        let p = placement(control: control, screen: screen, radius: TouchControlsModel.diameter(control) / 2)
+        return CGRect(x: p.center.x - p.size.width / 2, y: p.center.y - p.size.height / 2,
+                      width: p.size.width, height: p.size.height)
+    }
 
     /// ml646: the panel must NEVER sit under the control it is editing.
     ///
@@ -4937,9 +5099,13 @@ struct MappingPanel: View {
     /// then always safe — below/above are separated vertically, so no horizontal
     /// clamp can reintroduce an overlap, and vice versa.
     private var layout: Placement {
+        Self.placement(control: control, screen: screen,
+                       radius: (resizeDiameter ?? TouchControlsModel.diameter(control)) / 2)
+    }
+
+    static func placement(control: TouchControl, screen: CGSize, radius r: CGFloat) -> Placement {
         let cx = CGFloat(control.nx) * screen.width
         let cy = CGFloat(control.ny) * screen.height
-        let r  = (resizeDiameter ?? TouchControlsModel.diameter(control)) / 2
         let gap: CGFloat = 14, edge: CGFloat = 8
 
         for size in [CGSize(width: 340, height: 236),

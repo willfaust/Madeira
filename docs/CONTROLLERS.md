@@ -381,6 +381,7 @@ user sees are opt-in (only `1` enables); the others are on unless set to `0`:
 | --- | --- | --- |
 | `MADEIRA_CONTROL_PRESETS` | on | `0`: no layout menu, no write-back |
 | `MADEIRA_CONTROLS_EDITOR_DONE` | on | `0`: the checkmark and show/hide glyph while editing |
+| `MADEIRA_TOUCH_KEY_MIN_HOLD_MS` | 60 | The shortest press (ms, 0 to 500) an on-screen key or mouse button sends, so a game that reads key state once a frame sees a quick tap; `0`: release the moment the finger lifts. A game's own config can set it |
 | `MADEIRA_CONTROLS_XBOX_DEFAULT` | **off** | `1`: a user with no controls file gets the built-in once |
 | `MADEIRA_PAD_EARLY_SLOT` | **off** | `1`: player 1 is reserved at session start (see above) |
 | `MADEIRA_PAD_MODE` | XInput | `hid` / `dualsense` / `generic`: player 1 as a HID controller (see above) |
