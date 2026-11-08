@@ -52,6 +52,13 @@ let entitled = parse("[steam-host] ml1830 session-requested-app-entitled=1\n[ste
 assert(entitled.fields["session-requested-app-entitled"] == "1" && entitled.fields["session-subscription-count"] == "12")
 assert(parse("[steam-host] ml1830 session-authenticated-online=1\n[steam-host] ml1830 probe-result=34\n").failure!.contains("did not confirm this game's license in time"))
 assert(parse("[steam-host] ml1830 probe-result=34\n").failure!.contains("did not finish signing in"))
+// The host crashed (dock patch 0004): the code is shown as hex, and a crash after sign-in names the license.
+let crashed = parse("[steam-host] ml1830 host-crash-report=1\n[steam-host] ml1830 session-authenticated-online=1\n[steam-host] ml1830 host-unhandled-exception=-1073741819\n[steam-host] ml1830 probe-result=60\n")
+assert(crashed.result == 60 && crashed.fields["host-crash-report"] == "1")
+assert(crashed.failure!.contains("crashed after signing in") && crashed.failure!.contains("0xc0000005"))
+let crashedEarly = parse("[steam-host] ml1830 host-unhandled-exception=-1073741819\n[steam-host] ml1830 probe-result=60\n").failure!
+assert(crashedEarly.contains("crashed (exception 0xc0000005) before the game started") && !crashedEarly.contains("license"))
+assert(parse("[steam-host] ml1830 probe-result=60\n").failure!.contains("crashed before the game started"))
 // Offline start (ml2016): Valve's client decides; each refusal has its own words.
 let offline = parse("[steam-host] ml2016 session-offline-abi=1\n[steam-host] ml2016 session-offline-requested=1\n[steam-host] ml2016 session-offline-can=2\n[steam-host] ml1830 probe-result=50\n")
 assert(offline.fields["session-offline-can"] == "2" && offline.failure!.contains("nothing saved") && offline.failure!.contains("once while online"))

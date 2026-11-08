@@ -1,0 +1,76 @@
+diff --git a/src/main.c b/src/main.c
+index 6f04ab6..fb4a65f 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -44,12 +44,58 @@ static void event(const char *stage, int32_t value)
+     }
+ }
+ 
++/* Madeira: a crash on a thread of Valve's client, or of a DLL it loads, ends
++ * this process before main() writes probe-result. The launcher then waits for
++ * a game that never starts ("Waiting for Steam to confirm this game's
++ * license" with no end). This filter writes the exception code and result 60
++ * first, then hands the exception on unchanged to the filter it replaced
++ * (Valve's client installs its own, which ends the process). Valve's client
++ * may install its filter after this one, so a watcher thread puts this one
++ * back in front, keeping the client's as the next in line. Numbers only.
++ * MADEIRA_DOCK_CRASH_REPORT=0 turns it off. */
++#define SH_HOST_CRASHED 60
++static LPTOP_LEVEL_EXCEPTION_FILTER volatile next_filter;
++static volatile LONG crash_reported;
++
++static LONG WINAPI host_crash_filter(EXCEPTION_POINTERS *info)
++{
++    /* Once only: a client filter that calls back into this one stops here. */
++    if (InterlockedExchange(&crash_reported, 1)) return EXCEPTION_CONTINUE_SEARCH;
++    DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
++    event("host-unhandled-exception", (int32_t)code);
++    event("probe-result", SH_HOST_CRASHED);
++    LPTOP_LEVEL_EXCEPTION_FILTER next = next_filter;
++    return next ? next(info) : EXCEPTION_CONTINUE_SEARCH;
++}
++
++static void front_crash_filter(void)
++{
++    LPTOP_LEVEL_EXCEPTION_FILTER current = SetUnhandledExceptionFilter(host_crash_filter);
++    if (current && current != host_crash_filter) next_filter = current;
++}
++
++static DWORD WINAPI crash_filter_watch(void *unused)
++{
++    (void)unused;
++    for (;;) {
++        Sleep(250);
++        front_crash_filter();
++    }
++    return 0;
++}
++
+ static bool enabled(const wchar_t *name)
+ {
+     wchar_t value[4];
+     return GetEnvironmentVariableW(name, value, 4) == 1 && value[0] == L'1';
+ }
+ 
++static bool wide_off(const wchar_t *name)
++{
++    wchar_t value[4];
++    return GetEnvironmentVariableW(name, value, 4) == 1 && value[0] == L'0';
++}
++
+ static bool client_directory(wchar_t *directory)
+ {
+     DWORD count = GetEnvironmentVariableW(L"MADEIRA_STEAM_HOST_CLIENT_DIR", directory, PATH_CAP);
+@@ -246,6 +292,12 @@ int main(int argc, char **argv)
+     if (!log_length) wcscpy(path, L"C:\\madeira-steamhost-probe.txt");
+     if (log_length < PATH_CAP) report = _wfopen(path, L"w");
+     event("probe-start-bits", (int32_t)(sizeof(void *) * 8));
++    if (!wide_off(L"MADEIRA_DOCK_CRASH_REPORT")) {
++        front_crash_filter();
++        HANDLE watch = CreateThread(NULL, 0, crash_filter_watch, NULL, 0, NULL);
++        event("host-crash-report", watch != NULL);
++        if (watch) CloseHandle(watch);
++    }
+     mutex = CreateMutexW(NULL, FALSE, L"Local\\MadeiraSteamHostProbe");
+     if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+         event("another-probe-or-mutex-error", 1);

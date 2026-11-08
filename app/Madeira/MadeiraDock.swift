@@ -255,6 +255,16 @@ enum MadeiraDock {
                 return "The game's launch arguments are invalid or too long. Edit them in Game details and try again."
             }
             if result == 35 { return "Steam did not confirm a license for this game on the signed-in account." }
+            // The host crashed (build/dock-patches/0004): usually a DLL that Valve's
+            // client loaded on one of its own threads. Without this report the
+            // starting screen waited for a game that could never start.
+            if result == 60 {
+                let code = fields["host-unhandled-exception"].flatMap(Int32.init)
+                    .map { " (exception 0x" + String(UInt32(bitPattern: $0), radix: 16) + ")" } ?? ""
+                return fields["session-authenticated-online"] == "1"
+                    ? "Madeira Dock stopped: Steam's client crashed after signing in\(code), before it confirmed this game's license. Export the log and try again."
+                    : "Madeira Dock stopped: Steam's client crashed\(code) before the game started. Export the log and try again."
+            }
             // Offline start (madeira-dock docs/OFFLINE.md): Valve's client decides.
             if result == 50 {
                 return fields["session-offline-abi"] == "0"
@@ -347,7 +357,7 @@ enum MadeiraDock {
         "ceg-finished-jobs", "ceg-result", "ceg-already-prepared", "ceg-disabled", "ceg-unsupported-client",
         "ceg-scm", "ceg-scm-started", "ceg-scm-error", "ceg-service-registered", "ceg-service-install", "ceg-service-start", "ceg-service-start-retry", "ceg-service-stop", "ceg-scm-stopped",
         "game-scm", "game-scm-services", "game-scm-timeout", "launch-keep-alive", "launch-keep-alive-held",
-        "shutdown-begin", "shutdown-complete", "probe-result"]
+        "shutdown-begin", "shutdown-complete", "host-crash-report", "host-unhandled-exception", "probe-result"]
     /// The host's report rounds (madeira-dock src/main.c).
     static let reportRounds: Set<String> = ["ml1820", "ml1830", "ml1860", "ml1870", "ml1970", "ml1990", "ml2000", "ml2011", "ml2015", "ml2016", "ml2020"]
 

@@ -452,6 +452,7 @@ Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_IMAGE_RETIRE` | on | `0`: a Dock launch does not turn on the engine's `MADEIRA_JIT_IMAGE_RETIRE` (an explicit `env.MADEIRA_JIT_IMAGE_RETIRE` still wins) |
 | `MADEIRA_DOCK_IMAGE_MAP_GUARD` | on | `0`: a Dock launch does not turn on Wine's `MADEIRA_IMAGE_MAP_GUARD` |
 | `MADEIRA_DOCK_CLIENT_202601` | on | read by the host: `0` disables its January 2026 client adapter |
+| `MADEIRA_DOCK_CRASH_REPORT` | on | read by the host (build/dock-patches/0004): `0` does not report a crash of the host (`host-unhandled-exception`, result 60) before the process ends |
 | `MADEIRA_DOCK_HANDOFF_DIAGNOSTICS` | on | read by the host: `0` drops its numeric transfer diagnostics |
 | `MADEIRA_DOCK_SESSION_WAIT` | on | read by the host: `0` fails a launch refused with 35 (another session playing) at once instead of asking again for up to three minutes |
 | `MADEIRA_DOCK_OFFLINE_LOGON` | on | `0`: no offline starts. The app never asks for one and hides the Game details mark; read by the host too, which then does not look up Valve's offline-logon methods |
