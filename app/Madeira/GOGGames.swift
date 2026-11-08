@@ -89,7 +89,7 @@ struct GOGGamesSection: View {
                 }
                 if gog.signedIn && !others.isEmpty {
                     Button {
-                        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { showUninstalled.toggle() }
+                        var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
                     } label: {
                         HStack {
                             Text("Not installed").font(.headline)
@@ -180,6 +180,9 @@ struct GOGGameArtwork: View {
     var body: some View {
         if let entry = library.entries.first(where: { $0.gogProductID == item.id }), entry.coverFile != nil {
             LibraryArtwork(entry: entry)
+        } else if LibraryCachedArtwork.enabled {
+            // Downsampled, kept in memory and on disk (LibraryCoverCache.swift).
+            LibraryCachedArtwork(source: .store("gog", "\(item.id)", item.cover))
         } else {
             GeometryReader { geometry in
                 ZStack {

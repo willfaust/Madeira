@@ -586,7 +586,7 @@ struct SteamGamesSection: View {
                     }
                     if part != .installed && signedIn && !groups.notInstalled.isEmpty {
                         Button {
-                            withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { showUninstalled.toggle() }
+                            var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
                         } label: {
                             HStack {
                                 Text("Not installed").font(.headline)
@@ -682,6 +682,21 @@ struct SteamGameArtwork: View {
     @State private var index = 0
 
     var body: some View {
+        if LibraryCachedArtwork.enabled {
+            // The cache's copy, the blur spot baked in for a not-downloaded game as the zoomable grid draws it (LibraryCoverCache.swift).
+            LibraryCachedArtwork(source: cachedSource, glyph: notDownloaded ? nil : "gamecontroller.fill")
+        } else {
+            asyncArtwork
+        }
+    }
+
+    private var cachedSource: LibraryCoverCache.Source {
+        var source = LibraryCoverCache.Source.steam(appID)
+        source.spot = notDownloaded
+        return source
+    }
+
+    @ViewBuilder private var asyncArtwork: some View {
         let urls = SteamGamesRules.artwork(appID: appID) { steam.game($0) }
         GeometryReader { geometry in
             ZStack {

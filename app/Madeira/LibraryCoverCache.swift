@@ -193,6 +193,26 @@ final class LibraryCoverCache {
         for key in keys { if let job = loading[key], job.lane == .ahead, job.cancelable { cancel(job) } }
     }
 
+    /// A SwiftUI card scrolled away before its cover landed (LibraryCachedArtwork): its request stops holding a place ahead
+    /// of the cards now on screen. A view's requests are high priority and were never dropped, so a fast scroll through a big
+    /// library queued every card it passed, the cards it stopped on waited behind them, and the backlog of decodes and
+    /// downloads made the page lag (Cameron, Wave 7). A load already decoding, or one a zoom asked to reconsider, finishes.
+    /// (cover-withdraw)
+    func withdraw(_ source: Source) {
+        guard let job = loading[source.key], job.lane == .demand, !job.reconsider, !job.decodingDownload,
+              !(job.op?.isExecuting ?? false) else { return }
+        job.demanded = false
+        if job.cancelable { cancel(job) }
+    }
+
+    /// The SwiftUI cards (LibraryCachedArtwork) keep about `cards` covers of `pixelWidth` resident, so scrolling back finds
+    /// them in memory instead of decoding them again; never below what the zoomable grid set, never above the ceiling.
+    func keepAtLeast(cards: Int, pixelWidth: Int) {
+        let bucket = Self.bucket(pixelWidth)
+        let bytes = min(Self.budgetCeiling, bucket * bucket * 3 / 2 * 4 * cards)
+        if bytes > budgetBytes { setBudget(bytes) }
+    }
+
     func dropIdle() {
         prefetchQueue = []
         let idle = loading.values.filter { $0.lane == .demand && $0.priority == .veryLow && $0.cancelable }
@@ -627,5 +647,65 @@ extension LibraryCoverCache.Source {
             modificationTimes[leaf] = time
         }
         return (url, "file-\(leaf)-\(Int(time * 1000))")
+    }
+}
+
+// MARK: - SwiftUI cards
+
+/// A cover for the SwiftUI cards (the list layouts, the original grid, and the GOG, itch.io, Epic Games and EA sections, which
+/// the zoomable grid also draws in SwiftUI). They used AsyncImage: every card decoded the full-size image on the main thread,
+/// nothing was kept on disk, and a card that scrolled away fetched its cover again when it came back, so a big library
+/// stuttered and covers kept popping in. This asks LibraryCoverCache instead: a downsampled bitmap at the card's pixel width
+/// (decoded off the main thread), resident in memory under its budget and kept on disk, and the best size already resident
+/// while the exact one loads. env.MADEIRA_LIBRARY_COVER_CACHE = 0 keeps AsyncImage.
+struct LibraryCachedArtwork: View {
+    let source: LibraryCoverCache.Source?
+    /// The glyph while there is no cover (nil: none, as for a not-downloaded Steam game, whose card draws its own).
+    var glyph: String? = "gamecontroller.fill"
+    @Environment(\.displayScale) private var scale
+    @State private var image: UIImage?
+    @State private var shownKey: String?
+
+    static let enabled = MadeiraConfig.flag("MADEIRA_LIBRARY_COVER_CACHE")
+
+    var body: some View {
+        GeometryReader { geometry in
+            let pixels = Int((geometry.size.width * scale).rounded(.up))
+            ZStack {
+                Color(uiColor: .secondarySystemFill)
+                if let image, shownKey == source?.variant {
+                    Image(uiImage: image).resizable().scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                } else if let glyph {
+                    Image(systemName: glyph).font(.largeTitle).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            .onAppear { refresh(pixels) }
+            // Off screen before its cover landed: the request gives way to the cards now on screen (cover-withdraw).
+            .onDisappear { if let source, shownKey != source.variant { LibraryCoverCache.shared.withdraw(source) } }
+            .onChange(of: pixels) { _, now in refresh(now) }
+            .onChange(of: source?.variant) { _, _ in refresh(pixels) }
+            .onReceive(LibraryCoverCache.shared.updates) { key in if key == source?.variant { refresh(pixels) } }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func refresh(_ pixels: Int) {
+        guard let source, pixels > 0 else { image = nil; shownKey = nil; return }
+        LibraryCoverCache.shared.keepAtLeast(cards: 150, pixelWidth: pixels)
+        if let found = LibraryCoverCache.shared.image(for: source, pixelWidth: pixels) {
+            image = found.image; shownKey = source.variant
+        } else if shownKey != source.variant {
+            image = nil; shownKey = nil
+        }
+    }
+}
+
+extension LibraryCoverCache.Source {
+    /// A store's own cover (GOG, itch.io, Epic Games, EA), keyed by store and game.
+    static func store(_ store: String, _ id: String, _ url: URL?) -> Self? {
+        guard let url else { return nil }
+        return Self(key: "\(store)-\(id)", urls: [url])
     }
 }

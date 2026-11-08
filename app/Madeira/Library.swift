@@ -2477,6 +2477,15 @@ struct LibraryArtwork: View {
     let entry: LibraryEntry
     var backdrop = false
     var body: some View {
+        // A card's cover from the cache (LibraryCoverCache.swift): the cover file was decoded at full size on the main thread
+        // every time the card drew. The backdrop (Game details) stays as it was.
+        if !backdrop, LibraryCachedArtwork.enabled, let source = LibraryCoverCache.Source.entry(entry) {
+            LibraryCachedArtwork(source: source, glyph: entry.desktop == true ? "desktopcomputer" : "gamecontroller.fill")
+        } else {
+            plain
+        }
+    }
+    private var plain: some View {
         GeometryReader { geometry in
         ZStack {
             Color(uiColor: .secondarySystemFill)
@@ -2991,6 +3000,38 @@ struct LibraryBadges: View {
     }
 }
 
+/// Settings' status line, at its far right (after JIT, Memory+ and Ready to play, in Ready to
+/// play's font): the installed Madeira (BuildStamp) and the free space on the drive games go to.
+/// Players asked for both in an easy place; Cameron wanted them here rather than on the library
+/// page (Wave 7). Read when Settings appears and every 30 s. env.MADEIRA_LIBRARY_INFO = 0 hides it.
+struct LibraryInfoLine: View {
+    @State private var free: Int64?
+    let ticks = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    static let shown = MadeiraConfig.flag("MADEIRA_LIBRARY_INFO")
+    static func freeText(_ bytes: Int64?) -> String? {
+        guard let bytes, bytes >= 0 else { return nil }
+        return String(format: L("%@ free"), ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+    }
+    var body: some View {
+        if Self.shown {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(verbatim: "Madeira \(BuildStamp.text)").lineLimit(1).minimumScaleFactor(0.7)
+                if let text = Self.freeText(free) { Text(text).lineLimit(1) }
+            }
+            .font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+            .accessibilityElement(children: .combine)
+            .onAppear { update() }.onReceive(ticks) { _ in update() }
+        }
+    }
+    private func update() {
+        let drive = LibraryModel.drive
+        DispatchQueue.global(qos: .utility).async {
+            let bytes = drive.freeSpace
+            DispatchQueue.main.async { free = bytes }
+        }
+    }
+}
+
 /// JIT and Memory+ at the top of Settings, each with a green check or a red cross (the
 /// developer interface's badges), and "Ready to play" beside them once both are there.
 /// Checked every 2 s.
@@ -3007,6 +3048,9 @@ struct LibraryStatus: View {
                     Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                         .padding(.leading, 4)
                 }
+                // The build and the free space, at the line's far right (settings-info-right).
+                Spacer(minLength: 8)
+                LibraryInfoLine()
             }
             if !memory {
                 Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
@@ -3041,7 +3085,9 @@ struct LibrarySectionHeader<Trailing: View>: View {
         if let collapsed {
             HStack(alignment: .firstTextBaseline) {
                 Button {
-                    withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { collapsed.wrappedValue.toggle() }
+                    // At once (Cameron, Nov 7: "Yes, instant").
+                    var instant = Transaction(); instant.disablesAnimations = true
+                    withTransaction(instant) { collapsed.wrappedValue.toggle() }
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(title).font(.title2.bold())
@@ -3120,7 +3166,7 @@ struct LibraryStoreTabBar: View {
 
     private var picked: Binding<LibraryStoreTab> {
         Binding(get: { LibraryStoreTab.current(selection, in: tabs) },
-                set: { tab in withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { selection = tab.rawValue } })
+                set: { tab in var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { selection = tab.rawValue } })
     }
 
     var body: some View {
@@ -3762,23 +3808,6 @@ struct LibraryView: View {
                                       part: .installed, open: { selected = $0 })
                 }
                 if SteamGamesSection.shown {
-                    if tab.shows(.other) {
-                        VStack(alignment: .leading, spacing: 14) {
-                            // Games are added with the + in the navigation bar.
-                            LibrarySectionHeader(title: L("Other games"), count: entries.count,
-                                                 collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
-                            if hideOthers && SteamGamesSection.collapsible {
-                                EmptyView()
-                            } else if entries.isEmpty {
-                                Text(search.isEmpty
-                                     ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
-                                     : L("No other games match your search."))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                cells(entries, width: viewport.size.width)
-                            }
-                        }
-                    }
                     if MadeiraDock.enabled && tab.shows(.steam) {
                         SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,
                                           part: steamFirst ? .notInstalled : .all, open: { selected = $0 })
@@ -3808,6 +3837,25 @@ struct LibraryView: View {
                 // Game details page, the others their download sheet.
                 if EALibrary.enabled && tab.shows(.ea) {
                     EAGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })
+                }
+                // The games you added, last (other-games-last): below Steam's Not installed and the stores' sections
+                // (Cameron, Nov 7). Without the Steam section they stay where they were, as the page's own grid.
+                if SteamGamesSection.shown && tab.shows(.other) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        // Games are added with the + in the navigation bar.
+                        LibrarySectionHeader(title: L("Other games"), count: entries.count,
+                                             collapsed: SteamGamesSection.collapsible ? $hideOthers : nil) { EmptyView() }
+                        if hideOthers && SteamGamesSection.collapsible {
+                            EmptyView()
+                        } else if entries.isEmpty {
+                            Text(search.isEmpty
+                                 ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
+                                 : L("No other games match your search."))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            cells(entries, width: viewport.size.width)
+                        }
+                    }
                 }
                 }
             }

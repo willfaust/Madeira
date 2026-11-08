@@ -53,6 +53,11 @@ OVERLAY = {
                         "restart; every other game starts right after them in the same session. 1: always a session of their "
                         "own; 0: never"},
     # Madeira in the background (app/Madeira/BackgroundRun.swift, build/ntdll-unix/audio_null_ios.c).
+    "env.MADEIRA_LIBRARY_COVER_CACHE": {"category": "App & front end", "title": "Library covers from the cover cache", "kind": "bool", "default": "1",
+                "note": "On by default: the SwiftUI cards (list layouts, the original grid, the GOG, itch.io, Epic Games and EA "
+                        "sections) take their covers from the zoomable grid's cover cache: downsampled off the main thread, kept "
+                        "in memory and on disk, so a big library scrolls without covers popping in again. 0: AsyncImage, as before. "
+                        "Read at app start."},
     "background-run": {"category": "App & front end", "title": "Keep a game running in the background (minutes)",
                 "kind": "int", "default": "10", "sources": ["app/Madeira/BackgroundRun.swift"],
                 "note": "Minutes a running game keeps going after you switch apps or lock the screen, so a long load "

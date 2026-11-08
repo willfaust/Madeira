@@ -6,8 +6,8 @@
 
 Source checks that the library page is laid out as the fork's sectioned library:
 Steam (the games being downloaded and the games Steam installed, collapsed by the
-title), its Not installed group (folding on its own), then Other games (the
-games you added, with Add a game); one grid without the Steam section; the
+title), its Not installed group (folding on its own), the store sections, then Other games
+last (the games you added; other-games-last, Cameron Nov 7); one grid without the Steam section; the
 texts; the collapse switch MADEIRA_LIBRARY_COLLAPSE and the remembered states;
 search and layout apply to every section; pull to refresh; the log line.
 The rules behind the groups and the sort are compiled and run by
@@ -47,22 +47,25 @@ body = between(section, '    var body: some View {', '    private func cell(')
 steam_at = page.index('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,')
 others_at = page.index('LibrarySectionHeader(title: L("Other games")')
 # The Desktop button is LibraryView.desktopButton (both grids show it).
-require(page.index('desktopButton') < steam_at < others_at and 'Label("Desktop", systemImage: "desktopcomputer")' in view,
-        'page order: Desktop, then Steam, then Other games')
+not_installed_at = page.index('part: steamFirst ? .notInstalled : .all, open: { selected = $0 })')
+stores_at = page.index('EAGamesSection(search: search, layout: layout, width: viewport.size.width, open: { selected = $0 })')
+require(page.index('desktopButton') < steam_at < not_installed_at < stores_at < others_at
+        and 'Label("Desktop", systemImage: "desktopcomputer")' in view,
+        'page order: Desktop, Steam, its Not installed, the store sections, then Other games last (other-games-last)')
 require('let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled' in page[:steam_at]
-        and 'part: .installed, open: { selected = $0 })' in page[steam_at:others_at]
-        and 'if SteamGamesSection.shown {' in page[steam_at:others_at],
+        and 'part: .installed, open: { selected = $0 })' in page[steam_at:not_installed_at]
+        and 'if SteamGamesSection.shown && tab.shows(.other) {' in page[stores_at:others_at],
         'Other games is a section exactly when the Steam section is shown; installed Steam games come first')
-require('part: steamFirst ? .notInstalled : .all, open: { selected = $0 })' in page[others_at:]
-        and 'if MadeiraDock.enabled && tab.shows(.steam) {' in page[others_at:],
-        'Not installed follows Other games; with nothing installed the whole Steam section does')
-single = page[others_at:]
+require('if MadeiraDock.enabled && tab.shows(.steam) {' in page[steam_at:not_installed_at] or
+        'if MadeiraDock.enabled && tab.shows(.steam) {' in page[:not_installed_at],
+        'with nothing installed the whole Steam section takes the Not installed place')
+single = page[not_installed_at:]
 require('ContentUnavailableView("Make yourself at home"' in single and single.count('cells(entries, width: viewport.size.width)') == 2,
         'without the Steam section: one grid of the games you added, or the empty-library message')
 require('.refreshable { await SteamGamesSection.refresh() }' in page, 'pull down on the library refreshes the Steam section')
 
 # ------------------------------------------------------------------ Other games
-others = between(page, 'LibrarySectionHeader(title: L("Other games")', '} else if model.entries.filter(')
+others = between(page, 'LibrarySectionHeader(title: L("Other games")', '// Ambient light behind the grid cards')
 require('count: entries.count' in others and 'collapsed: SteamGamesSection.collapsible ? $hideOthers : nil' in others,
         'Other games: count and a collapsible title (MADEIRA_LIBRARY_COLLAPSE)')
 require('Label("Add a game"' not in others and '{ EmptyView() }' in others and 'browser = true' in page,
