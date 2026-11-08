@@ -72,6 +72,16 @@ for path in sources:
         if 'LogStore' in line or 'EpicLog' in line:
             bad = [w for w in ('accessToken', 'refreshToken', 'exchange)', 'code)', 'displayName', 'accountID') if '\\(' + w in line.replace(' ', '')]
             require(not bad, f'{path.name}: no credential in a log line: {line.strip()[:80]}') if bad else None
+formats = (epic / 'EpicFormats.swift').read_text()
+hasher = formats[formats.index('static func sha1(of url: URL'):]
+hasher = hasher[:hasher.index('\n    }\n') + 6]
+require('autoreleasepool' in hasher and hasher.index('autoreleasepool') < hasher.index('handle.read('),
+        'repair: each file read is drained in its own autorelease pool (Satisfactory repair ran out of memory)')
+ea = (app / 'SwiftEA/EADownloader.swift').read_text()
+matcher = ea[ea.index("static func matches(_ url: URL, _ entry: EAZipEntry"):]
+matcher = matcher[:matcher.index('\n    }\n') + 6]
+require('autoreleasepool' in matcher and matcher.index('autoreleasepool') < matcher.index('handle.readData('),
+        'EA repair: each file read is drained in its own autorelease pool')
 bridge = (app / 'WineProcessBridge.m').read_text()
 require('madeira_redact_arg_a(extra_argv[i]' in bridge and 'madeira_redact.h' in bridge,
         'the bridge redacts the exchange code with the shared credential filter')
