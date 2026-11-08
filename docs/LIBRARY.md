@@ -363,7 +363,13 @@ only the last error status. No program names are involved.
 One Wine session runs per app run: a second one cannot start in the same
 process (the wineserver's permanent objects from the first session remain and
 the registry initialisation aborts). The library asks to restart Madeira
-instead.
+instead. The alert names the game whose Play it held: its Close Madeira keeps
+that game (`NextLibraryGame`, `SavesAndShortcuts.swift`), and the next app run
+starts it by itself through Play, once, if Madeira is opened again within 30
+minutes and no Home Screen shortcut or `steam://run` request comes first.
+Later forgets it. Log: `[session-once] the next app run starts the held game`,
+then `[session-once] starting <title>, which Play asked for before the
+restart`.
 
 ## First-run setup
 

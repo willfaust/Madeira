@@ -75,10 +75,41 @@ require('HStack(spacing: 14)' in row, 'one row of glyph buttons')
 order = [row.index('L("Close session"), "stop.circle"'), row.index('L("Hide live log") : L("Show live log"), "text.alignleft"'),
          row.index('L("Show desktop"), "macwindow"')]
 require(order == sorted(order), 'glyph order: close session, live log, show desktop')
-require('if dockStart.failure != nil {' in row and 'if dockStart.holding {' in row and 'dockStart.showDesktop(model)' in row,
-        'close session only once the Dock stopped; show desktop only while the desktop is held back')
+require('if dockStart.failure != nil {' not in row and 'if dockStart.holding {' in row and 'dockStart.showDesktop(model)' in row,
+        'close session all the time on the starting screen; show desktop only while the desktop is held back')
+# Close session on the starting screen goes back to the library at once: it asks the game to
+# close and closes the desktop, then ends the session's screens (finish), with no wait.
+close = library[library.index('    func stopStartToLibrary() {'):]
+close = close[:close.index('\n    }\n')]
+require(close.index('requestQuit()') < close.index('winios_close_desktop()') < close.index('finish()') and 'exit(0)' not in close,
+        'Stop on the starting screen closes the game and the desktop, then goes back to the library')
+require('MainActor.assumeIsolated { EndedSessionSurface.hide(reason: "stopped", whileClosing: true) }' in close,
+        'Stop hides the Wine desktop over the library while Wine is still closing')
+quit = library[library.index('    func quitToLibrary() {'):]
+quit = quit[:quit.index('\n    }\n')]
+require(quit.index('requestQuit()') < quit.index('finish()') < quit.index('whileClosing: true') < quit.index('winios_close_desktop()')
+        and 'forceCloseAfter' in quit and 'pollReport().result == 0' in quit,
+        'Quit game goes back to the library at once and closes the desktop once the game ended, or after forceCloseAfter')
+require('Button(role: .destructive) { model.quitToLibrary() }' in library and '{ model.requestQuit() }' not in library,
+        'the in-game Quit game uses quitToLibrary')
+require('whileClosing || wine_process_is_running() == 0' in library, 'the ended-desktop hide can skip the wait for Wine')
+require(row.count('{ model.stopStartToLibrary() }') == 1 and library.count('{ model.stopStartToLibrary() }') == 2 and 'model.requestQuit() }' not in row,
+        'both starting-screen layouts use stopStartToLibrary')
+require(library.count('if model.current != nil {\n                        launchGlyph(L("Close session"), "stop.circle")') == 2,
+        'Close session shows once the session has begun')
+content = (root / 'app/Madeira/ContentView.swift').read_text()
+for held in ('[session-once] launch held', '[session-once] Dock launch held'):
+    k = content.index(held)
+    require(content.rfind('MADEIRA_ONE_SESSION_PER_RUN', 0, k) > content.rfind('A session is already running.', 0, k),
+            'a second start after Stop says to restart Madeira, not that a session is running')
 require('Text("Madeira Dock stopped")' in library and 'DockInstallers.note' in library and 'DockStartStatus.text(' in library,
         'the starting screen shows the Dock status, the one-time-install note, and a stop with its words')
+
+# A stopped Dock start keeps the elapsed-time line (portrait and landscape).
+stopped = [m.start() for m in re.finditer(r'Text\("Madeira Dock stopped"\)', library)]
+require(len(stopped) == 2 and all('timeIntervalSince(model.startingSince)' in library[i:library.index('} else', i)] for i in stopped),
+        'the stopped starting screen still shows the elapsed time')
+
 status = library[library.index('    private var dockStatus: String {'):]
 status = status[:status.index('\n    }\n')]
 require(status.index('DockInstallers.poll(drive: MadeiraDock.drive)') < status.index('DockInstallers.finishedAt ?? model.launchStartedAt')

@@ -1343,9 +1343,13 @@ struct ContentView: View {
                                                             set: { if !$0 { library.restartNotice = nil } })) {
                 Button("Close Madeira") {
                     LogStore.shared.log("[session-once] closed by the user for a restart")
+                    if let id = library.restartEntry {
+                        NextLibraryGame.set(id)
+                        LogStore.shared.log("[session-once] the next app run starts the held game")
+                    }
                     exit(0)
                 }
-                Button("Later", role: .cancel) { library.restartNotice = nil }
+                Button("Later", role: .cancel) { library.restartNotice = nil; library.restartEntry = nil }
             } message: { Text(library.restartNotice ?? "") }
             // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
             .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
@@ -2533,19 +2537,29 @@ struct ContentView: View {
 
     /// A Home Screen shortcut waiting for the library (a link opened at a cold start
     /// arrives before the library is up).
-    /// Then the Steam game the last run's game asked to start (NextSteamApp).
+    /// Then the Steam game the last run's game asked to start (NextSteamApp), or else the
+    /// game whose Play the last run held for a restart (NextLibraryGame).
     private func launchPendingShortcut() {
         guard library.enabled, library.current == nil else { return }
         if let exe = ShortcutRouter.shared.pendingExe {
             ShortcutRouter.shared.pendingExe = nil
-            _ = NextSteamApp.take()
+            _ = NextSteamApp.take(); _ = NextLibraryGame.take()
             launchShortcut(exe); return
         }
-        guard LibraryModel.sessionsThisRun == 0, let appID = NextSteamApp.take() else { return }
-        guard let entry = library.entries.first(where: { $0.steamAppID == appID }) else {
-            LogStore.shared.log("[dock-steam-run] app \(appID) is not in the library: not started", level: .error); return
+        guard LibraryModel.sessionsThisRun == 0 else { return }
+        let heldGame = NextLibraryGame.take()
+        if let appID = NextSteamApp.take() {
+            guard let entry = library.entries.first(where: { $0.steamAppID == appID }) else {
+                LogStore.shared.log("[dock-steam-run] app \(appID) is not in the library: not started", level: .error); return
+            }
+            LogStore.shared.log("[dock-steam-run] starting app \(appID), which the last run's game asked for")
+            launchLibraryEntry(entry); return
         }
-        LogStore.shared.log("[dock-steam-run] starting app \(appID), which the last run's game asked for")
+        guard let heldGame else { return }
+        guard let entry = library.entries.first(where: { $0.id == heldGame }) else {
+            LogStore.shared.log("[session-once] the game held for the restart is no longer in the library: not started", level: .error); return
+        }
+        LogStore.shared.log("[session-once] starting \(entry.title), which Play asked for before the restart")
         launchLibraryEntry(entry)
     }
 
@@ -2592,13 +2606,14 @@ struct ContentView: View {
             LogStore.shared.log("[steam-start] app=\(appID) direct source=\(entry.steamProgramSource ?? "-") " +
                                 "args=\(entry.launchArguments.isEmpty ? 0 : 1) folder=\(entry.steamWorkingWindowsPath == nil ? "program" : "steam")")
         }
-        guard wine_process_is_running() == 0, wineserver_is_running() == 0, library.current == nil else {
-            library.error = "A session is already running."; return
-        }
-        // One Wine session per app run (see LibraryModel.sessionsThisRun).
+        // One Wine session per app run (see LibraryModel.sessionsThisRun). First, so a start
+        // stopped from the starting screen, whose game may still be closing, says to restart.
         if LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
             LogStore.shared.log("[session-once] launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
-            library.restartNotice = LibraryModel.restartMessage; return
+            library.holdForRestart(entry); return
+        }
+        guard wine_process_is_running() == 0, wineserver_is_running() == 0, library.current == nil else {
+            library.error = "A session is already running."; return
         }
         // The same precondition runWineFullSequence checks: the JIT pool is
         // taken at launch, through the debugger. Without it, Play enables JIT and
@@ -3507,14 +3522,16 @@ struct ContentView: View {
         guard jitReadyForLaunch(inLibrary: inLibrary, entry: profile?.id,
                                 then: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
         guard cloudClear(game.id, name: game.name, retry: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
+        // First, so a start stopped from the starting screen, whose game may still be
+        // closing, says to restart Madeira.
+        if inLibrary, LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
+            LogStore.shared.log("[session-once] Dock launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
+            library.holdForRestart(profile)
+            return
+        }
         guard wine_process_is_running() == 0, wineserver_is_running() == 0, !inLibrary || library.current == nil else {
             logStore.log("[madeira-dock] a session already ran in this app run; restart Madeira first", level: .error)
             if inLibrary { library.error = "A session is already running." }
-            return
-        }
-        if inLibrary, LibraryModel.sessionsThisRun > 0, MadeiraConfig.flag("MADEIRA_ONE_SESSION_PER_RUN") {
-            LogStore.shared.log("[session-once] Dock launch held: \(LibraryModel.sessionsThisRun) session(s) already ran in this app run")
-            library.restartNotice = LibraryModel.restartMessage
             return
         }
         func fail(_ error: Error) {

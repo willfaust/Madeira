@@ -1678,6 +1678,18 @@ final class LibraryModel: ObservableObject {
     var startingEntry: LibraryEntry? { launching ? activeEntry : preparing }
     /// When the starting screen went up, for its elapsed-time line.
     var startingSince: Date { launching ? launchStarted : preparingSince }
+    /// The game whose Play was held by the one-session rule. The alert's Close Madeira
+    /// keeps it (NextLibraryGame), and the next app run starts it by itself, so the
+    /// player does not have to find it and press Play again after reopening Madeira.
+    /// Set only by holdForRestart; the alert's Later clears it (Close Madeira exits).
+    var restartEntry: UUID?
+    /// Play was held because a session already ran in this app run: the Restart Madeira
+    /// alert, naming the game that starts by itself once Madeira is open again.
+    func holdForRestart(_ entry: LibraryEntry?) {
+        guard let entry else { restartNotice = Self.restartMessage; return }
+        restartNotice = String(format: L("Madeira starts one game each time it is opened. Tap Close Madeira, then open Madeira again: %@ starts by itself."), entry.title)
+        restartEntry = entry.id
+    }
     func prepare(_ entry: LibraryEntry) {
         guard MadeiraConfig.flag("MADEIRA_LAUNCH_EARLY"), current == nil else { return }   // 0: Play keeps the Game details page up until the session begins
         preparingSince = Date(); preparing = entry
@@ -1905,6 +1917,43 @@ final class LibraryModel: ObservableObject {
         sessionMessage = L("Close requested. Confirm any in-game exit dialog.")
         menu = false
         fputs("[frontend] graceful close requested\n", stderr)
+    }
+    /// Stop on the starting screen, while the start runs or once the Dock stopped: back to
+    /// the library at once. The game is asked to close (Alt+F4) and the Wine desktop is
+    /// closed, as after a Dock game ends, and the screen does not wait for that: a start
+    /// may have no window to take the close, and a second game needs Madeira reopened
+    /// anyway (sessionsThisRun), which Play then says.
+    func stopStartToLibrary() {
+        LogStore.shared.log("[frontend] Stop on the starting screen: closing the game, back to the library")
+        requestQuit()
+        winios_close_desktop()
+        finish()
+        // The Wine desktop's view sits on the app window above the library; Wine is still
+        // closing, so the ended-session hide (which waits for Wine) would leave it up.
+        MainActor.assumeIsolated { EndedSessionSurface.hide(reason: "stopped", whileClosing: true) }   // a button action: main thread
+    }
+    /// Quit game in the in-game menu: back to the library at once, as Stop does, so the
+    /// player never waits on a screen that looks frozen. The game gets the close request
+    /// (Alt+F4) and closes behind the library; the desktop closes once a Dock game and
+    /// Steam have ended, as before, or `forceCloseAfter` seconds after Quit at the latest.
+    func quitToLibrary() {
+        LogStore.shared.log("[frontend] Quit game: back to the library; the game closes behind it")
+        let dock = DockStartScreen.shared.active
+        requestQuit()
+        finish()
+        MainActor.assumeIsolated { EndedSessionSurface.hide(reason: "quit", whileClosing: true) }   // a button action: main thread
+        let asked = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+            MainActor.assumeIsolated {
+                if wine_process_is_running() == 0 && wineserver_is_running() == 0 { timer.invalidate(); return }
+                let ended = dock && MadeiraDock.pollReport().result == 0
+                let late = Date().timeIntervalSince(asked) > Self.forceCloseAfter
+                guard ended || late else { return }
+                timer.invalidate()
+                winios_close_desktop()
+                LogStore.shared.log("[frontend] Quit game: closing the desktop behind the library (\(ended ? "the Dock game ended" : "\(Int(Self.forceCloseAfter)) s after Quit"))")
+            }
+        }
     }
     func saveCurrentProfile() {
         let controls = TouchControlsModel.shared
@@ -5737,6 +5786,11 @@ struct LibraryHUD: View {
                 if let failure = dockStart.failure {
                     Text("Madeira Dock stopped").font(.headline)
                     Text(failure).font(.caption).multilineTextAlignment(.center).frame(maxWidth: 360)
+                    // The elapsed time stays on a stopped start too, as while it ran.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
+                    }
                 } else if dockStart.active {
                     // What the Dock start is waiting for, from the host's report, and what it
                     // does with the game's one-time installs.
@@ -5763,11 +5817,12 @@ struct LibraryHUD: View {
                 }
                 // The starting screen's controls are one row of glyph-only buttons, so a
                 // short screen does not push them below the fold. The words stay as
-                // VoiceOver labels. A stopped Dock start can be closed; while a Dock start
+                // VoiceOver labels. Close session is there once the session has begun, while the
+                // start runs and once the Dock stopped, and goes back to the library; while a Dock start
                 // holds the desktop back, Show desktop reveals it.
                 HStack(spacing: 14) {
-                    if dockStart.failure != nil {
-                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
+                    if model.current != nil {
+                        launchGlyph(L("Close session"), "stop.circle") { model.stopStartToLibrary() }
                     }
                     if model.installsRestartReady {
                         launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
@@ -5820,8 +5875,8 @@ struct LibraryHUD: View {
                     .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 22, height: 0), still: curtained))
                 launchWideStatus.modifier(LaunchEntrance(visible: launchVisible, step: 2, rise: CGSize(width: 22, height: 0), still: curtained))
                 HStack(spacing: 12) {
-                    if dockStart.failure != nil {
-                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
+                    if model.current != nil {
+                        launchGlyph(L("Close session"), "stop.circle") { model.stopStartToLibrary() }
                     }
                     if model.installsRestartReady {
                         launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
@@ -5859,9 +5914,14 @@ struct LibraryHUD: View {
     /// the one-time-install note and the elapsed time under it; or why the Dock stopped.
     @ViewBuilder private var launchWideStatus: some View {
         if let failure = dockStart.failure {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Madeira Dock stopped").font(.headline)
-                Text(failure).font(.subheadline).foregroundStyle(.white.opacity(0.75)).frame(maxWidth: 440, alignment: .leading)
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Madeira Dock stopped").font(.headline)
+                    Text(failure).font(.subheadline).foregroundStyle(.white.opacity(0.75)).frame(maxWidth: 440, alignment: .leading)
+                    // The elapsed time stays on a stopped start too, as while it ran.
+                    Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
+                }
             }
         } else {
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -6073,7 +6133,7 @@ struct LibraryHUD: View {
                 }
                 Divider()
                 // Red label and symbol; the menu's .primary style would otherwise win.
-                Button(role: .destructive) { model.requestQuit() } label: {
+                Button(role: .destructive) { model.quitToLibrary() } label: {
                     Label("Quit game", systemImage: "stop.circle").foregroundStyle(.red)
                 }.tint(.red)
                 Text("Closes the running session. Unsaved progress will be lost.").font(.caption).foregroundStyle(.secondary)
@@ -6691,10 +6751,21 @@ enum EndedSessionSurface {
         }
     }
 
-    @MainActor static func hide(reason: String) {
+    /// `whileClosing`: Stop or Quit game went back to the library while Wine is still
+    /// closing the session behind it, so the desktop is hidden without waiting for Wine.
+    @MainActor static func hide(reason: String, whileClosing: Bool = false) {
         guard MadeiraConfig.flag("MADEIRA_LIBRARY_HIDE_ENDED_DESKTOP"), LibraryModel.shared.enabled,
-              LibraryModel.shared.current == nil, wine_process_is_running() == 0 else { return }
-        guard winios_compositor_set_hidden(1) != 0 else { return }
+              LibraryModel.shared.current == nil, whileClosing || wine_process_is_running() == 0 else { return }
+        guard winios_compositor_set_hidden(1) != 0 else {
+            // A session stopped before its desktop drew has no view yet; it may still
+            // attach while Wine closes, so look again until Wine has gone.
+            if whileClosing, wine_process_is_running() != 0 || wineserver_is_running() != 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    MainActor.assumeIsolated { hide(reason: reason, whileClosing: true) }
+                }
+            }
+            return
+        }
         hiddenByUs = true
         LogStore.shared.log("[library-surface] hid ended desktop reason=\(reason)")
     }

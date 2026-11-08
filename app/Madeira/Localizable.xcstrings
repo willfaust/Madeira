@@ -30160,6 +30160,46 @@
           }
         }
       }
+    },
+    "Madeira starts one game each time it is opened. Tap Close Madeira, then open Madeira again: %@ starts by itself.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira startet bei jedem Öffnen ein Spiel. Tippe auf „Madeira schließen“ und öffne Madeira erneut: %1$@ startet dann von selbst."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira abre un juego cada vez que se abre. Toca Cerrar Madeira y vuelve a abrir Madeira: %1$@ se iniciará solo."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira는 열 때마다 게임 하나를 시작합니다. Madeira 닫기를 누른 뒤 Madeira를 다시 여세요. %1$@이(가) 자동으로 시작됩니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O Madeira abre um jogo cada vez que é aberto. Toque em Fechar o Madeira e abra o Madeira de novo: %1$@ inicia sozinho."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira запускает одну игру при каждом открытии. Нажмите «Закрыть Madeira» и откройте Madeira снова: %1$@ запустится сама."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira 每次打开只能启动一个游戏。轻点“关闭 Madeira”，然后重新打开 Madeira：%1$@ 会自动启动。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
