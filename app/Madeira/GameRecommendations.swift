@@ -1307,6 +1307,11 @@ enum GameRecommendations {
         // A program, wherever it was installed: only the game's own programs, so a
         // redistributable inside a game's folder gets nothing.
         let inSteam = steamAppID != nil || steamFolder != nil
+        // The full game shares its launcher name with the demo.
+        if steamAppID == 3259780 || steamFolder == "final fantasy resonance",
+           last == "ffrs.exe" || last == "ffrs-win64-shipping.exe" {
+            return finalFantasyResonance
+        }
         switch last {
         case "playgtav.exe", "gta5_enhanced.exe":
             // GTA V Enhanced (the legacy edition has PlayGTAV.exe too, beside GTA5.exe):
@@ -1416,6 +1421,8 @@ extension GameRecommendations {
                    programs: [], steamPrograms: [], list: minecraftDungeons2),
         SteamTitle(appIDs: [2524850], folders: ["denshattack"],
                    programs: ["denshattack_proto.exe"], steamPrograms: [], list: denshattack),
+        SteamTitle(appIDs: [3259780], folders: ["final fantasy resonance"],
+                   programs: [], steamPrograms: [], list: finalFantasyResonance),
         SteamTitle(appIDs: [4474710], folders: ["final fantasy resonance demo"],
                    programs: ["ffrs.exe"], steamPrograms: [], list: finalFantasyResonanceDemo),
         SteamTitle(appIDs: [1371980], folders: ["norestforthewicked"],
@@ -1759,6 +1766,19 @@ extension GameRecommendations {
         env.MADEIRA_JIT_DUMP = 0
         """,
         avx: false, nvidia: false, wineVCRT: false, display: "fit")
+
+    /// The full game's captured runs exhaust the image pool loading AVRT for XAudio2.
+    /// Keep code buffers in the existing lower region; inferred from logs, not device-tested.
+    static let finalFantasyResonance = GameRecommendation(
+        id: "final-fantasy-resonance", title: "FINAL FANTASY RESONANCE", version: 1,
+        config: """
+        # Madeira's recommended settings for FINAL FANTASY RESONANCE.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        pool-split = 1
+        pool-low = 1
+        """)
 
     /// FINAL FANTASY RESONANCE DEMO (Steam App ID 4474710). Ported on 2026-10-26 from thebcd69's (BCD) tested list for
     /// it (its version 2); not device-tested here.
