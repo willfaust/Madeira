@@ -511,28 +511,38 @@ class SteamSession {
             jobID: jobID
         )
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingPICSJobs[jobID] = PICSAccumulator(messages: [], continuation: continuation)
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                pendingPICSJobs[jobID] = PICSAccumulator(messages: [], continuation: continuation)
 
-            Task {
-                do {
-                    try await connection.send(data)
-                } catch {
-                    if pendingPICSJobs.removeValue(forKey: jobID) != nil {
-                        continuation.resume(throwing: error)
+                Task {
+                    guard pendingPICSJobs[jobID] != nil else { return }
+                    do {
+                        try await connection.send(data)
+                    } catch {
+                        if pendingPICSJobs.removeValue(forKey: jobID) != nil {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+
+                // Timeout — return partial results if any arrived, otherwise error
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    if let acc = pendingPICSJobs.removeValue(forKey: jobID) {
+                        if acc.messages.isEmpty {
+                            acc.continuation.resume(throwing: SteamError.connectionTimeout)
+                        } else {
+                            acc.continuation.resume(returning: acc.messages)
+                        }
                     }
                 }
             }
-
-            // Timeout — return partial results if any arrived, otherwise error
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if let acc = pendingPICSJobs.removeValue(forKey: jobID) {
-                    if acc.messages.isEmpty {
-                        acc.continuation.resume(throwing: SteamError.connectionTimeout)
-                    } else {
-                        acc.continuation.resume(returning: acc.messages)
-                    }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                if let job = self?.pendingPICSJobs.removeValue(forKey: jobID) {
+                    job.continuation.resume(throwing: CancellationError())
                 }
             }
         }

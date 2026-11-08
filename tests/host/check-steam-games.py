@@ -54,7 +54,7 @@ content_view = (app / 'ContentView.swift').read_text()
 require('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,\n'
         '                                      part: .installed, open: { selected = $0 })' in library,
         "Library: the Steam section is in the library and opens the library's Game details page")
-require('MadeiraDock.games(drive: drive)' in games and 'let drive = MadeiraDock.drive' in games,
+require('MadeiraDock.discovery(drive: drive)' in games and 'let drive = MadeiraDock.drive' in games,
         "the section lists exactly what Dock's own discovery finds")
 # Game details: a Steam game is a library entry (its per-game settings) with a Steam section.
 require('open(LibraryModel.shared.steamEntry(installed, title: item.name))' in games,
@@ -312,7 +312,7 @@ func record(_ appID: Int, _ name: String, _ folder: String, flags: Int) -> Strin
         require(dlcHost.depotSelectionSummary(language: "english", ownedDLC: [7002, 7004]).contains("7004[-]dlc"), "a turned-off DLC depot is logged as dlc")
         let ownedDLC: [UInt32: SteamAppInfo] = [7101: dlcApp(7101, "Expansion", parent: 7000), 7102: dlcApp(7102, "Skin Pack", parent: nil),
                                                 7200: dlcApp(7200, "Other Game DLC", parent: 9999)]
-        let dlcGame = SteamOwnedGame(SteamAppInfo.parse(appID: 7000, from: Data(dlcGameVDF.utf8))!, ownedDLC: ownedDLC)
+        let dlcGame = SteamOwnedGame(SteamAppInfo.parse(appID: 7000, from: Data(dlcGameVDF.utf8))!, ownedDLC: SteamOwnedDLC.Index(owned: ownedDLC))
         require(dlcGame.dlc?.map(\.id) == [7101, 7102], "owned DLC of the game only, by name: \(String(describing: dlcGame.dlc?.map(\.id)))")
         require(dlcGame.dlc?.first?.downloadBytes == 20 && dlcGame.dlc?.first?.installBytes == 25 && dlcGame.dlc?.last?.depots == [],
                 "sizes per DLC, and a DLC without files has no depots")

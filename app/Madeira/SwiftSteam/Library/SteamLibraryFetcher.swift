@@ -299,75 +299,67 @@ class SteamLibraryFetcher {
     // MARK: - Package Info → App IDs
 
     private func fetchAppIDsFromPackages(packageIDs: [UInt32], tokens: [UInt32: UInt64]) async throws -> Set<UInt32> {
-        var allAppIDs = Set<UInt32>()
-
-        // Package info requests in batches of 50.
-        let batches = stride(from: 0, to: packageIDs.count, by: 50).map {
-            Array(packageIDs[$0..<min($0 + 50, packageIDs.count)])
-        }
-
-        for batch in batches {
-            var request = CMsgClientPICSProductInfoRequest()
-            request.packages = batch.map { pkgID in
-                CMsgClientPICSProductInfoRequest.PackageInfo(
-                    packageid: pkgID,
-                    accessToken: tokens[pkgID] ?? 0
-                )
-            }
-
-            let responses = try await session.sendAndWaitPICS(
-                eMsg: .clientPICSProductInfoRequest,
-                body: request.serialize(),
-                timeout: 30
-            )
-
-            for response in responses {
-                let picsResponse = try CMsgClientPICSProductInfoResponse.deserialize(from: response.body)
-                for pkg in picsResponse.packages {
-                    allAppIDs.formUnion(VDFParser.parsePackageAppIDs(from: pkg.buffer))
+        let batches = try await productInfo(ids: packageIDs, tokens: tokens, packages: true) { bodies in
+            var ids = Set<UInt32>()
+            for body in bodies {
+                for package in try CMsgClientPICSProductInfoResponse.deserialize(from: body).packages {
+                    ids.formUnion(VDFParser.parsePackageAppIDs(from: package.buffer))
                 }
             }
+            return ids
         }
-
-        return allAppIDs
+        return batches.reduce(into: Set<UInt32>()) { $0.formUnion($1) }
     }
 
     // MARK: - App Info
 
     private func fetchAppInfo(appIDs: [UInt32], tokens: [UInt32: UInt64]) async throws -> [SteamAppInfo] {
-        var allApps: [SteamAppInfo] = []
-
-        // App info requests in batches of 50.
-        let batches = stride(from: 0, to: appIDs.count, by: 50).map {
-            Array(appIDs[$0..<min($0 + 50, appIDs.count)])
-        }
-
-        for batch in batches {
-            var request = CMsgClientPICSProductInfoRequest()
-            request.apps = batch.map { appID in
-                CMsgClientPICSProductInfoRequest.AppInfo(
-                    appid: appID,
-                    accessToken: tokens[appID] ?? 0
-                )
-            }
-
-            let responses = try await session.sendAndWaitPICS(
-                eMsg: .clientPICSProductInfoRequest,
-                body: request.serialize(),
-                timeout: 30
-            )
-
-            for response in responses {
-                let picsResponse = try CMsgClientPICSProductInfoResponse.deserialize(from: response.body)
-                for app in picsResponse.apps {
-                    if let info = SteamAppInfo.parse(appID: app.appid, from: app.buffer) {
-                        allApps.append(info)
-                    }
+        let batches = try await productInfo(ids: appIDs, tokens: tokens, packages: false) { bodies in
+            var apps: [SteamAppInfo] = []
+            for body in bodies {
+                for app in try CMsgClientPICSProductInfoResponse.deserialize(from: body).apps {
+                    if let info = SteamAppInfo.parse(appID: app.appid, from: app.buffer) { apps.append(info) }
                 }
             }
+            return apps
         }
+        return batches.flatMap { $0 }
+    }
 
-        return allApps
+    /// Keep the existing 50-ID requests, with at most four jobs in flight on
+    /// the session's job-ID-matched PICS transport. Decode off main, and retain
+    /// batch order even when replies arrive out of order. An error fails the
+    /// refresh rather than publishing a partially built library.
+    private func productInfo<Value: Sendable>(ids: [UInt32], tokens: [UInt32: UInt64], packages: Bool,
+                                              decode: @escaping @Sendable ([Data]) throws -> Value) async throws -> [Value] {
+        let batches = stride(from: 0, to: ids.count, by: 50).map { Array(ids[$0..<min($0 + 50, ids.count)]) }
+        var values: [Int: Value] = [:]
+        for window in stride(from: 0, to: batches.count, by: 4) {
+            try Task.checkCancellation()
+            try await withThrowingTaskGroup(of: (Int, Value).self) { group in
+                for index in window..<min(window + 4, batches.count) {
+                    let batch = batches[index]
+                    group.addTask { @MainActor [session] in
+                        try Task.checkCancellation()
+                        var request = CMsgClientPICSProductInfoRequest()
+                        if packages {
+                            request.packages = batch.map { .init(packageid: $0, accessToken: tokens[$0] ?? 0) }
+                        } else {
+                            request.apps = batch.map { .init(appid: $0, accessToken: tokens[$0] ?? 0) }
+                        }
+                        let responses = try await session.sendAndWaitPICS(eMsg: .clientPICSProductInfoRequest,
+                                                                         body: request.serialize(), timeout: 30)
+                        try Task.checkCancellation()
+                        let bodies = responses.map(\.body)
+                        let value = try await Task.detached(priority: .userInitiated) { try decode(bodies) }.value
+                        return (index, value)
+                    }
+                }
+                for try await (index, value) in group { values[index] = value }
+            }
+        }
+        try Task.checkCancellation()
+        return (0..<batches.count).compactMap { values[$0] }
     }
 }
 

@@ -83,8 +83,17 @@ enum MadeiraDock {
 
     /// The game an app manifest describes, or nil when it is not one Dock can start.
     static func game(manifest data: Data, library: String) -> DockGame? {
-        guard data.count <= 1 << 20, var parser = try? SteamKeyValues(data), let root = try? parser.read(),
-              let state = root["AppState"], let appID = state["appid"]?.string.flatMap({ Int($0) }), validAppID(appID),
+        guard let state = manifestState(data) else { return nil }
+        return game(state: state, library: library)
+    }
+
+    private static func manifestState(_ data: Data) -> SteamValue? {
+        guard data.count <= 1 << 20, var parser = try? SteamKeyValues(data), let root = try? parser.read() else { return nil }
+        return root["AppState"]
+    }
+
+    private static func game(state: SteamValue, library: String) -> DockGame? {
+        guard let appID = state["appid"]?.string.flatMap({ Int($0) }), validAppID(appID),
               let folder = state["installdir"]?.string, validFolderName(folder) else { return nil }
         let flags = state["StateFlags"]?.string.flatMap { UInt32($0) } ?? 0
         let name = state["name"]?.string.map { String($0.prefix(200)) } ?? ""
@@ -95,8 +104,12 @@ enum MadeiraDock {
     /// A record's depots: the ones it lends from each owner app (`SharedDepots`, depot -> owner)
     /// and the ones installed for the app itself (`InstalledDepots`).
     static func depots(manifest data: Data) -> (lent: [Int: Set<String>], installed: Set<String>) {
-        guard data.count <= 1 << 20, var parser = try? SteamKeyValues(data), let root = try? parser.read(),
-              let state = root["AppState"], let appID = state["appid"]?.string.flatMap({ Int($0) }) else { return ([:], []) }
+        guard let state = manifestState(data) else { return ([:], []) }
+        return depots(state: state)
+    }
+
+    private static func depots(state: SteamValue) -> (lent: [Int: Set<String>], installed: Set<String>) {
+        guard let appID = state["appid"]?.string.flatMap({ Int($0) }) else { return ([:], []) }
         var lent: [Int: Set<String>] = [:]
         for (depot, owner) in (state["SharedDepots"]?.fields ?? [:]).prefix(64) {
             guard let ownerID = owner.string.flatMap({ Int($0) }), validAppID(ownerID), ownerID != appID else { continue }
@@ -107,11 +120,16 @@ enum MadeiraDock {
 
     /// Installed games in the client's own library (`<client>/steamapps`) and the other
     /// libraries on C: that its `libraryfolders.vdf` lists. Read-only.
-    static func games(drive: URL) -> [DockGame] {
+    static func games(drive: URL) -> [DockGame] { discovery(drive: drive).games }
+
+    /// A fresh scan, keeping parsed canonical records for the refresh's metadata.
+    /// No persistent file cache: external changes are visible on the next scan.
+    static func discovery(drive: URL) -> (games: [DockGame], records: [Int: SteamValue]) {
         let fm = FileManager.default
         let libraries = steamLibraries(drive: drive)
         let external = ExternalDrives.steamLibraries
         var result: [DockGame] = []
+        var seen = Set<Int>(), records: [Int: SteamValue] = [:]
         // Apps that only lend depots to another install ("Shared Only", e.g. GTA V
         // Enhanced's RGL/SC 1899670) have a record but nothing to start. A game that
         // lends depots but has its own installed too (a base game whose depots its
@@ -122,18 +140,21 @@ enum MadeiraDock {
             let isExternal = external.contains { $0.caseInsensitiveCompare(library) == .orderedSame }
             guard isExternal || folder.resolvingSymlinksInPath().path.hasPrefix(drive.resolvingSymlinksInPath().path + "/"),
                   let names = try? fm.contentsOfDirectory(atPath: folder.path) else { continue }
-            for file in names.sorted().prefix(2000) where file.hasPrefix("appmanifest_") && file.hasSuffix(".acf") {
-                guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)) else { continue }
-                let held = depots(manifest: data)
+            for file in names.filter({ $0.hasPrefix("appmanifest_") && $0.hasSuffix(".acf") }).sorted() {
+                guard let data = try? Data(contentsOf: folder.appendingPathComponent(file)),
+                      let state = manifestState(data) else { continue }
+                let held = depots(state: state)
                 lent.merge(held.lent) { $0.union($1) }
-                guard let game = game(manifest: data, library: library),
-                      !result.contains(where: { $0.id == game.id }) else { continue }
+                guard let game = game(state: state, library: library), seen.insert(game.id).inserted else { continue }
+                if file == "appmanifest_\(game.id).acf", state["appid"]?.string == String(game.id) {
+                    records[game.id] = state
+                }
                 installed[game.id] = held.installed
                 result.append(game)
             }
         }
         result.removeAll { game in lent[game.id].map { installed[game.id, default: []].isSubset(of: $0) } ?? false }
-        return result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return (result.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }, records)
     }
 
     /// The client's own library, the libraries on C: its `libraryfolders.vdf` lists and

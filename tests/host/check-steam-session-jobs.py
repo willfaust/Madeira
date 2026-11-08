@@ -17,6 +17,7 @@ then the send fails too.
 """
 from pathlib import Path
 import os
+import argparse
 import shutil
 import subprocess
 import sys
@@ -36,7 +37,10 @@ def require(condition, label):
 
 
 # The gzip helper at the end of the file needs Apple's Compression; no job path uses it.
-session = (steam / 'Core/SteamSession.swift').read_text()
+parser = argparse.ArgumentParser()
+parser.add_argument('--source-ref', help='local git ref to demonstrate the cancellation regression')
+args = parser.parse_args()
+session = subprocess.check_output(['git', 'show', f'{args.source_ref}:app/Madeira/SwiftSteam/Core/SteamSession.swift'], cwd=root, text=True) if args.source_ref else (steam / 'Core/SteamSession.swift').read_text()
 session = 'import Observation\n' + session[:session.index('// MARK: - Data Extensions')]
 
 stubs = r'''
@@ -50,20 +54,23 @@ extension Data { func gunzip(expectedSize: Int = 0) -> Data? { nil } }
 /// Stand-in for the WebSocket. send() parks until release(), then fails.
 actor SteamConnection {
     nonisolated(unsafe) static var last: SteamConnection?
-    private var parked: CheckedContinuation<Void, Never>?
+    private var parked: [UInt64: CheckedContinuation<Void, Never>] = [:]
     init() { Self.last = self }
     var isConnected: Bool { true }
-    var isSending: Bool { parked != nil }
+    var isSending: Bool { !parked.isEmpty }
+    var jobs: [UInt64] { parked.keys.sorted() }
     func setMessageHandler(_ handler: @escaping (Data) -> Void) {}
     func setDisconnectHandler(_ handler: @escaping (Error?) -> Void) {}
     func connect() async throws {}
     func reconnect() async throws {}
     func disconnect() {}
     func send(_ data: Data) async throws {
-        await withCheckedContinuation { parked = $0 }
+        let id = try SteamMessageCodec.decode(data).header.jobidSource
+        await withCheckedContinuation { parked[id] = $0 }
         throw SteamError.disconnected
     }
-    func release() { parked?.resume(); parked = nil }
+    func release(_ id: UInt64) { parked.removeValue(forKey: id)?.resume() }
+    func release() { let held = parked; parked = [:]; for continuation in held.values { continuation.resume() } }
 }
 '''
 
@@ -91,6 +98,49 @@ var failures = 0
     require(true, "\(label): the send failing afterwards does not resume the request again")
 }
 
+
+@MainActor final class Completion { var watchdogFired = false; var unrelatedFinished = false }
+@MainActor func cancelledPICSGroup() async throws {
+    let session = SteamSession(), state = Completion()
+    let connection = SteamConnection.last!
+    let unrelated = Task {
+        defer { state.unrelatedFinished = true }
+        _ = try? await session.sendAndWaitPICS(eMsg: .clientPICSProductInfoRequest, body: Data(), timeout: 60)
+    }
+    while await connection.jobs.count != 1 { await Task.yield() }
+    let unrelatedID = await connection.jobs[0]
+    let group = Task {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<2 {
+                group.addTask { @MainActor in
+                    _ = try await session.sendAndWaitPICS(eMsg: .clientPICSProductInfoRequest, body: Data(), timeout: 60)
+                }
+            }
+            for try await _ in group {}
+        }
+    }
+    while await connection.jobs.count != 3 { await Task.yield() }
+    // Failing one send must cancel the sibling already parked in a continuation.
+    let failedID = await connection.jobs.first { $0 != unrelatedID }!
+    let watchdog = Task {
+        do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+        state.watchdogFired = true
+        session.disconnect() // make an unfixed test finish promptly instead of waiting 60 s
+    }
+    await connection.release(failedID)
+    do { try await group.value; require(false, "failed PICS group must throw") }
+    catch { require(error as? SteamError == .disconnected, "the first PICS failure is preserved") }
+    require(!state.watchdogFired, "a failed group cancels its suspended sibling before the watchdog, without a timeout")
+    require(!state.unrelatedFinished, "cancelling a PICS job does not resume another job")
+    watchdog.cancel()
+    // Late send failures and a later disconnect cannot double-resume cancelled jobs.
+    await connection.release()
+    await unrelated.value
+    session.disconnect()
+    try await Task.sleep(nanoseconds: 50_000_000)
+    require(true, "late send failures after cancellation do not double-resume")
+}
+
 @main struct Checks {
     @MainActor static func main() async throws {
         try await disconnectDuringSend("callServiceMethod") { session in
@@ -103,17 +153,22 @@ var failures = 0
         try await disconnectDuringSend("sendAndWaitPICS") { session in
             _ = try await session.sendAndWaitPICS(eMsg: .clientPICSProductInfoRequest, body: Data(), timeout: 60)
         }
+        try await cancelledPICSGroup()
         if failures > 0 { print("FAILURES: \(failures)"); exit(1) }
         print("PASS: all SteamSession job checks")
     }
 }
 '''
 
-with tempfile.TemporaryDirectory() as tmp:
+private_root = Path.home() / 'tmp'
+private_root.mkdir(mode=0o700, exist_ok=True)
+private_root.chmod(0o700)
+with tempfile.TemporaryDirectory(prefix='pi-pics-jobs.', dir=private_root) as tmp:
     tmp = Path(tmp)
     (tmp / 'session.swift').write_text(session)
     (tmp / 'stubs.swift').write_text(stubs)
     (tmp / 'checks.swift').write_text(checks)
+    env = dict(os.environ, TMPDIR=str(tmp), TMP=str(tmp), TEMP=str(tmp))
     sources = [tmp / 'session.swift', tmp / 'stubs.swift', tmp / 'checks.swift',
                steam / 'Proto/SteamProtoMessages.swift', steam / 'Core/SteamError.swift', steam / 'Core/SteamProtocol.swift',
                steam / 'Core/SteamMessageCodec.swift', steam / 'Core/SteamCMSession.swift', steam / 'Core/LicenseListBox.swift',
@@ -121,13 +176,13 @@ with tempfile.TemporaryDirectory() as tmp:
     (tmp / 'lan-stub.swift').write_text('enum ContentDecryptor { static let maximumChunkBytes = 64 * 1024 * 1024 }\n')
     exe = tmp / 'swift-checks'
     build = subprocess.run([SWIFTC, '-parse-as-library', '-swift-version', '5', '-o', str(exe)] + [str(s) for s in sources],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
     require(build.returncode == 0, 'production SteamSession.swift compiles on the host with a stand-in connection')
     if build.returncode:
         sys.stdout.write(build.stderr[-6000:])
     else:
         # The Swift crash handler would sit on the pipes after a trap; the trap message is enough.
-        run = subprocess.run([str(exe)], env=dict(os.environ, SWIFT_BACKTRACE='enable=no'), capture_output=True, text=True, timeout=120)
+        run = subprocess.run([str(exe)], env=dict(env, SWIFT_BACKTRACE='enable=no'), capture_output=True, text=True, timeout=120)
         sys.stdout.write(run.stdout)
         if run.returncode:
             sys.stdout.write(run.stderr[-3000:])

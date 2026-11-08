@@ -145,7 +145,7 @@ enum LibraryGridStore: String, CaseIterable {
     @Published var eaSignIn = false
 }
 
-/// SteamGamesRules.items over the account's whole library, computed once per change of its inputs. A page build asks for it up
+/// Shared by both library layouts: SteamGamesRules.items computed once per change of its inputs. A page build asks for it up
 /// to five times, at thousands of games its sort is the build's whole cost, and a landing's size write re-renders the page.
 /// Array equality is a buffer identity check when nothing changed.
 @MainActor enum LibraryGridSteamItems {
