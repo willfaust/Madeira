@@ -115,7 +115,7 @@ struct EAGamesSection: View {
                 sheets.eaGame = .init(id: item.id)
             }
         } label: { EAGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "ea:\(item.id)")
     }
 }
 
@@ -168,6 +168,7 @@ struct EASignInCard: View {
             }.padding(14)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
+            .menuPad("signin:ea", cornerRadius: 16, action: signIn)
     }
 }
 
@@ -348,6 +349,7 @@ struct EAGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -418,6 +420,25 @@ struct EAGameSheet: View {
                 steamActionLabel(ea.hasPartialDownload(offerID) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!ea.signedIn || !owned.downloadable)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: EAItem) -> (() -> Void)? {
+        if let download = ea.downloads[offerID] {
+            switch download.state {
+            case .active, .queued:
+                return { ea.pause(offerID) }
+            case .paused:
+                return { ea.install(offerID) }
+            case .failed:
+                return { ea.install(offerID) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.eaEntry(installed); dismiss(); open(entry) }
+        } else if let owned = item.owned {
+            return ea.signedIn && owned.downloadable ? { ea.install(offerID) } : nil
+        }
+        return nil
     }
 }
 

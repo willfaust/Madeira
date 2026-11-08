@@ -118,7 +118,7 @@ struct EpicGamesSection: View {
                 sheets.epicGame = .init(id: item.id)
             }
         } label: { EpicGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "epic:\(item.id)")
     }
 }
 
@@ -171,6 +171,7 @@ struct EpicSignInCard: View {
             }.padding(14)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
+            .menuPad("signin:epic", cornerRadius: 16, action: signIn)
     }
 }
 
@@ -348,6 +349,7 @@ struct EpicGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -406,6 +408,25 @@ struct EpicGameSheet: View {
                 steamActionLabel(epic.hasPartialDownload(appName) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!epic.signedIn)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: EpicItem) -> (() -> Void)? {
+        if let download = epic.downloads[appName] {
+            switch download.state {
+            case .active, .queued:
+                return { epic.pause(appName) }
+            case .paused:
+                return { epic.install(appName) }
+            case .failed:
+                return { epic.install(appName) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.epicEntry(installed); dismiss(); open(entry) }
+        } else if item.owned != nil {
+            return epic.signedIn ? { epic.install(appName) } : nil
+        }
+        return nil
     }
 }
 

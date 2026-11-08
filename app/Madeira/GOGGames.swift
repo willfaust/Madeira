@@ -117,7 +117,7 @@ struct GOGGamesSection: View {
                 sheets.gogGame = .init(id: item.id)
             }
         } label: { GOGGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "gog:\(item.id)")
     }
 }
 
@@ -170,6 +170,7 @@ struct GOGSignInCard: View {
             }.padding(14)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
+            .menuPad("signin:gog", cornerRadius: 16, action: signIn)
     }
 }
 
@@ -351,6 +352,7 @@ struct GOGGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -421,6 +423,25 @@ struct GOGGameSheet: View {
                 steamActionLabel(gog.hasPartialDownload(productID) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!gog.signedIn)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: GOGItem) -> (() -> Void)? {
+        if let download = gog.downloads[productID] {
+            switch download.state {
+            case .active, .queued:
+                return { gog.pause(productID) }
+            case .paused:
+                return { gog.install(productID) }
+            case .failed:
+                return { gog.install(productID) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.gogEntry(installed); dismiss(); open(entry) }
+        } else if item.owned != nil {
+            return gog.signedIn ? { gog.install(productID) } : nil
+        }
+        return nil
     }
 }
 

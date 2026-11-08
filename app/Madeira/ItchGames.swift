@@ -83,6 +83,7 @@ struct ItchGamesSection: View {
                         }.padding(14)
                             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
                     }.buttonStyle(.plain)
+                        .menuPad("signin:itch", cornerRadius: 16) { sheets.itchSignIn = true }
                 }
                 if !mine.isEmpty {
                     LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
@@ -136,7 +137,7 @@ struct ItchGamesSection: View {
                 sheets.itchGame = .init(id: item.id)
             }
         } label: { ItchGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "itch:\(item.id)")
     }
 }
 
@@ -349,6 +350,7 @@ struct ItchGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -435,6 +437,25 @@ struct ItchGameSheet: View {
                 steamActionLabel(itch.hasPartialDownload(gameID) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!itch.signedIn)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: ItchItem) -> (() -> Void)? {
+        if let download = itch.downloads[gameID] {
+            switch download.state {
+            case .active, .queued:
+                return { itch.pause(gameID) }
+            case .paused:
+                return { itch.install(gameID) }
+            case .failed:
+                return { itch.install(gameID) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.itchEntry(installed); dismiss(); open(entry) }
+        } else if item.owned != nil {
+            return itch.signedIn ? { itch.install(gameID) } : nil
+        }
+        return nil
     }
 }
 

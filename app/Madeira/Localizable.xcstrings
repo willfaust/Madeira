@@ -1,6 +1,46 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "%@ games, from every store": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ Spiele aus allen Stores"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ juegos, de todas las tiendas"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모든 스토어의 게임 %1$@개"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ jogos, de todas as lojas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игр: %1$@, из всех магазинов"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 款游戏，来自所有商店"
+          }
+        }
+      }
+    },
     "%@ Workshop": {
       "localizations": {
         "de": {
@@ -197,6 +237,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "除非重新下载 .NET Framework，否则这类游戏无法启动。"
+          }
+        }
+      }
+    },
+    "1 game, from every store": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Spiel aus allen Stores"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 juego, de todas las tiendas"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모든 스토어의 게임 1개"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 jogo, de todas as lojas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 игра, из всех магазинов"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 款游戏，来自所有商店"
           }
         }
       }
@@ -1037,6 +1117,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "成就与统计"
+          }
+        }
+      }
+    },
+    "Add a game": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiel hinzufügen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Añadir un juego"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 추가"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adicionar um jogo"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Добавить игру"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加游戏"
           }
         }
       }
@@ -2477,6 +2597,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "备份存档"
+          }
+        }
+      }
+    },
+    "Back up your game saves and bring them back.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spielstände sichern und wiederherstellen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Haz copias de tus partidas guardadas y recupéralas."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 저장 파일을 백업하고 복원하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Faça backup dos seus saves e restaure-os."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Резервные копии сохранений и их восстановление."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "备份你的游戏存档并恢复它们。"
           }
         }
       }
@@ -9521,6 +9681,46 @@
         }
       }
     },
+    "Games that aren't from a store.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiele, die nicht aus einem Store stammen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Juegos que no son de una tienda."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스토어에서 받지 않은 게임."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jogos que não são de uma loja."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игры не из магазина."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不是来自商店的游戏。"
+          }
+        }
+      }
+    },
     "GOG": {
       "localizations": {
         "de": {
@@ -10557,6 +10757,126 @@
           "stringUnit": {
             "state": "translated",
             "value": "主屏幕"
+          }
+        }
+      }
+    },
+    "How games are drawn, and their frame rate on this screen.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wie Spiele dargestellt werden und ihre Bildrate auf diesem Bildschirm."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cómo se dibujan los juegos y su velocidad de fotogramas en esta pantalla."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 화면을 그리는 방식과 이 화면에서의 프레임 속도입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Como os jogos são desenhados e sua taxa de quadros nesta tela."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Как отрисовываются игры и с какой частотой кадров на этом экране."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏的绘制方式，以及它们在此屏幕上的帧率。"
+          }
+        }
+      }
+    },
+    "How games use this device's memory.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wie Spiele den Speicher dieses Geräts nutzen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cómo usan los juegos la memoria de este dispositivo."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임이 이 기기의 메모리를 사용하는 방식입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Como os jogos usam a memória deste dispositivo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Как игры используют память этого устройства."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏如何使用此设备的内存。"
+          }
+        }
+      }
+    },
+    "How Madeira looks: the library's store sidebar, the bars, and the touch buttons in games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "So sieht Madeira aus: die Store-Seitenleiste der Bibliothek, die Leisten und die Touch-Tasten in Spielen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El aspecto de Madeira: la barra lateral de tiendas de la biblioteca, las barras y los botones táctiles de los juegos."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira의 모양: 라이브러리의 스토어 사이드바, 막대, 게임 속 터치 버튼입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A aparência do Madeira: a barra lateral de lojas da biblioteca, as barras e os botões de toque nos jogos."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Внешний вид Madeira: боковая панель магазинов в библиотеке, панели и сенсорные кнопки в играх."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira 的外观：资料库的商店侧边栏、各个栏以及游戏中的触控按钮。"
           }
         }
       }
@@ -11681,6 +12001,46 @@
         }
       }
     },
+    "JIT lets games run fast. Madeira needs it to play.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JIT lässt Spiele schnell laufen. Madeira braucht es zum Spielen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JIT hace que los juegos vayan rápido. Madeira lo necesita para jugar."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JIT는 게임을 빠르게 실행합니다. Madeira로 플레이하려면 필요합니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O JIT faz os jogos rodarem rápido. O Madeira precisa dele para jogar."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JIT ускоряет игры. Без него Madeira не может их запускать."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "JIT 让游戏运行得更快。Madeira 需要它才能玩游戏。"
+          }
+        }
+      }
+    },
     "JIT lets Madeira run Windows code. Choose how your %@ gets it.": {
       "localizations": {
         "de": {
@@ -11997,6 +12357,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "继续下载"
+          }
+        }
+      }
+    },
+    "Keep games on an external drive.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spiele auf einem externen Laufwerk speichern."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guarda juegos en una unidad externa."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "외장 드라이브에 게임을 보관하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guarde jogos em um disco externo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Храните игры на внешнем диске."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把游戏存放在外接驱动器上。"
           }
         }
       }
@@ -13277,6 +13677,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "日志"
+          }
+        }
+      }
+    },
+    "Logs, help and every option, for when something goes wrong.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protokolle, Hilfe und alle Optionen, wenn etwas schiefgeht."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registros, ayuda y todas las opciones, para cuando algo falla."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "문제가 생겼을 때 쓰는 로그, 도움말, 모든 옵션입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Logs, ajuda e todas as opções, para quando algo dá errado."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журналы, помощь и все параметры — на случай, если что-то пошло не так."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "日志、帮助和所有选项，供出现问题时使用。"
           }
         }
       }
@@ -14921,6 +15361,46 @@
         }
       }
     },
+    "No installed games match your search.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine installierten Spiele passen zu deiner Suche."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ningún juego instalado coincide con tu búsqueda."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "검색과 일치하는 설치된 게임이 없습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nenhum jogo instalado corresponde à sua busca."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Нет установленных игр, подходящих под запрос."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有符合搜索条件的已安装游戏。"
+          }
+        }
+      }
+    },
     "No logs yet. Play a game once and its log shows here.": {
       "localizations": {
         "de": {
@@ -15801,6 +16281,46 @@
         }
       }
     },
+    "Not played yet": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch nicht gespielt"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún no jugado"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 플레이 안 함"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ainda não jogado"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ещё не запускалась"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未玩过"
+          }
+        }
+      }
+    },
     "Not present": {
       "localizations": {
         "de": {
@@ -16077,6 +16597,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "在你选择保留哪一个之前，不会改动任何内容。"
+          }
+        }
+      }
+    },
+    "Nothing is installed yet. Pick a store on the left to sign in and install a game.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch ist nichts installiert. Wähle links einen Store, um dich anzumelden und ein Spiel zu installieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Todavía no hay nada instalado. Elige una tienda a la izquierda para iniciar sesión e instalar un juego."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 설치된 게임이 없습니다. 왼쪽에서 스토어를 골라 로그인하고 게임을 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nada instalado ainda. Escolha uma loja à esquerda para entrar e instalar um jogo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пока ничего не установлено. Выберите магазин слева, чтобы войти и установить игру."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还没有安装任何游戏。在左侧选择一个商店，登录并安装游戏。"
           }
         }
       }
@@ -18117,6 +18677,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "开始"
+          }
+        }
+      }
+    },
+    "Played today": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Heute gespielt"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jugado hoy"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오늘 플레이함"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jogado hoje"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запускалась сегодня"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今天玩过"
+          }
+        }
+      }
+    },
+    "Played yesterday": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gestern gespielt"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jugado ayer"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "어제 플레이함"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jogado ontem"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запускалась вчера"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "昨天玩过"
           }
         }
       }
@@ -21561,6 +22201,46 @@
         }
       }
     },
+    "Settings": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einstellungen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajustes"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "설정"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajustes"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Настройки"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置"
+          }
+        }
+      }
+    },
     "Settings › .NET Framework downloads or removes Wine Mono.": {
       "localizations": {
         "de": {
@@ -22201,6 +22881,46 @@
         }
       }
     },
+    "Sign in to Epic Games to install your Epic games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei Epic Games anmelden, um deine Epic-Spiele zu installieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en Epic Games para instalar tus juegos de Epic."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Epic Games에 로그인하여 Epic 게임을 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre na Epic Games para instalar seus jogos da Epic."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в Epic Games, чтобы установить свои игры Epic."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 Epic Games 以安装你的 Epic 游戏。"
+          }
+        }
+      }
+    },
     "Sign in to GOG": {
       "localizations": {
         "de": {
@@ -22277,6 +22997,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "在「设置 › GOG」登录后才能更新此游戏。不登录也可游玩。"
+          }
+        }
+      }
+    },
+    "Sign in to GOG to install your GOG games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei GOG anmelden, um deine GOG-Spiele zu installieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en GOG para instalar tus juegos de GOG."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GOG에 로그인하여 GOG 게임을 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre no GOG para instalar seus jogos do GOG."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в GOG, чтобы установить свои игры GOG."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 GOG 以安装你的 GOG 游戏。"
+          }
+        }
+      }
+    },
+    "Sign in to itch.io to install your itch.io games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei itch.io anmelden, um deine itch.io-Spiele zu installieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en itch.io para instalar tus juegos de itch.io."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "itch.io에 로그인하여 itch.io 게임을 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre no itch.io para instalar seus jogos do itch.io."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в itch.io, чтобы установить свои игры itch.io."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 itch.io 以安装你的 itch.io 游戏。"
+          }
+        }
+      }
+    },
+    "Sign in to Steam and start games with Madeira Dock.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei Steam anmelden und Spiele mit Madeira Dock starten."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en Steam y abre juegos con Madeira Dock."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Steam에 로그인하고 Madeira Dock으로 게임을 시작하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre na Steam e inicie jogos com o Madeira Dock."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в Steam и запускайте игры через Madeira Dock."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 Steam，并用 Madeira Dock 启动游戏。"
+          }
+        }
+      }
+    },
+    "Sign in to the EA app to install your EA games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der EA app anmelden, um deine EA-Spiele zu installieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicia sesión en la EA app para instalar tus juegos de EA."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "EA app에 로그인하여 EA 게임을 설치하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entre no EA app para instalar seus jogos da EA."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Войдите в EA app, чтобы установить свои игры EA."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录 EA app 以安装你的 EA 游戏。"
           }
         }
       }
@@ -24921,6 +25801,86 @@
         }
       }
     },
+    "Store sidebar": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Store-Seitenleiste"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Barra lateral de tiendas"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스토어 사이드바"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Barra lateral de lojas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Боковая панель магазинов"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "商店侧边栏"
+          }
+        }
+      }
+    },
+    "Store sidebar lists your stores down the left of the library. Off, the library is one page with store tabs, as before. New library grid applies only with the sidebar off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Store-Seitenleiste listet deine Stores links in der Bibliothek auf. Aus: Die Bibliothek ist wie bisher eine Seite mit Store-Tabs. Das neue Bibliotheksraster gilt nur bei ausgeschalteter Seitenleiste: Zieh die Karten mit zwei Fingern auf oder zu, um zu ändern, wie viele nebeneinander passen. Zoom-Haptik klickt, wenn das Ziehen eine Größe überschreitet."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La barra lateral de tiendas muestra tus tiendas a la izquierda de la biblioteca. Desactivada, la biblioteca es una sola página con pestañas de tiendas, como antes. La nueva cuadrícula de la biblioteca solo se aplica con la barra lateral desactivada: pellizca las tarjetas para cambiar cuántas caben a lo ancho. La respuesta háptica del zoom hace clic al pasar cada tamaño."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "스토어 사이드바는 라이브러리 왼쪽에 스토어 목록을 보여 줍니다. 끄면 라이브러리가 예전처럼 스토어 탭이 있는 한 페이지가 됩니다. 새 라이브러리 그리드는 사이드바가 꺼져 있을 때만 적용됩니다. 카드를 핀치하여 한 줄에 들어가는 개수를 바꾸세요. 확대/축소 햅틱은 핀치가 크기를 넘을 때 딸깍합니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A barra lateral de lojas lista suas lojas à esquerda da biblioteca. Desligada, a biblioteca é uma página com abas de lojas, como antes. A nova grade da biblioteca vale só com a barra lateral desligada: faça pinça nos cartões para mudar quantos cabem na largura. A vibração do zoom dá um clique quando a pinça passa de um tamanho."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Боковая панель магазинов показывает ваши магазины слева в библиотеке. Если её выключить, библиотека станет одной страницей с вкладками магазинов, как раньше. Новая сетка библиотеки действует только при выключенной панели: сведите или разведите пальцы на карточках, чтобы изменить, сколько их помещается в ряд. Тактильный отклик щёлкает при переходе через размер."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "商店侧边栏在资料库左侧列出你的商店。关闭后，资料库会像以前一样是一页带商店标签的页面。新资料库网格只在侧边栏关闭时生效：在卡片上捏合可更改每行显示的数量。缩放触感会在捏合跨过一个尺寸时轻点。"
+          }
+        }
+      }
+    },
     "Stray (UE4, -dx11)": {
       "localizations": {
         "de": {
@@ -25401,6 +26361,46 @@
         }
       }
     },
+    "The extra Windows parts some games need to start.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zusätzliche Windows-Teile, die manche Spiele zum Starten brauchen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Las piezas extra de Windows que algunos juegos necesitan para iniciarse."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일부 게임이 시작하는 데 필요한 추가 Windows 구성 요소입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "As peças extras do Windows que alguns jogos precisam para iniciar."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Дополнительные компоненты Windows, без которых некоторые игры не запускаются."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分游戏启动所需的额外 Windows 组件。"
+          }
+        }
+      }
+    },
     "The game starts its own program in Wine, as GOG Galaxy would. Madeira stands in for GOG Galaxy while the game runs, so a game that uses Galaxy gets its achievements and stats. Galaxy cloud saves are not available yet.": {
       "localizations": {
         "de": {
@@ -25437,6 +26437,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "游戏在 Wine 里启动它自己的程序，如同 GOG Galaxy 那样。游戏运行时由 Madeira 代替 GOG Galaxy，所以使用 Galaxy 的游戏能获得成就与统计。Galaxy 云存档暂不可用。"
+          }
+        }
+      }
+    },
+    "The mouse pointer and touch in games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mauszeiger und Touch in Spielen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El puntero del ratón y el tacto en los juegos."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 속 마우스 포인터와 터치입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O ponteiro do mouse e o toque nos jogos."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Указатель мыши и касания в играх."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏中的鼠标指针和触控。"
+          }
+        }
+      }
+    },
+    "The people and projects Madeira is built on.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Menschen und Projekte, auf denen Madeira aufbaut."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Las personas y los proyectos sobre los que está hecho Madeira."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira를 만든 사람들과 프로젝트입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "As pessoas e os projetos em que o Madeira se baseia."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Люди и проекты, на которых построена Madeira."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "构建 Madeira 所依托的人和项目。"
           }
         }
       }
@@ -29121,6 +30201,46 @@
         }
       }
     },
+    "What Madeira and your games wrote while running.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Was Madeira und deine Spiele während der Ausführung aufgezeichnet haben."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lo que Madeira y tus juegos escribieron mientras se ejecutaban."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira와 게임이 실행 중에 기록한 내용입니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O que o Madeira e seus jogos registraram enquanto rodavam."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Что Madeira и ваши игры записали во время работы."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Madeira 和你的游戏在运行时记录的内容。"
+          }
+        }
+      }
+    },
     "When LocalDevVPN can't reach this device, Enable JIT runs your %@ shortcut: it turns Cellular Data off when there's no Wi-Fi and connects LocalDevVPN, then puts both back once the game has started. Each run opens Shortcuts for a moment.": {
       "localizations": {
         "de": {
@@ -29157,6 +30277,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "LocalDevVPN 连不上这台设备时，「启用 JIT」会运行你的 %1$@ 快捷指令：没有 Wi-Fi 时关掉蜂窝数据并连接 LocalDevVPN，游戏启动后把两者恢复。每次运行都会短暂打开「快捷指令」。"
+          }
+        }
+      }
+    },
+    "When this copy of Madeira needs signing again.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wann diese Kopie von Madeira erneut signiert werden muss."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cuándo hay que volver a firmar esta copia de Madeira."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Madeira를 언제 다시 서명해야 하는지 알려 줍니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quando esta cópia do Madeira precisa ser assinada de novo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Когда эту копию Madeira нужно подписать снова."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这份 Madeira 何时需要重新签名。"
           }
         }
       }
@@ -29357,6 +30517,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "整块预留 4 MB 以上（宽）"
+          }
+        }
+      }
+    },
+    "Windows desktop": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows-Desktop"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escritorio de Windows"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows 데스크톱"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Área de trabalho do Windows"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Рабочий стол Windows"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows 桌面"
           }
         }
       }

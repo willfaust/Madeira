@@ -140,8 +140,10 @@ enum BuildStamp {
 /// 1's physical pad) so there is no second timer. While the library owns input
 /// (no session, or the in-game menu is open) GamepadInput publishes a neutral
 /// pad to Windows. D-pad or left stick moves the focus, A opens, B goes back,
-/// Y adds a game, a shoulder switches tabs; in a session Back+Start opens the
-/// menu. MADEIRA_FRONTEND_CONTROLLER=0 turns navigation off.
+/// Y adds a game, a shoulder switches tabs (with the store sidebar: stores,
+/// MenuPad.swift); in a session Back+Start opens the menu. A held direction
+/// repeats (0.35 s, then every 0.1 s); the triggers page up and down and View
+/// is search. MADEIRA_FRONTEND_CONTROLLER=0 turns navigation off.
 final class LibraryController: ObservableObject, @unchecked Sendable {
     static let shared = LibraryController()
     @Published var connected = false
@@ -149,33 +151,55 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
     private let lock = NSLock()
     private var enabled = false
     private var owns = false
-    private var last: UInt16 = 0
+    private var last: UInt32 = 0
     private var announced = false
+    /// Controllers already named in the log ("[menu-pad] connected <name>").
+    private var named = Set<String>()
+    /// The held direction and when it next repeats.
+    private var heldDirection: UInt32 = 0
+    private var repeatAt = Date.distantFuture
     private let allowed = MadeiraConfig.flag("MADEIRA_FRONTEND_CONTROLLER")
     var ownsInput: Bool { lock.lock(); defer { lock.unlock() }; return enabled && owns }
     func configure(enabled: Bool, ownsInput: Bool) {
         lock.lock(); self.enabled = enabled && allowed; owns = ownsInput; lock.unlock()
     }
     /// One sample of player 1's pad, in XInput button bits and stick units.
-    func sample(buttons raw: UInt16, lx: Int16, ly: Int16) {
+    /// `lt`/`rt`: the triggers (0-255), page up and down past half way. `name`: the
+    /// controller's name, logged once per controller.
+    func sample(buttons raw: UInt16, lx: Int16, ly: Int16, lt: UInt8 = 0, rt: UInt8 = 0, name: String? = nil, now: Date = Date()) {
         lock.lock()
         guard enabled else { lock.unlock(); return }
-        var buttons = raw
+        var buttons = UInt32(raw)
         if owns {
+            // Stick past half way (the dead zone) counts as the D-pad.
             if lx < -16000 { buttons |= 4 }; if lx > 16000 { buttons |= 8 }
             if ly > 16000 { buttons |= 1 }; if ly < -16000 { buttons |= 2 }
+            if lt > 128 { buttons |= 0x10000 }; if rt > 128 { buttons |= 0x20000 }
         }
-        let pressed = buttons & ~last; last = buttons
+        var pressed = buttons & ~last; last = buttons
+        // A held direction repeats, so a long row or list is crossed without tapping.
+        let direction = buttons & 0xF
+        if !owns || direction == 0 || direction.nonzeroBitCount > 1 {
+            heldDirection = 0; repeatAt = .distantFuture
+        } else if direction != heldDirection || pressed & 0xF != 0 {
+            heldDirection = direction; repeatAt = now.addingTimeInterval(0.35)
+        } else if now >= repeatAt {
+            pressed |= direction; repeatAt = now.addingTimeInterval(0.1)
+        }
         let own = owns, announce = !announced; announced = true
+        var newName: String?
+        if let name, !name.isEmpty, !named.contains(name) { named.insert(name); newName = name }
         lock.unlock()
         if announce { DispatchQueue.main.async { self.connected = true; fputs("[frontend-controller] navigation active\n", stderr) } }
+        if let newName { fputs("[menu-pad] connected \(newName)\n", stderr) }
         var command: String?
         // Reserve the Back+Start chord in gameplay, leaving ordinary Start intact.
         if !own, buttons & 0x30 == 0x30, pressed & 0x30 != 0 { command = "menu" }
         if own {
-            for (mask, name): (UInt16, String) in [(1, "up"), (2, "down"), (4, "left"), (8, "right"), (0x1000, "accept"), (0x2000, "back"), (0x8000, "add"), (0x10, "menu"), (0x100, "tab"), (0x200, "tab")] {
-                if pressed & mask != 0 { command = name; break }
-            }
+            let names: [(UInt32, String)] = [(1, "up"), (2, "down"), (4, "left"), (8, "right"), (0x1000, "accept"), (0x2000, "back"),
+                                             (0x8000, "add"), (0x10, "menu"), (0x20, "search"), (0x100, "previous"), (0x200, "next"),
+                                             (0x10000, "pageUp"), (0x20000, "pageDown")]
+            for (mask, name) in names where pressed & mask != 0 { command = name; break }
         }
         if let command { DispatchQueue.main.async { self.commands.send(command) } }
     }
@@ -2943,8 +2967,10 @@ struct LibraryCardButtonStyle: ButtonStyle {
 extension View {
     /// A library card's button style: a grid card shows its press on its artwork
     /// (LibraryCardButtonStyle); a list row keeps the plain style.
-    @ViewBuilder func libraryCardButtonStyle(grid: Bool) -> some View {
-        if grid { buttonStyle(LibraryCardButtonStyle()) } else { buttonStyle(.plain) }
+    /// `pad`: the card's id for a controller (MenuPad.swift), on the store sidebar's pages.
+    @ViewBuilder func libraryCardButtonStyle(grid: Bool, pad: String? = nil) -> some View {
+        if let pad, MenuPad.enabled { buttonStyle(MenuPadCardStyle(id: pad, grid: grid)) }
+        else if grid { buttonStyle(LibraryCardButtonStyle()) } else { buttonStyle(.plain) }
     }
 }
 
@@ -3484,6 +3510,8 @@ struct LibraryView: View {
     /// The Settings tab's own search text, kept apart from the library's.
     @State private var settingsSearch = ""
     @State private var focused: UUID?
+    /// A controller changed the store while on the page: ring its first cover once it is laid out (MenuPad).
+    @State private var padEnter = false
     @ObservedObject private var controller = LibraryController.shared
     @ObservedObject private var input = InputSettings.shared
     @State private var tab = 0
@@ -3496,6 +3524,9 @@ struct LibraryView: View {
     /// The new grid (LibraryGridPage.swift): off by default, and its stored size (a position on the levels).
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
     @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    /// Settings › Appearance › Store sidebar (LibrarySidebar.swift).
+    @AppStorage(LibrarySidebar.settingKey) private var sidebarOn = true
+    private var sidebarShown: Bool { LibrarySidebar.enabled && sidebarOn }
     @AppStorage(LibraryGridSize.key) private var gridPosition: Double = -1
     @AppStorage("madeiraLibrarySort") private var sort = "played"
     @AppStorage("madeiraLibraryGroup") private var group = "platform"
@@ -3504,6 +3535,8 @@ struct LibraryView: View {
     @AppStorage("madeiraLibraryHideOthers") private var hideOthers = false
     // The store tab shown with Group by Platform (LibraryStoreTab).
     @AppStorage(LibraryStoreTab.key) private var storeTab = LibraryStoreTab.all.rawValue
+    // The shelf the store sidebar shows (LibrarySidebar.swift).
+    @AppStorage(LibrarySidebar.key) private var shelf = LibraryShelf.ready.rawValue
     private var storeTabs: [LibraryStoreTab] {
         group == "platform" ? LibraryStoreTab.available(steam: MadeiraDock.enabled && (SteamGamesSection.shown || SteamGamesSection.hasInstalled)) : []
     }
@@ -3544,12 +3577,20 @@ struct LibraryView: View {
         // names stay for VoiceOver.
         TabView(selection: Binding(get: { tab }, set: { switchTab(to: $0) })) {
             // The card layouts: the zoomable page or the original one (LibraryGridArm).
-            Group { if LibraryGridArm.zoomable(setting: zoomableGrid, layout: layout) { zoomableLibrary } else { library } }
+            // The store sidebar (LibrarySidebar.swift) unless env.MADEIRA_LIBRARY_SIDEBAR = 0.
+            Group {
+                if sidebarShown { sidebarLibrary }
+                else if LibraryGridArm.zoomable(setting: zoomableGrid, layout: layout) { zoomableLibrary } else { library }
+            }
                 .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
                 .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
+                // With the sidebar the Library and Settings switch goes: Settings is the gear at the
+                // bottom of the sidebar, and Settings has its own way back to the library.
+                .toolbar(sidebarShown ? .hidden : .automatic, for: .tabBar)
                 .tag(0)
             settingsTab
                 .tabItem { Image(systemName: "gearshape.fill").accessibilityLabel("Settings") }
+                .toolbar(sidebarShown ? .hidden : .automatic, for: .tabBar)
                 .tag(1)
         }
         // The system search field (Liquid Glass on iOS 26) in the title's place, left
@@ -3568,6 +3609,10 @@ struct LibraryView: View {
             LibraryLargeTitle()
             if tab == 0 { libraryToolbar } else { settingsToolbar }
         }
+        // The store sidebar runs the full height of the screen, so on its page the title,
+        // search and buttons move beside it (LibrarySidebarHeader) and the bar is hidden.
+        // iPad Settings with the sidebar (SettingsSplit) draws its own title, search and status too.
+        .toolbar(sidebarShown && (tab == 0 || (LibrarySidebar.padSettings && SettingsPages.enabled)) ? .hidden : .automatic, for: .navigationBar)
         // On the tab view, not inside one tab's page: an alert attached to the Library
         // page cannot present while Settings is showing, so an error raised there (its
         // Enable JIT, for one) waited until the Library tab came back.
@@ -3597,11 +3642,23 @@ struct LibraryView: View {
         .onAppear { GlassSkin.shared.start() }
         .onDisappear { GlassSkin.shared.stop() }
         .onReceive(controller.commands) { command in
-            if selected == nil, !browser, !onboarding.presented, command == "tab" { switchTab(to: 1 - tab) }
+            guard selected == nil, !browser, !onboarding.presented else { return }
+            // The shoulders switch tabs; with the store sidebar they switch stores (MenuPad.swift),
+            // and in Settings Menu (and B on iPad, where Settings has no pushed pages) goes back to
+            // the library, as the tab switch is hidden.
+            if !sidebarShown, command == "previous" || command == "next" { switchTab(to: 1 - tab) }
+            if sidebarShown, MenuPad.enabled, tab == 1, MenuPad.shared.sheets == 0, Date() >= MenuPad.shared.quietUntil,
+               command == "menu" || (command == "back" && LibrarySidebar.padSettings && SettingsPages.enabled) {
+                MenuPad.shared.show(); switchTab(to: 0)
+            }
         }
     }
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: .topBarTrailing) { libraryOptions }
+        ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
+    }
+    /// The library's layout, Group by and Sort by menu: in the bar, or beside the store sidebar.
+    private var libraryOptions: some View {
             Menu {
                 if zoomableGrid {
                     // The new grid is sized by pinching, so the layout menu has no card sizes: one "Cards" entry
@@ -3625,12 +3682,15 @@ struct LibraryView: View {
                         Label("Compact list", systemImage: "list.dash").tag("compactList")
                     }
                 }
+                // The sidebar groups by store itself.
+                if !sidebarShown {
                 Picker("Group by", selection: $group) {
                     Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
                     Label("Installed", systemImage: "arrow.down.circle").tag("installed")
                     Label("Platform", systemImage: "square.stack").tag("platform")
                     Label("None", systemImage: "square.grid.2x2").tag("none")
                 }.pickerStyle(.menu)
+                }
                 Picker("Sort by", selection: $sort) {
                     Label("Last played", systemImage: "clock").tag("played")
                     Label("Name", systemImage: "textformat.abc").tag("name")
@@ -3638,10 +3698,14 @@ struct LibraryView: View {
                     Label("Folder size", systemImage: "internaldrive").tag("size")
                 }
             } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
-        }
-        ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
     }
     @ToolbarContentBuilder private var settingsToolbar: some ToolbarContent {
+        // The tab switch is hidden with the sidebar: the way back to the library (iPhone).
+        if sidebarShown {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { switchTab(to: 0) } label: { Label(L("Library"), systemImage: "square.grid.2x2") }
+            }
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: enableJIT) {
                 HStack(spacing: 6) {
@@ -3666,7 +3730,11 @@ struct LibraryView: View {
     /// The Settings tab: its pages (SettingsPages.swift), or, while the search field holds
     /// text or with env.MADEIRA_SETTINGS_PAGES = 0, the one long page below.
     @ViewBuilder private var settingsTab: some View {
-        if SettingsPages.enabled, settingsSearch.trimmingCharacters(in: .whitespaces).isEmpty {
+        if sidebarShown, SettingsPages.enabled, LibrarySidebar.padSettings {
+            // iPad: laid out like the iPad's Settings app, the list always on the left (SettingsPages.swift).
+            SettingsSplit(search: $settingsSearch, startDock: startDock,
+                          enableJIT: enableJIT, library: { switchTab(to: 0) }, active: tab == 1) { settings }
+        } else if SettingsPages.enabled, settingsSearch.trimmingCharacters(in: .whitespaces).isEmpty {
             SettingsPagesList(startDock: startDock)
         } else {
             settings
@@ -3733,14 +3801,19 @@ struct LibraryView: View {
                     Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
                 }
             }
-            if settingsShow("appearance", "grid", "library", "new", "zoom", "pinch", "haptics", "cards") {
+            if settingsShow("appearance", "grid", "library", "new", "zoom", "pinch", "haptics", "cards", "sidebar", "store") {
                 Section {
+                    if LibrarySidebar.enabled {
+                        Toggle("Store sidebar", isOn: $sidebarOn)
+                    }
                     Toggle("New library grid", isOn: $zoomableGrid)
                     if zoomableGrid {
                         Toggle("Zoom haptics", isOn: $zoomHaptics)
                     }
                 } footer: {
-                    Text("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size.")
+                    Text(LibrarySidebar.enabled
+                         ? L("Store sidebar lists your stores down the left of the library. Off, the library is one page with store tabs, as before. New library grid applies only with the sidebar off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.")
+                         : L("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size."))
                 }
             }
             if settingsShow("interface", "developer") {
@@ -3894,6 +3967,166 @@ struct LibraryView: View {
         }
         }
     }
+    /// The store sidebar's page (LibrarySidebar.swift): a list of shelves on the left and the
+    /// chosen one on the right. A store's page is its own section, as on the page above, so
+    /// sign-in, installs and game pages work the same; Ready to play lists every installed
+    /// game; Other games the games you added.
+    private var sidebarLibrary: some View {
+        LibrarySidebarFrame(selection: $shelf,
+                            readyCount: LibraryReadyGame.all(search: "").count,
+                            otherCount: LibraryReadyGame.added().count,
+                            search: $search,
+                            desktop: { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry },
+                            settings: { switchTab(to: 1) }) { shelf, width, rail in
+            ScrollViewReader { reader in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // The bar's buttons beside the full-height sidebar (its title and search are in the list),
+                    // and JIT and Memory+ when the list is folded to icons.
+                    LibrarySidebarHeader(search: $search, rail: rail, options: { libraryOptions }, add: { browser = true })
+                    switch shelf {
+                    case .ready:
+                        LibraryReadyGames(search: search, width: width, open: { selected = $0 })
+                    case .steam:
+                        SteamGamesSection(search: search, layout: layout, sort: sort, width: width, part: .all, open: { selected = $0 })
+                    case .epic:
+                        EpicGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
+                    case .gog:
+                        GOGGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
+                    case .itch:
+                        ItchGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
+                    case .ea:
+                        EAGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
+                    case .other:
+                        LibraryShelfTitle(title: L("Other games"), note: L("Games that aren't from a store."))
+                        if entries.isEmpty {
+                            Text(search.isEmpty
+                                 ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
+                                 : L("No other games match your search."))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            cells(entries, width: width)
+                        }
+                        Button { browser = true } label: {
+                            Label("Add a game", systemImage: "plus").font(.headline).frame(minHeight: 44).padding(.horizontal, 18)
+                                .foregroundStyle(.white).background(LibrarySidebar.blue, in: Capsule())
+                        }.buttonStyle(.plain)
+                            .menuPad("other:add", cornerRadius: 22) { browser = true }
+                    }
+                }
+                // Ambient light behind the store sections' cards, as on the page above.
+                .backgroundPreferenceValue(AmbientGlowKey.self) { AmbientGlowLayer(items: $0) }
+                .padding(16).frame(maxWidth: 1100, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
+                // Where the controller-reachable covers and buttons are (MenuPad.swift).
+                .coordinateSpace(name: MenuPadSpace.name)
+                .onPreferenceChange(MenuPadFrames.self) { frames in
+                    MenuPad.shared.frames = frames
+                    if padEnter, let first = MenuPad.shared.entry(for: LibraryShelf.current(self.shelf)) {
+                        padEnter = false; MenuPad.shared.move(to: first)
+                    }
+                }
+            }
+            .refreshable { await SteamGamesSection.refresh() }
+            .id(shelf)
+            // A new store's page replaces the old one at once: no cross-fade, which looked like
+            // ghosting and felt slow (Cameron, Wave 9).
+            .transition(.identity)
+            // The ringed cover stays on screen.
+            .onReceive(MenuPad.shared.$focus) { id in
+                guard let id, !id.hasPrefix("side:") else { return }
+                withAnimation(MenuPad.animation) { reader.scrollTo(id, anchor: .center) }
+            }
+            }
+        }
+        // A controller: the ring over the sidebar and the page (MenuPad.swift); without it
+        // (env.MADEIRA_MENU_CONTROLLER = 0) up and down change the shelf and + adds a game.
+        .onReceive(controller.commands) { command in
+            guard tab == 0, selected == nil, !browser, !onboarding.presented, MenuPad.shared.sheets == 0,
+                  Date() >= MenuPad.shared.quietUntil else { return }
+            if MenuPad.enabled { padCommand(command); return }
+            if command == "add" { browser = true }
+            else if command == "up" || command == "down" {
+                let shelves = LibraryShelf.available
+                let index = shelves.firstIndex(of: LibraryShelf.current(shelf)) ?? 0
+                let next = shelves[(index + (command == "up" ? -1 : 1) + shelves.count) % shelves.count]
+                next.unfold(); shelf = next.rawValue
+            }
+        }
+        .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, play: play, jit: jit))
+        .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
+        .onAppear {
+            GlassSkin.shared.start()
+            if MenuPad.enabled { MenuPad.shared.claimControllerEvents() }
+        }
+        // A game page closed (B on a controller closes it): that press is not the library's too.
+        .onChange(of: selected == nil) { _, closed in if closed { MenuPad.shared.quietUntil = Date().addingTimeInterval(0.3) } }
+    }
+    /// One controller press on the store sidebar's library (MenuPad.swift).
+    private func padCommand(_ command: String) {
+        let pad = MenuPad.shared
+        let current = LibraryShelf.current(shelf)
+        // A ringed cover that is no longer on the page (another store was picked by touch):
+        // the ring goes to the store's row.
+        if !pad.onSidebar, let ringed = pad.focus, pad.frames[ringed] == nil { pad.move(to: MenuPad.side(current)) }
+        // The first press (or the first after a touch) only shows the ring, where it was;
+        // at the very first, on the page's first cover.
+        if pad.show() {
+            if pad.focus == nil { pad.move(to: pad.entry(for: current) ?? MenuPad.side(current)) }
+            if ["up", "down", "left", "right", "accept"].contains(command) { return }
+        }
+        let rows = LibraryShelf.available.map(MenuPad.side) + [MenuPad.desktopRow, MenuPad.settingsRow]
+        let focus = pad.focus ?? MenuPad.side(current)
+        func pick(_ next: LibraryShelf, enter: Bool) {
+            next.unfold()
+            if next != current {
+                var instant = Transaction(); instant.disablesAnimations = true
+                withTransaction(instant) { shelf = next.rawValue }
+                pad.frames = [:]
+            }
+            LogStore.shared.log("[menu-pad] store=\(next.rawValue)")
+            // The ring goes to the store's row, and into its page once the page is laid out
+            // (it stays on the row when the page has nothing to ring).
+            if enter, next == current, let first = pad.entry(for: next) { pad.move(to: first) }
+            else { pad.move(to: MenuPad.side(next)); padEnter = enter }
+        }
+        switch command {
+        case "up", "down":
+            if pad.onSidebar {
+                let index = rows.firstIndex(of: focus) ?? 0
+                pad.move(to: rows[max(0, min(rows.count - 1, index + (command == "up" ? -1 : 1)))])
+            } else if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: command, in: pad.frames) {
+                pad.move(to: next)
+            }
+        case "pageUp", "pageDown":
+            guard !pad.onSidebar, let from = pad.frames[focus] else { return }
+            let jump = max(300, (UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }.first ?? 800) * 0.75)
+            if let next = MenuPad.nearest(from: from, direction: command == "pageUp" ? "up" : "down", in: pad.frames, jump: jump) { pad.move(to: next) }
+        case "left":
+            guard !pad.onSidebar else { return }
+            if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: "left", in: pad.frames) { pad.move(to: next) }
+            else { pad.move(to: MenuPad.side(current)) }
+        case "right":
+            if pad.onSidebar { pick(current, enter: true) }
+            else if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: "right", in: pad.frames) { pad.move(to: next) }
+        case "accept":
+            if focus == MenuPad.desktopRow { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
+            else if focus == MenuPad.settingsRow { switchTab(to: 1) }
+            else if pad.onSidebar, let next = LibraryShelf(rawValue: String(focus.dropFirst(5))) { pick(next, enter: true) }
+            else { LogStore.shared.log("[menu-pad] open \(focus)"); pad.press.send(focus) }
+        case "back":
+            if !pad.onSidebar { pad.move(to: MenuPad.side(current)) }
+        case "previous", "next":
+            let shelves = LibraryShelf.available
+            let index = shelves.firstIndex(of: current) ?? 0
+            pick(shelves[(index + (command == "previous" ? -1 : 1) + shelves.count) % shelves.count], enter: !pad.onSidebar)
+        case "add": browser = true
+        case "menu": switchTab(to: 1)
+        case "search": pad.search.send()
+        default: break
+        }
+        if !pad.onSidebar, let ringed = pad.focus { pad.remembered[LibraryShelf.current(shelf).rawValue] = ringed }
+    }
+
     /// The Desktop button at the top of the page (both grids).
     private var desktopButton: some View {
         HStack {
@@ -4010,7 +4243,7 @@ struct LibraryView: View {
                     }.padding(4)
                 }
             }.foregroundStyle(.primary)
-        }.libraryCardButtonStyle(grid: !list)
+        }.libraryCardButtonStyle(grid: !list, pad: "entry:" + entry.id.uuidString)
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(focused == entry.id && controller.connected ? Color.accentColor : .clear, lineWidth: 2))
             .id(entry.id)
             .task(id: entry.id, priority: .utility) { await model.refreshMetadata(entry.id) }
@@ -4032,6 +4265,9 @@ private struct LibrarySheets: ViewModifier {
                     // madeira-bcd: the page shows the entry as stored, with its recommended settings.
                     model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
                 } }
+                // A sheet is its own hosting view: without this, iOS 18 lets the controller also move
+                // the system's own focus and press buttons on it, besides Madeira's commands.
+                .modifier(ClaimGamepadEvents())
             }
             .sheet(item: $selected) { entry in
                 // The details page stays up until the session's starting screen takes over (or an error needs the library's alert).
@@ -4043,6 +4279,10 @@ private struct LibrarySheets: ViewModifier {
                         if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
                     }
                 })
+                // The game page: A is Play and B is back (LibraryDetail); the system's own focus must
+                // not also walk its rows and press them (Cameron, Wave 9: A on a game card "clicks
+                // through the options"). MenuPad also claims the window.
+                .modifier(ClaimGamepadEvents())
             }
             .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
             .onChange(of: model.error) { _, error in if error != nil { selected = nil } }

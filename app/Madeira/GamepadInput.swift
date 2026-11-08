@@ -570,7 +570,8 @@ final class GamepadInput: @unchecked Sendable {
                 // sees a connected pad at rest.
                 if i == 0 {
                     let library = LibraryController.shared
-                    library.sample(buttons: state.buttons, lx: state.lx, ly: state.ly)
+                    library.sample(buttons: state.buttons, lx: state.lx, ly: state.ly, lt: state.left_trigger, rt: state.right_trigger,
+                                   name: pad.controller?.vendorName)
                     if library.ownsInput {
                         state = winios_gamepad()
                         state.connected = 1

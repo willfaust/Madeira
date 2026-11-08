@@ -635,7 +635,7 @@ struct SteamGamesSection: View {
 
     private func cell(_ item: SteamGamesRules.Item, list: Bool, dense: Bool) -> some View {
         Button { select(item) } label: { SteamGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "steam:\(item.id)")
     }
 
     /// An installed game (by Madeira's download or by Steam's client) opens its
@@ -666,6 +666,7 @@ struct SteamSignInCard: View {
             }.padding(14)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
+            .menuPad("signin:steam", cornerRadius: 16, action: signIn)
     }
 }
 
@@ -1193,6 +1194,7 @@ struct SteamGameSheet: View {
                                     Text(summary).font(.subheadline).foregroundStyle(.secondary)
                                 }
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                             .listRowBackground(
@@ -1300,6 +1302,26 @@ struct SteamGameSheet: View {
                 steamActionLabel(partial ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!steam.signedIn)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: SteamGamesRules.Item) -> (() -> Void)? {
+        if let installed = item.installed {
+            // The download finished (or Steam's client installed the game): its Game details page.
+            return { let entry = LibraryModel.shared.steamEntry(installed, title: item.name); dismiss(); open(entry) }
+        } else if let download = steam.downloads[appID] {
+            switch download.state {
+            case .active, .queued:
+                return { steam.pause(appID) }
+            case .paused:
+                return { steam.install(appID) }
+            case .failed:
+                return { steam.install(appID) }
+            }
+        } else if item.owned != nil {
+            return steam.signedIn ? { steam.install(appID, library: partial ? nil : target) } : nil
+        }
+        return nil
     }
 }
 
