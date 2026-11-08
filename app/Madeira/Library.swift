@@ -4516,6 +4516,10 @@ struct LibraryDetail: View {
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
             case .workshop: return "Steam Workshop"
+            case .binds: return "Controller binds"
+            case .epic: return "Epic Games"
+            case .ea: return "EA app"
+            case .assist: return "Gyro aim & turbo"
             case .gog: return "GOG"
             case .itch: return "itch.io"
             case .achievements: return "Achievements"
@@ -4533,6 +4537,10 @@ struct LibraryDetail: View {
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
             case .workshop: return "square.stack.3d.up"
+            case .binds: return "keyboard"
+            case .epic: return "shippingbox"
+            case .ea: return "shippingbox"
+            case .assist: return "gyroscope"
             case .gog: return "bag"
             case .itch: return "bag"
             case .achievements: return "trophy"
@@ -4543,13 +4551,129 @@ struct LibraryDetail: View {
         }
         /// A Steam game's Steam Workshop items (SteamWorkshop.swift).
         case workshop
+        /// Controls › Controller binds and Gyro aim & turbo, pages of their own so they open
+        /// at once like the others (open(_:)).
+        case binds, assist
+        /// An Epic or EA game's store page (repair, version, cloud saves, uninstall): on the
+        /// details page itself before the rebuild, a page like Steam's, GOG's and itch.io's now.
+        case epic, ea
     }
     @State private var path: [Page] = []
+    /// The controller's ring on this page (Cameron, Wave 11: A on a row played the game and the
+    /// iPad's own focus could not get back up to Play): Play, the two switches under it, then
+    /// each page's row, top to bottom. Up and down move it, A presses what it is on.
+    @ObservedObject private var pad = MenuPad.shared
+    @State private var padItem = "play"
+    /// A page A opened on purpose: the guard against the system's own pushes lets it through.
+    @State private var padOpened = false
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @ObservedObject private var steamGames = SteamGamesModel.shared
+    @State private var confirmSteamUninstall = false
+    /// A Steam game Madeira downloaded and that is not updating: Uninstall shows (as
+    /// SteamUninstallSection decides on the store page).
+    private var steamUninstallable: DockGame? {
+        guard let appID = entry.steamAppID, appID != 0, steam.downloads[appID] == nil,
+              let installed = steamGames.games.first(where: { $0.id == appID }),
+              SteamInstallPaths.isManaged(library: installed.library) else { return nil }
+        return installed
+    }
+    /// One rounded group of rows, like a Form section.
+    private func detailGroup<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(spacing: 0) { content() }
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+    /// A row of a group: the ring (a rounded fill and blue edge inside the row, never cut off),
+    /// a line under it unless it is the group's last, and a tap when it has one. `id` nil: the
+    /// ring passes it by.
+    private func detailRow<Content: View>(_ id: String?, last: Bool = false, tap: (() -> Void)? = nil,
+                                          @ViewBuilder _ content: () -> Content) -> some View {
+        let on = id != nil && pad.ring && padItem == id && path.isEmpty
+        let row = content()
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .padding(.horizontal, 16)
+            .contentShape(Rectangle())
+        return Group {
+            if let tap { Button(action: tap) { row }.buttonStyle(.plain) } else { row }
+        }
+        .background {
+            if on {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(LibrarySidebar.picked)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(LibrarySidebar.blue, lineWidth: 3)
+                }.padding(4)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if !last { Rectangle().fill(Color(uiColor: .separator)).frame(height: 0.5).padding(.leading, 16) }
+        }
+        .id(id ?? "plain")
+    }
+    private var padItems: [String] {
+        ["play", "fps", "toggle:performance", "toggle:touch"] + pageGroups.flatMap { $0 }.map { "page:\($0)" }
+            + (steamUninstallable != nil ? ["uninstall"] : [])
+    }
+    private func padMove(_ step: Int, reader: ScrollViewProxy) {
+        let items = padItems
+        let index = items.firstIndex(of: padItem) ?? 0
+        let next = items[min(max(index + step, 0), items.count - 1)]
+        guard next != padItem else { return }
+        var instant = Transaction(); instant.disablesAnimations = true
+        withTransaction(instant) { padItem = next }
+        withAnimation(MenuPad.animation) { reader.scrollTo(next, anchor: .center) }
+    }
+    private func padPress() {
+        LogStore.shared.log("[menu-pad] details: A on \(padItem)")
+        switch padItem {
+        case "play": start()
+        case "toggle:performance": entry.performance.toggle()
+        case "toggle:touch": entry.touchControls.toggle()
+        case "fps": entry.fpsMode = FPSChoice.next(after: entry.fpsMode)
+        case "uninstall": confirmSteamUninstall = true
+        default:
+            if let page = pageGroups.flatMap({ $0 }).first(where: { "page:\($0)" == padItem }) {
+                padOpened = true
+                open(page)
+            }
+        }
+    }
+    /// Opens a page at once, without the slide (Cameron, Nov 7: "Yes, instant").
+    private func open(_ page: Page) {
+        var instant = Transaction(); instant.disablesAnimations = true
+        withTransaction(instant) { path.append(page) }
+    }
+    /// A row that opens `page` (open(_:)): its icon, title, summary and a chevron, like a
+    /// NavigationLink's row.
+    private func pageRow(_ item: Page, icon: Bool = true) -> some View {
+        Button { open(item) } label: { pageRowLabel(item, icon: icon) }
+    }
+    /// A page row's look: icon, title, summary and chevron.
+    private func pageRowLabel(_ item: Page, icon: Bool = true) -> some View {
+        Group {
+            HStack(spacing: 8) {
+                Group {
+                    if icon {
+                        Label { Text(LocalizedStringKey(item.title)).foregroundStyle(.primary) } icon: { Image(systemName: item.symbol).foregroundStyle(Color.accentColor) }
+                    } else {
+                        Text(LocalizedStringKey(item.title)).foregroundStyle(.primary)
+                    }
+                }
+                Spacer(minLength: 8)
+                if let value = summary(item) { Text(value).lineLimit(1).foregroundStyle(.secondary) }
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+    }
+    /// A Game details button row's look: a blue icon (red for Uninstall) and its title.
+    private func detailLabel(_ title: LocalizedStringKey, _ symbol: String, color: Color = .accentColor) -> some View {
+        Label { Text(title).foregroundStyle(color == .red ? Color.red : Color.primary) } icon: { Image(systemName: symbol).foregroundStyle(color) }
+    }
     /// The rows of the details page, in groups. The Desktop entry has no launch options
     /// or library details; a Steam game has its Steam pages.
     private var pageGroups: [[Page]] {
         let launch = entry.usesLaunchOptions || entry.desktop != true
-        let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
+        let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch]
+                                                      : entry.epicAppName != nil ? [.epic] : entry.eaOfferID != nil ? [.ea] : [])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
@@ -4596,9 +4720,25 @@ struct LibraryDetail: View {
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
             case .advanced: advancedPage
+            case .epic:
+                if let appName = entry.epicAppName {
+                    EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
+                    EpicCloudSection(appName: appName)
+                }
+            case .ea: EAEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .binds:
+                ControllerBindsPage(binds: $entry.controllerBinds, mouseVertical: $entry.padMouseVertical)
+                    .toolbar {
+                        Button("Reset") { entry.controllerBinds = nil; entry.padMouseVertical = nil }
+                            .disabled(entry.controllerBinds == nil && entry.padMouseVertical == nil)
+                    }
+            case .assist:
+                PadAssistPage(settings: $entry.padAssist)
+                    .toolbar { Button("Reset") { entry.padAssist = nil }.disabled(entry.padAssist == nil) }
             }
         }
-        .navigationTitle(page.title).navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(LocalizedStringKey(page.title)).navigationBarTitleDisplayMode(.inline)
+        .menuPadNoSystemFocus()
     }
 
     @ViewBuilder private var displayPage: some View {
@@ -4652,22 +4792,11 @@ struct LibraryDetail: View {
                 }
                 if entry.controllerMode == "keys" {
                     Text("The pad acts as keyboard and mouse. Change keys in Controller binds.").font(.caption).foregroundStyle(.secondary)
-                    NavigationLink("Controller binds") {
-                        Form { ControllerBindsPage(binds: $entry.controllerBinds, mouseVertical: $entry.padMouseVertical) }
-                            .navigationTitle("Controller binds")
-                            .toolbar {
-                                Button("Reset") { entry.controllerBinds = nil; entry.padMouseVertical = nil }
-                                    .disabled(entry.controllerBinds == nil && entry.padMouseVertical == nil)
-                            }
-                    }
+                    pageRow(.binds, icon: false)
                 }
             }
             if GamepadInput.enabled {
-                NavigationLink("Gyro aim & turbo") {
-                    Form { PadAssistPage(settings: $entry.padAssist) }
-                        .navigationTitle("Gyro aim & turbo")
-                        .toolbar { Button("Reset") { entry.padAssist = nil }.disabled(entry.padAssist == nil) }
-                }
+                pageRow(.assist, icon: false)
             }
             LabeledContent("Control opacity") {
                 Slider(value: Binding(get: { entry.controlOpacity ?? 0.7 }, set: { entry.controlOpacity = $0 }), in: 0.15...1)
@@ -4899,108 +5028,148 @@ struct LibraryDetail: View {
                 Text("Copies this device, iOS version, Madeira version and the game's store in the format the Madeira Discord's game-compatibility posts use. Fill in Results before posting.")
             }
         }
+        // (game-actions-advanced) madeira-bcd: the setup, help and reset actions, for every entry, the Desktop too
+        // (GameRecommendationsApply.swift). Moved here from Game details with Copy Compat Report, so Game details
+        // ends with Uninstall on its own.
+        Section {
+            Button("Share Setup", systemImage: "square.and.arrow.up") { model.save(entry); shareSetup = true }
+            Button("Apply Shared Setup", systemImage: "square.and.arrow.down") { askSetupSource = true }
+                .confirmationDialog("Apply a shared setup", isPresented: $askSetupSource, titleVisibility: .visible) {
+                    Button("Choose a File") { importSetup = true }
+                    Button("Paste from Clipboard") { readSetup { try GameSetup(text: UIPasteboard.general.string ?? "") } }
+                }
+            Button("Copy Settings", systemImage: "doc.on.doc") {
+                let configText = entry.config ?? ""
+                UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
+            }
+            ClaudeHelpButton(entry: entry)
+            // LogsView.swift: the summary, last game log, this run's log and madeira.cfg in one scrubbed .zip.
+            ShareLogsButton()
+            Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
+                .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
+                                    isPresented: $confirmReset, titleVisibility: .visible) {
+                    Button("Reset", role: .destructive) { resetToRecommended() }
+                }
+        } footer: {
+            Text(GameRecommendations.note(recommended, desktop: entry.desktop == true))
+        }
+        .fileImporter(isPresented: $importSetup,
+                      allowedContentTypes: [GameSetup.contentType, .json, .plainText, .data]) { result in
+            readSetup { try GameSetup.read(file: try result.get()) }
+        }
     }
 
     var body: some View {
         NavigationStack(path: $path) {
-            Form {
-                Section {
-                    HStack(spacing: 20) {
-                        artwork(backdrop: false).frame(width: 120, height: 180).clipShape(RoundedRectangle(cornerRadius: 14))
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(entry.title).font(.title2.bold())
-                            LibraryBadges(entry: entry)
-                            if let appID = entry.steamAppID, let summary = SteamOwnedLibrary.shared.playtime[appID]?.summary {
-                                Text(summary).font(.subheadline).foregroundStyle(.secondary)
-                            } else if let played = entry.lastPlayed {
-                                Text("Last played \(played.formatted(.relative(presentation: .named)))").font(.subheadline).foregroundStyle(.secondary)
+          ScrollViewReader { reader in
+            // Game details is Madeira's own page, built like the library (Cameron, Wave 12: the
+            // system list's own focus walked under the ring and cut it off at its corners). The
+            // ring moves over Play, the FPS limit, the switches, each page's row, Uninstall and the
+            // share buttons; the pages inside stay system Forms.
+            ScrollView {
+                VStack(spacing: 24) {
+                    ZStack {
+                        HStack(spacing: 20) {
+                            artwork(backdrop: false).frame(width: 120, height: 180).clipShape(RoundedRectangle(cornerRadius: 14))
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text(entry.title).font(.title2.bold())
+                                LibraryBadges(entry: entry)
+                                if let appID = entry.steamAppID, let summary = SteamOwnedLibrary.shared.playtime[appID]?.summary {
+                                    Text(summary).font(.subheadline).foregroundStyle(.secondary)
+                                } else if let played = entry.lastPlayed {
+                                    Text("Last played \(played.formatted(.relative(presentation: .named)))").font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                // A game Valve's client starts (Madeira Dock): can it start without a connection?
+                                if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
+                                    DockOfflineMark(appID: appID)
+                                }
+                                Button(action: start) {
+                                    HStack(spacing: 10) {
+                                        // Enabling JIT can take seconds with nothing else on screen.
+                                        if model.startingJIT == entry.id {
+                                            ProgressView().tint(.white)
+                                            Text("Starting JIT").fontWeight(.semibold)
+                                        } else {
+                                            Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
+                                        }
+                                    }.frame(minWidth: 100, minHeight: 30)
+                                }
+                                .buttonStyle(LibraryPlayStyle(pending: leaving)).disabled(leaving)
+                                .overlay {
+                                    // Play's own shape (LibraryPlayStyle: 14), grown by the gap: the ring follows it.
+                                    RoundedRectangle(cornerRadius: 18)
+                                        .strokeBorder(LibrarySidebar.blue, lineWidth: 3).padding(-4)
+                                        .opacity(pad.ring && padItem == "play" && path.isEmpty ? 1 : 0)
+                                        .allowsHitTesting(false)
+                                }
+                                .scaleEffect(pad.ring && padItem == "play" && path.isEmpty ? 1.04 : 1)
+                                // Holds the iPad's own focus while the ring shows (MenuPadNoSystemFocus.Probe).
+                                .background(MenuPadNoSystemFocus().frame(width: 1, height: 1).allowsHitTesting(false))
+                                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { playFrame = $0 }
                             }
-                            // A game Valve's client starts (Madeira Dock): can it start without a connection?
-                            if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
-                                DockOfflineMark(appID: appID)
-                            }
-                            Button(action: start) {
-                                HStack(spacing: 10) {
-                                    // Enabling JIT can take seconds with nothing else on screen.
-                                    if model.startingJIT == entry.id {
-                                        ProgressView().tint(.white)
-                                        Text("Starting JIT").fontWeight(.semibold)
-                                    } else {
-                                        Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
-                                    }
-                                }.frame(minWidth: 100, minHeight: 30)
-                            }
-                            .buttonStyle(LibraryPlayStyle(pending: leaving)).disabled(leaving)
-                            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { playFrame = $0 }
                         }
-                    }.padding(.vertical, 24)
-                        .listRowBackground(
-                            artwork(backdrop: true).blur(radius: 4)
-                                .overlay(Color(uiColor: .secondarySystemGroupedBackground).opacity(0.48))
-                                .overlay(alignment: .bottom) {
-                                    LinearGradient(colors: [.clear, Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .top, endPoint: .bottom).frame(height: 70)
-                                }.clipped()
-                        )
-                }
-                // A Play error sits under Play.
-                if let error { Section { Text(error).foregroundStyle(.red) } }
-                // A running update blocks Play: its progress shows here too.
-                if let appID = entry.steamAppID, let download = SteamOwnedLibrary.shared.downloads[appID] {
-                    Section { SteamDownloadStatus(download: download) }
-                }
-                if let appName = entry.epicAppName {
-                    EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
-                    EpicCloudSection(appName: appName)
-                }
-                if entry.eaOfferID != nil {
-                    EAEntrySection(entry: $entry) { leaving = true; dismiss() }
-                }
-                Section {
-                    FPSChoice(mode: $entry.fpsMode)
-                    Toggle("Performance overlay", isOn: $entry.performance)
-                    Toggle("Touch controls", isOn: $entry.touchControls)
-                }
-                ForEach(Array(pageGroups.enumerated()), id: \.offset) { _, group in
-                    Section {
-                        ForEach(group, id: \.self) { item in
-                            NavigationLink(value: item) {
-                                if let value = summary(item) {
-                                    LabeledContent { Text(value).lineLimit(1) } label: { Label(item.title, systemImage: item.symbol) }
-                                } else {
-                                    Label(item.title, systemImage: item.symbol)
+                        .padding(.vertical, 24).padding(.horizontal, 20)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .background(
+                        artwork(backdrop: true).blur(radius: 4)
+                            .overlay(Color(uiColor: .secondarySystemGroupedBackground).opacity(0.48))
+                            .overlay(alignment: .bottom) {
+                                LinearGradient(colors: [.clear, Color(uiColor: .secondarySystemGroupedBackground)], startPoint: .top, endPoint: .bottom).frame(height: 70)
+                            }
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .id("play")
+                    // A Play error sits under Play.
+                    if let error {
+                        detailGroup { Text(error).foregroundStyle(.red).padding(16).frame(maxWidth: .infinity, alignment: .leading) }
+                    }
+                    // A running update blocks Play: its progress shows here too.
+                    if let appID = entry.steamAppID, let download = steam.downloads[appID] {
+                        detailGroup { SteamDownloadStatus(download: download).padding(16) }
+                    }
+                    detailGroup {
+                        detailRow("fps") { FPSChoice(mode: $entry.fpsMode) }
+                        detailRow("toggle:performance") { Toggle("Performance overlay", isOn: $entry.performance) }
+                        detailRow("toggle:touch", last: true) { Toggle("Touch controls", isOn: $entry.touchControls) }
+                    }
+                    ForEach(Array(pageGroups.enumerated()), id: \.offset) { _, group in
+                        detailGroup {
+                            ForEach(group, id: \.self) { item in
+                                detailRow("page:\(item)", last: item == group.last, tap: { open(item) }) { pageRowLabel(item) }
+                            }
+                        }
+                    }
+                    // A Steam game Madeira downloaded: Uninstall on this page too.
+                    if steamUninstallable != nil {
+                        detailGroup {
+                            detailRow("uninstall", last: true, tap: { confirmSteamUninstall = true }) {
+                                detailLabel("Uninstall", "trash", color: .red)
+                            }
+                            .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from where it is installed. Saves stored elsewhere are kept.",
+                                                isPresented: $confirmSteamUninstall, titleVisibility: .visible) {
+                                Button("Uninstall", role: .destructive) {
+                                    if let installed = steamUninstallable { steam.uninstall(installed) }
+                                    leaving = true; dismiss()
                                 }
                             }
                         }
                     }
                 }
-                // madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).
-                Section {
-                    Button("Share Setup", systemImage: "square.and.arrow.up") { model.save(entry); shareSetup = true }
-                    Button("Apply Shared Setup", systemImage: "square.and.arrow.down") { askSetupSource = true }
-                        .confirmationDialog("Apply a shared setup", isPresented: $askSetupSource, titleVisibility: .visible) {
-                            Button("Choose a File") { importSetup = true }
-                            Button("Paste from Clipboard") { readSetup { try GameSetup(text: UIPasteboard.general.string ?? "") } }
-                        }
-                    Button("Copy Settings", systemImage: "doc.on.doc") {
-                        let configText = entry.config ?? ""
-                        UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
-                    }
-                    // ClaudeHelp.swift: the fixes guide, the logs and this game's config to a chat.
-                    ClaudeHelpButton(entry: entry)
-                    Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
-                        .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
-                                            isPresented: $confirmReset, titleVisibility: .visible) {
-                            Button("Reset", role: .destructive) { resetToRecommended() }
-                        }
-                } footer: {
-                    Text(GameRecommendations.note(recommended, desktop: entry.desktop == true))
-                }
-                .fileImporter(isPresented: $importSetup,
-                              allowedContentTypes: [GameSetup.contentType, .json, .plainText, .data]) { result in
-                    readSetup { try GameSetup.read(file: try result.get()) }
-                }
+                .padding(.horizontal, 20).padding(.vertical, 16)
+                .frame(maxWidth: 760).frame(maxWidth: .infinity)
             }
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            // Up and down move the ring (B and A are handled below, with the rest of the page).
+            .onReceive(LibraryController.shared.commands) { command in
+                guard path.isEmpty, !leaving, !findCover, !importCover, !remove, !confirmReset,
+                      command == "up" || command == "down" else { return }
+                if pad.show() { return }
+                padMove(command == "up" ? -1 : 1, reader: reader)
+            }
+          }
             .navigationTitle("Game details").navigationBarTitleDisplayMode(.inline)
+            .menuPadNoSystemFocus()
             .navigationDestination(for: Page.self) { item in page(item) }
             .toolbarBackground(.regularMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
@@ -5054,12 +5223,26 @@ struct LibraryDetail: View {
             Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
         }
         .onDisappear { if !leaving { model.save(entry) } }
+        // Madeira's commands never open a page here (B goes back, A plays): a page that opens
+        // while the ring shows (no touch since the controller was used) is the system's own
+        // focus pressing a row (Cameron, Wave 10: Controls, then Gyro aim & turbo). Undone.
+        .onChange(of: path) { old, new in
+            if padOpened { padOpened = false; return }
+            guard MenuPad.enabled, MenuPad.shared.ring, new.count > old.count else { return }
+            LogStore.shared.log("[menu-pad] details: stopped a page the controller did not open (\(new.last?.title ?? "?"))")
+            var instant = Transaction(); instant.disablesAnimations = true
+            withTransaction(instant) { path = old }
+        }
         .onReceive(LibraryController.shared.commands) { command in
             guard !leaving, !findCover, !importCover, !remove, !confirmReset else { return }
             if command == "back" {
-                if path.isEmpty { model.save(entry); dismiss() } else { path.removeLast() }
+                if path.isEmpty { model.save(entry); dismiss() }
+                else { var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { path.removeLast() } }
             }
-            if command == "accept", path.isEmpty { start() }
+            // A presses what the ring is on: Play, a switch, or a page's row.
+            if command == "accept", path.isEmpty {
+                if MenuPad.enabled { if !pad.show() { padPress() } } else { start() }
+            }
         }
     }
 }
@@ -5430,6 +5613,14 @@ struct FPSChoice: View {
             if ProMotionIntent.has40Cap || mode == 4 { Text("40 FPS").tag(4) }
             Text("60 FPS").tag(1); Text("Display maximum").tag(0); Text("Uncapped").tag(2)
         }.labelsHidden().pickerStyle(.menu) }
+    }
+    /// The choices in the menu's order; A on the controller steps to the next one (Game details).
+    static func order(current: Int) -> [Int] {
+        (ProMotionIntent.has30Cap || current == 3 ? [3] : []) + (ProMotionIntent.has40Cap || current == 4 ? [4] : []) + [1, 0, 2]
+    }
+    static func next(after current: Int) -> Int {
+        let choices = order(current: current)
+        return choices[((choices.firstIndex(of: current) ?? -1) + 1) % choices.count]
     }
 }
 

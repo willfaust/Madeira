@@ -40,6 +40,9 @@ check('case .logs: return "Logs"' in pages and '.advanced, .logs, .credits' in p
       'Settings lists a Logs page')
 link = 'NavigationLink { Form { LogsSection() }.navigationTitle("Logs") }'
 check(pages.count(link) == 1 and library.count(link) == 1, 'Diagnostics links to Logs, on the pages and on the long page')
+check(library.count('ShareLogsButton()') == 1 and
+      library.index('Button("Copy Settings"') < library.index('ShareLogsButton()'),
+      'Game details offers Share Logs (Get Help from Claude is in the Get Help sheet now)')
 
 check('PrivacyScrub.copy(from: url, to: out)' in view and 'try PrivacyScrub.copy(from: source, to: copy)' in view
       and 'ring.map(PrivacyScrub.line)' in view,

@@ -1528,6 +1528,38 @@ struct InstalledDLC: Identifiable, Equatable {
     let bytes: Int64
 }
 
+/// Uninstall on the game's own page, under its settings: players looked for it there and
+/// did not find it on the Steam page below Repair (about eight asked after 0.2.0). The same
+/// rule and question as the Steam page's button: only a game Madeira downloaded into Dock's
+/// own library folder, and not while a download runs.
+struct SteamUninstallSection: View {
+    let entry: LibraryEntry
+    /// The game was uninstalled: the page closes without saving.
+    var uninstalled: () -> Void
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @ObservedObject private var games = SteamGamesModel.shared
+    @State private var confirmUninstall = false
+
+    var body: some View {
+        let appID = entry.steamAppID ?? 0
+        let installed = games.games.first { $0.id == appID }
+        let managed = installed.map { SteamInstallPaths.isManaged(library: $0.library) } ?? false
+        if appID != 0, managed, steam.downloads[appID] == nil {
+            Section {
+                Button("Uninstall", systemImage: "trash", role: .destructive) { confirmUninstall = true }
+                    .foregroundStyle(.red)
+            }
+            .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from where it is installed. Saves stored elsewhere are kept.",
+                                isPresented: $confirmUninstall, titleVisibility: .visible) {
+                Button("Uninstall", role: .destructive) {
+                    if let installed { steam.uninstall(installed) }
+                    uninstalled()
+                }
+            }
+        }
+    }
+}
+
 struct SteamEntrySection: View {
     @Binding var entry: LibraryEntry
     /// The game was uninstalled: the page closes without saving.

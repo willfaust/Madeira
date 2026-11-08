@@ -568,9 +568,12 @@ assert reset_section.index('Button("Reset", role: .destructive) { resetToRecomme
     < reset_section.index('Text(GameRecommendations.note(recommended, desktop: entry.desktop == true))')
 assert 'GameRecommendations.question(recommended, desktop: entry.desktop == true)' in reset_section
 # For every entry, the Desktop too: the section is not gated off.
-assert ('// madeira-bcd: always last, for every entry, the Desktop too (GameRecommendationsApply.swift).\n'
-        '                Section {\n') in detail
-assert detail.index('// madeira-bcd: always last,') < detail.index('Button("Reset to Recommended"')
+# (game-actions-advanced) On the game's Advanced page (every entry has one, the Desktop too), not
+# gated off; Game details itself ends with Uninstall.
+advanced = detail[detail.index('@ViewBuilder private var advancedPage: some View {'):detail.index('    var body: some View {')]
+assert ('// (game-actions-advanced) madeira-bcd: the setup, help and reset actions, for every entry, the Desktop too\n') in advanced
+assert advanced.index('// (game-actions-advanced)') < advanced.index('Button("Reset to Recommended"')
+assert 'Button("Reset to Recommended"' not in detail[detail.index('    var body: some View {'):]
 # Last in the form, after the Executable section and Remove from library (the error line is
 # shown with the page's other sections since the Game details pages).
 assert detail.index('Button("Remove from library"') < detail.index('Button("Reset to Recommended"')
