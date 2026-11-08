@@ -200,8 +200,16 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
                                              (0x8000, "add"), (0x10, "menu"), (0x20, "search"), (0x100, "previous"), (0x200, "next"),
                                              (0x10000, "pageUp"), (0x20000, "pageDown")]
             for (mask, name) in names where pressed & mask != 0 { command = name; break }
+            if command == nil, pressed != 0 { LogTrail.pressedUnused(pressed) }
         }
-        if let command { DispatchQueue.main.async { self.commands.send(command) } }
+        if let command {
+            DispatchQueue.main.async {
+                // madeira-log-trail: the press, and where the ring was before and after it.
+                let before = MainActor.assumeIsolated { LogTrail.ring }
+                self.commands.send(command)
+                MainActor.assumeIsolated { LogTrail.pressed(command, ownsMenus: own, before: before) }
+            }
+        }
     }
 }
 
@@ -1065,7 +1073,7 @@ final class LibraryModel: ObservableObject {
     }
     @Published var current: UUID?
     @Published var activeEntry: LibraryEntry?
-    @Published var menu = false
+    @Published var menu = false { didSet { if menu != oldValue { LogTrail.inGameMenu(menu) } } }
     @Published var performance = false
     @Published var liveLogs = false
     @Published var fpsMode = 1
@@ -1792,6 +1800,7 @@ final class LibraryModel: ObservableObject {
     /// `dock`: the game a Madeira Dock start launches (DockStartScreen).
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
+        LogTrail.began(entry, dock: dock != nil)
         JITPoolMeter.reset(); smallPoolNoted = false; poolAutoChecked = false; poolAutoTitle = nil
         quitRequested = false
  quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil; installsRestartReady = false
@@ -1911,6 +1920,7 @@ final class LibraryModel: ObservableObject {
     /// offers Enable JIT instead of only reporting.
     func launchFailed(_ reason: String? = nil, offerJIT: Bool = false) {
         guard current != nil && !sawProcess else { return }
+        LogTrail.ending("the start failed" + (reason.map { ": " + LogTrail.clip($0, 100) } ?? ""))
         finish()
         if offerJIT, let reason { jitNotice = reason }
         else { error = reason ?? L("The session could not start. Check the diagnostic log and JIT status.") }
@@ -1993,6 +2003,7 @@ final class LibraryModel: ObservableObject {
     /// anyway (sessionsThisRun), which Play then says.
     func stopStartToLibrary() {
         LogStore.shared.log("[frontend] Stop on the starting screen: closing the game, back to the library")
+        LogTrail.ending("Stop on the starting screen")
         requestQuit()
         winios_close_desktop()
         finish()
@@ -2006,6 +2017,7 @@ final class LibraryModel: ObservableObject {
     /// Steam have ended, as before, or `forceCloseAfter` seconds after Quit at the latest.
     func quitToLibrary() {
         LogStore.shared.log("[frontend] Quit game: back to the library; the game closes behind it")
+        LogTrail.ending("Quit game")
         let dock = DockStartScreen.shared.active
         requestQuit()
         finish()
@@ -2071,6 +2083,9 @@ final class LibraryModel: ObservableObject {
         ProMotionIntent.shared.setActive(false)
         ThermalPacing.shared.end()
         fputs("[frontend] returned to library\n", stderr)
+        // madeira-log-trail: the end line, once Wine is done (LogTrail.swift).
+        if Thread.isMainThread { MainActor.assumeIsolated { LogTrail.backInLibrary() } }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated { LogTrail.backInLibrary() } } }
         LogSummary.writeLater(from: LogStore.shared.logURL, source: "madeira-log.txt (this session)")
     }
 }
@@ -4268,6 +4283,7 @@ private struct LibrarySheets: ViewModifier {
                 // A sheet is its own hosting view: without this, iOS 18 lets the controller also move
                 // the system's own focus and press buttons on it, besides Madeira's commands.
                 .modifier(ClaimGamepadEvents())
+                .logScreen("add a game")
             }
             .sheet(item: $selected) { entry in
                 // The details page stays up until the session's starting screen takes over (or an error needs the library's alert).
@@ -4283,6 +4299,7 @@ private struct LibrarySheets: ViewModifier {
                 // not also walk its rows and press them (Cameron, Wave 9: A on a game card "clicks
                 // through the options"). MenuPad also claims the window.
                 .modifier(ClaimGamepadEvents())
+                .logScreen("game page: \(entry.title)")
             }
             .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
             .onChange(of: model.error) { _, error in if error != nil { selected = nil } }

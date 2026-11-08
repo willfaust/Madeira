@@ -41,6 +41,7 @@ struct MadeiraApp: App {
                     WineGeckoModel.shared.installAutomatically()  // on Wi-Fi, so Wine never asks (WineGecko.swift)
                     AchievementWatcher.shared.start()             // unlock banners from Steam's stats files (SteamAchievements.swift)
                     ClaudeHelp.install()                          // the fixes guide beside madeira-log.txt (ClaudeHelp.swift)
+                    LogTrail.install()                            // presses, focus, screens, taps, start steps (LogTrail.swift)
                 }
                 // madeira://jit-network/... (the Madeira JIT shortcut returning, JITNetwork.swift),
                 // else a shared game setup (a .madeirasetup file or madeira://setup?d=..., GameSetupShare.swift),

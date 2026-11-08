@@ -201,6 +201,7 @@
 		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
 		A1000D51 /* LibrarySidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000D51 /* LibrarySidebar.swift */; };
 		A1000D52 /* MenuPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000D52 /* MenuPad.swift */; };
+		A1000E71 /* LogTrail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E71 /* LogTrail.swift */; };
 		A1000976 /* LibraryGridZoomStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000976 /* LibraryGridZoomStart.swift */; };
 		A1000975 /* LibraryGridZoomIdle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000975 /* LibraryGridZoomIdle.swift */; };
 		A1000974 /* LibraryGridZoomHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000974 /* LibraryGridZoomHaptics.swift */; };
@@ -501,6 +502,7 @@
 		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
 		A2000D51 /* LibrarySidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibrarySidebar.swift"; sourceTree = "<group>"; };
 		A2000D52 /* MenuPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MenuPad.swift"; sourceTree = "<group>"; };
+		A2000E71 /* LogTrail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogTrail.swift"; sourceTree = "<group>"; };
 		A2000976 /* LibraryGridZoomStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStart.swift"; sourceTree = "<group>"; };
 		A2000975 /* LibraryGridZoomIdle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomIdle.swift"; sourceTree = "<group>"; };
 		A2000974 /* LibraryGridZoomHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomHaptics.swift"; sourceTree = "<group>"; };
@@ -748,6 +750,7 @@
 				A2000977 /* LibraryCoverSpot.swift */,
 				A2000D51 /* LibrarySidebar.swift */,
 				A2000D52 /* MenuPad.swift */,
+				A2000E71 /* LogTrail.swift */,
 				A2000976 /* LibraryGridZoomStart.swift */,
 				A2000975 /* LibraryGridZoomIdle.swift */,
 				A2000974 /* LibraryGridZoomHaptics.swift */,
@@ -1217,6 +1220,7 @@
 				A1000977 /* LibraryCoverSpot.swift in Sources */,
 				A1000D51 /* LibrarySidebar.swift in Sources */,
 				A1000D52 /* MenuPad.swift in Sources */,
+				A1000E71 /* LogTrail.swift in Sources */,
 				A1000976 /* LibraryGridZoomStart.swift in Sources */,
 				A1000975 /* LibraryGridZoomIdle.swift in Sources */,
 				A1000974 /* LibraryGridZoomHaptics.swift in Sources */,

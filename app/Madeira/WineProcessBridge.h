@@ -41,6 +41,8 @@ int wine_process_exit_code(void);
 // (0xC...) since the last reset.
 void wine_launched_process_did_exit(int status);
 int wine_crash_exit_status(uint32_t *status);
+// madeira-log-trail: the same program's exit status, any value (0 included); 1 when it ended.
+int wine_launched_exit_code(uint32_t *status);
 // Forget the recorded status (and the Steam request below); called when a session begins.
 void wine_exit_status_reset(void);
 // A game in a Madeira Dock session asked Steam to start another game

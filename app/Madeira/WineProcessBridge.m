@@ -374,11 +374,22 @@ int wine_steam_run_request(uint32_t *appid) {
     if (appid) *appid = value;
     return 1;
 }
+/* madeira-log-trail: the launched program's exit status, whatever it is (0, a game's own
+ * code, an NTSTATUS), for the log's [game-end] line. Same rules as g_launch_exit: stored only. */
+static uint64_t g_launch_exit_any = 0;
 void wine_launched_process_did_exit(int status) {
+    __atomic_store_n(&g_launch_exit_any, (UINT64_C(1) << 32) | (uint32_t)status, __ATOMIC_RELEASE);
     if ((uint32_t)status >= 0xC0000000u)
         __atomic_store_n(&g_launch_exit, (UINT64_C(1) << 32) | (uint32_t)status, __ATOMIC_RELEASE);
 }
+int wine_launched_exit_code(uint32_t *status) {
+    uint64_t value = __atomic_load_n(&g_launch_exit_any, __ATOMIC_ACQUIRE);
+    if (!(value >> 32)) return 0;
+    if (status) *status = (uint32_t)value;
+    return 1;
+}
 void wine_exit_status_reset(void) {
+    __atomic_store_n(&g_launch_exit_any, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_launch_exit, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_steam_run_app, 0, __ATOMIC_RELEASE);
 }

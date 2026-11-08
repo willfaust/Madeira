@@ -217,6 +217,7 @@ struct SettingsPageView: View {
                 }
                 // A controller's B closes it, and the Settings list leaves the pad alone meanwhile.
                 .menuPadSheet()
+                .logScreen("Settings sheet: \(String(describing: sheet))")
             }
     }
 
