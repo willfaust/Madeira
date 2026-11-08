@@ -22766,37 +22766,37 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Die letzten %lld Zeilen, ohne persönliche Daten."
+            "value": "Die letzten %1$lld Zeilen, ohne persönliche Daten."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Se muestran las últimas %lld líneas, sin datos personales."
+            "value": "Se muestran las últimas %1$lld líneas, sin datos personales."
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "개인 정보를 제거한 마지막 %lld줄입니다."
+            "value": "개인 정보를 제거한 마지막 %1$lld줄입니다."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mostrando as últimas %lld linhas, sem dados pessoais."
+            "value": "Mostrando as últimas %1$lld linhas, sem dados pessoais."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Последние строки (%lld), без личных данных."
+            "value": "Последние строки (%1$lld), без личных данных."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "显示最后 %lld 行，已去除个人信息。"
+            "value": "显示最后 %1$lld 行，已去除个人信息。"
           }
         }
       }

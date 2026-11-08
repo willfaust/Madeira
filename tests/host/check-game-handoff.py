@@ -41,7 +41,7 @@ typedef uint16_t WCHAR;
 #define ERR(...) ((void)0)
 '''
 native += block(process, 'static int ios_image_name_is(')
-native += '\nstatic uint32_t g_steam_run_app; static uint64_t g_launch_exit;\n'
+native += '\nstatic uint32_t g_steam_run_app; static uint64_t g_launch_exit; static uint64_t g_launch_exit_any;\n'
 hooks = ''
 for name in ['void wine_steam_run_requested(', 'int wine_steam_run_request(', 'void wine_exit_status_reset(']:
     hooks += block(bridge, name) + '\n'
