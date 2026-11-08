@@ -679,33 +679,27 @@ struct SteamGameArtwork: View {
     /// of the art for that glyph to sit on.
     var notDownloaded = false
     @ObservedObject private var steam = SteamOwnedLibrary.shared
-    @State private var index = 0
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        let urls = SteamGamesRules.artwork(appID: appID) { steam.game($0) }
+        let source = LibraryCoverCache.Source.steam(appID)
         GeometryReader { geometry in
             ZStack {
                 Color(uiColor: .secondarySystemFill)
                 if !notDownloaded {
                     Image(systemName: "gamecontroller.fill").font(.largeTitle).foregroundStyle(.secondary)
                 }
-                AsyncImage(url: index < urls.count ? urls[index] : nil) { phase in
-                    switch phase {
-                    case .success(let image):
+                LibraryCachedArtwork(source: source, pixelWidth: Int((geometry.size.width * displayScale).rounded(.up))) { image in
+                    if let image {
                         image.resizable().scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                             .overlay { if notDownloaded { SteamArtworkBlurSpot(image: image, size: geometry.size) } }
-                    case .failure:
-                        Color.clear.onAppear { if index + 1 < urls.count { index += 1 } }
-                    default:
-                        Color.clear
                     }
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height).clipped()
         }
         .accessibilityHidden(true)
-        .task(id: appID) { index = 0 }
     }
 }
 

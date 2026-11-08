@@ -158,7 +158,7 @@ final class LibraryGridHostController: UIViewController, UICollectionViewDelegat
         coverUpdates = LibraryCoverCache.shared.batches.sink { [weak self] keys in
             guard let self else { return }
             for case let cell as LibraryGridCardCell in self.collectionView.visibleCells {
-                if let key = cell.coverSourceKey, keys.contains(key) { cell.refreshCover() }
+                if let key = cell.coverSourceKey, keys.contains(key) { cell.refreshCover(force: true) }
             }
         }
         // Dynamic Type: the trait (the system setting, and any override above the page).

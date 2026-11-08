@@ -81,6 +81,12 @@ final class LibraryGridCardCell: LibraryGridHeldCell {
     private var wanted: LibraryGridCardWork?
     private var running: (id: String, task: Task<Void, Never>)?
     private var displayed = false
+    private let coverDemand = UUID()
+
+    deinit {
+        let token = coverDemand
+        Task { @MainActor in LibraryCoverCache.shared.releaseDemand(token) }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -180,13 +186,19 @@ final class LibraryGridCardCell: LibraryGridHeldCell {
 
     // MARK: Cover
 
-    func refreshCover() {
-        guard let cover, let source = content?.source else { cover?.setImage(nil, exact: false); coverKey = nil; return }
+    func refreshCover(force: Bool = false) {
+        guard let cover, let source = content?.source else {
+            LibraryCoverCache.shared.releaseDemand(coverDemand)
+            cover?.setImage(nil, exact: false); coverKey = nil
+            return
+        }
+        guard displayed else { return }
         let scale = traitCollection.displayScale
         let pixels = LibraryGridGeometry.coverPixels(cardWidth: bounds.width, scale: scale)
         guard pixels > 0 else { return }
-        if coverKey == source.variant, coverPixels == pixels, coverExact { return }
-        let found = LibraryCoverCache.shared.image(for: source, pixelWidth: pixels)
+        if !force, coverKey == source.variant, coverPixels == pixels, coverExact { return }
+        if coverKey != source.variant { LibraryCoverCache.shared.releaseDemand(coverDemand) }
+        let found = LibraryCoverCache.shared.image(for: source, pixelWidth: pixels, demand: coverDemand)
         cover.setImage(found?.image, exact: found?.exact ?? false)
         coverKey = source.variant
         coverPixels = pixels
@@ -215,9 +227,9 @@ final class LibraryGridCardCell: LibraryGridHeldCell {
 
     /// Set for a cell realised while a zoom runs: its metadata work waits for the landing, not while the offset sweeps under the zoom.
     private var workHeld = false
-    func displayStarted(holdWork: Bool = false) { displayed = true; workHeld = holdWork; updateWork() }
+    func displayStarted(holdWork: Bool = false) { displayed = true; workHeld = holdWork; refreshCover(force: true); updateWork() }
     func releaseHeldWork() { guard workHeld else { return }; workHeld = false; updateWork() }
-    func displayEnded() { displayed = false; updateWork() }
+    func displayEnded() { displayed = false; LibraryCoverCache.shared.releaseDemand(coverDemand); updateWork() }
 
     private func updateWork() {
         guard displayed, !workHeld, let wanted else {
@@ -234,6 +246,7 @@ final class LibraryGridCardCell: LibraryGridHeldCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         displayed = false
+        LibraryCoverCache.shared.releaseDemand(coverDemand)
         workHeld = false
         wanted = nil
         updateWork()
