@@ -491,6 +491,8 @@ static LONG g_vis_begun, g_vis_resolved, g_vis_nonzero, g_vis_restarts;   /* ml1
 static LONG g_srv_clamped; static float g_srv_clamp_max;   /* ml1089 */
 static LONG g_zero_inst;   /* ml1094 */
 static LONG g_fence_waits, g_fence_updates, g_barriers;   /* ml1091 */
+static int g_tex_pfv_min = -1;   /* madeira-duo tex-pfv-minimal (mad_tex_pfv_minimal_on) */
+static volatile LONG g_pfv_kept, g_pfv_dropped, g_pfv_miss;
 static LONG g_f6_begins, g_f6_synced, g_f6_att_sync, g_f6_kept_open, g_f6_joins, g_f6_rclose;   /* ml1134 */
 static LONG g_f6_rar_passed; static int g_f6_rar = -1;   /* madeira-bcd f6-rar */
 /* ml1137: GPU census, counts only. Barrier entries by the states they move
@@ -1139,6 +1141,9 @@ static void mad_skip_report(void) {
               g_tess_draws, g_tess_drawn, g_tess_nonidx, g_gs_built, g_gs_drawn, g_dtess_drawn, g_dtess_ind_drawn);   /* ml1083, ml1147, madeira-bcd */
     d3d12_log("[madeira-d3d12] ml1126 views: %ld typed-buffer views live (%ld made; kept OUT of the residency set, their buffer is in it), %ld texture views live\n",
               g_tview_live, g_tview_made, g_xview_live);
+    if (g_tex_pfv_min > 0)   /* madeira-duo tex-pfv-minimal */
+        d3d12_log("[madeira-d3d12] tex-pfv-minimal: %ld textures made without PixelFormatView (lossless compression allowed), %ld kept it "
+                  "(typeless, depth-stencil, atomic); %ld views refused another format ([pfv-miss])\n", (long)g_pfv_dropped, (long)g_pfv_kept, (long)g_pfv_miss);
     mad_tvs_report();   /* typed-view-shadow */
     d3d12_log("[madeira-d3d12] ml1132 address lookups on the locked path: %ld (true misses %ld); every other lookup was lock-free\n",
               g_resolve_locked, g_resolve_miss);
@@ -1267,6 +1272,7 @@ struct mad_resource {
      * MTLTextureType2DArray", 6520 reports in one run). Views are cached per
      * (type, levels, slices). */
     enum WMTTextureType tex_type; enum WMTPixelFormat tex_pf; UINT tex_mips, tex_layers; UINT tex_depth;   /* ml924: 3D depth */
+    UINT8 no_pfv;              /* madeira-duo tex-pfv-minimal: made without PixelFormatView usage (may be compressed) */
     struct mad_xview { UINT type, lvl0, nlvl, sl0, nsl, pf, swz; obj_handle_t tex; UINT64 id; } *xview;
     unsigned nxview, xview_cap;
     UINT64 reserved_bytes;   /* d3d12-tiled-resources: created by CreateReservedResource (fully backed), its tiles x 64 KB */
@@ -1521,6 +1527,7 @@ static void mad_format_info(DXGI_FORMAT f, UINT *bytes, UINT *block);
 static UINT64 mad_res_row_bytes(const struct mad_resource *r);
 static int mad_map_texture_format(DXGI_FORMAT f, D3D12_RESOURCE_FLAGS flags, enum WMTPixelFormat *out, int *is_depth);
 static int mad_texinfo_from_desc(const D3D12_RESOURCE_DESC *desc, struct WMTTextureInfo *ti, enum WMTPixelFormat *pf, int *is_depth);   /* ml1145 */
+static int mad_pfv_missing(const struct mad_resource *r, enum WMTPixelFormat pf, const char *what);   /* madeira-duo tex-pfv-minimal */
 static void mad_alias_desc(const struct mad_resource *r, char *o, size_t cap);   /* madeira-bcd */
 static void mad_res_short(const struct mad_resource *r, char *o, size_t cap);
 struct mad_memheap;
@@ -10658,6 +10665,7 @@ static obj_handle_t mad_resolve_view(struct mad_resource *r, enum WMTPixelFormat
     uint64_t id = 0;
     sw.r = (enum WMTTextureSwizzle)2; sw.g = (enum WMTTextureSwizzle)3;   /* identity, as MAD_SWZ_IDENTITY */
     sw.b = (enum WMTTextureSwizzle)4; sw.a = (enum WMTTextureSwizzle)5;
+    if (r->no_pfv && mad_pfv_missing(r, pf, "resolve view")) return 0;   /* madeira-duo tex-pfv-minimal: the resolve is skipped and logged */
     return MTLTexture_newTextureView(r->texture, pf, WMTTextureType2D, (uint16_t)level, 1, (uint16_t)slice, 1, sw, &id);
 }
 
@@ -14577,6 +14585,7 @@ static UINT64 mad_texture_view_id(struct mad_device *d, struct mad_resource *r, 
                       (unsigned)r->desc.MipLevels,
                       r->desc.MipLevels ? "" : "; madeira.cfg mip0-full = 1 gives a MipLevels 0 texture its full chain");
     }
+    if (r->no_pfv && mad_pfv_missing(r, pf, "view")) pf = r->tex_pf;   /* madeira-duo tex-pfv-minimal */
     if (want == r->tex_type && lvl0 == 0 && nlvl == r->tex_mips && sl0 == 0 && nsl == r->tex_layers && pf == r->tex_pf && swz == MAD_SWZ_IDENTITY)
         return r->gpu_resource_id;
     if (want == WMTTextureTypeCube) nsl = 6;
@@ -16185,6 +16194,79 @@ static void mad_placed_fallback(const struct mad_memheap *h, const D3D12_RESOURC
                   desc->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? "buffer" : "texture", (unsigned long long)desc->Width, desc->Height,
                   (unsigned long long)off, (unsigned long long)(h->desc.SizeInBytes >> 10), (unsigned long long)msz, (unsigned long long)mal);
 }
+/* madeira-duo TEX-PFV-MINIMAL (madeira.cfg tex-pfv-minimal, opt-in, default 0).
+ * Every texture was created with PixelFormatView usage, and Apple's
+ * MTLTextureUsage.pixelFormatView page says: "In iOS devices with GPU family 5
+ * and later, Metal doesn't apply lossless compression to the given texture if
+ * you set this option." So no render target, depth buffer or FSR target was
+ * ever compressed, although PoE2 stores 50-150 MB of attachments a frame and
+ * samples nearly all of it again. The same page says the option is for views
+ * with a different component layout, and not needed for views that only switch
+ * sRGB/linear or only swizzle. The views this file makes with another format:
+ *   - SRVs and UAVs whose DXGI format maps to another Metal format: D3D12 allows
+ *     that only on a TYPELESS resource (castable-format lists are refused);
+ *   - a stencil SRV (X32_Stencil8) of a depth-stencil texture (ml1101);
+ *   - ResolveSubresource into a destination of another format (sRGB/linear, or
+ *     a typeless destination);
+ *   - RTVs and DSVs never make one (the attachment is the texture itself).
+ * With the switch the option is kept for TYPELESS formats, depth formats with
+ * stencil, and ShaderAtomic textures (ml1149); every other texture can be
+ * compressed. A view that would still need it on a texture without it (an
+ * application breaking the typeless rule) is made in the texture's own format
+ * instead, and logged as [pfv-miss]. GetResourceAllocationInfo uses the same
+ * builder, so the size a heap is planned with stays the size a placement takes.
+ * 0 (the default): every texture gets the option, as before. */
+static int mad_tex_pfv_minimal_on(void) {
+    if (g_tex_pfv_min < 0) {
+        int on = mad_cfg_int_pe("tex-pfv-minimal", 0) > 0;   /* madeira-duo: 1 = PixelFormatView usage (which turns off Apple's lossless compression) only on textures a view may reinterpret: typeless formats, depth with stencil, atomics; 0 = on every texture (as before) */
+        if (on) d3d12_log("[madeira-d3d12] tex-pfv-minimal = 1: PixelFormatView usage only on typeless, depth-stencil and atomic textures; the rest may be losslessly compressed\n");
+        g_tex_pfv_min = on;
+    }
+    return g_tex_pfv_min;
+}
+/* tex-pfv-minimal: a view of this format may need another component layout. */
+static int mad_tex_needs_pfv(DXGI_FORMAT f, enum WMTTextureUsage usage) {
+    if (usage & WMTTextureUsageShaderAtomic) return 1;   /* ml1149 asks for it with atomics */
+    switch (f) {
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS: case DXGI_FORMAT_R32G32B32_TYPELESS: case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R32G32_TYPELESS: case DXGI_FORMAT_R10G10B10A2_TYPELESS: case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R16G16_TYPELESS: case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_R8G8_TYPELESS:
+    case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+    case DXGI_FORMAT_BC1_TYPELESS: case DXGI_FORMAT_BC2_TYPELESS: case DXGI_FORMAT_BC3_TYPELESS: case DXGI_FORMAT_BC4_TYPELESS:
+    case DXGI_FORMAT_BC5_TYPELESS: case DXGI_FORMAT_BC6H_TYPELESS: case DXGI_FORMAT_BC7_TYPELESS:
+    /* depth with stencil (all D32S8 here): the stencil SRV is an X32_Stencil8 view */
+    case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+    case DXGI_FORMAT_X32_TYPELESS_G8X24_UINT: case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS: case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+/* tex-pfv-minimal: the two formats differ only in sRGB/linear (no PixelFormatView needed). */
+static int mad_pf_srgb_pair(enum WMTPixelFormat a, enum WMTPixelFormat b) {
+    static const UINT pairs[][2] = {
+        { WMTPixelFormatRGBA8Unorm, WMTPixelFormatRGBA8Unorm_sRGB }, { WMTPixelFormatBGRA8Unorm, WMTPixelFormatBGRA8Unorm_sRGB },
+        { WMTPixelFormatBC1_RGBA, WMTPixelFormatBC1_RGBA_sRGB }, { WMTPixelFormatBC2_RGBA, WMTPixelFormatBC2_RGBA_sRGB },
+        { WMTPixelFormatBC3_RGBA, WMTPixelFormatBC3_RGBA_sRGB }, { WMTPixelFormatBC7_RGBAUnorm, WMTPixelFormatBC7_RGBAUnorm_sRGB },
+    };
+    unsigned i;
+    for (i = 0; i < sizeof pairs / sizeof pairs[0]; i++)
+        if (((UINT)a == pairs[i][0] && (UINT)b == pairs[i][1]) || ((UINT)a == pairs[i][1] && (UINT)b == pairs[i][0])) return 1;
+    return 0;
+}
+/* tex-pfv-minimal: a view of r in format pf would need the usage r was made without. */
+static int mad_pfv_missing(const struct mad_resource *r, enum WMTPixelFormat pf, const char *what) {
+    LONG n;
+    if (!r->no_pfv || pf == r->tex_pf || mad_pf_srgb_pair(pf, r->tex_pf)) return 0;
+    n = InterlockedIncrement(&g_pfv_miss);
+    if (n <= 8 || !(n & (n - 1)))
+        d3d12_log("[pfv-miss] %s of r#%u %ux%u dx%u (Metal format %u) as Metal format %u: the texture has no PixelFormatView usage "
+                  "(tex-pfv-minimal); the view keeps the texture's format (%ld so far)\n", what, r->serial, r->width, r->height,
+                  (unsigned)r->desc.Format, (unsigned)r->tex_pf, (unsigned)pf, (long)n);
+    return 1;
+}
 /* ml1145: the Metal texture description a D3D12 resource gets. ONE builder for
  * creation and for GetResourceAllocationInfo, so the size the application
  * plans its heap with is the size the placement really takes. */
@@ -16225,8 +16307,10 @@ static int mad_texinfo_from_desc(const D3D12_RESOURCE_DESC *desc, struct WMTText
             ti->pixel_format == WMTPixelFormatRG32Uint)
             ti->usage = (enum WMTTextureUsage)(ti->usage | WMTTextureUsageShaderAtomic);
     }
-    /* Views may reinterpret typeless and sRGB/linear pairs. */
-    ti->usage = (enum WMTTextureUsage)(ti->usage | WMTTextureUsagePixelFormatView);
+    /* Views may reinterpret typeless and sRGB/linear pairs. madeira-duo tex-pfv-minimal: only the
+     * textures a view can actually reinterpret (mad_tex_needs_pfv). */
+    if (!mad_tex_pfv_minimal_on() || mad_tex_needs_pfv(desc->Format, ti->usage))
+        ti->usage = (enum WMTTextureUsage)(ti->usage | WMTTextureUsagePixelFormatView);
     ti->options = WMTResourceStorageModePrivate;
     return 1;
 }
@@ -16288,6 +16372,10 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
         r->width = ti.width; r->height = ti.height;
         r->gpu_resource_id = ti.gpu_resource_id;
         r->tex_type = ti.type; r->tex_pf = pf; r->tex_mips = ti.mipmap_level_count;   /* ml913 */
+        if (g_tex_pfv_min > 0) {   /* madeira-duo tex-pfv-minimal */
+            r->no_pfv = !(ti.usage & WMTTextureUsagePixelFormatView);
+            InterlockedIncrement(r->no_pfv ? &g_pfv_dropped : &g_pfv_kept);
+        }
         r->tex_layers = ti.type == WMTTextureType3D ? 1 : ti.array_length;
         r->tex_depth = ti.type == WMTTextureType3D ? ti.depth : 1;   /* ml924 */
         /* ml1053: BASE textures were not in the view map, so every sm5 texture
