@@ -493,6 +493,8 @@ static LONG g_zero_inst;   /* ml1094 */
 static LONG g_fence_waits, g_fence_updates, g_barriers;   /* ml1091 */
 static int g_tex_pfv_min = -1;   /* madeira-duo tex-pfv-minimal (mad_tex_pfv_minimal_on) */
 static volatile LONG g_pfv_kept, g_pfv_dropped, g_pfv_miss;
+static int g_rcf = -1;   /* madeira-duo root-cbv-fast (mad_root_cbv_fast_on) */
+static volatile LONG g_rcf_hits, g_rcf_misses;
 static LONG g_f6_begins, g_f6_synced, g_f6_att_sync, g_f6_kept_open, g_f6_joins, g_f6_rclose;   /* ml1134 */
 static LONG g_f6_rar_passed; static int g_f6_rar = -1;   /* madeira-bcd f6-rar */
 /* ml1137: GPU census, counts only. Barrier entries by the states they move
@@ -2028,6 +2030,8 @@ struct mad_list {
      * resident at every draw because Metal cannot see them. */
     struct mad_resource **used;
     unsigned nused, ucap;
+    /* madeira-duo root-cbv-fast: the last root descriptor's buffer (mad_resolve_root) */
+    UINT64 rc_lo, rc_len; struct mad_resource *rc_r; LONG64 rc_ver; unsigned rc_hits, rc_misses;
     /* Argument buffers: one slot of root values per draw, carved from shared
      * chunks. A draw's root arguments must survive until the GPU reads them,
      * so a single buffer rewritten per draw would race the previous draw. */
@@ -2101,6 +2105,10 @@ static HRESULT STDMETHODCALLTYPE list_Close(ID3D12GraphicsCommandList *This) {
     if (l->closed) return E_FAIL;          /* double Close is a caller bug */
     l->closed = 1;
     l->recorded_generation = l->alloc ? l->alloc->generation : 0;
+    if (l->rc_hits | l->rc_misses) {   /* madeira-duo root-cbv-fast: one add per list, not per record */
+        InterlockedExchangeAdd(&g_rcf_hits, (LONG)l->rc_hits); InterlockedExchangeAdd(&g_rcf_misses, (LONG)l->rc_misses);
+        l->rc_hits = l->rc_misses = 0;
+    }
     if (l->alloc) InterlockedDecrement(&l->alloc->recording);
     return S_OK;
 }
@@ -11958,6 +11966,11 @@ static void mad_perf_present(void) {
             if (g_fc3_frag > 0 && g_perf_presents)   /* madeira-duo fence-chain-frag */
                 d3d12_log("[perf] fence-chain-frag per frame: %.1f render waits at the fragment stage (the rest of the waits above stay at the vertex stage)\n",
                           (double)InterlockedExchange(&g_fc3_frag_waits, 0) / g_perf_presents);
+            if (g_rcf > 0 && g_perf_presents) {   /* madeira-duo root-cbv-fast */
+                LONG h = InterlockedExchange(&g_rcf_hits, 0), m = InterlockedExchange(&g_rcf_misses, 0);
+                d3d12_log("[perf] root-cbv-fast per frame: %.0f root descriptors took the previous one's buffer, %.0f were searched (%.0f%% hits)\n",
+                          h / (double)g_perf_presents, m / (double)g_perf_presents, h + m ? 100.0 * h / (h + m) : 0.0);
+            }
             if (g_f6_used && g_perf_presents) {   /* ml1134 */
                 double np = (double)g_perf_presents;
                 LONG b = InterlockedExchange(&g_f6_begins, 0), sy = InterlockedExchange(&g_f6_synced, 0), at = InterlockedExchange(&g_f6_att_sync, 0);
@@ -21190,6 +21203,48 @@ static void STDMETHODCALLTYPE list_SetComputeRootSignature(ID3D12GraphicsCommand
         l->rec_rs[1] = (struct mad_rootsig *)rs; memset(l->rec_tab[1], 0, sizeof l->rec_tab[1]); memset(l->lat_va[1], 0, sizeof l->lat_va[1]);
     }
 }
+/* madeira-duo ROOT-CBV-FAST (madeira.cfg root-cbv-fast, opt-in, default 0).
+ * Every root CBV/SRV/UAV the game records is resolved to its resource
+ * (binary search of the address index plus the alias walk) so the replay can
+ * declare it with useResource. PoE2 records ~13k root CBVs a frame in fights,
+ * and mad_resolve_address was ~1.1-1.7 % of each frame thread's CPU, with about
+ * one cache miss per search step. Nearly all of those addresses fall inside the
+ * same few constant buffers, one after another. With the switch each list keeps
+ * the buffer its last root descriptor fell in, and an address inside it takes
+ * that answer without a search. Only a buffer with its own Metal storage (not
+ * placed in a heap) is kept, so nothing else can alias its range and the search
+ * would return the same buffer; the entry holds only while the address index is
+ * unchanged (aidx_ver, no pending rebuild), so a resource created or released
+ * since sends the next address back to the search. The resource noted for
+ * useResource is exactly the one the search gives. 0 (the default): every root
+ * descriptor is searched, as before. */
+static int mad_root_cbv_fast_on(void) {
+    if (g_rcf < 0) {
+        int on = mad_cfg_int_pe("root-cbv-fast", 0) > 0;   /* madeira-duo: 1 = a root CBV/SRV/UAV address inside the buffer the list's previous one resolved to skips the address search (same answer; only committed buffers, only while the address index is unchanged); 0 = every one is searched (as before) */
+        if (on) d3d12_log("[madeira-d3d12] root-cbv-fast = 1: root descriptor addresses inside the previous one's buffer skip the address search\n");
+        g_rcf = on;
+    }
+    return g_rcf;
+}
+static struct mad_resource *mad_resolve_root(struct mad_list *l, UINT64 value) {
+    struct mad_device *d = l->device;
+    struct mad_resource *r;
+    UINT64 off = 0;
+    LONG64 v;
+    if (!mad_root_cbv_fast_on() || !d) return mad_resolve_address(d, value, &off);
+    v = __atomic_load_n(&d->aidx_ver, __ATOMIC_ACQUIRE);
+    if (l->rc_r && v == l->rc_ver && !(v & 1) && !__atomic_load_n(&d->aidx_dirty, __ATOMIC_RELAXED) && value - l->rc_lo < l->rc_len) {
+        l->rc_hits++;
+        return l->rc_r;
+    }
+    l->rc_misses++;
+    r = mad_resolve_address(d, value, &off);   /* the entry kept stays valid while the version holds */
+    if (r && !r->placed_heap && r->buffer && r->size && !(v & 1) && !__atomic_load_n(&d->aidx_dirty, __ATOMIC_RELAXED) &&
+        __atomic_load_n(&d->aidx_ver, __ATOMIC_ACQUIRE) == v) {   /* answered from the index this version describes */
+        l->rc_lo = r->gpu_address; l->rc_len = r->size; l->rc_r = r; l->rc_ver = v;
+    }
+    return r;
+}
 static void mad_record_croot(struct mad_list *l, UINT index, UINT64 value, int resolve) {
     struct mad_cmd *c;
     if (index >= MAD_ROOT_PARAM_MAX) return;
@@ -21197,7 +21252,7 @@ static void mad_record_croot(struct mad_list *l, UINT index, UINT64 value, int r
     if (!c) return;
     c->u.root.index = index; c->u.root.value = value;
     if (!resolve && g_scbv_on > 0) l->rec_tab[1][index] = value;   /* madeira-bcd static-cbv: a table */
-    if (resolve) { UINT64 off = 0; mad_list_note_used(l, mad_resolve_address(l->device, value, &off)); }
+    if (resolve) mad_list_note_used(l, mad_resolve_root(l, value));   /* madeira-duo root-cbv-fast */
 }
 static void STDMETHODCALLTYPE list_SetComputeRootConstantBufferView(ID3D12GraphicsCommandList *This, UINT index, D3D12_GPU_VIRTUAL_ADDRESS a) { mad_record_croot((struct mad_list *)This, index, a, 1); }
 static void STDMETHODCALLTYPE list_SetComputeRootShaderResourceView(ID3D12GraphicsCommandList *This, UINT index, D3D12_GPU_VIRTUAL_ADDRESS a) { mad_record_croot((struct mad_list *)This, index, a, 1); }
@@ -21511,10 +21566,7 @@ static void mad_record_root(struct mad_list *l, UINT index, UINT64 value, int re
     if (!c) return;
     c->u.root.index = index; c->u.root.value = value;
     if (!resolve && g_scbv_on > 0) l->rec_tab[0][index] = value;   /* madeira-bcd static-cbv: a table */
-    if (resolve) {
-        UINT64 off = 0;
-        mad_list_note_used(l, mad_resolve_address(l->device, value, &off));
-    }
+    if (resolve) mad_list_note_used(l, mad_resolve_root(l, value));   /* madeira-duo root-cbv-fast */
 }
 static void STDMETHODCALLTYPE list_SetGraphicsRootConstantBufferView(ID3D12GraphicsCommandList *This,
         UINT index, D3D12_GPU_VIRTUAL_ADDRESS addr) { mad_record_root((struct mad_list *)This, index, addr, 1); }
