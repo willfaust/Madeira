@@ -1668,7 +1668,13 @@ static void *wine_process_thread(void *arg) {
         {
             NSError *aerr = nil;
             AVAudioSession *session = [AVAudioSession sharedInstance];
-            [session setCategory:AVAudioSessionCategoryPlayback error:&aerr];
+            /* Mixes with other apps' audio, so a Discord voice call or music keeps
+             * playing while a game runs (players asked after 0.2.0: Madeira cut both
+             * off). env.MADEIRA_AUDIO_MIX = 0 is applied once the config lines are
+             * exported (the [audio-mix] step below). */
+            [session setCategory:AVAudioSessionCategoryPlayback
+                     withOptions:AVAudioSessionCategoryOptionMixWithOthers
+                           error:&aerr];
             if (aerr) LOG("AVAudioSession setCategory failed: %{public}s",
                           aerr.localizedDescription.UTF8String);
             aerr = nil;
@@ -2007,6 +2013,19 @@ static void *wine_process_thread(void *arg) {
                     setenv("MADEIRA_NLS_EXTRA", "1", 1);
                     fprintf(stderr, "[japanese] LC_ALL=%s MADEIRA_NLS_EXTRA=1: Japanese system locale, code page 932\n",
                             getenv("LC_ALL"));
+                }
+                {   /* Audio with other apps (the session became active above, mixing): default on,
+                     * so a Discord voice call or music keeps playing while a game runs.
+                     * MADEIRA_AUDIO_MIX=0 (madeira.cfg or the game's config, exported above):
+                     * Madeira's audio stops the others, as it did in 0.2.0. */
+                    const char *mix = getenv("MADEIRA_AUDIO_MIX");
+                    BOOL mixes = !(mix && !strcmp(mix, "0"));
+                    NSError *merr = nil;
+                    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback
+                                                     withOptions:mixes ? AVAudioSessionCategoryOptionMixWithOthers : 0
+                                                           error:&merr];
+                    fprintf(stderr, "[audio-mix] mix with other apps=%d (MADEIRA_AUDIO_MIX)%s%s\n", mixes ? 1 : 0,
+                            merr ? ": refused, " : "", merr ? merr.localizedDescription.UTF8String : "");
                 }
                 {   /* madeira-bcd: the server's per-launch switches (fd_ios.c, request_ios.c) */
                     const char *ef = getenv("MADEIRA_SRV_ECO_FOLLOW");   /* 1: the server thread runs at utility QoS while ECO is on */

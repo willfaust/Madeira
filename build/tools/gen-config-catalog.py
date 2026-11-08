@@ -1256,6 +1256,9 @@ OVERLAY = {
                 "note": "Default off. 1: an x64 image's PE volatile metadata (MSVC /volatileMetadata) is cleared when it is "
                         "mapped, so FEX orders every instruction of it by its TSO settings instead of only the listed ones. "
                         "Slower; for testing memory-ordering bugs. Logged as [fex-vmeta]. Read at session start."},
+    "env.MADEIRA_AUDIO_MIX": {"category": "Audio", "title": "Play alongside other apps' audio", "kind": "bool", "default": "1",
+                "note": "Default on: a game's sound mixes with other apps', so a Discord voice call or music keeps playing "
+                        "while Madeira runs. 0: Madeira's audio stops the others, as before. Read when a session starts."},
     "env.MADEIRA_AUDIO_RESUME": {"category": "Audio", "title": "Bring game audio back after an interruption", "kind": "bool",
                 "default": "0",
                 "note": "Default off: after a call, Siri, an alarm or a suspension the sound stays off until the game restarts. "
