@@ -40,6 +40,21 @@ jobs:
       - name: Check Steam connection recovery
         if: hashFiles('tests/host/check-steam-cm-transport.py') != ''
         run: python3 tests/host/check-steam-cm-transport.py
+      - name: Check active-gameplay diagnostic work
+        run: |
+          python3 - <<'PYCODE'
+          import os, subprocess, tempfile
+          from pathlib import Path
+          base = Path.home() / 'tmp'
+          base.mkdir(mode=0o700, exist_ok=True)
+          if base.stat().st_mode & 0o077:
+              raise RuntimeError("~/tmp must already be private (mode 0700)")
+          with tempfile.TemporaryDirectory(prefix='pi-gameplay-ci.', dir=base) as tmp:
+              env = dict(os.environ, TMPDIR=tmp, TMP=tmp, TEMP=tmp)
+              for name in ['check-gameplay-diagnostic-work.py', 'check-gameplay-native-diagnostics.py',
+                           'check-lean-diag.py', 'check-quiet-log.py', 'check-overlay-frame-times.py']:
+                  subprocess.run(['python3', 'tests/host/' + name], env=env, check=True)
+          PYCODE
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: key

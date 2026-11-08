@@ -40,6 +40,19 @@
 #include "Winios.h"
 #include "VulkanLayerGeometry.h"
 
+/* Periodic desktop dumps are diagnostics, not part of event delivery or layout.
+ * Keep them opt-in; crash/hang-triggered stack dumps are independent. */
+static int winios_desktop_diagnostics_enabled(void) {
+    static atomic_int enabled = -1;
+    int on = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (on < 0) {
+        const char *value = getenv("MADEIRA_DESKTOP_DIAG");
+        on = value && *value && strcmp(value, "0") != 0;
+        atomic_store_explicit(&enabled, on, memory_order_relaxed);
+    }
+    return on;
+}
+
 /* csops syscall — CS_DEBUGGED is the flag StikDebug JIT rides on. Declared by
  * hand for the same reason JITAllocator.c does: <sys/codesign.h> is not in the
  * iOS SDK's public headers. */
@@ -1046,7 +1059,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
      * this wine thread (valid TEB — the dump walks win32u internals). */
     static int desk = -1;
     if (desk < 0) desk = ({ const char *d = getenv("MADEIRA_DESKTOP"); d && *d == '1'; });
-    if (desk) {
+    if (desk && winios_desktop_diagnostics_enabled()) {
         static double next_tree_dump;
         double now = CACurrentMediaTime();
         if (now >= next_tree_dump) {
@@ -1460,7 +1473,7 @@ static void winios_ensure_compositor(void) {
      * an app-side timer — keeps firing even when all wine threads are
      * stuck (unlike the tree dump, which rides wine's event drain). */
     static dispatch_source_t stack_timer;
-    if (!stack_timer) {
+    if (!stack_timer && winios_desktop_diagnostics_enabled()) {
         stack_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(stack_timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC),

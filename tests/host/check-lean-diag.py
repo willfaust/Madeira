@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lean-diag: env.MADEIRA_LEAN_DIAG = 1 makes the periodic diagnostics cheap; no Wine runs.
 
-Every game session runs, by default, diagnostics that suspend threads or walk
+Full profiling (MADEIRA_PROBES=1) runs diagnostics that suspend threads or walk
 the whole address space (Horizon Zero Dawn, builds 486-493):
   - [thread-sample]: every 20 s, every thread suspended 4 times;
   - the guest RIP profile behind [rip-profile]/[cpu-split]: then ~200 passes
@@ -19,7 +19,8 @@ calls, then every 1000th. The owner's analysis lines keep their rates:
 [xp]/[xp-t] every 250 ms, [xp-api]/[xp-api-top] every second, [sync-census]
 every 20 s (abline, bucket, xptphase, energyfit, clampstats, apitop).
 
-Checks (unset = byte-identical behaviour):
+Default/light retains the stuck-store check without periodic profiles.
+Checks:
   - the switch is read once where the samplers are armed, and [wprof] is not
     started with it;
   - ios_thread_sampler_main compiled on this host: without the switch 4 passes
@@ -106,13 +107,13 @@ check('ios_lean_diag = lean_env && *lean_env && strcmp(lean_env, "0") != 0;' in 
 check(re.search(r"if \((?:probes >= 2 && )?!ios_lean_diag\) dispatch_async\(dispatch_get_global_queue\(QOS_CLASS_UTILITY, 0\), "
                 r"\^\{ ios_wprof_main\(\); \}\);", arm),
       "[wprof] is not started with the switch")
-check(re.search(r"(?:if \(probes >= 2\) )?dispatch_async\(dispatch_get_global_queue\(QOS_CLASS_UTILITY, 0\), "
-                r"\^\{ ios_thread_sampler_main\(\); \}\);", arm)
+check(re.search(r"(?:if \(probes >= 1\) )?dispatch_async\(dispatch_get_global_queue\(QOS_CLASS_UTILITY, 0\), "
+                r"\^\{ ios_thread_sampler_main\(probes >= 2\); \}\);", arm)
       and re.search(r"(?:if \(probes >= 1\) )?dispatch_async\(dispatch_get_global_queue\(QOS_CLASS_UTILITY, 0\), "
                     r"\^\{ ios_xprobe_main\(\); \}\);", arm)
-      and "ios_lean_diag" not in arm[arm.find("ios_thread_sampler_main(); });") - 120:arm.find("ios_xprobe_main(); });")],
+      and "ios_lean_diag" not in arm[arm.find("ios_thread_sampler_main(probes >= 2); });") - 120:arm.find("ios_xprobe_main(); });")],
       "the thread sampler (for [sync-census]) and the [xp] sampler start as before")
-check(server.find("static int ios_lean_diag;") < server.find("static void ios_thread_sampler_main(void)"),
+check(server.find("static int ios_lean_diag;") < server.find("static void ios_thread_sampler_main(int full_probes)"),
       "ios_lean_diag is declared before the sampler")
 
 # ---- the [xp] family does not change -----------------------------------------
@@ -124,7 +125,7 @@ check("usleep( 250000 );" in xprobe and "if (!(gen & 3)) ios_xp_api_report(" in 
       "[xp] stays at 250 ms and [xp-api] at every 4th sample")
 
 # ---- ios_thread_sampler_main on this host ----------------------------------
-sampler = func_body(server, "static void ios_thread_sampler_main(void)")
+sampler = func_body(server, "static void ios_thread_sampler_main(int full_probes)")
 check(bool(sampler), "ios_thread_sampler_main found")
 harness = r'''
 #define _GNU_SOURCE
@@ -138,12 +139,12 @@ harness = r'''
 typedef struct { uint32_t numer, denom; } mach_timebase_info_data_t;
 static void mach_timebase_info( mach_timebase_info_data_t *t ) { t->numer = 125; t->denom = 3; }
 static jmp_buf done; static int sleeps, passes, profiles, census1115, census1122, bursts, armed_lean, armed_full;
-static int ios_lean_diag;
+static int ios_lean_diag, stuck_checks;
 volatile long long ios_alert_wakes, ios_alert_waits, ios_qpc_syscalls, ios_affinity_sets;
 volatile int ios_srv_req_count;
 volatile long long ios_alert_lat_n, ios_alert_lat_ticks, ios_alert_lat_hist[6], ios_alert_spin_tries, ios_alert_spin_hits;
 static void ios_ts_calibrate( void ) {}
-static void ios_stuck_store_check( void ) {}   /* ml1288's 100 ms check between bursts (MADEIRA_STUCK_CHECK) */
+static void ios_stuck_store_check( void ) { stuck_checks++; }   /* ml1288's 100 ms check between bursts (MADEIRA_STUCK_CHECK) */
 static void ios_thread_sampler_pass( int b ) { (void)b; passes++; }
 static void ios_guest_rip_profile( int gen ) { (void)gen; profiles++; }
 static unsigned h_sleep( unsigned s ) { if (s != 20) abort(); if (++sleeps > 5) longjmp( done, 1 ); ios_alert_wakes += 100; return 0; }
@@ -159,21 +160,21 @@ static void wine_log_write( const char *fmt, ... )
     if (!strncmp( b, "[sync-census] ml1122", 20 )) census1122++;
     if (!strcmp( b, "[thread-sample] ml876 burst done" )) bursts++;
     if (!strcmp( b, "[thread-sample] ml876 armed (task-wide: burst of 4 passes / 250 ms every 20 s)" )) armed_full++;
-    if (strstr( b, "armed for [sync-census] only" )) armed_lean++;
+    if (strstr( b, "armed for [sync-census] and stuck-store checks only" )) armed_lean++;
 }
 #define sleep(x) h_sleep(x)
 #define usleep(x) h_usleep(x)
-''' + sampler + r'''
+''' + func_body(server, 'static int ios_probes_level(void)') + '\n' + sampler + r'''
 int main( void )
 {
     const char *e = getenv( "LEAN" );
     ios_lean_diag = e && *e == '1';
-    if (!setjmp( done )) ios_thread_sampler_main();
-    printf( "%d %d %d %d %d %d %d %d\n", sleeps - 1, passes, profiles, bursts, census1115, census1122, armed_full, armed_lean );
+    if (ios_probes_level() && !setjmp( done )) ios_thread_sampler_main(ios_probes_level() >= 2);
+    printf( "%d %d %d %d %d %d %d %d %d\n", sleeps - 1, passes, profiles, bursts, census1115, census1122, armed_full, armed_lean, stuck_checks );
     return 0;
 }
 '''
-outs, err = compile_run(harness, "sampler", [{}, {"LEAN": "1"}])
+outs, err = compile_run(harness, "sampler", [{"MADEIRA_PROBES": "1"}, {"MADEIRA_PROBES": "1", "LEAN": "1"}, {}, {"MADEIRA_PROBES": "light"}, {"MADEIRA_PROBES": "0"}, {"MADEIRA_STUCK_CHECK": "0"}])
 if outs is None:
     check(False, "ios_thread_sampler_main compiles on this host: " + err[-800:])
 else:
@@ -181,11 +182,20 @@ else:
     lean = [int(x) for x in outs[1][1].split()]
     # 5 completed 20 s iterations each
     check(full[:4] == [5, 20, 5, 5] and full[6] == 1 and full[7] == 0,
-          "without the switch: 4 passes and one guest profile every 20 s, as before (%s)" % full)
-    check(full[4] >= 4 and full[5] == 5, "without the switch: both [sync-census] lines every 20 s (%s)" % full)
+          "full profiling: 4 passes and one guest profile every 20 s, as before (%s)" % full)
+    check(full[4] >= 4 and full[5] == 5, "full profiling: both [sync-census] lines every 20 s (%s)" % full)
     check(lean[:4] == [5, 0, 0, 0] and lean[6] == 0 and lean[7] == 1,
-          "with the switch: no pass, no guest profile, no burst line (%s)" % lean)
-    check(lean[4] >= 4 and lean[5] == 5, "with the switch: [sync-census] every 20 s as before (%s)" % lean)
+          "full profiling plus lean: no pass, no guest profile, no burst line (%s)" % lean)
+    check(lean[4] >= 4 and lean[5] == 5, "full profiling plus lean: [sync-census] every 20 s as before (%s)" % lean)
+    for label, out in zip(("default", "light"), outs[2:4]):
+        counts = [int(x) for x in out[1].split()]
+        check(counts[:4] == [5, 0, 0, 0] and counts[8] == full[8] and counts[8] > 1000,
+              "%s: no profile passes, stuck-store checks preserved (%s)" % (label, counts))
+    check(full[8] == lean[8] and lean[8] > 1000, "lean diagnostics never disable stuck-store repair")
+    off = [int(x) for x in outs[4][1].split()]
+    disabled = [int(x) for x in outs[5][1].split()]
+    check(off[1:6] == [0, 0, 0, 0, 0] and off[8] == 0, "MADEIRA_PROBES=0 still disables sampler startup")
+    check(disabled[8] == 0, "MADEIRA_STUCK_CHECK=0 independently disables repair")
 
 # ---- virtual_ios.c helpers on this host -------------------------------------
 lean_v = func_body(virt, "static int ios_lean_diag_virtual( void )")

@@ -64,7 +64,7 @@ static void mad_dump_blob(const char *name, const void *data, SIZE_T len) {
     WriteFile(h, data, (DWORD)len, &wr, NULL);
     CloseHandle(h);
 }
-/* madeira-bcd quiet-log: madeira.cfg / a game's config quiet-log = 1 (default 0),
+/* madeira-bcd quiet-log: madeira.cfg / a game's config quiet-log = 1 (default 1),
  * read once when the device is created (mad_quiet_log_init). OutputDebugStringA
  * raises DBG_PRINTEXCEPTION_C, which Wine dispatches through the game's vectored
  * handlers and an unwind of the stack, then asks the wineserver for the DBWIN
@@ -3364,7 +3364,7 @@ static void mad_quiet_log_init(void) {
     static int done;
     if (done) return;
     done = 1;
-    if (mad_cfg_int_pe("quiet-log", 0)) {
+    if (mad_cfg_int_pe("quiet-log", 1)) {
         d3d12_log("[madeira-d3d12] quiet-log = 1: lines skip OutputDebugStringA; no census frames or list 12000-12400 dumps; "
                   "\"converted at runtime\" for the first 64 shaders, then every 1000th\n");
         g_quiet_log = 1;
