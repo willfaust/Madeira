@@ -205,6 +205,30 @@ that iPadOS granted it. A request alone is not proof of containment; see
   the mouse (no report for 2 s while the mouse moves, e.g. it exited).
   `MADEIRA_POINTER_AUTOLOCK=0` turns this off; a game's
   `MADEIRA_POINTER_HIDDEN_ABSOLUTE=1` keeps it off and the motion absolute.
+- **A program that reads mouse motion:** the Wine server reports how the
+  program in front reads the mouse. One that reads raw input without legacy
+  messages or captures it (DirectInput 8 in exclusive mode) is turning, not
+  pointing: it gets relative motion and the
+  automatic lock even while its Windows cursor shows, and that cursor is not
+  drawn. Without this, on an iPad whose pointer iPadOS does not lock
+  (`actual=0`), the program followed the iOS pointer's position and stopped
+  turning at the screen edge. Any raw mouse registration counts only for a
+  game whose config has `env.MADEIRA_POINTER_RAW_LOOK = 1`: SDL registers one
+  only while its relative (mouse-look) mode is on, so Counter-Strike 2, which
+  keeps its arrow up in a match, has it in its recommended settings; other
+  engines may keep one in their menus. A low-level mouse hook counts only with
+  that line too: Wine's DirectInput 7 and older keeps one for any acquired
+  mouse, also in menus that point with the Windows cursor. `MADEIRA_POINTER_READER=0` ignores the
+  reader. The `[hwinput] program reads the mouse by:` line logs each change.
+- **When iPadOS refuses:** iPadOS grants the lock only to an app running in
+  Full Screen Apps (Settings > Multitasking & Gestures). In Windowed Apps or
+  Stage Manager it answers `actual=0`: the hidden iPad pointer drifts off the
+  game's own arrow and reaches the screen edges, where iPadOS shows its status
+  bar and Control Center. When a request is still refused 1.5 s later while
+  Madeira is in front, the game shows "Mouse leaving the game? In iPad
+  Settings > Multitasking & Gestures, choose Full Screen Apps." for 10 s, once per game
+  (`[hwinput] pointer lock refused notice shown`). It goes away at once if the
+  lock is granted. `MADEIRA_POINTER_LOCK_NOTICE=0` turns it off.
 - **Relative pointer mode:** the existing Relative toggle also selects relative
   hardware mouse motion and automatic lock. It does not need a cursor report
   from the game. A desktop game that hides its cursor also keeps its automatic
@@ -267,7 +291,10 @@ and restart to enable the fixes again. The same switch is listed in Settings > A
 | `MADEIRA_POINTER_ABSOLUTE` | on | `0`: the program's cursor never follows the pointer's position; all motion is relative. |
 | `MADEIRA_POINTER_LOCK` | on | `0`: never lock the pointer; no lock button, Ctrl+Alt+P is sent to the program. |
 | `MADEIRA_POINTER_AUTOLOCK` | on | `0`: lock only by hand (Ctrl+Alt+P or the lock button). |
+| `MADEIRA_POINTER_LOCK_NOTICE` | on | `0`: no notice when iPadOS refuses the pointer lock. |
 | `MADEIRA_POINTER_HIDDEN_ABSOLUTE` | off | `1` (a game's own config): the program's cursor follows the pointer's position even while the program hides it, and the pointer never locks by itself. For a game that draws its own cursor at the cursor position, where relative motion lags the pointer and stops short of the screen edges. |
+| `MADEIRA_POINTER_READER` | on | `0`: how the program reads the mouse is ignored; a program that shows its cursor follows the pointer's position even while it reads raw or hooked mouse motion. |
+| `MADEIRA_POINTER_RAW_LOOK` | off | `1` (a game's own config): while the program has raw mouse input registered at all, or a low-level mouse hook, it gets relative motion and the automatic lock, and its cursor is not drawn. For an SDL game that leaves its Windows cursor up during mouse-look (Counter-Strike 2's recommended settings). |
 | `MADEIRA_NAV_KEYS_E0` | on | `0`: the driver's previous extended-key flags for the navigation keys. |
 
 ## Logs

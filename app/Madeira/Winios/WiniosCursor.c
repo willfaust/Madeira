@@ -84,6 +84,22 @@ void winios_direct_cursor_pos(int x, int y)
     cursor_notify_unlocked(notify);
 }
 
+/* The Wine server's thread, with every mouse event: only a change notifies. */
+void winios_direct_cursor_reader(unsigned int flags)
+{
+    int notify = 0;
+    if (!winios_direct_cursor_wanted()) return;
+    flags &= WINIOS_READER_RAW_CAPTURE | WINIOS_READER_LL_HOOK | WINIOS_READER_RAW;
+    pthread_mutex_lock(&cursor_lock);
+    if (cursor_state.reader != flags)
+    {
+        cursor_state.reader = flags;
+        notify = cursor_mark_changed();
+    }
+    pthread_mutex_unlock(&cursor_lock);
+    cursor_notify_unlocked(notify);
+}
+
 void winios_direct_cursor_enable(winios_direct_cursor_notify_t notify)
 {
     pthread_mutex_lock(&cursor_lock);

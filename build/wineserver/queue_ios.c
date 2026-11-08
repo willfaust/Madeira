@@ -2278,7 +2278,11 @@ static void dispatch_rawinput_message( struct desktop *desktop, struct rawinput_
  * it (DirectInput 8 in exclusive mode), or that installed a low-level mouse hook
  * (older DirectInput), reads MOTION: on an iPad whose pointer iPadOS does not
  * lock, the app keeps giving it relative moves. A program that draws its own
- * cursor at Wine's cursor gets the pointer's position instead. Reporting only;
+ * cursor at Wine's cursor gets the pointer's position instead. Any raw mouse
+ * registration is reported too (WINIOS_READER_RAW): SDL registers one only
+ * while its relative (mouse-look) mode is on and removes it when it ends, but
+ * other engines may keep one registered in their menus too, so the app uses
+ * that flag only for a game whose config opts in (MADEIRA_POINTER_RAW_LOOK). Reporting only;
  * nothing here changes what any program receives. The app function is weak: a
  * build without it reports nothing. */
 extern void winios_direct_cursor_reader( unsigned int flags ) __attribute__((weak));
@@ -2294,6 +2298,7 @@ static void madeira_report_mouse_reader( struct desktop *desktop, struct thread 
     if ((raw = foreground->process->rawinput_mouse) &&
         ((raw->flags & RIDEV_NOLEGACY) == RIDEV_NOLEGACY || (raw->flags & RIDEV_CAPTUREMOUSE)))
         flags |= 1;   /* WINIOS_READER_RAW_CAPTURE */
+    if (raw) flags |= 4;   /* WINIOS_READER_RAW */
     if ((hook = get_first_global_hook( desktop, WH_MOUSE_LL )) && hook->process == foreground->process)
         flags |= 2;   /* WINIOS_READER_LL_HOOK */
     winios_direct_cursor_reader( flags );

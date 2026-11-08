@@ -453,11 +453,12 @@ assert not any(line.startswith('mip0-full') for ident, p in presets.items() if p
 # GTA IV, version 3: AVX pinned off (a community list for the same launcher chain).
 assert presets['gta4-steam']['version'] == 3 and presets['gta4-steam']['switches'] == \
     'avx: false, fastSync: true, semaphoreFastPath: true, display: "fit"', presets['gta4-steam']
-# The merged lists: version 1 (Arkham City 2, with the switch the owner's test found), none of the community
+# The merged lists: version 1 (Arkham City 2, with the switch the owner's test found; Counter-Strike 2 2, with
+# mouse-look at the iPad screen edge, MADEIRA_POINTER_RAW_LOOK), none of the community
 # variant or app-side switches, and no MADEIRA_SPAWN_SWAP (its engine code is not in this tree).
 for ident in MERGED:
     p = presets[ident]
-    assert p['version'] == (2 if ident == 'batman-arkham-city-goty' else 1), ident
+    assert p['version'] == (2 if ident in ('batman-arkham-city-goty', 'counter-strike-2') else 1), ident
     assert not any(line.startswith(('env.MADEIRA_WINTYPES', 'env.MADEIRA_OPTIN_DLLS', 'env.MADEIRA_D3D8 ',
                                     'env.MADEIRA_STEAM_IDENTITY', 'env.MADEIRA_MFC_DOCK', 'pool-split-retry'))
                    for line in p['lines']), (ident, p['lines'])

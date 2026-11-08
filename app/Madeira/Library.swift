@@ -5657,6 +5657,8 @@ struct LibraryHUD: View {
     }
     @ObservedObject private var model = LibraryModel.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    /// The once-per-game "iPadOS refused the pointer lock" notice.
+    @ObservedObject private var hw = HardwareInput.shared
     @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
@@ -5703,6 +5705,20 @@ struct LibraryHUD: View {
                 if !model.startingScreen && model.performance { LibraryFloatingItem(isMenu: false, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.liveLogs && !model.startingScreen { LibraryLiveLogs().frame(maxWidth: 550, maxHeight: 140).padding(.top, Self.topInset(geo) + 60).padding(.horizontal, 12).allowsHitTesting(false) }
                 if !model.sessionMessage.isEmpty && !model.startingScreen { Text(model.sessionMessage).font(.caption).padding(10).background(.regularMaterial, in: Capsule()).frame(maxWidth: .infinity).padding(.top, Self.topInset(geo) + 12).allowsHitTesting(false) }
+                // iPadOS refused the pointer lock (HardwareInput.swift, LockRefusedNotice): once per game.
+                if hw.lockRefusedHint && !model.startingScreen && !model.menu {
+                    // Two lines at most widths: a rounded box, not a capsule. The text's width is
+                    // capped before the box is drawn, so the box wraps it.
+                    Text(LockRefusedNotice.text).font(.caption).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: min(480, geo.size.width - 60))
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, Self.topInset(geo) + (model.sessionMessage.isEmpty ? 12 : 56))
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
                 if !model.startingScreen { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.menu {
                     Color.black.opacity(SessionMenuBackground.blur ? 0.3 : 0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)

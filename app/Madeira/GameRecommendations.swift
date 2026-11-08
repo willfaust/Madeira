@@ -1521,14 +1521,17 @@ extension GameRecommendations {
         avx: true, nvidia: true, wineVCRT: false, display: "fit")
 
     /// Counter-Strike 2 (Steam App ID 730). Ported on 2026-10-26 from the tested list for it in thebcd69's BCD (its version
-    /// 2); not device-tested here.
+    /// 2); not device-tested here. Version 2: mouse-look keeps turning at the screen edge on an iPad whose pointer
+    /// iPadOS does not lock. CS2 turns SDL's relative mode on in a match but leaves its Windows arrow up, so the app
+    /// followed the pointer's position, which stops at the edge (MADEIRA_POINTER_RAW_LOOK, HardwareInput.swift).
     static let counterStrike2 = GameRecommendation(
-        id: "counter-strike-2", title: "Counter-Strike 2", version: 1,
+        id: "counter-strike-2", title: "Counter-Strike 2", version: 2,
         config: """
         # Madeira's recommended settings for Counter-Strike 2.
         # Reset to Recommended, at the bottom of the game's settings, brings them back.
         env.MADEIRA_EC_HOOK_TRACE = 0
         pool-split = 1
+        env.MADEIRA_POINTER_RAW_LOOK = 1
         # The defaults this list was tested with (upstream's differ).
         env.MADEIRA_FREE_DELAY_MS = 2000
         env.MADEIRA_CTX_CPU_AREA = 2

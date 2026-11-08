@@ -14161,6 +14161,46 @@
         }
       }
     },
+    "Mouse leaving the game? In iPad Settings > Multitasking & Gestures, choose Full Screen Apps.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Maus verlässt das Spiel? In den iPad-Einstellungen > Multitasking & Gesten „Apps im Vollbild“ wählen."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "¿El ratón se sale del juego? En Ajustes del iPad > Multitarea y gestos, elige Apps a pantalla completa."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "마우스가 게임 밖으로 나가나요? iPad 설정 > 멀티태스킹 및 제스처에서 전체 화면 앱을 선택하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O mouse sai do jogo? Em Ajustes do iPad > Multitarefa e Gestos, escolha Apps em Tela Cheia."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Мышь уходит из игры? В Настройках iPad > Многозадачность и жесты выберите «Приложения на весь экран»."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "鼠标跑出游戏？请在 iPad 设置 > 多任务与手势中选择「全屏 App」。"
+          }
+        }
+      }
+    },
     "Move to": {
       "localizations": {
         "de": {
