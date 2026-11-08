@@ -317,3 +317,7 @@ build to `app/Madeira/legal/LICENSE-MoltenVK.txt`. The integration and Wine Unix
 adapters retain their LGPL-2.1-or-later source notices. No third-party runtime
 binary is added to this repository. Build and validation limits are documented
 in `build/vulkan-ios/README.md`.
+
+## Agent skills (not part of the app)
+
+`.claude/skills/` links six public, MIT-licensed skills for coding agents (SwiftUI and Swift concurrency review, iOS Simulator tooling) from git submodules under `third_party/agent-skills/`: `twostraws/SwiftUI-Agent-Skill`, `twostraws/Swift-Concurrency-Agent-Skill` (Paul Hudson), `rshankras/claude-code-apple-skills` and `conorluddy/ios-simulator-skill`. They are development tooling only and are not built into or shipped with the app. See `.claude/skills/README.md`.
