@@ -7401,42 +7401,42 @@
         }
       }
     },
-    "Every other option Madeira reads from madeira.cfg. JIT pool, video memory, the swap tier, the sync engine and eco mode are in Settings › Memory & sync; the Direct3D 9/12 routes, the Vulkan driver and windowed mode in Settings › Graphics. Most options are read when Madeira starts, so close it from the app switcher after a change. Default leaves the option out of the file. Swipe left on a row to reset it.": {
+    "Every other option Madeira reads from madeira.cfg. JIT pool, video memory, the swap tier, the sync engine and eco mode are in Settings › Memory & sync; the Direct3D 9/12 routes, the Vulkan driver and windowed mode in Settings › Display and Graphics. Most options are read when Madeira starts, so close it from the app switcher after a change. Default leaves the option out of the file. Swipe left on a row to reset it.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Jede andere Option, die Madeira aus madeira.cfg liest. JIT-Pool, Videospeicher, die Swap-Stufe, die Sync-Engine und der Eco-Modus sind unter Einstellungen › Speicher & Sync; die Direct3D-9/12-Wege, der Vulkan-Treiber und der Fenstermodus unter Einstellungen › Grafik. Die meisten Optionen werden beim Start von Madeira gelesen, schließe es nach einer Änderung also im App-Umschalter. Standard lässt die Option aus der Datei weg. Wische auf einer Zeile nach links, um sie zurückzusetzen."
+            "value": "Jede andere Option, die Madeira aus madeira.cfg liest. JIT-Pool, Videospeicher, die Swap-Stufe, die Sync-Engine und der Eco-Modus sind unter Einstellungen › Speicher & Sync; die Direct3D-9/12-Wege, der Vulkan-Treiber und der Fenstermodus unter Einstellungen › Anzeige und Grafik. Die meisten Optionen werden beim Start von Madeira gelesen, schließe es nach einer Änderung also im App-Umschalter. Standard lässt die Option aus der Datei weg. Wische auf einer Zeile nach links, um sie zurückzusetzen."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Todas las demás opciones que Madeira lee de madeira.cfg. El pool de JIT, la memoria de vídeo, el nivel de intercambio, el motor de sincronización y el modo eco están en Ajustes › Memoria y sincronización; las rutas de Direct3D 9/12, el driver de Vulkan y el modo ventana en Ajustes › Gráficos. La mayoría de opciones se leen al iniciar Madeira, así que ciérrala desde el selector de apps tras un cambio. Predeterminado deja la opción fuera del archivo. Desliza a la izquierda en una fila para restablecerla."
+            "value": "Todas las demás opciones que Madeira lee de madeira.cfg. El pool de JIT, la memoria de vídeo, el nivel de intercambio, el motor de sincronización y el modo eco están en Ajustes › Memoria y sincronización; las rutas de Direct3D 9/12, el driver de Vulkan y el modo ventana en Ajustes › Pantalla y gráficos. La mayoría de opciones se leen al iniciar Madeira, así que ciérrala desde el selector de apps tras un cambio. Predeterminado deja la opción fuera del archivo. Desliza a la izquierda en una fila para restablecerla."
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Madeira가 madeira.cfg에서 읽는 그 밖의 모든 옵션입니다. JIT 풀, 비디오 메모리, 스왑 계층, 동기화 엔진, 절전 모드는 설정 › 메모리 및 동기화에 있고, Direct3D 9/12 경로, Vulkan 드라이버, 창 모드는 설정 › 그래픽에 있습니다. 대부분의 옵션은 Madeira가 시작될 때 읽히므로 변경 후 앱 전환기에서 닫으세요. 기본값은 파일에서 옵션을 뺍니다. 줄을 왼쪽으로 쓸어 넘기면 초기화됩니다."
+            "value": "Madeira가 madeira.cfg에서 읽는 그 밖의 모든 옵션입니다. JIT 풀, 비디오 메모리, 스왑 계층, 동기화 엔진, 절전 모드는 설정 › 메모리 및 동기화에 있고, Direct3D 9/12 경로, Vulkan 드라이버, 창 모드는 설정 › 디스플레이 및 그래픽에 있습니다. 대부분의 옵션은 Madeira가 시작될 때 읽히므로 변경 후 앱 전환기에서 닫으세요. 기본값은 파일에서 옵션을 뺍니다. 줄을 왼쪽으로 쓸어 넘기면 초기화됩니다."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Todas as outras opções que o Madeira lê do madeira.cfg. O pool de JIT, a memória de vídeo, o nível de swap, o motor de sincronização e o modo eco ficam em Ajustes › Memória e sincronização; as rotas de Direct3D 9/12, o driver Vulkan e o modo janela em Ajustes › Gráficos. A maioria das opções é lida quando o Madeira inicia, então feche-o no seletor de apps após uma mudança. Padrão deixa a opção fora do arquivo. Deslize para a esquerda numa linha para redefini-la."
+            "value": "Todas as outras opções que o Madeira lê do madeira.cfg. O pool de JIT, a memória de vídeo, o nível de swap, o motor de sincronização e o modo eco ficam em Ajustes › Memória e sincronização; as rotas de Direct3D 9/12, o driver Vulkan e o modo janela em Ajustes › Tela e gráficos. A maioria das opções é lida quando o Madeira inicia, então feche-o no seletor de apps após uma mudança. Padrão deixa a opção fora do arquivo. Deslize para a esquerda numa linha para redefini-la."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Все остальные параметры, которые Madeira читает из madeira.cfg. Пул JIT, видеопамять, уровень подкачки, движок синхронизации и эко-режим находятся в Настройки › Память и синхронизация; пути Direct3D 9/12, драйвер Vulkan и оконный режим — в Настройки › Графика. Большинство параметров читается при запуске Madeira, поэтому после изменения закройте её в переключателе приложений. «По умолчанию» убирает параметр из файла. Смахните строку влево, чтобы сбросить её."
+            "value": "Все остальные параметры, которые Madeira читает из madeira.cfg. Пул JIT, видеопамять, уровень подкачки, движок синхронизации и эко-режим находятся в Настройки › Память и синхронизация; пути Direct3D 9/12, драйвер Vulkan и оконный режим — в Настройки › Экран и графика. Большинство параметров читается при запуске Madeira, поэтому после изменения закройте её в переключателе приложений. «По умолчанию» убирает параметр из файла. Смахните строку влево, чтобы сбросить её."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "其余选项 Madeira 都从 madeira.cfg 读取。JIT 内存池、显存、交换层、同步引擎与节能模式在「设置 › 内存与同步」；Direct3D 9/12 路线、Vulkan 驱动与窗口模式在「设置 › 图形」。多数选项在 Madeira 启动时读取，改完请从后台多任务关闭它。默认会把该选项从文件中移除。在某行上向左轻扫可重置。"
+            "value": "其余选项 Madeira 都从 madeira.cfg 读取。JIT 内存池、显存、交换层、同步引擎与节能模式在「设置 › 内存与同步」；Direct3D 9/12 路线、Vulkan 驱动与窗口模式在「设置 › 显示与图形」。多数选项在 Madeira 启动时读取，改完请从后台多任务关闭它。默认会把该选项从文件中移除。在某行上向左轻扫可重置。"
           }
         }
       }

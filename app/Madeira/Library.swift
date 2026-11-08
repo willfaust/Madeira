@@ -5191,7 +5191,7 @@ struct RuntimeMemorySyncSettings: View {
     var open: (SettingsSheet) -> Void = { _ in }
     /// Bumped when a Settings sheet closes, so the rows re-read madeira.cfg.
     var refresh = 0
-    /// The keys this section and Settings › Graphics own; All settings and the Settings
+    /// The keys this section and Settings › Display and Graphics own; All settings and the Settings
     /// search leave them out.
     static let featuredKeys: Set<String> = Set(["pool", "vram-mb", "swap-mb", "env.MADEIRA_SWAP_COVERAGE", "donor-pool-mb", "swap-wow64",
                                                 "inproc-sync", "env.MADEIRA_FASTSYNC", "eco"]).union(GraphicsSettings.featuredKeys)
@@ -5230,6 +5230,12 @@ struct RuntimeMemorySyncSettings: View {
     /// ml1257: madeira.cfg swap-mode = 2 selects broad coverage when
     /// env.MADEIRA_SWAP_COVERAGE is unset (virtual_ios.c ios_swap_config).
     static var swapModeBroad: Bool { (Int(MadeiraConfig.get("swap-mode") ?? "") ?? 1) >= 2 }
+    /// (donor-alone) ml2200: donor-pool-mb without swap-mb starts the donor pool on its own
+    /// (WineProcessBridge.m, virtual_ios.c ios_swap_init) unless madeira.cfg has donor-only = 0.
+    /// So the Donor pool picker is open with the swap tier off, and the pickers that shape the
+    /// tier are open while either stage is on.
+    static var donorAlone: Bool { (Int(MadeiraConfig.get("donor-only") ?? "") ?? 1) != 0 }
+    private var tierOn: Bool { swapMB > 0 || (donorPoolMB > 0 && Self.donorAlone) }
     static func gb(_ mb: Int) -> String {
         String(format: "%g GB", Double(mb) / 1024)   // 1.5, 4, 4.25 ...
     }
@@ -5263,10 +5269,10 @@ struct RuntimeMemorySyncSettings: View {
                 ForEach(Self.coverageChoices, id: \.0) { Text($0.1).tag($0.0) }
                 if !Self.coverageChoices.contains(where: { $0.0 == coverage }) { Text(coverage).tag(coverage) }
             }
-            .disabled(swapMB == 0)
+            .disabled(!tierOn)
             mbPicker("Donor pool", key: "donor-pool-mb", value: $donorPoolMB, choices: Self.donorPoolChoices,
                      zero: "Off", label: Self.gb)
-                .disabled(swapMB == 0)
+                .disabled(swapMB == 0 && !Self.donorAlone)
             // ml2021: a 32-bit program's memory takes donor RAM but never the swap file unless asked
             // (madeira.cfg swap-wow64, virtual_ios.c ios_swap_wow64_policy).
             Picker("32-bit programs", selection: Binding(get: { wow64 }, set: { choice in
@@ -5277,7 +5283,7 @@ struct RuntimeMemorySyncSettings: View {
                 ForEach(Self.wow64Choices, id: \.0) { Text($0.1).tag($0.0) }
                 if !Self.wow64Choices.contains(where: { $0.0 == wow64 }) { Text(wow64).tag(wow64) }
             }
-            .disabled(swapMB == 0)
+            .disabled(!tierOn)
             Picker("Sync engine", selection: Binding(get: { engine }, set: { choice in
                 engine = choice; changed = true
                 SyncEngine.apply(choice)
@@ -5299,7 +5305,7 @@ struct RuntimeMemorySyncSettings: View {
                 Text("JIT pool is the memory reserved at launch for translated x86 code (256 to 1152 MB; below 512 MB, large games can run out of room for it).")
                 Text("Video memory is how much graphics memory games are told they have. Automatic sizes it from the memory free at launch. Too high can get Madeira closed for using too much memory; too low makes games keep reloading textures.")
                 Text("Swap tier moves game data to a file on this device's storage when memory runs short, up to the chosen size, at some speed cost. Coverage decides which allocations it moves: large ones only (8 MB and up, the default), every allocation of 1 MB and up, or those plus allocations that overflow the game's address range. Broad backs every new reservation of 4 MB and up (madeira.cfg swap-min-mb moves the floor) as it is made, so the small commits games make inside it are covered too, and the swap tier size limits the storage it uses. Wider coverage saves more memory but can slow a game down.")
-                Text("Donor pool gives the swap tier RAM that does not count against Madeira's memory limit: memory donated by Madeira's helper extension, which creates it, hands it over and exits, used before the swap file while the phone has memory to spare. It stops taking more when iOS reports memory pressure. Experimental; needs the swap tier on.")
+                Text("Donor pool gives the swap tier RAM that does not count against Madeira's memory limit: memory donated by Madeira's helper extension, which creates it, hands it over and exits, used before the swap file while the phone has memory to spare. It stops taking more when iOS reports memory pressure. Experimental. It works without the swap tier too: then no swap file is made, and memory the pool can't cover stays normal app memory.")
                 Text("Sync engine: Fastsync (the default) handles events and semaphores in-process; its per-game options are in each game's details. Madsync is the older in-process engine. Wine standard sync uses neither. Only one engine runs at a time.")
                 Text("Eco mode starts every game with its threads at a low priority, which saves power but makes games run slower. Off by default. It is meant for loading screens: Eco mode in the in-game menu turns it on and off while a game runs.")
                 if changed { Text("Restart Madeira (close it from the app switcher) for these changes to apply.").foregroundStyle(.orange) }
@@ -5341,7 +5347,7 @@ struct LibraryPointerSettings: View {
     }
 }
 
-/// Settings › Graphics: the Direct3D 9, 11 and 12 routes and the Vulkan driver as plain
+/// Settings › Display and Graphics: the Direct3D 9, 11 and 12 routes and the Vulkan driver as plain
 /// controls for madeira.cfg d3d9, d3d11, d3d12 and vulkan (read at each session start by
 /// ContentView.swift and WineProcessBridge.m; docs/BUILDING.md 6b, 6c and 6d). Default
 /// removes the key. The rows show the global file only: a game's own config lines

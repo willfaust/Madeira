@@ -133,8 +133,8 @@ exe Steam launches), game version (betas), Steam Cloud.
 Display: resolution, FPS limit, MetalFX (D3D11/12), frame generation.
 Controls: controller mode, touch controls, gyro. Audio crackle:
 env.MADEIRA_AUDIO_LEAD_MS = 150 (default 60).
-Global Settings > Graphics: Direct3D 9 = DXMT / native frontend for
-32-bit (d3d9 = native) / wined3d; D3D11 DXMT or DXVK; D3D12
+Global Settings > Display and Graphics: Direct3D 9 = DXMT / native
+frontend for 32-bit (d3d9 = native) / wined3d; D3D11 DXMT or DXVK; D3D12
 madeira-d3d12 or vkd3d (experimental); Vulkan driver. Memory: JIT pool
 size (pool), video memory (vram-mb), swap tier (swap-mb).
 

@@ -15,7 +15,7 @@ enum SettingsPages {
     static var enabled: Bool { MadeiraConfig.flag("MADEIRA_SETTINGS_PAGES") }
 
     enum Page: Hashable, CaseIterable {
-        case steam, gog, itch, epic, ea, runtimes, graphics, display, memory, pointer, jit, signing, saves, drives,
+        case steam, gog, itch, epic, ea, runtimes, displayGraphics, memory, pointer, jit, signing, saves, drives,
              appearance, advanced, credits
 
         var title: String {
@@ -26,8 +26,7 @@ enum SettingsPages {
             case .epic: return "Epic Games"
             case .ea: return "EA app"
             case .runtimes: return "Runtimes"
-            case .graphics: return "Graphics"
-            case .display: return "Display"
+            case .displayGraphics: return "Display and Graphics"
             case .memory: return "Memory and sync"
             case .pointer: return "Pointer and touch"
             case .jit: return "JIT"
@@ -48,8 +47,7 @@ enum SettingsPages {
             case .epic: return "gamecontroller"
             case .ea: return "arrow.down.circle"
             case .runtimes: return "puzzlepiece.extension"
-            case .graphics: return "cpu"
-            case .display: return "display"
+            case .displayGraphics: return "display"
             case .memory: return "memorychip"
             case .pointer: return "cursorarrow"
             case .jit: return "bolt"
@@ -71,8 +69,9 @@ enum SettingsPages {
             case .epic: return EpicLibrary.enabled
             case .ea: return EALibrary.enabled
             case .signing: return SigningRefresh.enabled
-            case .graphics: return GraphicsSettings.shown
-            case .display, .memory: return LibraryView.runtimeSettingsShown
+            // One page for both (display-graphics): it shows when either part would.
+            case .displayGraphics: return GraphicsSettings.shown || LibraryView.runtimeSettingsShown
+            case .memory: return LibraryView.runtimeSettingsShown
             default: return true
             }
         }
@@ -81,7 +80,7 @@ enum SettingsPages {
     /// The rows of the Settings tab, in groups.
     static let groups: [(String?, [Page])] = [
         ("Getting games", [.steam, .gog, .itch, .epic, .ea, .runtimes]),
-        ("Running games", [.graphics, .display, .memory, .pointer]),
+        ("Running games", [.displayGraphics, .memory, .pointer]),
         ("Device", [.jit, .signing, .saves, .drives]),
         (nil, [.appearance, .advanced, .credits]),
     ]
@@ -172,8 +171,10 @@ struct SettingsPageView: View {
             WineMonoSettingsSection()
             if VCRedistModel.enabled { VCRedistSettingsSection() }
             WineGeckoSettingsSection()
-        case .graphics: GraphicsSettings(refresh: refresh)
-        case .display: DisplayRateSettings()
+        case .displayGraphics:
+            // The Direct3D and Vulkan pickers first, then the display rate in its own section.
+            if GraphicsSettings.shown { GraphicsSettings(refresh: refresh) }
+            if LibraryView.runtimeSettingsShown { DisplayRateSettings() }
         case .memory: RuntimeMemorySyncSettings(open: { sheet = $0 }, refresh: refresh)
         case .pointer: Section("Pointer") { LibraryPointerSettings() }
         case .jit: JITSettingsSection()
