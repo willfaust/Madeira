@@ -59,6 +59,12 @@ void madeira_swap_overlay_stats(unsigned long long *file_mb, unsigned long long 
                                 unsigned long long *donor_guarded);
 double madeira_gpu_meter_busy_seconds(void);
 uint64_t madeira_gpu_meter_cmdbufs(void);
+/// madeira-duo overlay-shader: the performance overlay's shader cells (winemetal_unix.c).
+/// Cumulative shader-cache misses (madeira-d3d12) and pso-archive misses; pipelines draws
+/// wait on (pso-async) and pipelines queued at creation, now. flags: 1 madeira-d3d12's
+/// counters are there, 2 its shader cache is on, 4 pso-async is on, 8 the pso-archive is in use.
+void madeira_shader_overlay_stats(unsigned long long *shader_misses, unsigned long long *pipeline_misses,
+                                  long long *pso_queue, long long *pso_background, int *flags);
 // ml1098: ask the D3D12 runtime to capture the next N frames (winemetal_unix.c)
 void madeira_capture_request(int frames);
 // ml1133: ECO switch (ntdll unix sync.c). 1 = every guest thread drops to a

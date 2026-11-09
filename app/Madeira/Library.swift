@@ -6105,7 +6105,7 @@ enum OverlayStyle {
     static let layouts: [(id: String, name: String)] = [("grid", "Grid"), ("row", "One row"), ("column", "Column")]
     static let backgrounds: [(id: String, name: String)] = [("glass", "Glass"), ("dark", "Dark"), ("clear", "None")]
     /// The figures the overlay can show, in the order of the menu's switches.
-    static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
+    static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "Shader misses", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
 }
 
 /// Frame times from the present path (madeira_frame_times_us, Winios.m) and the
@@ -6246,6 +6246,18 @@ struct LibraryMetrics: View {
     @State private var donatedMB = 0
     @State private var donorPoolMB = 0
     @State private var donorGuarded = 0
+    /// madeira-duo overlay-shader: madeira_shader_overlay_stats (winemetal_unix.c). Per
+    /// second over the last refresh: shader stages madeira-d3d12's cache did not have, and
+    /// pipelines the pso-archive did not have (-1 = not measured yet); the pso-async queue
+    /// draws wait on, and the create-time queue behind it, right now; the flags it gave.
+    @State private var shaderPrimed = false
+    @State private var lastShaderMisses: UInt64 = 0
+    @State private var lastPipelineMisses: UInt64 = 0
+    @State private var shaderRate = -1.0
+    @State private var pipelineRate = -1.0
+    @State private var psoQueue = 0
+    @State private var psoBackground = 0
+    @State private var shaderFlags = 0
     /// Half-second ticks; the figures change every `refresh` seconds (0.5, 1 or 2).
     private let ticks = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     /// ml2021: one cell per figure. A fixed width per cell (the widest value it can show)
@@ -6296,6 +6308,10 @@ struct LibraryMetrics: View {
             if donorPoolMB > 0 { result.append(Cell(id: "donor", label: "DONOR", value: "\(donatedMB)", width: 54)) }
             result.append(Cell(id: "swap", label: "SWAP", value: "\(swapFileMB)", width: 54))
         }
+        if model.overlayFields.contains("Shader misses") {
+            result.append(Cell(id: "miss", label: "MISS/s", value: missText, width: 64))
+            result.append(Cell(id: "psoq", label: "PSO Q", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
+        }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append(Cell(id: "bat", label: "BAT", value: "\(battery)%", width: 50)) }
         if model.overlayFields.contains("Thermal") {
             let (word, dot): (String, Color) = {
@@ -6310,6 +6326,13 @@ struct LibraryMetrics: View {
             result.append(Cell(id: "temp", label: "TEMP", value: word, width: 62, dot: dot))
         }
         return result
+    }
+    /// Any miss in the interval shows as at least 1. "shaders/pipelines"; just the shader
+    /// figure while the pso-archive is off (its misses can't be told from Metal's cache hits).
+    private func perSecond(_ rate: Double) -> String { rate <= 0 ? "0" : String(format: "%.0f", max(1, rate.rounded())) }
+    private var missText: String {
+        guard shaderRate >= 0, shaderFlags & 1 != 0 else { return "–" }   // no madeira-d3d12 (a D3D11 game) or not yet
+        return shaderFlags & 8 != 0 ? "\(perSecond(shaderRate))/\(perSecond(pipelineRate))" : perSecond(shaderRate)
     }
     private func value(_ c: Cell) -> some View {
         HStack(spacing: 4 * s) {
@@ -6432,6 +6455,18 @@ struct LibraryMetrics: View {
                     madeira_swap_overlay_stats(&file, &donated, &pool, &guarded)
                     swapFileMB = Int(file); donatedMB = Int(donated); donorPoolMB = Int(pool); donorGuarded = Int(guarded)
                 }
+                if model.overlayFields.contains("Shader misses") {
+                    var shaders: UInt64 = 0, pipelines: UInt64 = 0, queue: Int64 = 0, background: Int64 = 0, flags: Int32 = 0
+                    madeira_shader_overlay_stats(&shaders, &pipelines, &queue, &background, &flags)
+                    if shaderPrimed {
+                        shaderRate = Double(shaders >= lastShaderMisses ? shaders - lastShaderMisses : 0) / max(0.001, dt)
+                        pipelineRate = Double(pipelines >= lastPipelineMisses ? pipelines - lastPipelineMisses : 0) / max(0.001, dt)
+                    }
+                    lastShaderMisses = shaders; lastPipelineMisses = pipelines; shaderPrimed = true
+                    psoQueue = Int(queue); psoBackground = Int(background); shaderFlags = Int(flags)
+                } else if shaderPrimed {
+                    shaderPrimed = false; shaderRate = -1; pipelineRate = -1
+                }
                 if model.overlayFields.contains("GPU") {
                     let busy = madeira_gpu_meter_busy_seconds(), buffers = madeira_gpu_meter_cmdbufs()
                     let used = max(0, busy - lastGPUBusy)
@@ -6473,6 +6508,15 @@ struct LibraryMetrics: View {
                                                : "Donated \(donatedMB)/\(donorPoolMB) MB")
             }
             result.append("Swap \(swapFileMB) MB")
+        }
+        if model.overlayFields.contains("Shader misses") {
+            if shaderRate < 0 || shaderFlags & 1 == 0 { result.append("Shader misses —") }
+            else if shaderFlags & 8 != 0 {
+                result.append("\(perSecond(shaderRate)) shader and \(perSecond(pipelineRate)) pipeline misses a second")
+            } else { result.append("\(perSecond(shaderRate)) shader misses a second") }
+            if shaderFlags & 1 == 0 { result.append("Pipeline queue —") }
+            else if shaderFlags & 4 == 0 { result.append("Pipeline queue off") }
+            else { result.append("Pipeline queue \(psoQueue) (\(psoBackground) queued at creation)") }
         }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         if model.overlayFields.contains("Thermal") {

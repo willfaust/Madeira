@@ -73,7 +73,7 @@ else:
     print('SKIP: dxmt submodule not checked out here')
 
 # --- the overlay ----------------------------------------------------------------------
-check('static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]' in lib
+check('static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "Shader misses", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]' in lib
       and 'ForEach(OverlayStyle.fields, id: \\.self) { field in' in lib,
       'the menu offers 1% lows and the frame graph among the overlay\'s figures')
 one = lib[lib.index('static func onePercent(_ ms: [Double]) -> (low: Double, high: Double)? {'):lib.index('struct FrameTimeGraph: View {')]
