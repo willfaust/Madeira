@@ -1134,6 +1134,19 @@ static int madeira_fossilize_replay_locked(NSFileManager *fm, NSString *gl, NSSt
     double start = madeira_monotonic_seconds();
     fossilize_replay_started = start;
     fossilize_replay_state = 1;
+    /* Sample the replayer's progress while it runs, so the totals are known even when nothing polls
+     * (the replay at game start) and the last figures survive the replay's end. */
+    fossilize_replay_last_done = 0;
+    fossilize_replay_last_total = 0;
+    if (fossilize_replay_progress_fn)
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            while (fossilize_replay_state == 1) {
+                uint32_t d = 0, t = 0;
+                fossilize_replay_progress_fn(&d, &t);
+                if (t) { fossilize_replay_last_done = d; fossilize_replay_last_total = t; }
+                usleep(200000);
+            }
+        });
     int code = replay_main((int)args.count, argv);
     fossilize_replay_seconds = madeira_monotonic_seconds() - start;
     unsetenv("FOSSILIZE_VULKAN_LIBRARY");

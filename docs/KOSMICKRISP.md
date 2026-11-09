@@ -284,3 +284,16 @@ another Metal counter API that the phone does support.
   KosmicKrisp reports every library and pipeline build to `madeira_vulkan_compile_mark` (WiniosGL.m). On D3D12
   the field shows the overlay-shader branch's MISS/s and PSO Q cells, provided this build's DXMT has
   `madeira_shader_overlay_stats` (looked up at run time).
+
+## Compile-speed levers within the current design (patch 0014)
+
+KosmicKrisp bakes pipeline state into its MSL, so these levers keep one library per stage and make each compile
+cheaper or concurrent. Each has a switch, so one run can compare them:
+
+- `MADEIRA_KK_COMPILE_QOS` (default 1): a thread compiling below user-initiated QoS is raised to user-interactive
+  for the compile, then set back. Metal's compiler service runs a request at the requester's QoS.
+- `MADEIRA_KK_PARALLEL_LIBS` (default 1): a render pipeline's vertex and fragment libraries compile at the same time.
+- `MADEIRA_KK_OPT_SIZE` (default 0): `MTLLibraryOptimizationLevelSize`. Apple documents smaller binaries "which may
+  also reduce compile time". Shader speed may drop, so measure it.
+- `[kk-slow]` logs the compiling thread's QoS and the MSL size. `[kk-frame]` adds `feedback N (M untimed)`, to show
+  why GPU time read 0 on the Duo.
