@@ -4097,13 +4097,14 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, achievements, gog, itch, library, iniFiles, advanced
+        case display, controls, launch, compatibility, shaders, steam, cloud, achievements, gog, itch, library, iniFiles, advanced
         var title: String {
             switch self {
             case .display: return "Display"
             case .controls: return "Controls"
             case .launch: return "Launch"
             case .compatibility: return "Compatibility"
+            case .shaders: return "Shaders"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
             case .workshop: return "Steam Workshop"
@@ -4121,6 +4122,7 @@ struct LibraryDetail: View {
             case .controls: return "gamecontroller"
             case .launch: return "terminal"
             case .compatibility: return "cpu"
+            case .shaders: return "hammer"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
             case .workshop: return "square.stack.3d.up"
@@ -4143,7 +4145,7 @@ struct LibraryDetail: View {
         let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
-        let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
+        let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility, .shaders] : [.display, .controls, .compatibility, .shaders]
         let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
@@ -4175,6 +4177,7 @@ struct LibraryDetail: View {
             case .controls: controlsPage
             case .launch: launchPage
             case .compatibility: compatibilityPage
+            case .shaders: ShaderCacheSection()
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
             case .workshop:
@@ -4441,7 +4444,6 @@ struct LibraryDetail: View {
             if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
             Section { Button("Remove from library", role: .destructive) { remove = true } }
         }
-        ShaderCacheSection()
         if let error { Section { Text(error).foregroundStyle(.red) } }
     }
 

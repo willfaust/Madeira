@@ -1146,6 +1146,16 @@ static int madeira_fossilize_replay_locked(NSFileManager *fm, NSString *gl, NSSt
     return code == 0 ? 0 : -1;
 }
 
+/* Replay worker count: every core unless madeira.cfg `key` sets a number. madeira_cfg_get empties its
+ * buffer when the key is unset, so read into a scratch buffer (an empty --num-threads made Fossilize's
+ * stoul throw and abort the app, install33, 10 Nov 2026). */
+static void madeira_fossilize_threads(const char *key, char *out, size_t cap)
+{
+    snprintf(out, cap, "%d", (int)MAX(1, [NSProcessInfo processInfo].activeProcessorCount));
+    char v[16];
+    if (madeira_cfg_get(key, v, sizeof v) && atoi(v) > 0) snprintf(out, cap, "%d", atoi(v));
+}
+
 /* The replay at game start: waits for a pre-launch compile still running, and skips the replay when
  * one already finished in this app process (the caches are warm; what the game records next is
  * replayed at the next app start). */
@@ -1157,8 +1167,7 @@ static void madeira_fossilize_replay(NSFileManager *fm, NSString *gl, NSString *
     if (!fossilize_replayed) {
         /* The game waits for this replay, so it gets every core unless fossilize-threads says otherwise. */
         char threads[16];
-        snprintf(threads, sizeof threads, "%d", (int)MAX(1, [NSProcessInfo processInfo].activeProcessorCount));
-        madeira_cfg_get("fossilize-threads", threads, sizeof threads);
+        madeira_fossilize_threads("fossilize-threads", threads, sizeof threads);
         madeira_fossilize_replay_locked(fm, gl, driver, dir, threads);
     } else {
         dprintf(STDERR_FILENO, "[fossilize] replay: already done in this app run (%.1f s); skipped\n",
@@ -1196,8 +1205,7 @@ int madeira_shader_precompile_start(void)
         [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"import"] withIntermediateDirectories:YES attributes:nil error:nil];
         /* Every core: nothing else runs before the game starts. */
         char threads[16];
-        snprintf(threads, sizeof threads, "%d", (int)MAX(1, [NSProcessInfo processInfo].activeProcessorCount));
-        madeira_cfg_get("fossilize-precompile-threads", threads, sizeof threads);
+        madeira_fossilize_threads("fossilize-precompile-threads", threads, sizeof threads);
         fossilize_replay_last_done = 0;
         fossilize_replay_last_total = 0;
         if (madeira_fossilize_replay_locked(fm, [bundle stringByAppendingPathComponent:@"gl"], lib, dir, threads) == 1)
