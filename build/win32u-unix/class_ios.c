@@ -1467,6 +1467,7 @@ static void register_builtins(void)
 
     for (i = 0; i < ARRAYSIZE(builtin_classes); i++) register_builtin( &builtin_classes[i] );
     register_builtin( &edit_class );
+    register_builtin( &message_builtin_class );
     KeUserModeCallback( NtUserInitBuiltinClasses, NULL, 0, &ret_ptr, &ret_len );
 }
 
