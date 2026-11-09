@@ -248,3 +248,14 @@ Patch 0010 does two things:
 logs each one, so device creation can go ahead for applications that enable features they never use. If a dropped
 feature is used anyway, the pipelines that need it fail to build. Look for `Failed to create MTL` and the game's
 own errors.
+
+## Large timestamp query pools (patch 0011)
+
+Metal caps the number of entries in one `MTL4CounterHeap`. Above the cap, AGX logs `MTLCounterHeap: Invalid heap
+size requested`. Upstream KosmicKrisp backs each `VK_QUERY_TYPE_TIMESTAMP` pool with a single heap. So on 9 Nov 2026,
+with geometryShader relaxed (0010), PoE2 got past `vkCreateDevice` but failed `vkCreateQueryPool` with
+`ErrorOutOfDeviceMemory` and fell back to DirectX 11 again.
+
+Patch 0011 finds the largest heap size Metal accepts by halving the request. It remembers that size for the
+process and spreads the pool over as many heaps as needed: query q lives in heap q / n at q % n. A split pool
+logs `[kk-query] timestamp pool of N split into H counter heaps of n`.
