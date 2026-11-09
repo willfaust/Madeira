@@ -190,3 +190,38 @@ drivers behind one `libvulkan.1.dylib`. In that case:
 - `maxBufferLength` limits on iOS GPUs for large `VkDeviceMemory` allocations.
 - Present: CAMetalLayer, FIFO only (see patch 0001).
 - No CTS run, no vkd3d-proton or DXVK run.
+
+## Caches, archives, Fossilize and statistics (madeira-duo vk2, 9 Nov 2026)
+
+Upstream KosmicKrisp keeps nothing between launches: it never opens Mesa's disk cache, creates no
+implicit pipeline cache (so applications that pass no `VkPipelineCache`, like Path of Exile 2, get
+no caching at all), and compiles every Metal pipeline without an archive. vk2 adds:
+
+- `kosmickrisp-ios-0007`: the Mesa disk cache (built with `-Dshader-cache=enabled`) and an implicit
+  pipeline cache, as RADV does. Repeat launches skip SPIR-V -> NIR -> MSL.
+- `kosmickrisp-ios-0008`: Metal 4 pipeline archives. A `MTL4PipelineDataSetSerializer` collects every
+  pipeline built; chunks (`*.mtl4a`) are written every 60 s while new pipelines are built and when
+  the compiler is released, loaded at the next start-up and passed as `lookupArchives`. Unreadable
+  chunks (e.g. after an iOS update) are deleted. Keys: `MADEIRA_KK_ARCHIVE=0` (off),
+  `MADEIRA_KK_ARCHIVE_MB` (cap, default 1024), `MADEIRA_KK_ARCHIVE_FLUSH_S` (default 60),
+  `MADEIRA_KK_ARCHIVE_DIR`. Also timing: `[kk-slow]` for library/pipeline builds of 150 ms or more,
+  `[kk-compile]` totals with a duration histogram every 30 s (`MADEIRA_KK_COMPILE_STATS=0` off).
+- `kosmickrisp-ios-0009`: `[kk-frame]` every 30 s (presents, present intervals with >33/50/100 ms
+  counts, CPU time in queue submits, Metal GPU time per frame from commit feedback;
+  `MADEIRA_KK_FRAME_STATS=0` off), and each present is reported to Madeira's frame counter
+  (`madeira_vulkan_present_mark`, WiniosGL.m) so the FPS overlay and `[frame]` count Vulkan frames.
+- WineProcessBridge: with `vulkan = kosmickrisp`, `MESA_SHADER_CACHE_DIR` defaults to
+  `<prefix>/madeira-cache/kosmickrisp` (archives in its `kosmickrisp-mtl4/`), max 2G.
+
+Fossilize (`madeira.cfg fossilize = record | replay | on | off`, default off; KosmicKrisp only):
+
+- record: Vulkan goes through the Khronos loader (`gl/libvulkan.1.dylib`, build/vulkan-loader-ios),
+  driver manifest `gl/vulkan/icd.d/kosmickrisp_icd.json`, capture layer `VK_LAYER_fossilize`
+  (`gl/libVkLayer_fossilize.dylib`, build/fossilize-ios). Output:
+  `<prefix>/madeira-cache/fossilize/capture.*.foz`.
+- replay: before the session, every `.foz` there and in `import/` is replayed in-process
+  (`gl/libfossilize_replay.dylib`, `fossilize_replay_main`) straight through KosmicKrisp, filling its
+  disk cache and archives; `replayed.cache` skips what earlier replays built.
+  `fossilize-threads` (default 4). The point: driver caches are invalidated by driver rebuilds
+  (the disk cache key includes the driver build) and possibly by iOS updates (archives); the
+  `.foz` recording survives both and rebuilds them before play.

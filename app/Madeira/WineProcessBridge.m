@@ -1068,6 +1068,108 @@ static int madeira_link_vulkan_file(NSFileManager *fm, NSString *dir, NSString *
     return [fm createSymbolicLinkAtPath:dst withDestinationPath:src error:nil] ? 1 : 0;
 }
 
+/* madeira-duo vk2: Fossilize (Valve's pipeline record/replay, the mechanism behind Steam's shader
+ * pre-caching), madeira.cfg
+ *   fossilize = record | replay | on | off (default off)
+ * record: the session's Vulkan goes through the Khronos loader (gl/libvulkan.1.dylib) with the
+ *   driver from gl/vulkan/icd.d and the capture layer VK_LAYER_fossilize (gl/vulkan/explicit_layer.d),
+ *   which writes every pipeline the game creates to <prefix>/madeira-cache/fossilize/capture.*.foz.
+ *   KosmicKrisp only: MoltenVK is a portability driver the loader hides from Wine.
+ * replay: before the session starts, every .foz in that folder (and in its import/ subfolder, for
+ *   databases recorded elsewhere) is replayed in-process through the session's driver
+ *   (gl/libfossilize_replay.dylib), which fills the driver's own caches (KosmicKrisp: Mesa disk cache
+ *   and Metal 4 archives). --replayer-cache keeps a list of what was already replayed, so later
+ *   sessions only build new entries. Once per app process.
+ * on: both. fossilize-threads = N (default 4) sets the replay worker count. */
+static void madeira_fossilize_replay(NSFileManager *fm, NSString *gl, NSString *driver, NSString *dir)
+{
+    static BOOL replayed;
+    if (replayed) return;
+    replayed = YES;
+
+    NSMutableArray<NSString *> *databases = [NSMutableArray array];
+    for (NSString *folder in @[dir, [dir stringByAppendingPathComponent:@"import"]])
+        for (NSString *name in [[fm contentsOfDirectoryAtPath:folder error:nil] sortedArrayUsingSelector:@selector(compare:)])
+            if ([name hasSuffix:@".foz"])
+                [databases addObject:[folder stringByAppendingPathComponent:name]];
+    if (databases.count == 0) {
+        dprintf(STDERR_FILENO, "[fossilize] replay: no .foz in %s yet\n", dir.UTF8String);
+        return;
+    }
+    NSString *replayer = [gl stringByAppendingPathComponent:@"libfossilize_replay.dylib"];
+    void *handle = dlopen(replayer.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+    int (*replay_main)(int, char **) = handle ? (int (*)(int, char **))dlsym(handle, "fossilize_replay_main") : NULL;
+    if (!replay_main) {
+        dprintf(STDERR_FILENO, "[fossilize] replay: can't load %s: %s\n", replayer.UTF8String, dlerror());
+        return;
+    }
+
+    char threads[16] = "4";
+    madeira_cfg_get("fossilize-threads", threads, sizeof threads);
+    NSString *replayed_list = [dir stringByAppendingPathComponent:@"replayed.cache"];
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"fossilize-replay"];
+    [args addObjectsFromArray:databases];
+    [args addObjectsFromArray:@[@"--num-threads", [NSString stringWithUTF8String:threads],
+                                @"--replayer-cache", replayed_list]];
+    char **argv = calloc(args.count + 1, sizeof(char *));
+    for (NSUInteger i = 0; i < args.count; i++) argv[i] = strdup(args[i].UTF8String);
+
+    setenv("FOSSILIZE_VULKAN_LIBRARY", driver.fileSystemRepresentation, 1);
+    dprintf(STDERR_FILENO, "[fossilize] replay: %lu database(s) through %s, %s thread(s)\n",
+            (unsigned long)databases.count, driver.lastPathComponent.UTF8String, threads);
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int code = replay_main((int)args.count, argv);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    unsetenv("FOSSILIZE_VULKAN_LIBRARY");
+    dprintf(STDERR_FILENO, "[fossilize] replay: finished in %.1f s (exit %d)\n",
+            (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9, code);
+    for (NSUInteger i = 0; i < args.count; i++) free(argv[i]);
+    free(argv);
+}
+
+static void madeira_setup_fossilize(NSFileManager *fm, NSString *prefix, NSString *bundle, NSString *lib)
+{
+    char mode[32] = "";
+    if (!madeira_cfg_get("fossilize", mode, sizeof mode) || !mode[0] || !strcasecmp(mode, "off")) return;
+    BOOL record = !strcasecmp(mode, "record") || !strcasecmp(mode, "on");
+    BOOL replay = !strcasecmp(mode, "replay") || !strcasecmp(mode, "on");
+    if (!record && !replay) {
+        dprintf(STDERR_FILENO, "[fossilize] unknown madeira.cfg fossilize = %s (record, replay, on or off)\n", mode);
+        return;
+    }
+    if (![lib.lastPathComponent containsString:@"kosmickrisp"]) {
+        dprintf(STDERR_FILENO, "[fossilize] needs vulkan = kosmickrisp (this session: %s); off\n", lib.lastPathComponent.UTF8String);
+        return;
+    }
+    NSString *gl = [bundle stringByAppendingPathComponent:@"gl"];
+    NSString *dir = [prefix stringByAppendingPathComponent:@"madeira-cache/fossilize"];
+    [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"import"] withIntermediateDirectories:YES attributes:nil error:nil];
+
+    if (replay) madeira_fossilize_replay(fm, gl, lib, dir);
+
+    if (record) {
+        NSString *loader = [gl stringByAppendingPathComponent:@"libvulkan.1.dylib"];
+        NSString *icd = [gl stringByAppendingPathComponent:@"vulkan/icd.d/kosmickrisp_icd.json"];
+        NSString *layers = [gl stringByAppendingPathComponent:@"vulkan/explicit_layer.d"];
+        NSString *layer_lib = [gl stringByAppendingPathComponent:@"libVkLayer_fossilize.dylib"];
+        for (NSString *need in @[loader, icd, layer_lib])
+            if (access(need.fileSystemRepresentation, R_OK) != 0) {
+                dprintf(STDERR_FILENO, "[fossilize] record: %s is missing; recording off\n", need.UTF8String);
+                return;
+            }
+        setenv("MADEIRA_VULKAN_LIBRARY", loader.fileSystemRepresentation, 1);
+        setenv("VK_DRIVER_FILES", icd.fileSystemRepresentation, 1);
+        setenv("VK_ADD_LAYER_PATH", layers.fileSystemRepresentation, 1);
+        const char *have = getenv("VK_INSTANCE_LAYERS");
+        NSString *wanted = have && have[0] ? [NSString stringWithFormat:@"%s:VK_LAYER_fossilize", have] : @"VK_LAYER_fossilize";
+        setenv("VK_INSTANCE_LAYERS", wanted.UTF8String, 1);
+        setenv("FOSSILIZE_DUMP_PATH", [dir stringByAppendingPathComponent:@"capture"].fileSystemRepresentation, 0);
+        dprintf(STDERR_FILENO, "[fossilize] record: loader %s, driver %s, layer VK_LAYER_fossilize, dump %s.*.foz\n",
+                loader.lastPathComponent.UTF8String, icd.lastPathComponent.UTF8String, getenv("FOSSILIZE_DUMP_PATH"));
+    }
+}
+
 static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *bundle, BOOL use_arm64ec)
 {
     NSString *win = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
@@ -1122,6 +1224,7 @@ static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *
         dprintf(STDERR_FILENO, "[vulkan] KosmicKrisp caches in %s (Mesa disk cache max %s)\n",
                 getenv("MESA_SHADER_CACHE_DIR"), getenv("MESA_SHADER_CACHE_MAX_SIZE"));
     }
+    madeira_setup_fossilize(fm, prefix, bundle, lib);
 
     for (NSString *dir in dirs)
         for (NSString *dll in vulkan_dlls)

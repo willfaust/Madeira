@@ -1,0 +1,104 @@
+From 68769ce8e4bc04ea4424b3f703e2069abeb6b33b Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 21:30:22 +1100
+Subject: [PATCH] cli: replay through FOSSILIZE_VULKAN_LIBRARY; replayer as a
+ library
+
+FOSSILIZE_VULKAN_LIBRARY names the Vulkan library to load instead of the
+system loader (embedders that carry the loader or an ICD in their bundle).
+FOSSILIZE_REPLAY_LIBRARY builds libfossilize_replay exporting
+fossilize_replay_main for hosts that can't spawn processes (iOS).
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+---
+ cli/CMakeLists.txt       | 10 ++++++++++
+ cli/device.cpp           | 25 +++++++++++++++++++++++++
+ cli/fossilize_replay.cpp |  7 +++++++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/cli/CMakeLists.txt b/cli/CMakeLists.txt
+index d106024..839dc7a 100644
+--- a/cli/CMakeLists.txt
++++ b/cli/CMakeLists.txt
+@@ -37,6 +37,16 @@ function(add_fossilize_cli NAME)
+ endfunction()
+ 
+ add_fossilize_cli(fossilize-replay fossilize_replay.cpp)
++
++option(FOSSILIZE_REPLAY_LIBRARY "Also build the replayer as a shared library exporting fossilize_replay_main." OFF)
++if (FOSSILIZE_REPLAY_LIBRARY)
++	add_library(fossilize-replay-lib SHARED fossilize_replay.cpp)
++	set_target_properties(fossilize-replay-lib PROPERTIES OUTPUT_NAME fossilize_replay)
++	target_compile_options(fossilize-replay-lib PRIVATE ${FOSSILIZE_CXX_FLAGS})
++	target_compile_definitions(fossilize-replay-lib PRIVATE FOSSILIZE_REPLAY_LIBRARY=1 NO_ROBUST_REPLAYER=1)
++	target_link_libraries(fossilize-replay-lib PRIVATE fossilize cli-utils)
++	install(TARGETS fossilize-replay-lib DESTINATION ${CMAKE_INSTALL_LIBDIR})
++endif()
+ if (WIN32)
+ 	target_sources(fossilize-replay PRIVATE fossilize_replay_windows.hpp)
+ else()
+diff --git a/cli/device.cpp b/cli/device.cpp
+index 05e6e73..bc9f307 100644
+--- a/cli/device.cpp
++++ b/cli/device.cpp
+@@ -25,6 +25,10 @@
+ #include <vector>
+ #include <algorithm>
+ #include <string.h>
++#include <stdlib.h>
++#ifndef _WIN32
++#include <dlfcn.h>
++#endif
+ 
+ using namespace std;
+ 
+@@ -273,6 +277,27 @@ bool VulkanDevice::init_device(const Options &opts)
+ 		return true;
+ 	}
+ 
++#ifndef _WIN32
++	// FOSSILIZE_VULKAN_LIBRARY names a Vulkan library (a loader or an ICD that exports
++	// vkGetInstanceProcAddr) to replay through instead of the system loader. Embedders
++	// whose loader isn't on the default search path (iOS apps carry it in the bundle)
++	// use this to target a specific driver.
++	const char *custom_library = getenv("FOSSILIZE_VULKAN_LIBRARY");
++	if (custom_library && *custom_library)
++	{
++		void *handle = dlopen(custom_library, RTLD_NOW | RTLD_LOCAL);
++		auto get_instance_proc_addr = handle ?
++				reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(handle, "vkGetInstanceProcAddr")) : nullptr;
++		if (!get_instance_proc_addr)
++		{
++			LOGE("FOSSILIZE_VULKAN_LIBRARY=%s: %s.\n", custom_library,
++			     handle ? "no vkGetInstanceProcAddr" : dlerror());
++			return false;
++		}
++		volkInitializeCustom(get_instance_proc_addr);
++	}
++	else
++#endif
+ 	if (volkInitialize() != VK_SUCCESS)
+ 	{
+ 		LOGE("volkInitialize failed.\n");
+diff --git a/cli/fossilize_replay.cpp b/cli/fossilize_replay.cpp
+index 07c3ffd..bbf76f0 100644
+--- a/cli/fossilize_replay.cpp
++++ b/cli/fossilize_replay.cpp
+@@ -4565,7 +4565,14 @@ static int run_normal_process(ThreadedReplayer &replayer, const vector<const cha
+ #endif
+ #endif
+ 
++#ifdef FOSSILIZE_REPLAY_LIBRARY
++// The replayer as a library entry point (FOSSILIZE_REPLAY_LIBRARY), for embedders that can't
++// spawn processes (iOS). Same arguments as the executable; runs in-process with worker threads.
++// Call it at most once per process.
++extern "C" __attribute__((visibility("default"))) int fossilize_replay_main(int argc, char *argv[])
++#else
+ int main(int argc, char *argv[])
++#endif
+ {
+ 	vector<const char *> databases;
+ 	const char *whitelist_path = nullptr;
+-- 
+2.56.0
+
