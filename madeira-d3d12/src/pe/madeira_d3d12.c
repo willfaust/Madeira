@@ -1394,6 +1394,7 @@ struct mad_pso {
     SRWLOCK rlock;                                  /* serialises this pipeline's lazy build (zero = SRWLOCK_INIT) */
     volatile LONG async_q;                          /* pso-async: handed to the background builders (1; 2 = pso-create-build's low-priority queue) */
     UINT64 seen_key; LONG seen_mark;                /* madeira-duo pso-create-build: the pipeline's content key, and drawn once this session */
+    UINT8 origin;                                   /* madeira-duo pso-origin: 1 drawn in an earlier session, 2 created in one, 3 new (0 = not counted) */
     /* madeira-bcd pso-lazy-libs: lz = the stage libraries were dropped once the
      * pipeline was created and come back from the shader cache under these keys
      * at its first draw (mad_lzlib_restore); lz_has_ps never changes after creation */
@@ -6831,6 +6832,7 @@ static volatile LONG g_pso_lazy_built, g_pso_lazy_failed;
 static volatile LONG g_csb_queued, g_csb_built, g_csb_failed, g_csb_full, g_csb_waited, g_csb_inline;   /* madeira-duo cs-create-build */
 static volatile LONG64 g_csb_wait_t;
 static int mad_lzlib_restore(struct mad_pso *p);   /* madeira-bcd pso-lazy-libs */
+static void mad_po_build(const struct mad_pso *p, int kind, LONG64 dt);   /* madeira-duo pso-origin */
 static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     if (p->rps || !p->lazy) return p->rps;
     AcquireSRWLockExclusive(&p->rlock);   /* per pipeline: builds of different pipelines run in parallel */
@@ -6843,6 +6845,7 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
         if (built) { MemoryBarrier(); p->rps = built; }   /* pso-async: draws on other threads read rps without the lock */
         if (err) mad_log_nserror(p->vs_name, err);
         InterlockedExchangeAdd64(&g_pt_realize, mad_qpc() - t0); InterlockedIncrement(&g_pn_realize);
+        if (p->origin) mad_po_build(p, 0, mad_qpc() - t0);   /* madeira-duo pso-origin */
         if (p->rps) {
             LONG n = InterlockedIncrement(&g_pso_lazy_built);
             if (n == 1 || (n % 500) == 0)
@@ -6878,6 +6881,7 @@ static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
             LONG64 t0 = mad_qpc();   /* madeira-duo hitch recorder */
             ci.compute_function = p->vs_fn;
             p->cps = MTLDevice_newComputePipelineState(p->device_handle, &ci, &err);
+            if (p->origin) mad_po_build(p, 1, mad_qpc() - t0);   /* madeira-duo pso-origin */
             if (!bg) { InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n); }
             else if (p->cps) InterlockedIncrement(&g_csb_built);
             if (!bg && p->async_q == 2) InterlockedIncrement(&g_csb_inline);   /* queued, but its dispatch came first */
@@ -7241,6 +7245,265 @@ static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_ST
     return 1;
 }
 
+/* madeira-duo PIPELINE ORIGIN COUNTER (madeira.cfg pso-origin, diagnostic, default
+ * 0). Of the pipelines Metal compiles for the game, how many had an earlier
+ * session already created without drawing them? Only those could be compiled
+ * ahead of a session: ones drawn before are in the pso-archive already, and new
+ * ones can't be known. With the switch on, each lazy pipeline gets a content key
+ * at creation (pso-create-build's key for a render pipeline; the CS digest and
+ * the root signature for a compute one), and the keys created are kept in
+ * %LOCALAPPDATA%\Madeira\pso-created-<exe>.bin ("MPSC", pso-seen's layout, saved
+ * every 30 s when it changed). A pipeline is classed at creation against the
+ * lists as they stood at launch: drawn before (pso-seen-<exe>.bin), created
+ * before, or new; this session's draws and creations don't move it. Each build
+ * is counted under its class, and a build of 150 ms or more counts as a compile
+ * (archive hits take 1-24 ms, compiles 600-1500 ms). A stride variant, built at
+ * a draw, counts under its pipeline's class. A [pso-origin] line every 30 s when
+ * something changed, and at exit. The first session only fills the list: read
+ * the answer from the sessions after it. Compute pipelines pso-warm compiles are
+ * compiled inside winemetal, out of sight here; for those the created split is
+ * the figure (created before = archived by pso-warm in an earlier session).
+ * Nothing the game sees changes. Off: one branch per lazy creation. */
+#define MAD_PO_COMPILE_MS 150
+#define MAD_PO_PREV (1ull << 63)   /* in the created table: the key was on the list at launch */
+enum { MAD_PO_DRAWN = 1, MAD_PO_CREATED = 2, MAD_PO_NEW = 3 };
+static int g_po_on = -1;
+static LONG64 g_po_qpf;
+static UINT64 *g_po_seen; static LONG g_po_nseen;   /* pso-seen as it was at launch, sorted */
+static UINT64 *g_po_tab; static ULONG g_po_cap;     /* keys created, this session's and earlier ones (MAD_PO_PREV) */
+static LONG g_po_n, g_po_nprev, g_po_dirty, g_po_saved;
+static volatile LONG g_po_full, g_po_events;
+static SRWLOCK g_po_lock = SRWLOCK_INIT;
+static WCHAR g_po_path[MAX_PATH];
+static int (__cdecl *g_po_dbg_output)(const char *);
+/* [kind][class]: kind 0 render, 1 compute, 2 stride variant */
+static volatile LONG g_po_created[2][4], g_po_built[3][4], g_po_compiled[3][4];
+static volatile LONG64 g_po_compile_t[3];
+static int mad_po_on(void) {
+    if (g_po_on < 0) {
+        LARGE_INTEGER f;
+        int on = mad_pso_lazy_on() && mad_cfg_int_pe("pso-origin", 0) > 0;   /* madeira-duo: 1 = count the pipelines Metal compiles by origin: drawn in an earlier session, created in one, or new ([pso-origin] lines, list in pso-created-<exe>.bin; diagnostic, nothing the game sees changes); 0 = off */
+        if (on && QueryPerformanceFrequency(&f) && f.QuadPart) g_po_qpf = f.QuadPart;
+        else on = 0;
+        if (on) d3d12_log("[madeira-d3d12] pso-origin = 1: the pipelines built are counted by origin (drawn in an earlier session, created in one, new); "
+                          "[pso-origin] lines every 30 s and at exit\n");
+        MemoryBarrier();
+        g_po_on = on;
+    }
+    return g_po_on;
+}
+static int mad_po_cmp(const void *a, const void *b) {
+    UINT64 x = *(const UINT64 *)a, y = *(const UINT64 *)b;
+    return x < y ? -1 : x > y;
+}
+/* g_po_lock held */
+static UINT64 *mad_po_slot(UINT64 k) {
+    ULONG i = (ULONG)(k ^ (k >> 29)) & (g_po_cap - 1);
+    while (g_po_tab[i] && (g_po_tab[i] & ~MAD_PO_PREV) != k) i = (i + 1) & (g_po_cap - 1);
+    return &g_po_tab[i];
+}
+/* A key list (pso-seen's layout): the keys, malloc'd, or NULL. */
+static UINT64 *mad_po_read(const WCHAR *path, UINT magic, LONG *n_out) {
+    struct { UINT magic, version, count, reserved; } hdr;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    UINT64 *keys = NULL; DWORD rd; LONG n = 0;
+    *n_out = 0;
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    if (ReadFile(f, &hdr, sizeof hdr, &rd, NULL) && rd == sizeof hdr && hdr.magic == magic && hdr.version == 1 &&
+        hdr.count && hdr.count <= (1u << 22) && (keys = malloc(sizeof *keys * hdr.count)) &&
+        ReadFile(f, keys, (DWORD)(sizeof *keys * hdr.count), &rd, NULL))
+        n = (LONG)(rd / sizeof *keys);
+    CloseHandle(f);
+    if (!n) { free(keys); keys = NULL; }
+    *n_out = n;
+    return keys;
+}
+static DWORD WINAPI mad_po_saver(void *arg);
+/* Loads both lists once; 0 when there is nowhere to keep them. */
+static int mad_po_ready(void) {
+    static volatile LONG state;   /* 0 not loaded, 1 loading, 2 ready, 3 unavailable */
+    LONG s = InterlockedCompareExchange(&state, 1, 0);
+    if (s == 0) {
+        WCHAR exe[MAX_PATH], base[MAX_PATH], seen[MAX_PATH]; DWORD n, i; UINT64 h = 1469598103934665603ull;
+        HMODULE nt = GetModuleHandleA("ntdll.dll");
+        if (nt) g_po_dbg_output = (void *)GetProcAddress(nt, "__wine_dbg_output");   /* the exit line can't take stderr's lock */
+        n = GetModuleFileNameW(NULL, exe, MAX_PATH);   /* the same exe hash as pso-seen (mad_seen_ready) */
+        for (i = 0; i < n && n < MAX_PATH; i++) if (exe[i] >= 'A' && exe[i] <= 'Z') exe[i] += 'a' - 'A';
+        if (n && n < MAX_PATH) h = mad_seen_fnv(h, exe, n * sizeof(WCHAR));
+        n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+        if (n && n < MAX_PATH - 64) {
+            UINT64 *prev; LONG nprev = 0, k;
+            _snwprintf(g_po_path, MAX_PATH, L"%ls\\Madeira", base);
+            CreateDirectoryW(g_po_path, NULL);
+            _snwprintf(seen, MAX_PATH, L"%ls\\Madeira\\pso-seen-%016llx.bin", base, (unsigned long long)h);
+            _snwprintf(g_po_path, MAX_PATH, L"%ls\\Madeira\\pso-created-%016llx.bin", base, (unsigned long long)h);
+            g_po_seen = mad_po_read(seen, 0x4e53504du /* "MPSN" */, &g_po_nseen);
+            if (g_po_seen) qsort(g_po_seen, (size_t)g_po_nseen, sizeof *g_po_seen, mad_po_cmp);
+            prev = mad_po_read(g_po_path, 0x4353504du /* "MPSC" */, &nprev);
+            for (g_po_cap = 1u << 17; g_po_cap < 2 * ((ULONG)nprev + 65536); g_po_cap <<= 1) ;   /* at most half used */
+            g_po_tab = calloc(g_po_cap, sizeof *g_po_tab);
+            for (k = 0; g_po_tab && k < nprev; k++) {
+                UINT64 key = prev[k] & ~MAD_PO_PREV, *slot;
+                if (!key) continue;
+                slot = mad_po_slot(key);
+                if (!*slot) { *slot = key | MAD_PO_PREV; g_po_n++; }
+            }
+            free(prev);
+            g_po_nprev = g_po_saved = g_po_n;
+            if (g_po_tab) {
+                HANDLE t = CreateThread(NULL, 64 << 10, mad_po_saver, NULL, 0, NULL);
+                if (t) CloseHandle(t);
+                d3d12_log("[pso-origin] lists at launch: %ld pipelines drawn before (%ls), %ld created before (%ls)\n",
+                          (long)g_po_nseen, seen, (long)g_po_nprev, g_po_path);
+            }
+        }
+        if (!g_po_tab) {
+            free(g_po_seen); g_po_seen = NULL; g_po_nseen = 0;
+            d3d12_log("[pso-origin] no %%LOCALAPPDATA%%\\Madeira to keep the lists in; pso-origin off\n");
+        }
+        MemoryBarrier();
+        InterlockedExchange(&state, g_po_tab ? 2 : 3);
+        return g_po_tab != NULL;
+    }
+    while (s == 1) { Sleep(0); s = InterlockedCompareExchange(&state, 1, 1); }
+    return s == 2;
+}
+/* At creation: the pipeline's class against the lists at launch (0: not counted).
+ * key: the pso-seen key of a render pipeline (kind 0), mad_po_cs_key of a compute one (kind 1). */
+static UINT8 mad_po_note(UINT64 key, int kind) {
+    UINT64 k = key & ~MAD_PO_PREV, *slot; int cls = 0;
+    if (!mad_po_ready()) return 0;
+    if (!k) k = 1;
+    if (kind == 0 && g_po_seen && bsearch(&key, g_po_seen, (size_t)g_po_nseen, sizeof key, mad_po_cmp)) cls = MAD_PO_DRAWN;
+    AcquireSRWLockExclusive(&g_po_lock);
+    slot = mad_po_slot(k);
+    if (*slot & MAD_PO_PREV) { if (!cls) cls = MAD_PO_CREATED; }
+    else if (!*slot) {
+        if ((ULONG)g_po_n < g_po_cap / 2) { *slot = k; g_po_n++; g_po_dirty = 1; }
+        else InterlockedIncrement(&g_po_full);
+    }
+    ReleaseSRWLockExclusive(&g_po_lock);
+    if (!cls) cls = MAD_PO_NEW;
+    InterlockedIncrement(&g_po_created[kind][cls]);
+    InterlockedIncrement(&g_po_events);
+    return (UINT8)cls;
+}
+/* The compute key: the CS digest (as pso-seen hashes shaders) and the parsed root
+ * signature, field by field, under a seed of its own. */
+static UINT64 mad_po_cs_key(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc) {
+    const struct mad_rootsig *rs = (const struct mad_rootsig *)desc->pRootSignature;
+    UINT64 h = mad_seen_u32(1469598103934665603ull, 0x5343u /* "CS" */); UINT i;
+    h = mad_seen_shader(h, &desc->CS);
+    if (!rs) return h;
+    h = mad_seen_u32(h, rs->nparams);
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {
+        const struct madeira_ir_root_param *q = &rs->params[i];
+        h = mad_seen_u32(h, q->type); h = mad_seen_u32(h, q->shader_register); h = mad_seen_u32(h, q->register_space);
+        h = mad_seen_u32(h, q->num_constants); h = mad_seen_u32(h, q->visibility);
+        h = mad_seen_u32(h, q->num_ranges); h = mad_seen_u32(h, q->first_range);
+    }
+    h = mad_seen_u32(h, rs->nranges);
+    for (i = 0; rs->ranges && i < rs->nranges; i++) {
+        const struct madeira_ir_root_range *r = &rs->ranges[i];
+        h = mad_seen_u32(h, r->range_type); h = mad_seen_u32(h, r->num_descriptors); h = mad_seen_u32(h, r->base_register);
+        h = mad_seen_u32(h, r->register_space); h = mad_seen_u32(h, r->table_offset);
+    }
+    h = mad_seen_u32(h, rs->nsamplers);
+    for (i = 0; i < rs->nsamplers && i < 32; i++)   /* every field before reserved is 4 bytes: no padding */
+        h = mad_seen_fnv(h, &rs->samplers[i], offsetof(struct madeira_ir_static_sampler, reserved));
+    return h;
+}
+/* A build of a counted pipeline took dt (QPC ticks). */
+static void mad_po_build(const struct mad_pso *p, int kind, LONG64 dt) {
+    int cls = p->origin;
+    if (cls < MAD_PO_DRAWN || cls > MAD_PO_NEW) return;
+    InterlockedIncrement(&g_po_built[kind][cls]);
+    if (dt * 1000 >= (LONG64)MAD_PO_COMPILE_MS * g_po_qpf) {
+        InterlockedIncrement(&g_po_compiled[kind][cls]);
+        InterlockedExchangeAdd64(&g_po_compile_t[kind], dt);
+    }
+    InterlockedIncrement(&g_po_events);
+}
+static LONG mad_po_sum(volatile LONG *v) { return v[MAD_PO_DRAWN] + v[MAD_PO_CREATED] + v[MAD_PO_NEW]; }
+/* exiting: other threads are gone, so the line goes only to Wine's debug output
+ * (no stderr lock a dead thread may hold). */
+static void mad_po_log(const char *when, int exiting) {
+    char buf[1000];
+    double q = (double)g_po_qpf;
+    snprintf(buf, sizeof buf,
+             "[pso-origin] %s: render compiles %ld: drawn-before %ld, created-before %ld, new %ld (%.1f s) | "
+             "render built %ld (%ld/%ld/%ld), created %ld (%ld/%ld/%ld) | "
+             "compute compiles %ld: created-before %ld, new %ld (%.1f s); built %ld (%ld/%ld), created %ld (%ld/%ld) | "
+             "stride variants built %ld (%ld/%ld/%ld), compiled %ld (%ld/%ld/%ld; %.1f s) | "
+             "created list %ld keys (%ld from earlier sessions, %ld saved, %ld not kept: list full)\n",
+             when, (long)mad_po_sum(g_po_compiled[0]), (long)g_po_compiled[0][1], (long)g_po_compiled[0][2], (long)g_po_compiled[0][3],
+             (double)g_po_compile_t[0] / q,
+             (long)mad_po_sum(g_po_built[0]), (long)g_po_built[0][1], (long)g_po_built[0][2], (long)g_po_built[0][3],
+             (long)mad_po_sum(g_po_created[0]), (long)g_po_created[0][1], (long)g_po_created[0][2], (long)g_po_created[0][3],
+             (long)mad_po_sum(g_po_compiled[1]), (long)g_po_compiled[1][2], (long)g_po_compiled[1][3], (double)g_po_compile_t[1] / q,
+             (long)mad_po_sum(g_po_built[1]), (long)g_po_built[1][2], (long)g_po_built[1][3],
+             (long)mad_po_sum(g_po_created[1]), (long)g_po_created[1][2], (long)g_po_created[1][3],
+             (long)mad_po_sum(g_po_built[2]), (long)g_po_built[2][1], (long)g_po_built[2][2], (long)g_po_built[2][3],
+             (long)mad_po_sum(g_po_compiled[2]), (long)g_po_compiled[2][1], (long)g_po_compiled[2][2], (long)g_po_compiled[2][3],
+             (double)g_po_compile_t[2] / q,
+             (long)g_po_n, (long)g_po_nprev, (long)g_po_saved, (long)g_po_full);
+    if (!exiting) d3d12_log("%s", buf);
+    else if (g_po_dbg_output) g_po_dbg_output(buf);
+}
+/* Writes keys (0 skipped, MAD_PO_PREV cleared) from a stack buffer. */
+static BOOL mad_po_write(HANDLE f, const UINT64 *v, ULONG n) {
+    UINT64 buf[512]; ULONG i, nb = 0; DWORD wr;
+    for (i = 0; i < n; i++) {
+        if (!v[i]) continue;
+        buf[nb++] = v[i] & ~MAD_PO_PREV;
+        if (nb == 512) { if (!WriteFile(f, buf, sizeof buf, &wr, NULL) || wr != sizeof buf) return FALSE; nb = 0; }
+    }
+    return !nb || (WriteFile(f, buf, (DWORD)(nb * sizeof *buf), &wr, NULL) && wr == nb * sizeof *buf);
+}
+/* exiting: no malloc and no waiting (a dead thread may hold the heap or the lock). */
+static void mad_po_save(int exiting) {
+    struct { UINT magic, version, count, reserved; } hdr = { 0x4353504du /* "MPSC" */, 1, 0, 0 };
+    WCHAR tmp[MAX_PATH + 8]; HANDLE f; DWORD wr; BOOL ok; UINT64 *keys = NULL; ULONG i, n = 0;
+    if (!g_po_tab || !g_po_path[0]) return;
+    if (exiting) { if (!TryAcquireSRWLockShared(&g_po_lock)) return; }
+    else {
+        if (!(keys = malloc(sizeof *keys * (g_po_cap / 2)))) return;
+        AcquireSRWLockShared(&g_po_lock);
+        InterlockedExchange(&g_po_dirty, 0);   /* a key added from here on marks it again */
+        for (i = 0; i < g_po_cap && n < g_po_cap / 2; i++) if (g_po_tab[i]) keys[n++] = g_po_tab[i];
+        ReleaseSRWLockShared(&g_po_lock);
+    }
+    if (exiting) InterlockedExchange(&g_po_dirty, 0);
+    hdr.count = exiting ? (UINT)g_po_n : (UINT)n;
+    _snwprintf(tmp, MAX_PATH + 8, L"%ls.tmp", g_po_path);
+    f = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        ok = WriteFile(f, &hdr, sizeof hdr, &wr, NULL) && wr == sizeof hdr &&
+             (exiting ? mad_po_write(f, g_po_tab, g_po_cap) : mad_po_write(f, keys, n));
+        CloseHandle(f);
+        if (ok && MoveFileExW(tmp, g_po_path, MOVEFILE_REPLACE_EXISTING)) g_po_saved = (LONG)hdr.count;
+        else { DeleteFileW(tmp); g_po_dirty = 1; }
+    } else g_po_dirty = 1;
+    if (exiting) ReleaseSRWLockShared(&g_po_lock);
+    free(keys);
+}
+static DWORD WINAPI mad_po_saver(void *arg) {
+    LONG logged = 0;
+    (void)arg;
+    mad_name_self(L"MadeiraPSOOrigin");
+    for (;;) {
+        Sleep(30000);
+        if (g_po_dirty) mad_po_save(0);
+        if (g_po_events != logged) { logged = g_po_events; mad_po_log("30 s", 0); }
+    }
+    return 0;
+}
+static void mad_po_exit(void) {
+    if (g_po_on <= 0 || !g_po_tab) return;
+    if (g_po_dirty) mad_po_save(1);
+    mad_po_log("exit", 1);
+}
+
 /* madeira-duo COMPUTE PIPELINES BUILT WHEN THE GAME CREATES THEM (madeira.cfg
  * cs-create-build, opt-in, default 0). A lazy compute pipeline is built at its
  * first dispatch, on the thread replaying the frame: a dispatch can produce data
@@ -7386,6 +7649,7 @@ static obj_handle_t mad_pso_for_strides(struct mad_pso *p, const UINT strides[16
     unsigned k, i; obj_handle_t err = 0, rps;
     struct WMTVertexDescriptorInfo vd;
     static unsigned said;
+    LONG64 t0;   /* madeira-duo pso-origin */
     for (i = 0; i < 16; i++) if ((p->vb_mask & (1u << i)) && strides[i] != p->vb_stride[i]) break;
     if (i == 16) return p->rps;                      /* the base pipeline already matches */
     EnterCriticalSection(&p->var_lock);
@@ -7402,6 +7666,7 @@ static obj_handle_t mad_pso_for_strides(struct mad_pso *p, const UINT strides[16
             vd.layouts[6 + i].stride = p->vb_stride[i];
         } else vd.layouts[6 + i].stride = strides[i];
     }
+    t0 = p->origin ? mad_qpc() : 0;
     rps = MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &vd, &err);
     if (err) mad_log_nserror("render pipeline (vertex-descriptor variant)", err);
     if (!rps) {
@@ -7411,6 +7676,7 @@ static obj_handle_t mad_pso_for_strides(struct mad_pso *p, const UINT strides[16
         for (i = 0; i < 16; i++) if ((p->vb_mask & (1u << i)) && strides[i] == 0) { vd.layouts[6 + i].stride = 0; retry = 1; }
         if (retry) { err = 0; rps = MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &vd, &err); if (err) mad_log_nserror("render pipeline (retry)", err); }
     }
+    if (p->origin) mad_po_build(p, 2, mad_qpc() - t0);   /* madeira-duo pso-origin: a variant counts under its pipeline's class */
     if (!rps) {
         if (said++ < 8) d3d12_log("[madeira-d3d12] stride variant failed (slot0 stride %u vs assumed %u, slot1 stride %u); using the base pipeline\n",
                                   strides[0], p->vb_stride[0], strides[1]);
@@ -21053,7 +21319,9 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
      * until then (pso-warm, above, holds its own references to the functions) */
     {
         /* madeira-duo pso-create-build: queued now, so its libraries stay */
-        int queued = p->lazy && !p->rps && !p->tess && !p->gs_emu && mad_pcb_on_create(p, desc);
+        int queued;
+        if (p->lazy && !p->rps && !p->tess && !p->gs_emu && mad_po_on()) p->origin = mad_po_note(mad_seen_key(desc), 0);   /* madeira-duo pso-origin: classed before a builder can take it */
+        queued = p->lazy && !p->rps && !p->tess && !p->gs_emu && mad_pcb_on_create(p, desc);
         if (!queued && lz_on && p->lazy && !p->rps && mad_lzlib_can_drop(p, &lzv, &lzp)) mad_lzlib_drop(p, &lzv, &lzp);
     }
     hr = pso_QI((ID3D12PipelineState *)p, riid, out);
@@ -21216,6 +21484,7 @@ static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,
         p->lazy_cs = 1; p->device_handle = d->mtl_device;
         memset(&ci, 0, sizeof ci);   /* the descriptor mad_cpso_realize builds */
         ci.compute_function = p->vs_fn;
+        if (mad_po_on()) p->origin = mad_po_note(mad_po_cs_key(desc), 1);   /* madeira-duo pso-origin: classed before a builder can take it */
         queued = mad_csb_queue(p);   /* madeira-duo cs-create-build: a builder compiles it now */
         if (!queued) mad_pso_warm(p->device_handle, &ci, NULL, 2);   /* pso-warm */
         hr = pso_QI((ID3D12PipelineState *)p, riid, out);
@@ -24473,6 +24742,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     (void)inst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) { build_vtables(); mad_swap_fill_vtbl(); mad_load_d3d12core(); }
     if (reason == DLL_THREAD_DETACH) mad_es_thread_exit();   /* madeira-bcd encode-batch: the thread's arena */
+    if (reason == DLL_PROCESS_DETACH) mad_po_exit();   /* madeira-duo pso-origin: the last [pso-origin] line (returns at once when it is off) */
     return TRUE;
 }
 
