@@ -1,0 +1,193 @@
+From 59076c1af3dc9eaa63a372f1eae3299e90b89769 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 23:40:21 +1100
+Subject: [PATCH] kosmickrisp: name unsupported features at device creation;
+ opt-in relaxation
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/vulkan/kk_device.c | 149 ++++++++++++++++++++++++++++-
+ 1 file changed, 148 insertions(+), 1 deletion(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 959e6a0..3899837 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -23,7 +23,10 @@
+ 
+ #include "vulkan/wsi/wsi_common.h"
+ #include "vk_pipeline_cache.h"
++#include "vk_enum_to_str.h"
+ 
++#include <stdio.h>
++#include <stdlib.h>
+ #include <time.h>
+ 
+ struct kk_mtl_compiler {
+@@ -265,6 +268,134 @@ kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
+    return VK_SUCCESS;
+ }
+ 
++
++/* Madeira: device-creation diagnostics and an opt-in feature relaxation.
++ *
++ * When an application enables a feature KosmicKrisp lacks, vk_device_init
++ * fails with VK_ERROR_FEATURE_NOT_PRESENT and the reason only reaches a debug
++ * messenger, so a game that silently falls back to another renderer leaves no
++ * trace. Every enabled core feature that isn't supported is logged here as
++ * [kk-features]. With MADEIRA_KK_RELAX_FEATURES=1 those core 1.0 features are
++ * dropped from the request instead (each one logged), so device creation can
++ * go ahead for applications that enable features they never use.
++ */
++#define KK_CORE_FEATURES(X) \
++   X(robustBufferAccess) \
++   X(fullDrawIndexUint32) \
++   X(imageCubeArray) \
++   X(independentBlend) \
++   X(geometryShader) \
++   X(tessellationShader) \
++   X(sampleRateShading) \
++   X(dualSrcBlend) \
++   X(logicOp) \
++   X(multiDrawIndirect) \
++   X(drawIndirectFirstInstance) \
++   X(depthClamp) \
++   X(depthBiasClamp) \
++   X(fillModeNonSolid) \
++   X(depthBounds) \
++   X(wideLines) \
++   X(largePoints) \
++   X(alphaToOne) \
++   X(multiViewport) \
++   X(samplerAnisotropy) \
++   X(textureCompressionETC2) \
++   X(textureCompressionASTC_LDR) \
++   X(textureCompressionBC) \
++   X(occlusionQueryPrecise) \
++   X(pipelineStatisticsQuery) \
++   X(vertexPipelineStoresAndAtomics) \
++   X(fragmentStoresAndAtomics) \
++   X(shaderTessellationAndGeometryPointSize) \
++   X(shaderImageGatherExtended) \
++   X(shaderStorageImageExtendedFormats) \
++   X(shaderStorageImageMultisample) \
++   X(shaderStorageImageReadWithoutFormat) \
++   X(shaderStorageImageWriteWithoutFormat) \
++   X(shaderUniformBufferArrayDynamicIndexing) \
++   X(shaderSampledImageArrayDynamicIndexing) \
++   X(shaderStorageBufferArrayDynamicIndexing) \
++   X(shaderStorageImageArrayDynamicIndexing) \
++   X(shaderClipDistance) \
++   X(shaderCullDistance) \
++   X(shaderFloat64) \
++   X(shaderInt64) \
++   X(shaderInt16) \
++   X(shaderResourceResidency) \
++   X(shaderResourceMinLod) \
++   X(sparseBinding) \
++   X(sparseResidencyBuffer) \
++   X(sparseResidencyImage2D) \
++   X(sparseResidencyImage3D) \
++   X(sparseResidency2Samples) \
++   X(sparseResidency4Samples) \
++   X(sparseResidency8Samples) \
++   X(sparseResidency16Samples) \
++   X(sparseResidencyAliased) \
++   X(variableMultisampleRate) \
++   X(inheritedQueries)
++
++static uint32_t
++kk_relax_core_features(VkPhysicalDeviceFeatures *enabled,
++                       const VkPhysicalDeviceFeatures *supported, bool relax,
++                       const char *where)
++{
++   uint32_t missing = 0;
++#define KK_CHECK_FEATURE(name)                                                 \
++   if (enabled->name && !supported->name) {                                    \
++      missing++;                                                               \
++      fprintf(stderr, "[kk-features] %s.%s requested but not supported%s\n",   \
++              where, #name, relax ? ": dropped (MADEIRA_KK_RELAX_FEATURES)" : ""); \
++      if (relax)                                                               \
++         enabled->name = VK_FALSE;                                             \
++   }
++   KK_CORE_FEATURES(KK_CHECK_FEATURE)
++#undef KK_CHECK_FEATURE
++   return missing;
++}
++
++static const VkDeviceCreateInfo *
++kk_relax_device_features(VkPhysicalDevice physicalDevice,
++                         const VkDeviceCreateInfo *info,
++                         VkDeviceCreateInfo *relaxed_info,
++                         VkPhysicalDeviceFeatures *relaxed_features,
++                         VkPhysicalDeviceFeatures2 *relaxed_features2)
++{
++   const char *env = getenv("MADEIRA_KK_RELAX_FEATURES");
++   bool relax = env && env[0] == '1';
++   VkPhysicalDeviceFeatures supported;
++   vk_common_GetPhysicalDeviceFeatures(physicalDevice, &supported);
++
++   *relaxed_info = *info;
++   if (info->pEnabledFeatures) {
++      *relaxed_features = *info->pEnabledFeatures;
++      kk_relax_core_features(relaxed_features, &supported, relax,
++                             "pEnabledFeatures");
++      relaxed_info->pEnabledFeatures = relaxed_features;
++   }
++
++   for (const VkBaseInStructure *ext = info->pNext; ext; ext = ext->pNext) {
++      if (ext->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
++         continue;
++      VkPhysicalDeviceFeatures2 *features2 = (VkPhysicalDeviceFeatures2 *)ext;
++      if ((const void *)ext == info->pNext) {
++         /* The usual layout: substitute a copy at the head of the chain. */
++         *relaxed_features2 = *features2;
++         kk_relax_core_features(&relaxed_features2->features, &supported,
++                                relax, "VkPhysicalDeviceFeatures2");
++         relaxed_info->pNext = relaxed_features2;
++      } else {
++         /* Deeper in the chain: the copy can't be spliced in without cloning
++          * the structures before it, so report, and relax in place. */
++         kk_relax_core_features(&features2->features, &supported, relax,
++                                "VkPhysicalDeviceFeatures2 (in place)");
++      }
++      break;
++   }
++   return relaxed_info;
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+                 const VkDeviceCreateInfo *pCreateInfo,
+@@ -296,10 +427,26 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
+                                              &wsi_device_entrypoints, false);
+ 
++   VkDeviceCreateInfo relaxed_info;
++   VkPhysicalDeviceFeatures relaxed_features;
++   VkPhysicalDeviceFeatures2 relaxed_features2;
++   pCreateInfo = kk_relax_device_features(physicalDevice, pCreateInfo,
++                                          &relaxed_info, &relaxed_features,
++                                          &relaxed_features2);
++
++   /* Madeira: let vk_errorf reach stderr during device creation, so a
++    * failure names the feature or extension (Vulkan 1.1+ and extension
++    * feature structures included). */
++   bool saved_debug_logging = pdev->vk.instance->enable_debug_logging;
++   pdev->vk.instance->enable_debug_logging = true;
+    result = vk_device_init(&dev->vk, &pdev->vk, &dispatch_table, pCreateInfo,
+                            pAllocator);
+-   if (result != VK_SUCCESS)
++   pdev->vk.instance->enable_debug_logging = saved_debug_logging;
++   if (result != VK_SUCCESS) {
++      fprintf(stderr, "[kk-features] vkCreateDevice failed: %s\n",
++              vk_Result_to_str(result));
+       goto fail_alloc;
++   }
+ 
+    /* Implicit pipeline cache. Applications that pass no VkPipelineCache (many
+     * do, relying on the driver's own cache) otherwise get no caching at all,
+-- 
+2.56.0
+

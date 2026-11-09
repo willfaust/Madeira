@@ -225,3 +225,26 @@ Fossilize (`madeira.cfg fossilize = record | replay | on | off`, default off; Ko
   `fossilize-threads` (default 4). The point: driver caches are invalidated by driver rebuilds
   (the disk cache key includes the driver build) and possibly by iOS updates (archives); the
   `.foz` recording survives both and rebuilds them before play.
+
+## Unsupported features at device creation (patch 0010)
+
+KosmicKrisp doesn't support these core features: `geometryShader`, `fillModeNonSolid`, `depthBounds`, `wideLines`,
+`pipelineStatisticsQuery`, `shaderStorageImageMultisample`, `shaderFloat64`, `shaderResourceResidency`, sparse
+binding and residency, and `variableMultisampleRate`. If an application enables any of them, `vkCreateDevice`
+fails with `VK_ERROR_FEATURE_NOT_PRESENT`. Without a debug messenger, Mesa's explanation goes nowhere.
+
+On 9 Nov 2026, PoE2 0.5 hit exactly that on the Duo. Client.txt shows `Failed to start device:
+vk::PhysicalDevice::createDeviceUnique: ErrorFeatureNotPresent`, then `Falling back to DirectX11`, and the whole
+session ran on DXMT.
+
+Patch 0010 does two things:
+
+- Every enabled core feature that isn't supported is logged as `[kk-features] <struct>.<feature> requested but not
+  supported`.
+- Mesa's own messages are switched on while the device is created, so failures in Vulkan 1.1+ and extension
+  feature structures also name the field. A failed create logs `[kk-features] vkCreateDevice failed: <VkResult>`.
+
+`MADEIRA_KK_RELAX_FEATURES=1` (madeira.cfg `env.`) drops the unsupported core 1.0 features from the request and
+logs each one, so device creation can go ahead for applications that enable features they never use. If a dropped
+feature is used anyway, the pipelines that need it fail to build. Look for `Failed to create MTL` and the game's
+own errors.
