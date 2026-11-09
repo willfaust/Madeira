@@ -53,9 +53,13 @@ if [ ! -x "$WORK/build-host/bin/clang-tblgen" ]; then
 fi
 
 echo "=== dxcompiler.dll (arm64ec) ==="
+# madeira-duo vk2: SPIR-V code generation on (DXC's official -spirv backend), so games on a Vulkan
+# renderer (Path of Exile 2 with renderer_type=Vulkan compiles every shader with -spirv) can use the
+# native compiler too. DXC_SPIRV_CODEGEN=OFF builds the DXIL-only compiler as before. This doesn't
+# change DXIL output.
 "$CMAKE" -S "$WORK/src" -B "$WORK/build-arm64ec" "${COMMON[@]}" \
     -DCMAKE_TOOLCHAIN_FILE="$HERE/toolchain-arm64ec.cmake" \
-    -DENABLE_SPIRV_CODEGEN=OFF -DHLSL_BUILD_DXILCONV=OFF -DLLVM_BUILD_STATIC=ON -DHLSL_ENABLE_FIXED_VER=ON \
+    -DENABLE_SPIRV_CODEGEN="${DXC_SPIRV_CODEGEN:-ON}" -DHLSL_BUILD_DXILCONV=OFF -DLLVM_BUILD_STATIC=ON -DHLSL_ENABLE_FIXED_VER=ON \
     -DLLVM_TABLEGEN="$WORK/build-host/bin/llvm-tblgen" \
     -DCLANG_TABLEGEN="$WORK/build-host/bin/clang-tblgen"
 ninja -C "$WORK/build-arm64ec" -j"$JOBS" dxcompiler
@@ -63,5 +67,5 @@ OUT="${OUT:-$HERE/out}"
 mkdir -p "$OUT"
 "$LLVM_MINGW/bin/llvm-strip" --strip-debug -o "$OUT/dxcompiler.dll" "$WORK/build-arm64ec/bin/dxcompiler.dll"
 python3 "$HERE/mark-builtin.py" --prefer-native "$OUT/dxcompiler.dll"
-echo "  $(wc -c < "$OUT/dxcompiler.dll" | tr -d ' ') bytes, sha256 $(shasum -a 256 "$OUT/dxcompiler.dll" | cut -c1-16)"
+echo "  $(wc -c < "$OUT/dxcompiler.dll" | tr -d ' ') bytes, sha256 $( (shasum -a 256 "$OUT/dxcompiler.dll" 2>/dev/null || sha256sum "$OUT/dxcompiler.dll") | cut -c1-16)"
 echo "  copy it to app/Madeira/arm64ec-windows/dxcompiler.dll to bundle it"
