@@ -668,7 +668,19 @@ static struct mad_xp {
      * time / number of times Present held the game's thread for it */
     volatile LONG64 fps_cap;
     LONG64 t_cap, n_cap;
-} g_xp;
+    /* madeira-duo overlay-shader: the performance overlay's shader cells. winemetal
+     * (madeira_shader_overlay_stats) reads these at byte 184, right after the fps-gov
+     * fields; the overlay picks them up with the block. Cumulative counts and current
+     * queue depths, changed only where a shader misses or a pipeline is queued. */
+    struct mad_xp_shader {
+        LONG64 magic;              /* 0x31304448534d4d4d */
+        volatile LONG64 flags;     /* 1 = shader cache on, 2 = pso-async on */
+        volatile LONG64 sc_miss;   /* stages the shader cache did not have, sent to the converter (stored or refused) */
+        volatile LONG64 pa_wait;   /* pso-async: pipelines a draw is waiting for, queued or being built */
+        volatile LONG64 pcb_wait;  /* pso-create-build / cs-create-build: queued at creation, not built yet */
+    } shader;
+} g_xp = { .shader = { .magic = 0x31304448534d4d4dLL } };
+_Static_assert(offsetof(struct mad_xp, shader) == 184, "winemetal_unix.c reads the overlay fields at byte 184");
 static void mad_xp_role(char role) {   /* tell the probe which thread this is (unix side records its thread id) */
     static DWORD seen[32]; static LONG nseen;
     DWORD me = GetCurrentThreadId(), key = me ^ ((DWORD)(unsigned char)role << 24); LONG i, n = nseen;
@@ -6916,6 +6928,7 @@ static int mad_pso_async_on(void) {
     if (g_pso_async < 0) {
         int on = mad_pso_lazy_on() && mad_cfg_int_pe("pso-async", 0) > 0;   /* madeira.cfg pso-async: 1 = a new render pipeline is built on a background thread and its draws are skipped until it is ready (no frame waits for the compiler); 0 = built at its first draw */
         if (on) d3d12_log("[madeira-d3d12] pso-async = 1: new render pipelines are built on 2 background threads; their draws are skipped until they are ready\n");
+        if (on) InterlockedOr64(&g_xp.shader.flags, 2);   /* madeira-duo overlay-shader */
         g_pso_async = on;
     }
     return g_pso_async;
@@ -6948,6 +6961,7 @@ static DWORD WINAPI mad_pa_worker(void *arg) {
         else if (low) mad_pcb_built(p);   /* pso-create-build: counted on its own */
         else if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pa_built);
         else InterlockedIncrement(&g_pa_failed);
+        InterlockedDecrement64(low ? &g_xp.shader.pcb_wait : &g_xp.shader.pa_wait);   /* madeira-duo overlay-shader */
         if (n == 1 || (n && !(n % 250)))
             d3d12_log("[madeira-d3d12] pso-async: %ld pipelines built off the render thread (%ld failed, %ld waiting, %ld built at the draw with the queue full); "
                       "%ld draws skipped while their pipeline was being built\n", (long)g_pa_built, (long)g_pa_failed,
@@ -7000,6 +7014,7 @@ static int mad_pso_async_queue(struct mad_pso *p) {
     }
     InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
     g_pa_q[(ULONG)g_pa_tail % MAD_PA_MAX] = p; g_pa_tail++;
+    InterlockedIncrement64(&g_xp.shader.pa_wait);   /* madeira-duo overlay-shader */
     ReleaseSRWLockExclusive(&g_pa_lock);
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_pa_queued) == 1)
@@ -7218,6 +7233,7 @@ static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_ST
     }
     InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
     g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
+    InterlockedIncrement64(&g_xp.shader.pcb_wait);   /* madeira-duo overlay-shader */
     ReleaseSRWLockExclusive(&g_pa_lock);
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_pcb_queued) == 1)
@@ -7274,6 +7290,7 @@ static int mad_csb_queue(struct mad_pso *p) {
     }
     InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
     g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
+    InterlockedIncrement64(&g_xp.shader.pcb_wait);   /* madeira-duo overlay-shader */
     ReleaseSRWLockExclusive(&g_pa_lock);
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_csb_queued) == 1)
@@ -18614,6 +18631,7 @@ static int mad_sc_init(void) {
         if (on) d3d12_log("[madeira-d3d12] shader cache ON: %ls, identity '%s' (%s; madeira.cfg shader-cache = 0 turns it off)\n", g_sc_dir, g_sc_stamp, g_sc_rt);
         else d3d12_log("[madeira-d3d12] shader cache off\n");
         if (on) { mad_scn_init(); mad_pso_archive_init(); MemoryBarrier(); }   /* shader-cache-native: g_scn before g_sc_on */
+        if (on) InterlockedOr64(&g_xp.shader.flags, 1);   /* madeira-duo overlay-shader */
         g_sc_on = on;
     }
     ReleaseSRWLockExclusive(&lk);
@@ -18977,6 +18995,7 @@ static int mad_sc_convert_full(struct madeira_ir_convert_args *a, const UINT64 k
             a->out_vs_inputs = keep.out_vs_inputs; a->vs_input_cap = keep.vs_input_cap;
             a->out_locs = keep.out_locs; a->loc_cap = keep.loc_cap;
             a->out_entry = keep.out_entry; a->out_buf2 = keep.out_buf2; a->out_cap2 = keep.out_cap2;
+            InterlockedIncrement64(&g_xp.shader.sc_miss);   /* madeira-duo overlay-shader: refused */
             ok = -1;
         }
         goto done;
@@ -18985,6 +19004,7 @@ static int mad_sc_convert_full(struct madeira_ir_convert_args *a, const UINT64 k
     mad_sc_write_file(key, blob, total);
     mad_sc_memo_set(m, key, blob, total, 1);
     InterlockedIncrement(&g_sc_miss);
+    InterlockedIncrement64(&g_xp.shader.sc_miss);   /* madeira-duo overlay-shader */
     mad_sc_stats();
     ok = 1;
 done:
@@ -19071,6 +19091,14 @@ static void mad_failmemo_add(const UINT64 key[2], const struct madeira_ir_conver
 }
 
 static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a);
+/* madeira-duo overlay-shader: a converter call the shader cache did not answer counts
+ * once per stage -- the call that hands the metallib back, or a refusal. A sizing call
+ * (no out_buf) is left out: its fill call follows. */
+static void mad_ovl_conv(const struct madeira_ir_convert_args *a) {
+    if ((a->ret_status == MADEIRA_IR_OK && a->out_buf && a->ret_len <= a->out_cap) ||
+        (a->ret_status != MADEIRA_IR_OK && a->ret_status != MADEIRA_IR_BUFFER_TOO_SMALL))
+        InterlockedIncrement64(&g_xp.shader.sc_miss);
+}
 /* madeira-duo: the res3 log (4 Nov) spent 45.6 s in conversion+cache for 13,806 hits
  * and 194 misses; split it, so the pso time line says what a hit costs. */
 static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {   /* madeira-bcd: timed */
@@ -19083,7 +19111,7 @@ static void mad_ir_convert_cached(struct madeira_ir_convert_args *a) {   /* made
 }
 static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a) {
     UINT64 key[2]; int fresh = 0;
-    if (!mad_sc_init()) { MadeiraIRConvert(a); return; }
+    if (!mad_sc_init()) { MadeiraIRConvert(a); mad_ovl_conv(a); return; }
     mad_sc_key(a, key);
     if (g_scn) mad_scn_key_note(a, key);   /* madeira-bcd shader-cache-native: pso-lazy-libs asks for it again */
     if (mad_sc_load(a, key, &fresh)) {
@@ -19096,6 +19124,7 @@ static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a) {
         if (r < 0 || (r > 0 && mad_sc_load(a, key, &fresh))) return;
     }
     MadeiraIRConvert(a);
+    mad_ovl_conv(a);   /* madeira-duo overlay-shader */
     if (a->out_buf && a->ret_status == MADEIRA_IR_OK && a->ret_len <= a->out_cap) {
         InterlockedIncrement(&g_sc_miss);
         mad_sc_save(a, key);
