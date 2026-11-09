@@ -1080,32 +1080,46 @@ static int madeira_link_vulkan_file(NSFileManager *fm, NSString *dir, NSString *
  *   (gl/libfossilize_replay.dylib), which fills the driver's own caches (KosmicKrisp: Mesa disk cache
  *   and Metal 4 archives). --replayer-cache keeps a list of what was already replayed, so later
  *   sessions only build new entries. Once per app process.
- * on: both. fossilize-threads = N (default 4) sets the replay worker count. */
-static void madeira_fossilize_replay(NSFileManager *fm, NSString *gl, NSString *driver, NSString *dir)
-{
-    static BOOL replayed;
-    if (replayed) return;
-    replayed = YES;
+ * on: both. fossilize-threads = N (default: every core) sets the replay worker count. */
+/* madeira-duo vk3: one replay at a time (a pre-launch compile from the Library or the replay at
+ * game start), with progress for the Library's Shaders page and the overlay. */
+static pthread_mutex_t fossilize_replay_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int fossilize_replay_state;            /* 0 idle, 1 running, 2 done, 3 failed */
+static _Atomic double fossilize_replay_started;       /* CLOCK_MONOTONIC seconds */
+static _Atomic double fossilize_replay_seconds;       /* duration of the last finished replay */
+static _Atomic uint32_t fossilize_replay_last_done, fossilize_replay_last_total;
+static void (*fossilize_replay_progress_fn)(uint32_t *, uint32_t *);
+static BOOL fossilize_replayed;                       /* a replay finished in this app process */
 
+static double madeira_monotonic_seconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec + now.tv_nsec / 1e9;
+}
+
+/* Replay every .foz in `dir` and dir/import through `driver`. Called with fossilize_replay_lock held. */
+static int madeira_fossilize_replay_locked(NSFileManager *fm, NSString *gl, NSString *driver, NSString *dir,
+                                           const char *threads)
+{
     NSMutableArray<NSString *> *databases = [NSMutableArray array];
     for (NSString *folder in @[dir, [dir stringByAppendingPathComponent:@"import"]])
         for (NSString *name in [[fm contentsOfDirectoryAtPath:folder error:nil] sortedArrayUsingSelector:@selector(compare:)])
-            if ([name hasSuffix:@".foz"])
+            if ([name hasSuffix:@".foz"] && ![name hasPrefix:@"replayed.cache"])
                 [databases addObject:[folder stringByAppendingPathComponent:name]];
     if (databases.count == 0) {
         dprintf(STDERR_FILENO, "[fossilize] replay: no .foz in %s yet\n", dir.UTF8String);
-        return;
+        return 1;
     }
     NSString *replayer = [gl stringByAppendingPathComponent:@"libfossilize_replay.dylib"];
     void *handle = dlopen(replayer.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
     int (*replay_main)(int, char **) = handle ? (int (*)(int, char **))dlsym(handle, "fossilize_replay_main") : NULL;
     if (!replay_main) {
         dprintf(STDERR_FILENO, "[fossilize] replay: can't load %s: %s\n", replayer.UTF8String, dlerror());
-        return;
+        return -1;
     }
+    fossilize_replay_progress_fn = (void (*)(uint32_t *, uint32_t *))dlsym(handle, "fossilize_replay_progress");
 
-    char threads[16] = "4";
-    madeira_cfg_get("fossilize-threads", threads, sizeof threads);
     NSString *replayed_list = [dir stringByAppendingPathComponent:@"replayed.cache"];
     NSMutableArray<NSString *> *args = [NSMutableArray arrayWithObject:@"fossilize-replay"];
     [args addObjectsFromArray:databases];
@@ -1117,15 +1131,93 @@ static void madeira_fossilize_replay(NSFileManager *fm, NSString *gl, NSString *
     setenv("FOSSILIZE_VULKAN_LIBRARY", driver.fileSystemRepresentation, 1);
     dprintf(STDERR_FILENO, "[fossilize] replay: %lu database(s) through %s, %s thread(s)\n",
             (unsigned long)databases.count, driver.lastPathComponent.UTF8String, threads);
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
+    double start = madeira_monotonic_seconds();
+    fossilize_replay_started = start;
+    fossilize_replay_state = 1;
     int code = replay_main((int)args.count, argv);
-    clock_gettime(CLOCK_MONOTONIC, &end);
+    fossilize_replay_seconds = madeira_monotonic_seconds() - start;
     unsetenv("FOSSILIZE_VULKAN_LIBRARY");
-    dprintf(STDERR_FILENO, "[fossilize] replay: finished in %.1f s (exit %d)\n",
-            (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9, code);
+    dprintf(STDERR_FILENO, "[fossilize] replay: finished in %.1f s (exit %d), %u of %u pipelines\n",
+            fossilize_replay_seconds, code, fossilize_replay_last_done, fossilize_replay_last_total);
     for (NSUInteger i = 0; i < args.count; i++) free(argv[i]);
     free(argv);
+    fossilize_replay_state = code == 0 ? 2 : 3;
+    if (code == 0) fossilize_replayed = YES;
+    return code == 0 ? 0 : -1;
+}
+
+/* The replay at game start: waits for a pre-launch compile still running, and skips the replay when
+ * one already finished in this app process (the caches are warm; what the game records next is
+ * replayed at the next app start). */
+static void madeira_fossilize_replay(NSFileManager *fm, NSString *gl, NSString *driver, NSString *dir)
+{
+    if (fossilize_replay_state == 1)
+        dprintf(STDERR_FILENO, "[fossilize] replay: waiting for the shader compile that is running\n");
+    pthread_mutex_lock(&fossilize_replay_lock);
+    if (!fossilize_replayed) {
+        /* The game waits for this replay, so it gets every core unless fossilize-threads says otherwise. */
+        char threads[16];
+        snprintf(threads, sizeof threads, "%d", (int)MAX(1, [NSProcessInfo processInfo].activeProcessorCount));
+        madeira_cfg_get("fossilize-threads", threads, sizeof threads);
+        madeira_fossilize_replay_locked(fm, gl, driver, dir, threads);
+    } else {
+        dprintf(STDERR_FILENO, "[fossilize] replay: already done in this app run (%.1f s); skipped\n",
+                fossilize_replay_seconds);
+    }
+    pthread_mutex_unlock(&fossilize_replay_lock);
+}
+
+/* KosmicKrisp's cache locations; the same at game start and for a pre-launch compile. */
+static void madeira_kosmickrisp_cache_env(NSFileManager *fm, NSString *prefix)
+{
+    NSString *cache = [prefix stringByAppendingPathComponent:@"madeira-cache/kosmickrisp"];
+    [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+    char v[1024];
+    if (madeira_cfg_get("env.MESA_SHADER_CACHE_DIR", v, sizeof v) && v[0]) setenv("MESA_SHADER_CACHE_DIR", v, 0);
+    if (madeira_cfg_get("env.MESA_SHADER_CACHE_MAX_SIZE", v, sizeof v) && v[0]) setenv("MESA_SHADER_CACHE_MAX_SIZE", v, 0);
+    setenv("MESA_SHADER_CACHE_DIR", cache.fileSystemRepresentation, 0);
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 0);
+}
+
+
+int madeira_shader_precompile_start(void)
+{
+    if (fossilize_replay_state == 1) return -1;
+    NSString *bundle = [[NSBundle mainBundle] bundlePath];
+    NSString *lib = madeira_vulkan_library(bundle);
+    if (!lib || ![lib.lastPathComponent containsString:@"kosmickrisp"]) return -2;
+    NSString *prefix = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                        stringByAppendingPathComponent:@"wine"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        pthread_mutex_lock(&fossilize_replay_lock);
+        madeira_kosmickrisp_cache_env(fm, prefix);
+        NSString *dir = [prefix stringByAppendingPathComponent:@"madeira-cache/fossilize"];
+        [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"import"] withIntermediateDirectories:YES attributes:nil error:nil];
+        /* Every core: nothing else runs before the game starts. */
+        char threads[16];
+        snprintf(threads, sizeof threads, "%d", (int)MAX(1, [NSProcessInfo processInfo].activeProcessorCount));
+        madeira_cfg_get("fossilize-precompile-threads", threads, sizeof threads);
+        fossilize_replay_last_done = 0;
+        fossilize_replay_last_total = 0;
+        if (madeira_fossilize_replay_locked(fm, [bundle stringByAppendingPathComponent:@"gl"], lib, dir, threads) == 1)
+            fossilize_replay_state = 2;   /* nothing recorded yet */
+        pthread_mutex_unlock(&fossilize_replay_lock);
+    });
+    return 0;
+}
+
+void madeira_shader_precompile_status(uint32_t *done, uint32_t *total, int *state, double *seconds)
+{
+    *state = fossilize_replay_state;
+    if (*state == 1 && fossilize_replay_progress_fn) {
+        uint32_t d = 0, t = 0;
+        fossilize_replay_progress_fn(&d, &t);
+        if (t) { fossilize_replay_last_done = d; fossilize_replay_last_total = t; }
+    }
+    *done = fossilize_replay_last_done;
+    *total = fossilize_replay_last_total;
+    *seconds = *state == 1 ? madeira_monotonic_seconds() - fossilize_replay_started : fossilize_replay_seconds;
 }
 
 static void madeira_setup_fossilize(NSFileManager *fm, NSString *prefix, NSString *bundle, NSString *lib)
@@ -1217,10 +1309,7 @@ static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *
      * upgrades like the d3d12 shader caches do. madeira.cfg env.MESA_SHADER_CACHE_DIR /
      * env.MESA_SHADER_CACHE_MAX_SIZE win when set. */
     if ([lib.lastPathComponent containsString:@"kosmickrisp"]) {
-        NSString *cache = [prefix stringByAppendingPathComponent:@"madeira-cache/kosmickrisp"];
-        [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
-        setenv("MESA_SHADER_CACHE_DIR", cache.fileSystemRepresentation, 0);
-        setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 0);
+        madeira_kosmickrisp_cache_env(fm, prefix);
         dprintf(STDERR_FILENO, "[vulkan] KosmicKrisp caches in %s (Mesa disk cache max %s)\n",
                 getenv("MESA_SHADER_CACHE_DIR"), getenv("MESA_SHADER_CACHE_MAX_SIZE"));
     }

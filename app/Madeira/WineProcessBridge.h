@@ -59,6 +59,15 @@ int madeira_write_continue_flag(void);
 // Madeira Dock's component setup calls it before writing Steam's registry keys.
 void madeira_seed_prefix_if_needed(const char *prefix_path);
 
+// madeira-duo vk3: compile shaders before a game starts (Library ▸ Shaders). Replays the recorded
+// Vulkan pipelines (madeira-cache/fossilize) through KosmicKrisp on every core, filling its caches.
+// 0 started, -1 a replay is already running, -2 vulkan isn't kosmickrisp in madeira.cfg.
+// A game started meanwhile waits for it.
+int madeira_shader_precompile_start(void);
+// Progress of the running or last replay (pre-launch or at game start): pipelines done and in the
+// recordings; state 0 idle, 1 running, 2 done, 3 failed; seconds running, or the last one took.
+void madeira_shader_precompile_status(uint32_t *done, uint32_t *total, int *state, double *seconds);
+
 #ifdef __cplusplus
 }
 #endif

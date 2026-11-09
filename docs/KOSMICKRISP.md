@@ -268,3 +268,19 @@ pool without a heap when that happens. `vkCmdWriteTimestamp2` marks the query av
 the 0 the reset left. This is logged once as `[kk-query] Metal refuses timestamp counter heaps here … timestamp
 queries will read 0`. GPU timings the game derives from timestamps read as zero. A real fix would sample through
 another Metal counter API that the phone does support.
+
+## Pre-launch compile, progress and live counters (vk3, 10 Nov 2026)
+
+- **Library ▸ any game ▸ Shaders** lists the size of each shader cache in the prefix: the Mesa cache, the Metal
+  pipeline archives and the Fossilize recordings, plus the D3D12 caches. **Compile shaders now** replays the
+  recorded pipelines through KosmicKrisp on every core before any game starts
+  (`madeira_shader_precompile_start`). Progress shows as pipelines done of the total in the recordings, rate and
+  time left. It comes from Fossilize patch 0003's `fossilize_replay_progress`. A game started during the compile
+  waits for it, and the game-start replay is then skipped for that app run. The game-start replay now uses
+  every core too (`fossilize-threads` still overrides; `fossilize-precompile-threads` does the same for the
+  button).
+- **Overlay ▸ Shader misses** shows, on Vulkan: MISS/s (builds that compiled, 2 ms or more, per second), BUILD
+  (builds running now) and SLOW (compiles of 150 ms or more since the game started). The source is patch 0013:
+  KosmicKrisp reports every library and pipeline build to `madeira_vulkan_compile_mark` (WiniosGL.m). On D3D12
+  the field shows the overlay-shader branch's MISS/s and PSO Q cells, provided this build's DXMT has
+  `madeira_shader_overlay_stats` (looked up at run time).

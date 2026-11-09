@@ -4441,6 +4441,7 @@ struct LibraryDetail: View {
             if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
             Section { Button("Remove from library", role: .destructive) { remove = true } }
         }
+        ShaderCacheSection()
         if let error { Section { Text(error).foregroundStyle(.red) } }
     }
 
@@ -4659,6 +4660,94 @@ struct BCDGameValues {
 /// syntax, applied at its next start. madeira-bcd: LibraryDetail binds it to the
 /// game's GameProfiles.swift file (Application Support/GameConfigs), which every
 /// launch exports as MADEIRA_CFG_GAME (BCDLaunch, MadeiraConfig.applyGame).
+/// madeira-duo vk3: the shader caches in the prefix, how big each is, and a compile of the recorded
+/// Vulkan pipelines before a game starts (madeira_shader_precompile_start, WineProcessBridge.m), with
+/// its progress. The caches are shared by every game in the prefix.
+struct ShaderCacheSection: View {
+    struct Folder: Identifiable { let name: String; let bytes: Int64; var id: String { name } }
+    @State private var sizes: [Folder] = []
+    @State private var done: UInt32 = 0
+    @State private var total: UInt32 = 0
+    @State private var state: Int32 = 0
+    @State private var seconds = 0.0
+    @State private var message: String?
+    private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private static var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first! }
+    /// (name, folder under Documents). LOCALAPPDATA is drive_c/users/mobile/AppData/Local.
+    private static let folders: [(String, String)] = [
+        ("Vulkan: Mesa shader cache", "wine/madeira-cache/kosmickrisp/mesa_shader_cache"),
+        ("Vulkan: Metal pipeline archives", "wine/madeira-cache/kosmickrisp/kosmickrisp-mtl4"),
+        ("Vulkan: recorded pipelines", "wine/madeira-cache/fossilize"),
+        ("D3D12: converted shaders", "shadercache"),
+        ("D3D12: shader cache", "wine/drive_c/users/mobile/AppData/Local/Madeira/ShaderCache"),
+        ("D3D12: pipeline archive", "wine/drive_c/users/mobile/AppData/Local/Madeira/PipelineArchive"),
+    ]
+
+    private static func folderBytes(_ url: URL) -> Int64 {
+        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { return -1 }
+        var bytes: Int64 = 0
+        for case let file as URL in walker {
+            guard let values = try? file.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true else { continue }
+            bytes += Int64(values.totalFileAllocatedSize ?? 0)
+        }
+        return bytes
+    }
+
+    private func measure() {
+        Task.detached(priority: .utility) {
+            let measured = Self.folders.map { Folder(name: $0.0, bytes: Self.folderBytes(Self.documents.appendingPathComponent($0.1))) }
+            await MainActor.run { sizes = measured }
+        }
+    }
+
+    private func poll() {
+        var d: UInt32 = 0, t: UInt32 = 0, st: Int32 = 0, secs = 0.0
+        madeira_shader_precompile_status(&d, &t, &st, &secs)
+        let finished = state == 1 && st != 1
+        done = d; total = t; state = st; seconds = secs
+        if finished { measure() }
+    }
+
+    private var progressText: String {
+        let rate = seconds > 0 ? Double(done) / seconds : 0
+        var text = total > 0 ? "\(done) of \(total) pipelines" : "\(done) pipelines"
+        if rate > 0 { text += String(format: " · %.0f/s", rate) }
+        if rate > 0, total > done { text += String(format: " · about %.0f s left", Double(total - done) / rate) }
+        return text
+    }
+
+    var body: some View {
+        Section {
+            ForEach(sizes) { entry in
+                LabeledContent(entry.name, value: entry.bytes < 0 ? "–" : ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file))
+            }
+            Button("Compile shaders now", systemImage: "hammer") {
+                switch madeira_shader_precompile_start() {
+                case 0: message = nil; state = 1
+                case -1: message = L("A shader compile is already running.")
+                default: message = L("Needs vulkan = kosmickrisp in madeira.cfg.")
+                }
+            }
+            .disabled(state == 1)
+            if state == 1 {
+                ProgressView(value: Double(done), total: Double(max(total, max(done, 1))))
+                Text(progressText).font(.caption.monospacedDigit())
+            } else if state == 2 {
+                Text(String(format: L("Last compile: %u pipelines in %.0f s."), done, seconds)).font(.caption)
+            } else if state == 3 {
+                Text("The last compile stopped with an error; the log has the [fossilize] lines.").font(.caption).foregroundStyle(.red)
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+        } header: { Text("Shaders") } footer: {
+            Text("Compiles the Vulkan pipelines Madeira recorded while you played (vulkan = kosmickrisp, fossilize = on) on every core, before the game starts. A game started meanwhile waits for it. The same replay runs at each game start.")
+        }
+        .onAppear { measure(); poll() }
+        .onReceive(ticks) { _ in poll() }
+    }
+}
+
 struct LibraryGameConfigEditor: View {
     @Binding var text: String
     var body: some View {
@@ -6258,6 +6347,13 @@ struct LibraryMetrics: View {
     @State private var psoQueue = 0
     @State private var psoBackground = 0
     @State private var shaderFlags = 0
+    /// madeira-duo vk3: Vulkan builds KosmicKrisp reported (madeira_vulkan_compile_stats): compiles a second
+    /// over the last refresh (-1 = none seen yet), builds running now, slow compiles since the game started.
+    @State private var lastVulkanCompiles: UInt64 = 0
+    @State private var vulkanRate = -1.0
+    @State private var vulkanInFlight = 0
+    @State private var vulkanSlow = 0
+    @State private var vulkanSeen = false
     /// Half-second ticks; the figures change every `refresh` seconds (0.5, 1 or 2).
     private let ticks = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     /// ml2021: one cell per figure. A fixed width per cell (the widest value it can show)
@@ -6309,8 +6405,15 @@ struct LibraryMetrics: View {
             result.append(Cell(id: "swap", label: "SWAP", value: "\(swapFileMB)", width: 54))
         }
         if model.overlayFields.contains("Shader misses") {
-            result.append(Cell(id: "miss", label: "MISS/s", value: missText, width: 64))
-            result.append(Cell(id: "psoq", label: "PSO Q", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
+            if vulkanSeen {
+                // Vulkan (KosmicKrisp): compiles a second, builds running now, slow compiles this game.
+                result.append(Cell(id: "miss", label: "MISS/s", value: vulkanRate < 0 ? "–" : perSecond(vulkanRate), width: 64))
+                result.append(Cell(id: "psoq", label: "BUILD", value: "\(vulkanInFlight)", width: 50))
+                result.append(Cell(id: "slow", label: "SLOW", value: "\(vulkanSlow)", width: 54))
+            } else {
+                result.append(Cell(id: "miss", label: "MISS/s", value: missText, width: 64))
+                result.append(Cell(id: "psoq", label: "PSO Q", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
+            }
         }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append(Cell(id: "bat", label: "BAT", value: "\(battery)%", width: 50)) }
         if model.overlayFields.contains("Thermal") {
@@ -6457,7 +6560,17 @@ struct LibraryMetrics: View {
                 }
                 if model.overlayFields.contains("Shader misses") {
                     var shaders: UInt64 = 0, pipelines: UInt64 = 0, queue: Int64 = 0, background: Int64 = 0, flags: Int32 = 0
-                    madeira_shader_overlay_stats(&shaders, &pipelines, &queue, &background, &flags)
+                    _ = madeira_shader_overlay_stats_optional(&shaders, &pipelines, &queue, &background, &flags)
+                    var vkBuilds: UInt64 = 0, vkCompiles: UInt64 = 0, vkSlow: UInt64 = 0, vkMs: UInt64 = 0
+                    var vkInFlight: Int64 = 0, vkLibraries: UInt64 = 0, vkPipelines: UInt64 = 0
+                    madeira_vulkan_compile_stats(&vkBuilds, &vkCompiles, &vkSlow, &vkMs, &vkInFlight, &vkLibraries, &vkPipelines)
+                    if vkBuilds > 0 {
+                        if vulkanSeen {
+                            vulkanRate = Double(vkCompiles >= lastVulkanCompiles ? vkCompiles - lastVulkanCompiles : 0) / max(0.001, dt)
+                        }
+                        lastVulkanCompiles = vkCompiles; vulkanSeen = true
+                        vulkanInFlight = Int(vkInFlight); vulkanSlow = Int(vkSlow)
+                    }
                     if shaderPrimed {
                         shaderRate = Double(shaders >= lastShaderMisses ? shaders - lastShaderMisses : 0) / max(0.001, dt)
                         pipelineRate = Double(pipelines >= lastPipelineMisses ? pipelines - lastPipelineMisses : 0) / max(0.001, dt)
@@ -6509,7 +6622,9 @@ struct LibraryMetrics: View {
             }
             result.append("Swap \(swapFileMB) MB")
         }
-        if model.overlayFields.contains("Shader misses") {
+        if model.overlayFields.contains("Shader misses"), vulkanSeen {
+            result.append("\(vulkanRate < 0 ? "0" : perSecond(vulkanRate)) shader compiles a second, \(vulkanInFlight) building, \(vulkanSlow) slow")
+        } else if model.overlayFields.contains("Shader misses") {
             if shaderRate < 0 || shaderFlags & 1 == 0 { result.append("Shader misses —") }
             else if shaderFlags & 8 != 0 {
                 result.append("\(perSecond(shaderRate)) shader and \(perSecond(pipelineRate)) pipeline misses a second")
