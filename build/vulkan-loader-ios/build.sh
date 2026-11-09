@@ -19,7 +19,11 @@ cmake --install "$WORK/build-headers"
 cmake -S "$WORK/Vulkan-Loader" -B "$WORK/build-ios" -G Ninja \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
     -DCMAKE_BUILD_TYPE=Release -DVULKAN_HEADERS_INSTALL_DIR="$WORK/headers-install" \
-    -DCMAKE_PREFIX_PATH="$WORK/headers-install" -DBUILD_TESTS=OFF
+    -DCMAKE_PREFIX_PATH="$WORK/headers-install" -DBUILD_TESTS=OFF \
+    -DUSE_GAS=OFF
+# USE_GAS=OFF: the assembler trampolines need a SYSTEM_PROCESSOR that is empty in an iOS cross build
+# (loader/CMakeLists.txt:277). Without them only extension functions unknown to the loader lose
+# dispatch; Wine calls none.
 ninja -C "$WORK/build-ios" vulkan
 built="$(find "$WORK/build-ios/loader" -maxdepth 1 -name 'libvulkan.1*.dylib' -type f | head -1)"
 cp "$built" "$GL/libvulkan.1.dylib"
