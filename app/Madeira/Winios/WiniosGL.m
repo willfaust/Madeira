@@ -284,8 +284,20 @@ static _Atomic uint64_t gl_present_count;
 extern uint64_t madeira_get_present_count(void);
 extern void madeira_frame_mark(const void *layer);   // Winios.m: the overlay's frame times
 
+// madeira-duo vk2: Vulkan presents. Vulkan drivers that know about Madeira (KosmicKrisp's
+// kosmickrisp-ios-0009 patch looks this up with dlsym) report each present here, so the FPS
+// overlay, [frame] lines and first-frame checks count Vulkan games like GL ones.
+static _Atomic uint64_t vulkan_present_count;
+
+__attribute__((visibility("default"), used))
+void madeira_vulkan_present_mark(const void *layer) {
+    atomic_fetch_add_explicit(&vulkan_present_count, 1, memory_order_relaxed);
+    if (layer) madeira_frame_mark(layer);
+}
+
 uint64_t madeira_frame_count(void) {
-    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed);
+    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed)
+        + atomic_load_explicit(&vulkan_present_count, memory_order_relaxed);
 }
 
 // The presenter behind *state, created on first use for hwnd's layer.

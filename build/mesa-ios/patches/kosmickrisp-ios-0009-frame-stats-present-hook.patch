@@ -1,0 +1,246 @@
+From ba372134901040a9bb3c81400329158d939c46ee Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 21:25:54 +1100
+Subject: [PATCH] kosmickrisp: frame, submit and GPU statistics; Madeira
+ present hook
+
+[kk-frame] every 30 s: presents, present intervals (avg, max, >33/50/100 ms),
+CPU time in queue submits and Metal's per-commit GPU time per frame. Each
+present is also passed to madeira_vulkan_present_mark when the host process
+exports it, so Madeira's FPS overlay counts Vulkan frames.
+MADEIRA_KK_FRAME_STATS=0 turns the line off.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+---
+ src/kosmickrisp/bridge/mtl_command_queue.h    |   1 +
+ src/kosmickrisp/bridge/mtl_command_queue.m    |  12 ++
+ .../bridge/stubs/mtl_command_queue.c          |   6 +
+ src/kosmickrisp/vulkan/kk_queue.c             | 137 ++++++++++++++++++
+ 4 files changed, 156 insertions(+)
+
+diff --git a/src/kosmickrisp/bridge/mtl_command_queue.h b/src/kosmickrisp/bridge/mtl_command_queue.h
+index 56c24f2..d9b03ab 100644
+--- a/src/kosmickrisp/bridge/mtl_command_queue.h
++++ b/src/kosmickrisp/bridge/mtl_command_queue.h
+@@ -40,6 +40,7 @@ void mtl_command_queue_signal_drawable(mtl_command_queue *queue,
+                                        void *drawable);
+ 
+ void mtl_drawable_present(void *drawable);
++void *mtl_drawable_layer(void *drawable);
+ 
+ /* Madeira: Metal 4 drawable synchronisation. waitForDrawable must precede the
+  * commit of any command buffer that writes the drawable, and the layer's
+diff --git a/src/kosmickrisp/bridge/mtl_command_queue.m b/src/kosmickrisp/bridge/mtl_command_queue.m
+index ae5d52b..5c43bb4 100644
+--- a/src/kosmickrisp/bridge/mtl_command_queue.m
++++ b/src/kosmickrisp/bridge/mtl_command_queue.m
+@@ -133,6 +133,18 @@ mtl_drawable_present(void *drawable)
+    }
+ }
+ 
++/* Madeira: the CAMetalLayer a drawable belongs to (not retained), or NULL. */
++void *
++mtl_drawable_layer(void *drawable)
++{
++   @autoreleasepool {
++      id d = (id)drawable;
++      if (![d respondsToSelector:@selector(layer)])
++         return NULL;
++      return (void *)[d performSelector:@selector(layer)];
++   }
++}
++
+ void
+ mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
+ {
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+index d1962cc..491f205 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_command_queue.c
+@@ -66,6 +66,12 @@ mtl_drawable_present(void *drawable)
+ {
+ }
+ 
++void *
++mtl_drawable_layer(void *drawable)
++{
++   return NULL;
++}
++
+ void
+ mtl_command_queue_wait_for_drawable(mtl_command_queue *queue, void *drawable)
+ {
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index a5b8313..b8cd744 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -22,6 +22,118 @@
+ 
+ #include <string.h>
+ 
++#include <dlfcn.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <time.h>
++
++/*
++ * Madeira: frame and GPU statistics. Every 30 s a [kk-frame] line gives the
++ * presents in the window, the CPU interval between presents (average, max and
++ * how many took over 33, 50 and 100 ms), the CPU time spent in queue submits,
++ * and the GPU time Metal reports per commit (GPUEndTime - GPUStartTime) summed
++ * per frame. Presents are also handed to Madeira's frame counter
++ * (madeira_vulkan_present_mark, looked up at run time; absent outside Madeira)
++ * so its FPS overlay and [frame] lines count Vulkan frames.
++ * MADEIRA_KK_FRAME_STATS=0 turns the line off.
++ */
++#define KK_FRAME_REPORT_NS (30ull * 1000000000ull)
++
++static struct {
++   _Atomic uint64_t gpu_ns;
++   _Atomic uint64_t gpu_commits;
++   _Atomic uint64_t gpu_max_ns;
++   uint64_t window_start_ns;
++   uint64_t last_present_ns;
++   uint64_t presents;
++   uint64_t interval_total_ns;
++   uint64_t interval_max_ns;
++   uint64_t over_33ms;
++   uint64_t over_50ms;
++   uint64_t over_100ms;
++   uint64_t submit_ns;
++   uint64_t submits;
++   int enabled;
++   void (*present_mark)(const void *layer);
++   bool present_mark_resolved;
++} kk_frames = {.enabled = -1};
++
++static uint64_t
++kk_frame_now_ns(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static void
++kk_frame_report(uint64_t now)
++{
++   uint64_t window = now - kk_frames.window_start_ns;
++   uint64_t gpu_ns = atomic_exchange(&kk_frames.gpu_ns, 0);
++   uint64_t commits = atomic_exchange(&kk_frames.gpu_commits, 0);
++   uint64_t gpu_max = atomic_exchange(&kk_frames.gpu_max_ns, 0);
++   uint64_t presents = kk_frames.presents;
++   fprintf(stderr,
++           "[kk-frame] %.1f s: presents=%llu fps=%.1f interval avg=%.1fms max=%.1fms >33ms=%llu >50ms=%llu "
++           ">100ms=%llu | submit cpu %.2f ms/frame (%llu submits) | gpu %.2f ms/frame busy=%.0f%% "
++           "commits=%llu max=%.1fms\n",
++           window / 1e9, (unsigned long long)presents, window ? presents * 1e9 / window : 0.0,
++           presents ? kk_frames.interval_total_ns / 1e6 / presents : 0.0,
++           kk_frames.interval_max_ns / 1e6, (unsigned long long)kk_frames.over_33ms,
++           (unsigned long long)kk_frames.over_50ms, (unsigned long long)kk_frames.over_100ms,
++           presents ? kk_frames.submit_ns / 1e6 / presents : 0.0,
++           (unsigned long long)kk_frames.submits, presents ? gpu_ns / 1e6 / presents : 0.0,
++           window ? 100.0 * gpu_ns / window : 0.0, (unsigned long long)commits, gpu_max / 1e6);
++   kk_frames.window_start_ns = now;
++   kk_frames.presents = 0;
++   kk_frames.interval_total_ns = 0;
++   kk_frames.interval_max_ns = 0;
++   kk_frames.over_33ms = 0;
++   kk_frames.over_50ms = 0;
++   kk_frames.over_100ms = 0;
++   kk_frames.submit_ns = 0;
++   kk_frames.submits = 0;
++}
++
++/* Called from the submitting thread for each present. */
++static void
++kk_frame_present(void *drawable)
++{
++   if (!kk_frames.present_mark_resolved) {
++      kk_frames.present_mark =
++         (void (*)(const void *))dlsym(RTLD_DEFAULT, "madeira_vulkan_present_mark");
++      kk_frames.present_mark_resolved = true;
++   }
++   if (kk_frames.present_mark)
++      kk_frames.present_mark(mtl_drawable_layer(drawable));
++
++   if (kk_frames.enabled < 0)
++      kk_frames.enabled = debug_get_bool_option("MADEIRA_KK_FRAME_STATS", true);
++   if (!kk_frames.enabled)
++      return;
++
++   uint64_t now = kk_frame_now_ns();
++   if (kk_frames.window_start_ns == 0)
++      kk_frames.window_start_ns = now;
++   if (kk_frames.last_present_ns != 0) {
++      uint64_t interval = now - kk_frames.last_present_ns;
++      kk_frames.interval_total_ns += interval;
++      if (interval > kk_frames.interval_max_ns)
++         kk_frames.interval_max_ns = interval;
++      if (interval > 33000000ull)
++         kk_frames.over_33ms++;
++      if (interval > 50000000ull)
++         kk_frames.over_50ms++;
++      if (interval > 100000000ull)
++         kk_frames.over_100ms++;
++   }
++   kk_frames.last_present_ns = now;
++   kk_frames.presents++;
++   if (now - kk_frames.window_start_ns >= KK_FRAME_REPORT_NS)
++      kk_frame_report(now);
++}
++
+ /* Madeira: Metal 4 does not synchronise or page in CAMetalLayer drawables on
+  * its own. Before a command buffer that writes a drawable is committed, the
+  * queue must wait for the display to release it, and the layer's residency
+@@ -54,6 +166,16 @@ kk_queue_prepare_drawable(struct kk_queue *queue, void *drawable)
+ static void
+ commit_callback(struct mtl_feedback_data *data)
+ {
++   /* Madeira: GPU time per commit for [kk-frame]. */
++   if (data->gpu_end > data->gpu_start && data->gpu_start > 0.0) {
++      uint64_t gpu = (uint64_t)((data->gpu_end - data->gpu_start) * 1e9);
++      atomic_fetch_add(&kk_frames.gpu_ns, gpu);
++      atomic_fetch_add(&kk_frames.gpu_commits, 1);
++      uint64_t max = atomic_load(&kk_frames.gpu_max_ns);
++      while (gpu > max &&
++             !atomic_compare_exchange_weak(&kk_frames.gpu_max_ns, &max, gpu))
++         ;
++   }
+    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+       struct kk_device *dev = (struct kk_device *)data->user_data;
+       vk_device_set_lost(
+@@ -78,8 +200,22 @@ rerecord_cmd_buffer(struct kk_cmd_buffer *cmd)
+    kk_device_make_resources_resident(dev);
+ }
+ 
++static VkResult
++kk_queue_submit_impl(struct vk_queue *vk_queue, struct vk_queue_submit *submit);
++
++/* Madeira: CPU time in queue submits, for [kk-frame]. */
+ static VkResult
+ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
++{
++   uint64_t start = kk_frame_now_ns();
++   VkResult result = kk_queue_submit_impl(vk_queue, submit);
++   kk_frames.submit_ns += kk_frame_now_ns() - start;
++   kk_frames.submits++;
++   return result;
++}
++
++static VkResult
++kk_queue_submit_impl(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+ {
+    struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
+    struct kk_device *dev = kk_queue_device(queue);
+@@ -142,6 +278,7 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+          mtl_command_queue_signal_drawable(queue->mtl_handle,
+                                            cmd_buffer->drawable);
+          mtl_drawable_present(cmd_buffer->drawable);
++         kk_frame_present(cmd_buffer->drawable);
+          /* Madeira: drop the reference kk_encode_drawable_present took. A
+           * CAMetalLayer reuses a drawable only after every reference to it
+           * is gone; with this one leaked, the layer ran out of drawables
+-- 
+2.56.0
+

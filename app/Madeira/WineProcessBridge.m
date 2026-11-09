@@ -1110,6 +1110,19 @@ static void madeira_setup_vulkan(NSFileManager *fm, NSString *prefix, NSString *
     }
     setenv("MADEIRA_VULKAN_LIBRARY", lib.UTF8String, 1);   /* read by build/win32u-unix/vulkan_ios.c */
 
+    /* madeira-duo vk2: KosmicKrisp's caches (Mesa disk cache, and its Metal 4 pipeline-archive
+     * chunks in <dir>/kosmickrisp-mtl4) live inside the prefix, so they survive in-place app
+     * upgrades like the d3d12 shader caches do. madeira.cfg env.MESA_SHADER_CACHE_DIR /
+     * env.MESA_SHADER_CACHE_MAX_SIZE win when set. */
+    if ([lib.lastPathComponent containsString:@"kosmickrisp"]) {
+        NSString *cache = [prefix stringByAppendingPathComponent:@"madeira-cache/kosmickrisp"];
+        [fm createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+        setenv("MESA_SHADER_CACHE_DIR", cache.fileSystemRepresentation, 0);
+        setenv("MESA_SHADER_CACHE_MAX_SIZE", "2G", 0);
+        dprintf(STDERR_FILENO, "[vulkan] KosmicKrisp caches in %s (Mesa disk cache max %s)\n",
+                getenv("MESA_SHADER_CACHE_DIR"), getenv("MESA_SHADER_CACHE_MAX_SIZE"));
+    }
+
     for (NSString *dir in dirs)
         for (NSString *dll in vulkan_dlls)
             linked += madeira_link_vulkan_file(fm, [win stringByAppendingPathComponent:dir], dll,

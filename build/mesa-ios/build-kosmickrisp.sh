@@ -90,7 +90,7 @@ if [ ! -f "$B/build.ninja" ]; then
         -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
         -Dglx=disabled -Degl=disabled -Dgbm=disabled \
         -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system \
-        -Dshader-cache=disabled -Dxmlconfig=disabled \
+        -Dshader-cache=enabled -Dxmlconfig=disabled \
         -Dzstd=disabled -Dlibunwind=disabled -Dvalgrind=disabled -Dlmsensors=disabled \
         -Dexpat=disabled -Dbuild-tests=false -Dvideo-codecs= \
         -Dvulkan-icd-dir=share/vulkan/icd.d

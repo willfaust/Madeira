@@ -1,0 +1,99 @@
+From cdc6fe09287ff31e54ccbcf4777fdd5a5cb1246e Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 21:23:41 +1100
+Subject: [PATCH] kosmickrisp: on-disk shader cache and an implicit pipeline
+ cache
+
+KosmicKrisp never created a disk cache, and with no implicit pipeline cache
+the runtime consulted no cache at all for applications that pass no
+VkPipelineCache. Create the disk cache keyed on the driver build and device
+name, and create device->mem_cache the way RADV does.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+---
+ src/kosmickrisp/vulkan/kk_device.c          | 16 ++++++++++++++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 20 ++++++++++++++++++++
+ 2 files changed, 36 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 216faed..644a872 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -298,6 +298,17 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+    if (result != VK_SUCCESS)
+       goto fail_alloc;
+ 
++   /* Implicit pipeline cache. Applications that pass no VkPipelineCache (many
++    * do, relying on the driver's own cache) otherwise get no caching at all,
++    * not even the on-disk cache: the runtime only consults the disk cache
++    * through a vk_pipeline_cache. */
++   struct vk_pipeline_cache_create_info mem_cache_info = {.weak_ref = true};
++   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &mem_cache_info, NULL);
++   if (dev->vk.mem_cache == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_init;
++   }
++
+    dev->vk.shader_ops = &kk_device_shader_ops;
+    dev->mtl_handle = pdev->mtl_dev_handle;
+    dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
+@@ -363,6 +374,8 @@ fail_vab_memory:
+ fail_compiler:
+    kk_release_compiler(dev);
+ fail_init:
++   if (dev->vk.mem_cache)
++      vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
+    vk_device_finish(&dev->vk);
+ fail_alloc:
+    vk_free(&dev->vk.alloc, dev);
+@@ -404,6 +417,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+ 
+    kk_release_compiler(dev);
+ 
++   if (dev->vk.mem_cache)
++      vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
++
+    vk_device_finish(&dev->vk);
+ 
+    vk_free(&dev->vk.alloc, dev);
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 227273d..556196c 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -17,6 +17,7 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ 
+ #include "util/disk_cache.h"
++#include "util/hex.h"
+ #include "util/mesa-blake3.h"
+ #include "git_sha1.h"
+ 
+@@ -911,6 +912,25 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
++
++#ifdef ENABLE_SHADER_CACHE
++   /* On-disk shader cache. Without it, the runtime's pipeline cache keeps
++    * compiled shaders only for the life of the process, so every launch
++    * repeats SPIR-V -> NIR -> MSL for every pipeline the application creates.
++    * The key covers the driver build and the device name, so a driver update
++    * or a different GPU starts a fresh cache. */
++   _mesa_blake3_init(&blake3_ctx);
++   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
++                       sizeof(instance->driver_build_sha));
++   _mesa_blake3_update(&blake3_ctx, pdev->vk.properties.deviceName,
++                       strlen(pdev->vk.properties.deviceName));
++   unsigned char cache_key[BLAKE3_KEY_LEN];
++   _mesa_blake3_final(&blake3_ctx, cache_key);
++
++   char timestamp[BLAKE3_KEY_LEN * 2 + 1];
++   mesa_bytes_to_hex(timestamp, cache_key, BLAKE3_KEY_LEN);
++   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
++#endif
+ }
+ 
+ static void
+-- 
+2.56.0
+
