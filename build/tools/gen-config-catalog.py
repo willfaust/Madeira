@@ -1229,6 +1229,14 @@ OVERLAY = {
                         "the 64-bit JIT at once instead of testing the native-code bitmap first; the JIT's dispatcher "
                         "already tests every address it has no translation for. 11 instructions less per return from a "
                         "system DLL. 0: the test as before. Read when a program starts."},
+    # FEX's split-lock atomics (build/fex-patches/0002-ios-split-lock-atomics-inline.patch, both modules).
+    "env.MADEIRA_FEX_SPLIT_LOCK": {"category": "x86 emulation (FEX)", "title": "Atomics across a 16-byte boundary done inline",
+                "kind": "bool", "default": "1", "sources": ["build/fex-patches/0002-ios-split-lock-atomics-inline.patch"],
+                "note": "On by default. An x86 atomic (xchg with memory, lock xadd/add/sub/and/or/xor) whose operand "
+                        "crosses a 16-byte boundary faults on Apple's processors, and the exception thread then does it "
+                        "([mach_exc] UNALIGNED-LSE, 25-30 microseconds each). With this the emulator tests the operand "
+                        "first and does such an operation inline under a lock, with the same result; other atomics are "
+                        "unchanged. 0 keeps the trap. Read when each program starts."},
     "env.MADEIRA_FEX_EC_RET": {"category": "x86 emulation (FEX)", "title": "Returns from native code through the return predictor",
                 "kind": "bool", "default": "1",
                 "note": "Default on. A guest call into native (ARM64EC) code leaves the JIT with BLR and its return "

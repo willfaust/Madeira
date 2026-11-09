@@ -12,6 +12,7 @@ These patches are for Madeira only and are not to be sent to FEX-Emu.
 | Patch | What it fixes |
 |---|---|
 | `0001-windows-ios-smc-traps-per-16k-host-page.patch` | Self-modifying-code write traps per 16 KB iOS host page, both modules (The Escapists 2, Project Zomboid) |
+| `0002-ios-split-lock-atomics-inline.patch` | An atomic whose operand crosses a 16-byte boundary is done inline instead of trapping, both modules; `MADEIRA_FEX_SPLIT_LOCK=0` keeps the trap (Far Cry 4, Ubisoft Connect) |
 
 A patch must apply on the current FEX pin. When the pin moves, rebase the
 patches onto it (or drop a patch the new pin already covers).
