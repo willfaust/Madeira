@@ -259,3 +259,12 @@ with geometryShader relaxed (0010), PoE2 got past `vkCreateDevice` but failed `v
 Patch 0011 finds the largest heap size Metal accepts by halving the request. It remembers that size for the
 process and spreads the pool over as many heaps as needed: query q lives in heap q / n at q % n. A split pool
 logs `[kk-query] timestamp pool of N split into H counter heaps of n`.
+
+## Timestamp pools without a counter heap (patch 0012)
+
+On the Duo, Metal refuses *every* timestamp counter heap, even a 2-entry one: install32c logged `[kk-query]
+timestamp pool of 2: no counter heap size works`. So 0011's split alone can't help there. Patch 0012 creates the
+pool without a heap when that happens. `vkCmdWriteTimestamp2` marks the query available, and its value reads as
+the 0 the reset left. This is logged once as `[kk-query] Metal refuses timestamp counter heaps here … timestamp
+queries will read 0`. GPU timings the game derives from timestamps read as zero. A real fix would sample through
+another Metal counter API that the phone does support.
