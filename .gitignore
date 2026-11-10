@@ -226,3 +226,7 @@ __pycache__/
 
 # Verified runtime component caches
 .runtime-cache/
+
+# Simulator build (tools/sim)
+build/sim/
+app/MadeiraSim.xcodeproj/
