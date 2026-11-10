@@ -368,6 +368,9 @@ enum SteamDirectStart {
     /// The beta branch each of those install records names (`BetaKey`); none for public.
     @Published private(set) var branches: [Int: String] = [:]
     private var scanning = false
+    /// (new-look) The install records were read at least once since Madeira started: until then an
+    /// empty list means "not read yet", not "nothing installed".
+    @Published private(set) var scanned = false
     /// A refresh was asked for while a scan ran (an install record was just
     /// written): scan again once it ends.
     private var rescan = false
@@ -409,6 +412,7 @@ enum SteamDirectStart {
             let recordedBranches = branches
             await MainActor.run {
                 self.scanning = false
+                if !self.scanned { self.scanned = true }
                 let again = self.rescan
                 self.rescan = false
                 if self.games != found { self.games = found }
@@ -467,12 +471,15 @@ struct SteamGamesSection: View {
     // Collapsed state of the installed games (the Steam title) and of Not installed.
     @AppStorage("madeiraLibraryHideInstalled") private var hideInstalled = false
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookSteamShowInstalled") private var showInstalled = false
     @State private var selected: SteamGameSelection?
     @State private var showSignIn = false
     @State private var showWorkshop = false
 
     /// MADEIRA_LIBRARY_COLLAPSE=0: the section titles do not collapse.
-    static var collapsible: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }
+    /// (new-look) Never in the new look: a store's page always shows its games.
+    static var collapsible: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }
     private var libraryEnabled: Bool { SteamOwnedLibrary.enabled }
 
     /// Whether the library shows this section, and with it the sectioned
@@ -538,6 +545,10 @@ struct SteamGamesSection: View {
         let items = SteamGamesRules.items(installed: model.games, owned: owned, search: search)
         let groups = SteamGamesRules.groups(items, downloading: Set(steam.downloads.keys))
         let installed = SteamGamesRules.sorted(groups.installed, by: sort, recorded: recorded)
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let fold = NewLook.enabled && part == .all
+        let top = fold ? groups.downloading : groups.downloading + installed
         let collapsible = Self.collapsible
         Group {
             if Self.shown {
@@ -552,6 +563,7 @@ struct SteamGamesSection: View {
                                 Label("Workshop", systemImage: "square.stack.3d.up").font(.subheadline)
                             }
                             .accessibilityLabel("Steam Workshop")
+                            .padItem("steam-workshop", cornerRadius: 12) { showWorkshop = true }
                         }
                     }
                     // Signed out: the account's games need a sign-in; say so here rather
@@ -575,11 +587,11 @@ struct SteamGamesSection: View {
                     }
                     if hideInstalled && collapsible {
                         EmptyView()
-                    } else if !groups.downloading.isEmpty || !installed.isEmpty {
-                        LibraryCells(items: groups.downloading + installed, layout: layout, width: width) { item, list, dense in
+                    } else if !top.isEmpty {
+                        LibraryCells(items: top, layout: layout, width: width) { item, list, dense in
                             cell(item, list: list, dense: dense)
                         }
-                    } else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && search.isEmpty {
+                    } else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && installed.isEmpty && search.isEmpty {
                         Text(steam.libraryUpdated == nil ? "Pull down to load your Steam library."
                              : "No Windows games were found in this Steam library.").foregroundStyle(.secondary)
                     }
@@ -597,8 +609,19 @@ struct SteamGamesSection: View {
                             }.contentShape(Rectangle()).frame(minHeight: 44)
                         }.buttonStyle(.plain)
                             .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                            .padItem("steam-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
                         if showUninstalled {
                             LibraryCells(items: groups.notInstalled, layout: layout, width: width) { item, list, dense in
+                                cell(item, list: list, dense: dense)
+                            }
+                        }
+                    }
+                    if fold && !installed.isEmpty {
+                        // Nothing to install or download: the installed games just show, with a plain title.
+                        let only = top.isEmpty && !(signedIn && !groups.notInstalled.isEmpty)
+                        NewLookInstalledHeader(id: "steam-installed", count: installed.count, open: only ? nil : $showInstalled)
+                        if only || showInstalled {
+                            LibraryCells(items: installed, layout: layout, width: width) { item, list, dense in
                                 cell(item, list: list, dense: dense)
                             }
                         }
@@ -628,6 +651,12 @@ struct SteamGamesSection: View {
         }
         .sheet(isPresented: $showSignIn) { SteamSignInView() }
         .sheet(isPresented: $showWorkshop) { SteamWorkshopHub() }
+        // (new-look) Search's "In your stores": this game's sheet, once the Steam page shows.
+        .onReceive(LibraryStoreSheets.shared.$steamGame) { game in
+            guard let game else { return }
+            LibraryStoreSheets.shared.steamGame = nil
+            selected = SteamGameSelection(id: game.id)
+        }
         .alert("Steam", isPresented: Binding(get: { steam.error != nil }, set: { if !$0 { steam.error = nil } })) {
             Button("OK", role: .cancel) { steam.error = nil }
         } message: { Text(steam.error ?? "") }

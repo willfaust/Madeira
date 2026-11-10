@@ -62,6 +62,8 @@ struct EAGamesSection: View {
     @ObservedObject private var library = LibraryModel.shared
     @AppStorage("madeiraLibraryHideEA") private var hidden = false
     @AppStorage("madeiraEAShowUninstalled") private var showUninstalled = true
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookEAShowInstalled") private var showInstalled = false
     /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EASheets (LibraryGridPage.swift).
     var inGrid = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
@@ -70,6 +72,10 @@ struct EAGamesSection: View {
         let items = EAGamesRules.items(ea, search: search)
         let mine = items.filter { $0.installed != nil || ea.downloads[$0.id] != nil }
         let others = items.filter { $0.installed == nil && ea.downloads[$0.id] == nil }
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let top = NewLook.enabled ? mine.filter { ea.downloads[$0.id] != nil } : mine
+        let folded = NewLook.enabled ? mine.filter { ea.downloads[$0.id] == nil } : []
         let collapsible = SteamGamesSection.collapsible
         VStack(alignment: .leading, spacing: 14) {
             LibrarySectionHeader(title: "EA app", count: mine.count, collapsed: collapsible ? $hidden : nil) {
@@ -79,9 +85,9 @@ struct EAGamesSection: View {
                 if !ea.signedIn {
                     EASignInCard { sheets.eaSignIn = true }
                 }
-                if !mine.isEmpty {
-                    LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if ea.signedIn && !ea.refreshing && others.isEmpty && search.isEmpty {
+                if !top.isEmpty {
+                    LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                } else if ea.signedIn && !ea.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
                     Text(ea.libraryUpdated == nil ? "Pull down to load your EA library."
                          : "No PC games were found in this EA account.").foregroundStyle(.secondary)
                 }
@@ -98,8 +104,17 @@ struct EAGamesSection: View {
                         }.contentShape(Rectangle()).frame(minHeight: 44)
                     }.buttonStyle(.plain)
                         .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                        .padItem("ea-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
                     if showUninstalled {
                         LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                    }
+                }
+                if !folded.isEmpty {
+                    // Nothing to install or download: the installed games just show, with a plain title.
+                    let only = top.isEmpty && !(ea.signedIn && !others.isEmpty)
+                    NewLookInstalledHeader(id: "ea-installed", count: folded.count, open: only ? nil : $showInstalled)
+                    if only || showInstalled {
+                        LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                     }
                 }
             }

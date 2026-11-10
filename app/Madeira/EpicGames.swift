@@ -65,6 +65,8 @@ struct EpicGamesSection: View {
     @ObservedObject private var library = LibraryModel.shared
     @AppStorage("madeiraLibraryHideEpic") private var hidden = false
     @AppStorage("madeiraEpicShowUninstalled") private var showUninstalled = true
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookEpicShowInstalled") private var showInstalled = false
     /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EpicSheets (LibraryGridPage.swift).
     var inGrid = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
@@ -73,6 +75,10 @@ struct EpicGamesSection: View {
         let items = EpicGamesRules.items(epic, search: search)
         let mine = items.filter { $0.installed != nil || epic.downloads[$0.id] != nil }
         let others = items.filter { $0.installed == nil && epic.downloads[$0.id] == nil }
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let top = NewLook.enabled ? mine.filter { epic.downloads[$0.id] != nil } : mine
+        let folded = NewLook.enabled ? mine.filter { epic.downloads[$0.id] == nil } : []
         let collapsible = SteamGamesSection.collapsible
         VStack(alignment: .leading, spacing: 14) {
             LibrarySectionHeader(title: "Epic Games", count: mine.count, collapsed: collapsible ? $hidden : nil) {
@@ -82,9 +88,9 @@ struct EpicGamesSection: View {
                 if !epic.signedIn {
                     EpicSignInCard { sheets.epicSignIn = true }
                 }
-                if !mine.isEmpty {
-                    LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if epic.signedIn && !epic.refreshing && others.isEmpty && search.isEmpty {
+                if !top.isEmpty {
+                    LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                } else if epic.signedIn && !epic.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
                     Text(epic.libraryUpdated == nil ? "Pull down to load your Epic Games library."
                          : "No Windows games were found in this Epic Games library.").foregroundStyle(.secondary)
                 }
@@ -101,8 +107,17 @@ struct EpicGamesSection: View {
                         }.contentShape(Rectangle()).frame(minHeight: 44)
                     }.buttonStyle(.plain)
                         .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                        .padItem("epic-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
                     if showUninstalled {
                         LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                    }
+                }
+                if !folded.isEmpty {
+                    // Nothing to install or download: the installed games just show, with a plain title.
+                    let only = top.isEmpty && !(epic.signedIn && !others.isEmpty)
+                    NewLookInstalledHeader(id: "epic-installed", count: folded.count, open: only ? nil : $showInstalled)
+                    if only || showInstalled {
+                        LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                     }
                 }
             }

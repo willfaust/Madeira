@@ -181,20 +181,37 @@ final class ExternalDrives: ObservableObject {
         LogStore.shared.log("[external] steam libraries=\(found.count) install=\(target ?? "drive_c")")
     }
 
-    /// Adds `C:\<folder>` entries for the libraries Valve's client does not list yet.
+    /// Adds `C:\<folder>` entries for the libraries Valve's client does not list yet, and
+    /// drops a leftover External entry above one of them (ExternalSteamLibraries.staleParents).
+    /// Both of the client's libraryfolders.vdf files are written: config/ is the one Valve's
+    /// client reads, steamapps/ its copy (the same pair Big Picture's ml2230 writes).
     private static func listInSteamClient(_ relative: [String]) {
         guard !relative.isEmpty else { return }
-        let vdf = MadeiraDock.drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/steamapps/libraryfolders.vdf")
-        do {
-            let existing: Data?
-            do { existing = try Data(contentsOf: vdf) }
-            catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { existing = nil }
-            let paths = [SteamRuntimeFiles.relativeRoot] + relative
-            let data = try ExternalSteamLibraries.add(paths: paths, to: existing)
-            guard data != existing else { return }
-            try FileManager.default.createDirectory(at: vdf.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: vdf, options: .atomic)
-        } catch { LogStore.shared.log("[external] Steam library metadata was kept: \(error.localizedDescription)") }
+        let paths = [SteamRuntimeFiles.relativeRoot] + relative
+        // Drive libraries: a leftover entry above a drive's Steam library (C:\External\steam
+        // when the games are in C:\External\steam\SteamLibrary) is removed from Steam's
+        // libraryfolders.vdf, so Valve's client lists the real library and Dock does not stop
+        // with code 41. 0 keeps every entry.
+        let prune = MadeiraConfig.flag("MADEIRA_EXTERNAL_PRUNE_PARENT_LIBRARIES", fallback: true)
+        // Drive libraries: Madeira also lists them in Steam's config/libraryfolders.vdf (the
+        // file Valve's client reads), when it exists, beside steamapps/libraryfolders.vdf.
+        // 0 writes steamapps/ only.
+        let subfolders = MadeiraConfig.flag("MADEIRA_EXTERNAL_STEAM_CONFIG_VDF", fallback: true) ? ["config", "steamapps"] : ["steamapps"]
+        for sub in subfolders {
+            let vdf = MadeiraDock.drive.appendingPathComponent(SteamRuntimeFiles.relativeRoot + "/" + sub + "/libraryfolders.vdf")
+            do {
+                let existing: Data?
+                do { existing = try Data(contentsOf: vdf) }
+                catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { existing = nil }
+                // config/ is Valve's own: only an existing one is updated, never created.
+                if sub == "config" && existing == nil { continue }
+                let data = try ExternalSteamLibraries.add(paths: paths, to: existing, pruneParents: prune)
+                guard data != existing else { continue }
+                try FileManager.default.createDirectory(at: vdf.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: vdf, options: .atomic)
+                LogStore.shared.log("[external] \(sub)/libraryfolders.vdf updated (libraries=\(relative.count) prune=\(prune ? 1 : 0))")
+            } catch { LogStore.shared.log("[external] Steam \(sub) library metadata was kept: \(error.localizedDescription)") }
+        }
     }
 
     /// "External/<name>/..." -> "<name>", or nil for drive_c.

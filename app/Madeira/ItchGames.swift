@@ -55,6 +55,8 @@ struct ItchGamesSection: View {
     @ObservedObject private var library = LibraryModel.shared
     @AppStorage("madeiraLibraryHideItch") private var hidden = false
     @AppStorage("madeiraItchShowUninstalled") private var showUninstalled = true
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookItchShowInstalled") private var showInstalled = false
     /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches ItchSheets (LibraryGridPage.swift).
     var inGrid = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
@@ -63,6 +65,10 @@ struct ItchGamesSection: View {
         let items = ItchGamesRules.items(itch, search: search)
         let mine = items.filter { $0.installed != nil || itch.downloads[$0.id] != nil }
         let others = items.filter { $0.installed == nil && itch.downloads[$0.id] == nil }
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let top = NewLook.enabled ? mine.filter { itch.downloads[$0.id] != nil } : mine
+        let folded = NewLook.enabled ? mine.filter { itch.downloads[$0.id] == nil } : []
         let collapsible = SteamGamesSection.collapsible
         VStack(alignment: .leading, spacing: 14) {
             LibrarySectionHeader(title: "itch.io", count: mine.count, collapsed: collapsible ? $hidden : nil) {
@@ -85,9 +91,9 @@ struct ItchGamesSection: View {
                     }.buttonStyle(.plain)
                         .menuPad("signin:itch", cornerRadius: 16) { sheets.itchSignIn = true }
                 }
-                if !mine.isEmpty {
-                    LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if itch.signedIn && !itch.refreshing && others.isEmpty && search.isEmpty {
+                if !top.isEmpty {
+                    LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                } else if itch.signedIn && !itch.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
                     Text(itch.libraryUpdated == nil ? "Pull down to load your itch.io library."
                          : "No Windows games yet. Games you buy or claim on itch.io show here, and so do the games in your itch.io collections. For a free game, use Find a game.")
                         .foregroundStyle(.secondary)
@@ -106,6 +112,7 @@ struct ItchGamesSection: View {
                         }.padding(14)
                             .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
                     }.buttonStyle(.plain)
+                        .padItem("itch-find", cornerRadius: 16) { sheets.itchFind = true }
                 }
                 if itch.signedIn && !others.isEmpty {
                     Button {
@@ -120,8 +127,17 @@ struct ItchGamesSection: View {
                         }.contentShape(Rectangle()).frame(minHeight: 44)
                     }.buttonStyle(.plain)
                         .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                        .padItem("itch-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
                     if showUninstalled {
                         LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+                    }
+                }
+                if !folded.isEmpty {
+                    // Nothing to install or download: the installed games just show, with a plain title.
+                    let only = top.isEmpty && !(itch.signedIn && !others.isEmpty)
+                    NewLookInstalledHeader(id: "itch-installed", count: folded.count, open: only ? nil : $showInstalled)
+                    if only || showInstalled {
+                        LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                     }
                 }
             }
