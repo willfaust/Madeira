@@ -6505,6 +6505,66 @@ static int ios_img_off_is_exec( const void *img, size_t img_size, size_t off )
     return 0;   /* outside every section: headers/padding, not code */
 }
 
+/* [x64-data-imp], images without a pool copy. A pure x64 image mapped with
+ * MADEIRA_X64_IMAGE_NOCOPY (VPROT_X64DATA) has no ios_jit_mappings[] entry, so
+ * ios_x64_iat_bind_live_data below finds no importer for it, and its IAT slots
+ * for DATA exports of ARM64EC modules would keep the PE address, where the
+ * module's live data is not (Far Cry 4 reads msvcr100's _acmdln at CRT startup).
+ * Such views are noted here when they are marked (map_image_into_view, virtual
+ * mutex held) and forgotten in delete_view; the binder looks them up without the
+ * lock. A full table leaves later images unbound (logged once).
+ * env.MADEIRA_X64_NOCOPY_DATAIMP = 0 keeps no table. */
+#define IOS_X64_NOCOPY_MAX 128
+static struct { uintptr_t base; size_t size; } ios_x64_nocopy_tab[IOS_X64_NOCOPY_MAX];
+
+static int ios_x64_nocopy_dataimp_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char *s = getenv( "MADEIRA_X64_NOCOPY_DATAIMP" );
+        cached = (s && s[0] == '0' && !s[1]) ? 0 : 1;
+    }
+    return cached;
+}
+
+static void ios_x64_nocopy_note( uintptr_t base, size_t size )
+{
+    static int full_said;
+    int i;
+
+    for (i = 0; i < IOS_X64_NOCOPY_MAX; i++)
+        if (!__atomic_load_n( &ios_x64_nocopy_tab[i].base, __ATOMIC_ACQUIRE ))
+        {
+            ios_x64_nocopy_tab[i].size = size;
+            __atomic_store_n( &ios_x64_nocopy_tab[i].base, base, __ATOMIC_RELEASE );
+            return;
+        }
+    if (!full_said++)
+        dprintf( 2, "[x64-data-imp] %d images without a pool copy are mapped: %p+%#lx and later ones keep "
+                    "their data imports' PE addresses\n", IOS_X64_NOCOPY_MAX, (void *)base, (unsigned long)size );
+}
+
+static void ios_x64_nocopy_forget( uintptr_t base )
+{
+    int i;
+    for (i = 0; i < IOS_X64_NOCOPY_MAX; i++)
+        if (__atomic_load_n( &ios_x64_nocopy_tab[i].base, __ATOMIC_ACQUIRE ) == base)
+            __atomic_store_n( &ios_x64_nocopy_tab[i].base, (uintptr_t)0, __ATOMIC_RELEASE );
+}
+
+static int ios_x64_nocopy_find( uintptr_t rs, uintptr_t re, uintptr_t *pe, size_t *size )
+{
+    int i;
+    for (i = 0; i < IOS_X64_NOCOPY_MAX; i++)
+    {
+        uintptr_t b = __atomic_load_n( &ios_x64_nocopy_tab[i].base, __ATOMIC_ACQUIRE );
+        size_t sz = ios_x64_nocopy_tab[i].size;
+        if (b && rs >= b && re <= b + sz) { *pe = b; *size = sz; return 1; }
+    }
+    return 0;
+}
+
 /* ml1244: bind an x64 importer's DATA imports to the copy that is actually live.
  *
  * An ARM64EC/ARM64 module executes from its pool copy and reaches its own
@@ -6529,6 +6589,8 @@ static void ios_x64_iat_bind_live_data( char *base, size_t size )
 {
     static int said, calls;
     uintptr_t rs = (uintptr_t)base, re = rs + size, pe, lo, hi, page = 0;
+    size_t pe_size = 0;
+    int nocopy = 0;
     IMAGE_NT_HEADERS64 nt;
     IMAGE_DATA_DIRECTORY dir;
     unsigned int lfanew = 0;
@@ -6541,15 +6603,22 @@ static void ios_x64_iat_bind_live_data( char *base, size_t size )
         uintptr_t b = (uintptr_t)ios_jit_mappings[i].pe_base;
         if (b && rs >= b && re <= b + ios_jit_mappings[i].size) { imp = i; break; }
     }
-    /* ml1245: a pure x64 importer only; an EC module reads its pool-side IAT */
-    if (imp < 0 || ios_jit_mapping_machine( imp ) != 0x8664 || ios_jit_mapping_is_hybrid( imp )) return;
+    if (imp >= 0)
+    {
+        /* ml1245: a pure x64 importer only; an EC module reads its pool-side IAT */
+        if (ios_jit_mapping_machine( imp ) != 0x8664 || ios_jit_mapping_is_hybrid( imp )) return;
+        pe = (uintptr_t)ios_jit_mappings[imp].pe_base;
+        pe_size = ios_jit_mappings[imp].size;
+    }
+    /* An image without a pool copy (see ios_x64_nocopy_note): pure x64 by how it is marked. */
+    else if (ios_x64_nocopy_dataimp_enabled() && ios_x64_nocopy_find( rs, re, &pe, &pe_size )) nocopy = 1;
+    else return;
 
     /* The importer's headers are read fault-safe too, like its IAT pages below:
      * this runs on every protection change inside an x64 image, and a packer or
      * DRM stub may have made its own header page PAGE_NOACCESS. */
-    pe = (uintptr_t)ios_jit_mappings[imp].pe_base;
     if (!ios_safe_read( pe + offsetof( IMAGE_DOS_HEADER, e_lfanew ), &lfanew, sizeof(lfanew) )
-        || (size_t)lfanew + sizeof(nt) > ios_jit_mappings[imp].size
+        || (size_t)lfanew + sizeof(nt) > pe_size
         || !ios_safe_read( pe + lfanew, &nt, sizeof(nt) )) return;
     if (nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
         nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IAT) return;
@@ -6615,8 +6684,8 @@ static void ios_x64_iat_bind_live_data( char *base, size_t size )
     /* One line per x64 IAT window for the first few calls, then only windows
      * that bound something: a silent log must mean "never reached", not "maybe". */
     if (++calls <= 6 || (bound && calls <= 400))
-        dprintf( 2, "[x64-data-imp] ml1245 importer pe=%p IAT window %p+%#lx: %d slot(s), %d data import(s) bound%s\n",
-                 (void *)pe, (void *)lo, (unsigned long)(hi - lo), scanned, bound,
+        dprintf( 2, "[x64-data-imp] ml1245 importer pe=%p%s IAT window %p+%#lx: %d slot(s), %d data import(s) bound%s\n",
+                 (void *)pe, nocopy ? " (no pool copy)" : "", (void *)lo, (unsigned long)(hi - lo), scanned, bound,
                  unreadable ? " (ml1169: unreadable IAT page(s) skipped)" : "" );
 }
 
@@ -15379,6 +15448,8 @@ static void delete_view( struct file_view *view ) /* [in] View */
     if ((view->protect & SEC_IMAGE) && ios_jit_image_retire_enabled())
         ios_jit_retire_image( view->base, view->size );
     if (view->protect & SEC_IMAGE) ios_jit_note_image_unmapped( view->base, view->size );
+    if ((view->protect & VPROT_X64DATA) && ios_x64_nocopy_dataimp_enabled())
+        ios_x64_nocopy_forget( (uintptr_t)view->base );   /* [x64-data-imp] */
     ios_swap_release_range( view->base, view->size, 0 );   /* ml1077 */
     if (!(view->protect & VPROT_SYSTEM) && ios_alias_release_enabled())
         ios_alias_release_view( view->base, view->size );   /* MADEIRA_ALIAS_RELEASE */
@@ -27082,6 +27153,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     {
         static int x64_images;
         view->protect |= VPROT_X64DATA;
+        if (ios_x64_nocopy_dataimp_enabled()) ios_x64_nocopy_note( (uintptr_t)ptr, total_size );   /* [x64-data-imp] */
         if (x64_images++ < 64)
             dprintf( 2, "[x64-image] %s %p+0x%lx mapped without a pool copy (pure x64: the emulator runs "
                         "it at the PE VA; MADEIRA_X64_IMAGE_NOCOPY)\n",

@@ -143,6 +143,11 @@ OVERLAY = {
                         "image, as 32-bit programs already do, and its executable protections are applied without "
                         "EXEC. Frees the pool for hybrid DLL copies and code buffers. Hybrid images keep their "
                         "copy. Set it in the game's own file; restart the session after changing it."},
+    "env.MADEIRA_X64_NOCOPY_DATAIMP": {"category": "Memory & JIT pool", "title": "Data imports of images without a pool copy",
+                "kind": "bool", "default": "1",
+                "note": "On (default): an image MADEIRA_X64_IMAGE_NOCOPY maps without a pool copy has its imports of "
+                        "an ARM64EC DLL's variables (msvcr100's _acmdln) pointed at the copy the DLL writes, as a "
+                        "pool-copied x64 image already has ([x64-data-imp]). 0: they keep the PE address."},
     "env.MADEIRA_FIXED_BASE_GUARD": {"category": "Memory & JIT pool", "title": "Keep 0x140000000 for a fixed-base game",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: a resource-only image view (a version or resource query, e.g. the Rockstar "
