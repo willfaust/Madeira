@@ -125,6 +125,7 @@ final class LogStore: ObservableObject {
         // dprintf(STDERR_FILENO, ...), wine_log_write, etc.
         tail = LogTail(path: logFileURL.path) { [weak self] line in
             LogTrail.see(line)   // a game's start steps, its errors and its end (LogTrail.swift)
+            self?.tick(after: line)
             self?.handleRawLine(line)
         }
         tail?.start()
@@ -230,6 +231,29 @@ final class LogStore: ObservableObject {
         repeatLock.unlock()
         if skipped > 0 { appendToFile(Self.repeatLine(skipped, previous), level: .info) }
         appendToFile(message, level: level)
+    }
+
+    /// (log-fixes) Wine, FEX and DXMT write into this file without a time. In each second that
+    /// such lines arrive, one "[time]" line is written, so every one of them sits within about a
+    /// second of a time (Sentry check Nov 9: 87-99% of a game's log had none).
+    /// env.MADEIRA_LOG_TICK = 0 turns it off.
+    private static let tickLines = MadeiraConfig.flag("MADEIRA_LOG_TICK")
+    private var lastTick = 0
+    func tick(after line: String) {
+        guard Self.tickLines, !Self.hasTime(line) else { return }
+        let second = Int(Date().timeIntervalSince1970)
+        repeatLock.lock()
+        let due = second != lastTick
+        if due { lastTick = second }
+        repeatLock.unlock()
+        if due { appendToFile("[time]", level: .info) }
+    }
+    /// "[13:12:20.701] ..." (this file's own lines).
+    static func hasTime(_ line: String) -> Bool {
+        let u = line.utf8
+        guard u.count > 3, u.first == UInt8(ascii: "[") else { return false }
+        let second = u[u.index(after: u.startIndex)]
+        return second >= UInt8(ascii: "0") && second <= UInt8(ascii: "9")
     }
 
     /// env.MADEIRA_LOG_COLLAPSE = 0 writes every repeated line again.

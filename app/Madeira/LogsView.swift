@@ -12,9 +12,10 @@
 //  (Documents/logs, LogStore.startSessionLog). Tapping one shows its end;
 //  Share sends a copy with personal details taken out.
 //
-//  Share Logs (here and on Game details) makes one .zip for a bug report: the
-//  summary, the last game log, this run's log and madeira.cfg, scrubbed and
-//  deflated (a 20 MB log is about 2 MB zipped, under Discord's 10 MB limit).
+//  Share Logs (here and on Game details) makes one plain "<game> log.txt" for a
+//  bug report (get-help-auto): Get Help's short scrubbed report, about 30 KB.
+//  The Madeira Discord's bot deletes .zip files, and Discord previews a .txt.
+//  LogFiles.bundle (the old .zip) is kept but no button uses it.
 //  Nothing is sent anywhere by Madeira itself.
 //
 
@@ -205,8 +206,14 @@ private struct SharedLogs: Identifiable {
     let urls: [URL]
 }
 
-/// "Share Logs": the bug-report .zip, made in the background.
+/// "Share Logs": (get-help-auto) one plain "<game> log.txt", the same file as Save copy for Discord
+/// (DiscordLog, GetHelpView.swift): Get Help's short scrubbed report plus (discord-full-log) the
+/// whole scrubbed log, up to 5 MB, made in the background. Not a .zip any more: the
+/// Madeira Discord's bot deletes zips, and Discord shows a .txt. LogFiles.bundle stays for
+/// anyone who wants the whole logs (the rows below share each one).
 struct ShareLogsButton: View {
+    /// Game details › Advanced: that game's config goes in the report and names the file.
+    var entry: LibraryEntry? = nil
     @State private var shared: SharedLogs?
     @State private var busy = false
     @State private var failed: String?
@@ -214,19 +221,19 @@ struct ShareLogsButton: View {
         Button {
             guard !busy else { return }
             busy = true
+            let entry = entry
+            let game = entry.map(ClaudeHelp.gameText)
+            let device = ClaudeHelp.deviceLine()
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { try LogFiles.bundle() }
+                let url = DiscordLog.file(title: entry?.title, report: GetHelp.report(game: game, title: entry?.title, device: device))
                 DispatchQueue.main.async {
                     busy = false
-                    switch result {
-                    case .success(let url): shared = SharedLogs(urls: [url])
-                    case .failure(let error): failed = error.localizedDescription
-                    }
+                    if let url { shared = SharedLogs(urls: [url]) } else { failed = L("Madeira couldn't write the file. Try again.") }
                 }
             }
         } label: {
             HStack {
-                Label("Share Logs", systemImage: "doc.zipper")
+                Label("Share Logs", systemImage: "doc.text")
                 if busy { Spacer(); ProgressView() }
             }
         }
@@ -238,6 +245,65 @@ struct ShareLogsButton: View {
     }
 }
 
+/// (debug-logging) Game details › Advanced, test bundle only: this game's last run and its own config as one scrubbed .zip.
+struct DebugShareGameLogsButton: View {
+    let entry: LibraryEntry
+    @State private var shared: SharedLogs?
+    @State private var busy = false
+    @State private var failed = false
+    var body: some View {
+        Button {
+            guard !busy else { return }
+            busy = true
+            let title = entry.title, path = entry.windowsPath
+            DispatchQueue.global(qos: .userInitiated).async {
+                let url = DebugLogging.shareZip(title: title, windowsPath: path)
+                DispatchQueue.main.async {
+                    busy = false
+                    if let url { shared = SharedLogs(urls: [url]) } else { failed = true }
+                }
+            }
+        } label: {
+            HStack {
+                Label { Text(verbatim: "Share this game's logs") } icon: { Image(systemName: "doc.zipper") }
+                if busy { Spacer(); ProgressView() }
+            }
+        }
+        .disabled(busy)
+        .sheet(item: $shared) { ActivitySheet(items: $0.urls) }
+        .alert(Text(verbatim: "Could not make the logs file"), isPresented: $failed) {
+            Button(role: .cancel) {} label: { Text(verbatim: "OK") }
+        } message: { Text(verbatim: "Madeira couldn't write the zip. Try again.") }
+    }
+}
+
+/// (debug-logging) Game details › Advanced, test bundle only: takes the Debug logging lines and the lines Get Help
+/// added out of this game's own config (and nothing else), after a confirmation.
+struct DebugResetButton: View {
+    let entry: LibraryEntry
+    var changed: () -> Void
+    @State private var ask = false
+    @State private var counts = (debug: 0, getHelp: 0)
+    var body: some View {
+        Button(role: .destructive) {
+            counts = DebugLogging.cleanCounts(windowsPath: entry.windowsPath)
+            ask = true
+        } label: {
+            Label { Text(verbatim: "Reset to clean state") } icon: { Image(systemName: "eraser") }
+        }
+        .confirmationDialog(Text(verbatim: "Reset \(entry.title) to a clean state?"), isPresented: $ask, titleVisibility: .visible) {
+            Button(role: .destructive) {
+                DebugLogging.resetToClean(windowsPath: entry.windowsPath, title: entry.title)
+                changed()
+            } label: { Text(verbatim: "Reset") }
+            Button(role: .cancel) {} label: { Text(verbatim: "Cancel") }
+        } message: {
+            Text(verbatim: counts.debug + counts.getHelp == 0
+                 ? "This game's config has no Debug logging or Get Help lines. Nothing changes."
+                 : "Takes \(counts.debug) Debug logging line(s) and \(counts.getHelp) line(s) Get Help added out of this game's config. Every other line stays. madeira.cfg is not touched.")
+        }
+    }
+}
 /// Settings › Logs.
 struct LogsSection: View {
     @State private var main: [LogFiles.Item] = []
@@ -247,7 +313,7 @@ struct LogsSection: View {
         Section {
             ShareLogsButton()
         } footer: {
-            Text("Share Logs makes one .zip with the session summary, the last game log, this run's log and madeira.cfg, with personal details taken out. Post it with your bug report.")
+            Text("Share Logs makes one text file (up to 5 MB) with the last game's log and your settings, with personal details taken out. Post it in the Madeira Discord. To send another log, tap it below and share it.")
         }
         .onAppear { reload() }
         Section {

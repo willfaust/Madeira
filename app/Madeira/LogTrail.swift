@@ -268,13 +268,18 @@ enum LogTrail {
 
     /// The ring's place now, for a press's before and after.
     @MainActor static var ring: String {
+        if PadHighlight.enabled {
+            let pad = PadHighlight.shared
+            guard let focus = pad.focus else { return pad.shown ? "on nothing" : "hidden" }
+            return (pad.shown ? focus : "hidden (was \(focus))") + (pad.layerName == PadLayer.root ? "" : " in \(pad.layerName)")
+        }
         let pad = MenuPad.shared
         guard let focus = pad.focus else { return pad.ring ? "on nothing" : "hidden" }
         return pad.ring ? focus : "hidden (was \(focus))"
     }
 
     static let buttonNames: [String: String] = [
-        "up": "up", "down": "down", "left": "left", "right": "right", "accept": "A", "back": "B", "add": "Y",
+        "up": "up", "down": "down", "left": "left", "right": "right", "accept": "A", "back": "B", "add": "Y", "play": "X",
         "menu": "Menu", "search": "View", "previous": "L1", "next": "R1", "pageUp": "L2", "pageDown": "R2",
     ]
 
@@ -351,6 +356,9 @@ enum LogTrail {
         static func clearMarker() { if let url = markerURL { try? FileManager.default.removeItem(at: url) } }
     }
     static let session = Session()
+    /// (log-fixes) Whether `title` is still running (its Wine not finished): Get Help's upload
+    /// waits for the end of the run before it sends the logs.
+    static func isRunning(_ title: String) -> Bool { lock.lock(); defer { lock.unlock() }; return session.title == title }
     private static var warnings = 0
 
     static func clock(_ date: Date) -> String {
@@ -372,6 +380,10 @@ enum LogTrail {
         if let steps = fields["steps"], !steps.isEmpty { words += "; steps: \(steps)" }
         if let error = fields["last-error"] { words += "; last error: \(error)" }
         LogStore.shared.log(words, level: .error)
+        // (get-help) Not after the background: iOS ending it there, or a swipe, is no game problem.
+        if fields["background"] == nil, let game = fields["game"] {
+            GetHelpCenter.stopped(title: game, windowsPath: fields["path"], why: "Madeira closed while it ran")
+        }
         LogRuns.previousRun(String(words.dropFirst("[last-run] ".count)))
     }
 
@@ -501,6 +513,17 @@ enum LogTrail {
         line += " | \(String(format: "%.0f", total)) s in all: \(steps)"
         if let error { line += " | last error: \(error)" }
         LogStore.shared.log(line, level: why == "it closed by itself" && code.hasPrefix("exit code 0") ? .info : .error)
+        // (get-help) The game stopped by itself: a Windows error, an exit code other than 0, or no
+        // window at all. Not when the player quit or stopped it (reason).
+        if reason == nil, code.hasPrefix("Windows error") || (code.hasPrefix("exit code ") && !code.hasPrefix("exit code 0"))
+            || why == "it stopped before its window showed" {
+            GetHelpCenter.stopped(title: title, windowsPath: windowsPath, why: "\(why); \(code)")
+        }
+        // (fix-check) A run since Get Help's Apply: ask whether the fix worked (GetHelpView.swift).
+        let stoppedByItself = reason == nil && (code.hasPrefix("Windows error") || (code.hasPrefix("exit code ") && !code.hasPrefix("exit code 0"))
+            || why == "it stopped before its window showed")
+        GetHelpCenter.gameFinished(windowsPath: windowsPath, started: Date().addingTimeInterval(-total), seconds: total,
+                                   ended: stoppedByItself ? "crash" : (reason != nil ? "quit" : "normal"))
         LogRuns.ended(why + ", " + code + (dock.map { ", Madeira Dock result \($0)" } ?? "") + (crash.map { ", Wine: \($0)" } ?? ""), seconds: total)
     }
 
@@ -665,6 +688,8 @@ enum LogRuns {
         var title: String
         var store: String
         var config: String
+        /// (debug-logging) "Debug logging Medium · game config 3fa81c2e (14 lines)", test bundle with a level only.
+        var debug: String?
         var started: Date
         var began = false
         var lastStep: String?
@@ -696,9 +721,11 @@ enum LogRuns {
         }
         count += 1
         let number = count
-        runs.append(Run(number: number, title: title, store: store, config: config, started: Date()))
+        let debug = DebugLogging.stamp(windowsPath: windowsPath)
+        runs.append(Run(number: number, title: title, store: store, config: config, debug: debug, started: Date()))
         lock.unlock()
         LogStore.shared.log("[run-start] #\(number) \(title)")
+        if let debug { LogStore.shared.log("[debug-log] #\(number) \(debug)") }
         writeHeader()
     }
 
@@ -766,6 +793,7 @@ enum LogRuns {
             }
             lines.append(LogTrail.clip(line, 400))
             lines.append("     its config: " + LogTrail.clip(run.config, 400))
+            if let debug = run.debug { lines.append("     " + LogTrail.clip(debug, 200)) }
         }
         let end = [lastLine, "(The full log follows.)"]
         func joined(_ body: [String]) -> String { (top + body + end).joined(separator: "\n") + "\n" }
