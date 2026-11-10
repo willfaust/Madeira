@@ -43,6 +43,7 @@
       "tools/build/build-llvm-ios.sh",
       "build/dxmt-ios/build.sh",
       "build/dxmt-patches/**",
+      "patches/**",
       "madeira-d3d12/third_party/**",
       "app/Madeira/d3d12/**",
       "tools/build/build-runtime-component.sh",

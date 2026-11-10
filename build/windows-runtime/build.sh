@@ -6,6 +6,8 @@ R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TC="$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
 export PATH="$TC:$PATH"
 export JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
+# This repository's Wine changes (patches/apply.sh): opengl32.dll's image base.
+bash "$R/patches/apply.sh"
 bash "$R/tools/build/build-wine.sh"
 modules=()
 while IFS= read -r name; do

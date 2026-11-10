@@ -168,7 +168,10 @@ if [ ${#GNUTLS_DEFS[@]} -gt 0 ]; then
     done
 fi
 # OpenGL: opengl32's unix side (wrappers + generated thunks). It dispatches to
-# win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c.
+# win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c. The
+# wow64 thunks convert guest pointers only with patches/wine-opengl-winios.patch,
+# which patches/apply.sh puts in the wine working tree (skipped when present).
+bash "$REPO_ROOT/patches/apply.sh"
 compile_unixlib "$WINE_SRC/dlls/opengl32/unix_wgl.c" "opengl32_wgl" "opengl32" \
     -I"$WINE_SRC/dlls/opengl32"
 compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "opengl32" \
