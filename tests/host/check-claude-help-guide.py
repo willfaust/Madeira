@@ -83,10 +83,12 @@ check(project.count(f'/* {name} in Resources */') == 2 and project.count(f'/* {n
 check(project.count('/* ClaudeHelp.swift in Sources */') == 2 and project.count('/* ClaudeHelp.swift */') == 3,
       'ClaudeHelp.swift is compiled into the app')
 check('ClaudeHelp.install()' in main, 'the guide is copied into Documents when the app starts')
-check(library.count('ClaudeHelpButton(entry: entry)') == 1 and library.count('ClaudeHelpButton(entry: nil)') == 1,
-      'Game details (with the game) and Settings > Diagnostics (without one) offer Get Help from Claude')
+helpview = (app / 'GetHelpView.swift').read_text(encoding='utf-8')
+check('ClaudeHelpButton(' not in library and 'ClaudeHelpButton(' not in helpview
+      and library.count('DiscordLogButton(entry: nil, row: true)') == 1,
+      'Get Help and Settings > Diagnostics offer Save copy for Discord instead of Get Help from Claude (Cameron, Nov 8)')
 pages = (app / 'SettingsPages.swift').read_text(encoding='utf-8')
-check(pages.count('ClaudeHelpButton(entry: nil)') == 1, 'the Advanced settings page offers Get Help from Claude under Diagnostics')
+check(pages.count('DiscordLogButton(entry: nil, row: true)') == 1 and 'ClaudeHelpButton(' not in pages, 'the Advanced settings page offers Save copy for Discord under Diagnostics')
 check('GameProfile(windowsPath: entry.windowsPath).text' in helper and 'LibraryPrefs.sharedSwitches(entry.windowsPath)' in helper,
       "the game's file holds its own config and its Game details switches")
 report = (app / 'HelpReport.swift').read_text(encoding='utf-8')
@@ -111,6 +113,35 @@ for line in section6.splitlines():
 check('Game in this report' in report and 'Game in this' in guide,
       "the report says which game its log is from, and the guide checks it")
 check('"controls", "zones"' in helper, 'touch layouts are left out of the game file (long, unrelated)')
+
+# The newest guide from the Get Help server (GET /guide), with the bundled one as fallback.
+check('appendingPathComponent("guide")' in helper and 'x-madeira-key' in helper and 'GetHelp.key' in helper,
+      'the newest guide is asked from the Get Help server with the app key')
+check('guard GetHelp.enabled' in helper, 'no request when Get Help is off (env.MADEIRA_GET_HELP = 0)')
+check('static let guideTimeout: TimeInterval = 4' in helper and 'done.wait(timeout:' in helper,
+      'the button waits at most a few seconds for the server')
+check('text.hasPrefix("MADEIRA HELP GUIDE FOR CLAUDE")' in helper and '!text.contains("{{")' in helper
+      and 'data.count <= guideMaxBytes' in helper, 'only a real, filled-in guide of a sane size is kept')
+check('dd >= bd ? d : b' in helper, 'the newer guide by its Updated date wins (a newer build beats an old download)')
+check('fetchNewest()' in helper[helper.index('static func files('):] and 'let guide = bestGuide()' in helper,
+      'Get Help from Claude fetches the newest guide before it makes the file')
+check('.applicationSupportDirectory' in helper, 'the downloaded guide is kept outside Documents')
+check(re.search(r'Updated \d{4}-\d{2}-\d{2}', guide) is not None, 'the bundled guide has an Updated date (to compare)')
+check('Get Help added these' in guide and '2 tries have failed' in guide,
+      'the guide says not to repeat lines Get Help already added, and to stop after 2 tries')
+
+# The same date logic, run here on its own (Swift's text, Python's rules).
+import datetime
+def upd(t):
+    m = re.search(r'Updated (\d{4}-\d{2}-\d{2})', t)
+    return m.group(1) if m else None
+def newer(b, d):
+    if d is None or upd(d) is None: return b
+    if b is None or upd(b) is None: return d
+    return d if upd(d) >= upd(b) else b
+check(newer('Updated 2026-11-07.', 'Updated 2026-11-08.') == 'Updated 2026-11-08.', 'a newer download wins')
+check(newer('Updated 2026-11-09.', 'Updated 2026-11-08.') == 'Updated 2026-11-09.', 'a newer bundled guide wins')
+check(newer('Updated 2026-11-07.', None) == 'Updated 2026-11-07.', 'no download: the bundled guide')
 
 print('PASS' if failures == 0 else f'FAIL ({failures})')
 sys.exit(1 if failures else 0)

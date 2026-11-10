@@ -147,6 +147,12 @@ enum HelpReport {
         return part
     }
 
+    /// (log-fixes) "The Escapists 2 (TheEscapists2.exe)"; without a game program in the log, says so.
+    static func gameLine(title: String, program: String?, hasLog: Bool) -> String {
+        if let program { return "\(title) (\(program))" }
+        return title + (hasLog ? " (its program did not start in this log)" : " (no log yet)")
+    }
+
     /// madeira.cfg without comments and blank lines.
     static func settingLines(_ cfg: String) -> String {
         let lines = cfg.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -155,7 +161,9 @@ enum HelpReport {
     }
 
     /// The player's report, scrubbed. `game` is the game's settings text (ClaudeHelp.gameText).
-    static func text(build: String, device: String, log: LogPart?, game: String?, cfg: String?) -> String {
+    /// `title` (log-fixes): the Library game the player asked about, named in the header even when
+    /// its program never started (the log then only has Madeira's start steps or a helper program).
+    static func text(build: String, device: String, log: LogPart?, game: String?, cfg: String?, title: String? = nil) -> String {
         var out: [String] = [
             "==========================================================================",
             "PLAYER'S REPORT",
@@ -163,7 +171,10 @@ enum HelpReport {
             "Madeira build: \(build)",
             "Device: \(device)",
         ]
-        if let log {
+        if let title, !title.isEmpty {
+            out.append("Game in this report: " + gameLine(title: PrivacyScrub.text(title), program: log?.facts.game, hasLog: log != nil))
+            if let log { out.append("Log: \(log.name), \(log.lines) lines. Only the lines that usually explain a problem are below.") }
+        } else if let log {
             out.append("Game in this report: \(log.facts.game ?? "none (this log has no game in it)")")
             out.append("Log: \(log.name), \(log.lines) lines. Only the lines that usually explain a problem are below.")
         } else {

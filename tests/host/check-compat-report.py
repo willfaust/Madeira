@@ -83,7 +83,7 @@ for row in ['Button("Share Setup"', 'Button("Apply Shared Setup"', 'Button("Copy
             'Button("Reset to Recommended"', 'GameRecommendations.note(recommended']:
     check(row in adv, f'Advanced page has {row}')
 body = lib[lib.index('struct LibraryDetail: View {'):]
-body = body[body.index('    var body: some View {'):body.index('.navigationTitle("Game details")')]
+body = body[body.index('    var body: some View {'):body.index('.navigationTitle(stack == nil ? L("Game details") : entry.title)')]
 check(all(r not in body for r in ['Button("Share Setup"', 'ClaudeHelpButton(', 'ShareLogsButton()', 'Button("Reset to Recommended"']),
       'Game details no longer lists them')
 
