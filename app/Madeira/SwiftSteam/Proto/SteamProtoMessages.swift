@@ -160,7 +160,11 @@ struct ProtobufDecoder {
         guard let wireType = ProtoWireType(rawValue: wireTypeRaw) else {
             throw SteamError.protobufError("Unknown wire type: \(wireTypeRaw)")
         }
-        return (fieldNumber: UInt32(tag >> 3), wireType: wireType)
+        // Tags come from the network: a field number past 32 bits must throw, not trap.
+        guard let fieldNumber = UInt32(exactly: tag >> 3) else {
+            throw SteamError.protobufError("Field number out of range")
+        }
+        return (fieldNumber: fieldNumber, wireType: wireType)
     }
 
     /// A length prefix, checked against the bytes that remain. Lengths come
