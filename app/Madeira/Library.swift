@@ -2872,6 +2872,17 @@ struct LibraryDetail: View {
             case .advanced: return "Advanced"
             }
         }
+        /// The store a store's page is for (its logo is the row's icon).
+        var store: NewLookStore? {
+            switch self {
+            case .steam: return .steam
+            case .gog: return .gog
+            case .itch: return .itch
+            case .epic: return .epic
+            case .ea: return .ea
+            default: return nil
+            }
+        }
         var symbol: String {
             switch self {
             case .display: return "display"
@@ -5938,7 +5949,12 @@ extension LibraryView {
                             NewLookLibraryPage(width: width, enableJIT: enableJIT,
                                                open: { selected = $0 }, play: { lookPlay($0) },
                                                options: { entry in withAnimation(.easeOut(duration: 0.15)) { lookOptions = entry } },
-                                               add: { browser = true }, stores: { lookTab = .stores })
+                                               add: { browser = true },
+                                               desktop: { big in
+                                                   selected = big ? (model.entries.first(where: { $0.bigPicture == true }) ?? .bigPictureEntry)
+                                                                  : (model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry)
+                                               },
+                                               stores: { lookTab = .stores })
                         }
                     }
                     .modifier(NewLookTabRoot(title: item.title))
@@ -6312,18 +6328,18 @@ extension LibraryDetail {
     @ViewBuilder private var lookSettings: some View {
         NewLookSection(title: L("While playing")) {
             lookRow("gp-fps", press: { entry.fpsMode = FPSChoice.next(after: entry.fpsMode) }) {
-                NewLookBadge(symbol: "speedometer", color: .indigo)
+                NewLookBadge(symbol: "speedometer")
                 FPSChoice(mode: $entry.fpsMode)
             }
             lookRow("gp-overlay", press: { entry.performance.toggle() }) {
-                NewLookBadge(symbol: "chart.bar.xaxis", color: .teal)
+                NewLookBadge(symbol: "chart.bar.xaxis")
                 Toggle(isOn: $entry.performance) {
                     lookLabel(L("Performance overlay"), L("Frame rate and memory over the game."))
                 }
                 .tint(NewLookColor.green)
             }
             lookRow("gp-touch", last: true, press: { entry.touchControls.toggle() }) {
-                NewLookBadge(symbol: "hand.tap", color: .purple)
+                NewLookBadge(symbol: "hand.tap")
                 Toggle(isOn: $entry.touchControls) {
                     lookLabel(L("Touch controls"), L("Buttons on the screen while you play."))
                 }
@@ -6334,7 +6350,7 @@ extension LibraryDetail {
             NewLookSection(title: lookGroupTitle(group)) {
                 ForEach(group, id: \.self) { item in
                     lookRow("gp-page-\(item)", last: item == group.last, press: { open(item) }) {
-                        NewLookBadge(symbol: item.symbol, color: Self.lookColor(item))
+                        NewLookPageIcon(symbol: item.symbol, store: item.store)
                         lookLabel(L(item.title), item.blurb)
                         Spacer(minLength: 8)
                         if let value = summary(item) { Text(value).lineLimit(1).foregroundStyle(.secondary) }
@@ -6350,7 +6366,7 @@ extension LibraryDetail {
         if GetHelp.enabled {
             NewLookSection(title: L("Help")) {
                 lookRow("gp-help", last: true, press: { getHelp = true }) {
-                    NewLookBadge(symbol: "lifepreserver", color: NewLookColor.red)
+                    NewLookBadge(symbol: "lifepreserver")
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Get Help").font(.body.weight(.semibold)).foregroundStyle(.primary)
                         Text("Looks at what happened and tells you what to try.").font(.footnote).foregroundStyle(.secondary)
@@ -6416,21 +6432,6 @@ extension LibraryDetail {
         case .epic?: return "Epic Games"
         case .ea?: return "EA app"
         default: return nil
-        }
-    }
-
-    private static func lookColor(_ page: Page) -> Color {
-        switch page {
-        case .display: return .blue
-        case .controls, .binds, .assist: return .purple
-        case .launch: return Color(uiColor: .systemGray)
-        case .compatibility: return .orange
-        case .steam, .cloud, .achievements, .workshop: return Color(red: 0.17, green: 0.36, blue: 0.58)
-        case .gog: return Color(red: 0.18, green: 0.48, blue: 0.54)
-        case .itch: return Color(red: 0.72, green: 0.26, blue: 0.23)
-        case .epic: return Color(red: 0.29, green: 0.29, blue: 0.32)
-        case .ea: return Color(red: 0.69, green: 0.45, blue: 0.16)
-        case .library, .iniFiles, .mods, .advanced: return Color(uiColor: .systemGray)
         }
     }
 }

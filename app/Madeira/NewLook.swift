@@ -6,10 +6,9 @@ import UIKit
 import Combine
 import ImageIO
 import GameController
-import PhotosUI
 import UniformTypeIdentifiers
 
-// The new look (Settings › Appearance › New look, on by default): Apple's structure (a tab
+// The new look: Apple's structure (a tab
 // bar, large titles, grouped rows) with the Madeira island behind it, and one controller
 // highlight on every screen (PadHighlight.swift).
 //
@@ -61,6 +60,8 @@ enum NewLookColor {
     static let orange = pair(0xFF9F0A, 0xA84300)
     static let red = pair(0xFF6961, 0xC4001A)
     static let page = pair(0x000000, 0xF2F2F7)
+    /// The one tile every Settings and game page row icon sits on: white on it is 6:1, and no row has a colour of its own.
+    static let tile = Color(white: 0.39)
     static func ring(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.353, green: 0.663, blue: 1) : Color(red: 0, green: 0.345, blue: 0.753)
     }
@@ -804,93 +805,21 @@ enum NewLookStore: String, CaseIterable, Identifiable {
     @MainActor static var shown: [NewLookStore] { allCases.filter { $0.enabled } }
 }
 
-/// The stores' own icons (the pencil on a store's page): a square picture in
-/// Documents/madeira-art/store-icon-<store>.png, or the letter on the store's colour.
-@MainActor final class NewLookStoreIcons: ObservableObject {
-    static let shared = NewLookStoreIcons()
-    /// The store whose icon is being changed (NewLookOverlays shows its choices).
-    @Published var editing: NewLookStore?
-    @Published var photos = false
-    @Published var files = false
-    @Published var error: String?
-    @Published private(set) var revision = 0
-    private var cache: [NewLookStore: UIImage?] = [:]
-
-    static func url(_ store: NewLookStore) -> URL {
-        LibraryModel.documents.appendingPathComponent("madeira-art", isDirectory: true)
-            .appendingPathComponent("store-icon-\(store.rawValue).png")
-    }
-
-    func image(_ store: NewLookStore) -> UIImage? {
-        if let kept = cache[store] { return kept }
-        let image = UIImage(contentsOfFile: Self.url(store).path)
-        cache[store] = image
-        return image
-    }
-
-    func has(_ store: NewLookStore) -> Bool { image(store) != nil }
-
-    /// Any picture: the middle square of it, 256 × 256.
-    func set(_ store: NewLookStore, data: Data) {
-        guard data.count <= 20_000_000 else { error = L("Choose an image smaller than 20 MB."); return }
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let picture = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                                                            kCGImageSourceThumbnailMaxPixelSize: 1024,
-                                                                            kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
-        else { error = L("This image could not be opened."); return }
-        let side = min(picture.width, picture.height)
-        guard side > 0, let square = picture.cropping(to: CGRect(x: (picture.width - side) / 2, y: (picture.height - side) / 2, width: side, height: side))
-        else { error = L("This image could not be opened."); return }
-        let format = UIGraphicsImageRendererFormat.default(); format.scale = 1
-        let icon = UIGraphicsImageRenderer(size: CGSize(width: 256, height: 256), format: format).image { _ in
-            UIImage(cgImage: square).draw(in: CGRect(x: 0, y: 0, width: 256, height: 256))
-        }
-        do {
-            guard let png = icon.pngData() else { throw LibraryError.message(L("This image could not be opened.")) }
-            let url = Self.url(store)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try png.write(to: url, options: .atomic)
-            cache[store] = nil
-            revision += 1
-            LogStore.shared.log("[new-look] store icon: \(store.rawValue) changed")
-        } catch { self.error = error.localizedDescription }
-    }
-
-    func reset(_ store: NewLookStore) {
-        try? FileManager.default.removeItem(at: Self.url(store))
-        cache[store] = nil
-        revision += 1
-        LogStore.shared.log("[new-look] store icon: \(store.rawValue) reset")
-    }
-
-    /// A file from the Files app (security-scoped).
-    func set(_ store: NewLookStore, file url: URL) {
-        let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-        do { set(store, data: try Data(contentsOf: url)) } catch { self.error = error.localizedDescription }
-    }
-}
-
-/// A store's icon: your picture, or its letter on its colour.
+/// A store's icon: its letter on its colour (fixed, not editable).
 struct NewLookStoreIcon: View {
     let store: NewLookStore
     var size: CGFloat = 30
-    @ObservedObject private var icons = NewLookStoreIcons.shared
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
         Group {
-            if let image = icons.image(store) {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else {
-                Text(store.letter).font(.system(size: size * (store.letter.count > 1 ? 0.4 : 0.5), weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(store.color)
-            }
+            Text(store.letter).font(.system(size: size * (store.letter.count > 1 ? 0.4 : 0.5), weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(store.color)
         }
         .frame(width: size, height: size)
         .clipShape(shape)
         .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
-        .id(icons.revision)
         .accessibilityHidden(true)
     }
 }
@@ -1016,20 +945,7 @@ struct NewLookStorePage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .center, spacing: 16) {
-                Button { NewLookStoreIcons.shared.editing = store } label: {
-                    NewLookStoreIcon(store: store, size: 64)
-                        .overlay(alignment: .bottomTrailing) {
-                            Image(systemName: "pencil").font(.system(size: 12, weight: .bold)).foregroundStyle(.white)
-                                .frame(width: 24, height: 24)
-                                .background(NewLookColor.button, in: Circle())
-                                .overlay(Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.5))
-                                .offset(x: 6, y: 6)
-                        }
-                        .padding(6)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(L("Change icon"))
-                .padItem("sp-icon", capsule: true) { NewLookStoreIcons.shared.editing = store }
+                NewLookStoreIcon(store: store, size: 64)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(store.name).font(.largeTitle.bold()).lineLimit(1).minimumScaleFactor(0.7).accessibilityAddTraits(.isHeader)
                     if let signedIn = store.signedIn {
@@ -1086,45 +1002,9 @@ struct NewLookStorePage: View {
     }
 }
 
-/// Change a store's icon: Photos, Files, or back to its letter; Cancel first.
-struct NewLookIconSheet: View {
-    let store: NewLookStore
-    let close: () -> Void
-    @ObservedObject private var icons = NewLookStoreIcons.shared
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            Color.black.opacity(0.45).ignoresSafeArea().onTapGesture(perform: close)
-                .accessibilityLabel(L("Cancel")).accessibilityAddTraits(.isButton)
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    NewLookStoreIcon(store: store, size: 44)
-                    Text(String(format: L("%@ icon"), store.name)).font(.title2.bold()).lineLimit(2)
-                }
-                NewLookSheetButton(id: "ic-photos", title: L("Choose from Photos"), symbol: "photo") { close(); icons.photos = true }
-                NewLookSheetButton(id: "ic-files", title: L("Choose from Files"), symbol: "folder") { close(); icons.files = true }
-                if icons.has(store) {
-                    NewLookSheetButton(id: "ic-reset", title: L("Reset icon"), symbol: "arrow.uturn.backward") { icons.reset(store); close() }
-                }
-                NewLookSheetButton(id: "ic-cancel", title: L("Cancel"), symbol: nil, action: close)
-            }
-            .padding(20)
-            .frame(maxWidth: 520)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: NewLook.sheetRadius, style: .continuous))
-            .padding(12)
-        }
-        .padLayer("icon", start: "ic-cancel", back: close)
-        .accessibilityAddTraits(.isModal)
-    }
-}
-
-/// The new look's questions over every tab (Remove a download, Change a store's icon) and
-/// the Photos and Files pickers they open.
+/// The new look's question over every tab: Remove a download.
 struct NewLookOverlays: View {
     @ObservedObject private var downloads = NewLookDownloads.shared
-    @ObservedObject private var icons = NewLookStoreIcons.shared
-    @State private var picked: PhotosPickerItem?
-    /// The store the picker was opened for (the sheet closes first).
-    @State private var target: NewLookStore?
     var body: some View {
         ZStack {
             Color.clear.frame(width: 0, height: 0).allowsHitTesting(false)
@@ -1132,30 +1012,7 @@ struct NewLookOverlays: View {
                 NewLookRemoveSheet(row: row) { withAnimation(.easeOut(duration: 0.15)) { downloads.confirm = nil } }
                     .transition(.opacity)
             }
-            if let store = icons.editing {
-                NewLookIconSheet(store: store) { target = store; withAnimation(.easeOut(duration: 0.15)) { icons.editing = nil } }
-                    .transition(.opacity)
-            }
         }
-        .photosPicker(isPresented: $icons.photos, selection: $picked, matching: .images)
-        .onChange(of: picked) { _, item in
-            guard let item, let store = target else { return }
-            picked = nil
-            Task { @MainActor in
-                if let data = try? await item.loadTransferable(type: Data.self) { icons.set(store, data: data) }
-                else { icons.error = L("This image could not be opened.") }
-            }
-        }
-        .fileImporter(isPresented: $icons.files, allowedContentTypes: [.image]) { result in
-            guard let store = target else { return }
-            switch result {
-            case .success(let url): icons.set(store, file: url)
-            case .failure(let error): icons.error = error.localizedDescription
-            }
-        }
-        .alert(L("Store icon"), isPresented: Binding(get: { icons.error != nil }, set: { if !$0 { icons.error = nil } })) {
-            Button(L("OK"), role: .cancel) { icons.error = nil }
-        } message: { Text(icons.error ?? "") }
     }
 }
 
@@ -1262,6 +1119,8 @@ struct NewLookLibraryPage: View {
     let play: (LibraryEntry) -> Void
     let options: (LibraryEntry) -> Void
     let add: () -> Void
+    /// The Wine desktop (and Steam's Big Picture, in builds that have it): `big` is true for the latter.
+    let desktop: (_ big: Bool) -> Void
     let stores: () -> Void
     /// The ready games, worked out once per change (NewLookGames): a download's progress in any
     /// store no longer redraws this page (ux-review-0044 #7).
@@ -1382,16 +1241,27 @@ struct NewLookLibraryPage: View {
         .padItem("chip-\(value.isEmpty ? "all" : value)", capsule: true) { store = value }
     }
 
+    /// Add a game, and the Wine desktop (the only way to it).
     private var addButton: some View {
-        Button(action: add) {
-            Label("Add a game", systemImage: "plus").font(.subheadline.weight(.semibold))
+        HStack(spacing: 8) {
+            pill("add-game", "Add a game", "plus", add)
+            pill("desktop", "Desktop", "desktopcomputer") { desktop(false) }
+#if MADEIRA_BIG_PICTURE_UI
+            if LibraryEntry.steamClientInstalled { pill("big-picture", "Big Picture", "gamecontroller") { desktop(true) } }
+#endif
+        }
+    }
+
+    private func pill(_ id: String, _ title: LocalizedStringKey, _ symbol: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol).font(.subheadline.weight(.semibold))
                 .padding(.horizontal, 16).frame(minHeight: 44)
                 .foregroundStyle(NewLookColor.link)
                 .background(.regularMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5))
         }
         .buttonStyle(.plain)
-        .padItem("add-game", capsule: true, press: add)
+        .padItem(id, capsule: true, press: action)
     }
 
     private func grid(_ games: [LibraryReadyGame]) -> some View {
@@ -1749,7 +1619,7 @@ struct NewLookSearchPage: View {
                     ForEach(Array(pages.enumerated()), id: \.element) { index, page in
                         NewLookSearchRow(id: "sp-" + page.key, last: index == pages.count - 1, title: L(page.title), note: page.blurb,
                                          action: { setting(page) }) {
-                            NewLookBadge(symbol: page.symbol, color: page.color)
+                            NewLookPageIcon(symbol: page.symbol, store: page.store)
                         }
                     }
                 }
@@ -1868,7 +1738,7 @@ struct NewLookSettingsList: View {
                         ForEach(Array(pages.enumerated()), id: \.element) { index, page in
                             Button { open(page) } label: {
                                 HStack(spacing: 16) {
-                                    NewLookBadge(symbol: page.symbol, color: page.color)
+                                    NewLookPageIcon(symbol: page.symbol, store: page.store)
                                     Text(L(page.title)).font(.body).foregroundStyle(.primary).lineLimit(2)
                                     Spacer(minLength: 8)
                                     if let value = summary(page) {
@@ -1966,12 +1836,20 @@ struct NewLookSection<Content: View>: View {
 /// A colored rounded-square icon, as in Settings.
 struct NewLookBadge: View {
     let symbol: String
-    let color: Color
     var body: some View {
         Image(systemName: symbol).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
             .frame(width: 30, height: 30)
-            .background(color, in: RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
+            .background(NewLookColor.tile, in: RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
             .accessibilityHidden(true)
+    }
+}
+
+/// A Settings page's icon: a store's page shows the store's logo, every other page its symbol on the one tile.
+struct NewLookPageIcon: View {
+    let symbol: String
+    var store: NewLookStore?
+    var body: some View {
+        if let store { NewLookStoreIcon(store: store, size: 30) } else { NewLookBadge(symbol: symbol) }
     }
 }
 
@@ -2128,7 +2006,7 @@ struct NewLookStepTile: View {
     let step: NewLookStep
     var body: some View {
         HStack(spacing: 12) {
-            NewLookBadge(symbol: step.symbol, color: Color(white: 0.39))
+            NewLookBadge(symbol: step.symbol)
             VStack(alignment: .leading, spacing: 2) {
                 Text(step.title).font(.body.weight(.semibold)).lineLimit(2)
                 if let detail = step.detail, !detail.isEmpty {

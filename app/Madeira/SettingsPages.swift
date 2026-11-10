@@ -58,25 +58,15 @@ enum SettingsPages {
         /// The page's name for the iPad layout's stored choice.
         var key: String { String(describing: self) }
 
-        /// The colour of the page's icon square on iPad (SettingsSplit).
-        var color: Color {
-            func rgb(_ value: Int) -> Color { Color(red: Double(value >> 16) / 255, green: Double(value >> 8 & 0xff) / 255, blue: Double(value & 0xff) / 255) }
+        /// The store a store's page is for (its logo is the page's icon).
+        var store: NewLookStore? {
             switch self {
-            case .steam: return rgb(0x2b5d93)
-            case .gog: return rgb(0x2f7a8a)
-            case .itch: return rgb(0xb8433b)
-            case .epic: return rgb(0x4a4b52)
-            case .ea: return rgb(0xb0732a)
-            case .runtimes: return rgb(0x6a5acd)
-            case .displayGraphics: return rgb(0x2e8b57)
-            case .memory: return rgb(0xc0574a)
-            case .pointer: return rgb(0x5a5f6b)
-            case .jit: return rgb(0xe0a000)
-            case .signing: return rgb(0x3a8fb7)
-            case .saves: return rgb(0x4b8f5a)
-            case .drives, .advanced, .logs: return rgb(0x6b6f78)
-            case .appearance: return rgb(0x4a8cff)
-            case .credits: return rgb(0xc2415a)
+            case .steam: return .steam
+            case .gog: return .gog
+            case .itch: return .itch
+            case .epic: return .epic
+            case .ea: return .ea
+            default: return nil
             }
         }
 
