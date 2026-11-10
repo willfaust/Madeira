@@ -767,6 +767,17 @@ enum NewLookStore: String, CaseIterable, Identifiable {
         case .other: return Color(red: 0x5f / 255, green: 0x63 / 255, blue: 0x6e / 255)
         }
     }
+    /// The store's logo in the asset catalog (Assets.xcassets/Store*.imageset); nil for Other games.
+    var logo: String? {
+        switch self {
+        case .steam: return "StoreSteam"
+        case .epic: return "StoreEpic"
+        case .gog: return "StoreGOG"
+        case .itch: return "StoreItch"
+        case .ea: return "StoreEA"
+        case .other: return nil
+        }
+    }
     /// The start of its games' ids in LibraryReadyGame.
     var prefix: String { self == .other ? "entry:" : rawValue + ":" }
     /// On in this build and madeira.cfg (each store's own switch).
@@ -805,17 +816,25 @@ enum NewLookStore: String, CaseIterable, Identifiable {
     @MainActor static var shown: [NewLookStore] { allCases.filter { $0.enabled } }
 }
 
-/// A store's icon: its letter on its colour (fixed, not editable).
+/// A store's icon: its own logo, white on the store's colour (the stores' marks are fixed, not editable).
+/// Other games, which is no store, shows its letter.
 struct NewLookStoreIcon: View {
     let store: NewLookStore
     var size: CGFloat = 30
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
         Group {
-            Text(store.letter).font(.system(size: size * (store.letter.count > 1 ? 0.4 : 0.5), weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(store.color)
+            if let asset = store.logo {
+                Image(asset).renderingMode(.template).resizable().scaledToFit()
+                    .padding(size * 0.2).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(store.color)
+            } else {
+                Text(store.letter).font(.system(size: size * (store.letter.count > 1 ? 0.4 : 0.5), weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(store.color)
+            }
         }
         .frame(width: size, height: size)
         .clipShape(shape)
