@@ -27,7 +27,7 @@ def check(what, cond):
 # SteamUninstallSection does, and Uninstall is its last group, on its own.
 body = lib[lib.index("struct LibraryDetail: View {"):]
 body = body[body.index("    var body: some View {"):]
-form = body[:body.index('.navigationTitle("Game details")')]
+form = body[:body.index('.navigationTitle(stack == nil ? L("Game details") : entry.title)')]
 use = 'detailRow("uninstall", last: true, tap: { confirmSteamUninstall = true })'
 check("Game details shows it for a Steam game, as its last group",
       use in form and "if steamUninstallable != nil {" in form
@@ -35,7 +35,7 @@ check("Game details shows it for a Steam game, as its last group",
       and 'detailLabel("Share Setup"' not in form and "detailGroup" not in form[form.index(use):])
 check("Game details asks first, then uninstalls and closes",
       lib.index("isPresented: $confirmSteamUninstall") < lib.index("if let installed = steamUninstallable { steam.uninstall(installed) }")
-      < lib.index("leaving = true; dismiss()", lib.index("if let installed = steamUninstallable")))
+      < lib.index("leaving = true; closePage()", lib.index("if let installed = steamUninstallable")))
 start = steam.index("struct SteamUninstallSection: View {")
 view = steam[start:steam.index("\n}\n", start)]
 check("only a game Madeira manages, with no download running",

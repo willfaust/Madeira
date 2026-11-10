@@ -29,6 +29,8 @@ long madeira_stdout_read(void *buf, unsigned long len);
 
 // Check if Wine process is running
 int wine_process_is_running(void);
+/* Quit game was asked: a launcher session stops waiting for its game 10 s later (quit-ends-children). */
+void wine_session_quit_asked(void);
 
 /* How the last guest program ended. Only meaningful once
  * wine_process_is_running() returns 0. */
@@ -50,6 +52,9 @@ void wine_exit_status_reset(void);
 // and fills *appid when one was asked since the last reset.
 void wine_steam_run_requested(unsigned int appid);
 int wine_steam_run_request(uint32_t *appid);
+// The session's own program ended while a steam.exe it started still ran (a Steam
+// game started without Madeira Dock); 1 since the last reset.
+int wine_handed_to_steam(void);
 
 // Steam S0 net-test VPN gate: write C:\madeira-continue.flag into the
 // prefix's drive_c so the paused winhttp-test.exe resumes to the Steam

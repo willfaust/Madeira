@@ -24,6 +24,7 @@
 #include <d3d12.h>
 #include <dxgi1_5.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9913,6 +9914,7 @@ static void exec_resolve(struct mad_exec *e, const struct mad_cmd *c) {
     if (dview) NSObject_release(dview);
 }
 
+static int g_cs_concurrent = -1;   /* madeira-duo cs-concurrent, see exec_dispatch */
 static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_compute_setpso c_pso;
     e->wr_all = 1;   /* ml1116: a dispatch writes through UAVs we do not enumerate here */
@@ -9951,7 +9953,20 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     if (!e->cenc) {
         if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
         exec_end(e);
-        e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false); if (e->cenc) g_enc_seq++;
+        /* madeira-duo cs-concurrent: D3D12 orders dispatches only at a UAV or
+         * transition barrier, and every barrier here ends the compute encoder
+         * (fence-chain 1..5; f6 keeps it open, so stays serial). Inside one
+         * encoder the dispatches are independent, so a concurrent encoder lets
+         * the GPU overlap them. PoE2 fights issue 2,500-5,300 dispatches a frame
+         * of ~4 threadgroups each in ~35 encoders; serial, each waits for the
+         * last to drain (text14: GPU 72-116 ms a frame). Opt-in:
+         * madeira.cfg cs-concurrent = 1 (default 0 = serial encoders, as before). */
+        if (g_cs_concurrent < 0) {
+            g_cs_concurrent = mad_cfg_int_pe("cs-concurrent", 0) ? 1 : 0;   /* 1 = compute encoders are concurrent between barriers (fence modes 1-5); 0 = serial, as before (default) */
+            if (g_cs_concurrent)
+                d3d12_log("[madeira-d3d12] cs-concurrent: compute encoders are concurrent between barriers (madeira.cfg cs-concurrent)\n");
+        }
+        e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, g_cs_concurrent > 0 && e->mode != 6); if (e->cenc) g_enc_seq++;
         e->cenc_pso = e->cpso; e->cenc_seq = g_enc_seq;
         if (g_fault_diag) mad_label(e->cenc, "C#%u %s fn=%llx:%s", g_enc_seq, e->cpso->vs_name,
                                     (unsigned long long)e->cpso->vs_fn, e->cpso->vs_name);
@@ -16613,6 +16628,33 @@ static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UI
     if (red >= 2 || g_smp_census) mad_sampler_log(si, filter, cmp, who ? who : "?");
 }
 
+#define MAD_SMP_CACHE_N 512
+struct mad_smp_cache_ent { unsigned char key[offsetof(struct WMTSamplerInfo, gpu_resource_id)]; UINT64 id; obj_handle_t smp; };
+static struct mad_smp_cache_ent g_smp_cache[MAD_SMP_CACHE_N];
+static LONG g_smp_cache_n, g_smp_cache_said;
+static SRWLOCK g_smp_cache_lock = SRWLOCK_INIT;
+static int mad_smp_cache_get(struct WMTSamplerInfo *si, obj_handle_t *out) {
+    LONG i, n; int hit = 0;
+    AcquireSRWLockShared(&g_smp_cache_lock);
+    n = g_smp_cache_n;
+    for (i = 0; i < n; i++)
+        if (!memcmp(g_smp_cache[i].key, si, sizeof g_smp_cache[i].key)) {
+            si->gpu_resource_id = g_smp_cache[i].id; *out = g_smp_cache[i].smp; hit = 1; break;
+        }
+    ReleaseSRWLockShared(&g_smp_cache_lock);
+    if (hit && !g_smp_cache_said && !InterlockedExchange(&g_smp_cache_said, 1))
+        d3d12_log("[madeira-d3d12] sampler-cache: identical CreateSampler descriptions share one Metal sampler\n");
+    return hit;
+}
+static void mad_smp_cache_put(const struct WMTSamplerInfo *si, obj_handle_t smp) {
+    AcquireSRWLockExclusive(&g_smp_cache_lock);
+    if (g_smp_cache_n < MAD_SMP_CACHE_N) {
+        struct mad_smp_cache_ent *e = &g_smp_cache[g_smp_cache_n];
+        memcpy(e->key, si, sizeof e->key); e->id = si->gpu_resource_id; e->smp = smp;
+        MemoryBarrier(); g_smp_cache_n++;
+    }
+    ReleaseSRWLockExclusive(&g_smp_cache_lock);
+}
 static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
         const D3D12_SAMPLER_DESC *desc, D3D12_CPU_DESCRIPTOR_HANDLE h) {
     struct mad_device *d = (struct mad_device *)This;
@@ -16621,12 +16663,21 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
     if (g_sd_state > 0) mad_dg_write(e, 1, "CreateSampler");   /* madeira-bcd: desc-guard */
 
     struct WMTSamplerInfo si;
+    obj_handle_t smp = 0; int cached = 0;
+    memset(&si, 0, sizeof si);   /* madeira-duo sampler-cache: the padding takes part in the key */
     if (desc) {
         UINT border = (desc->BorderColor[0] > 0.5f) ? 2u : (desc->BorderColor[3] > 0.5f) ? 1u : 0u;
         mad_sampler_info(&si, desc->Filter, desc->AddressU, desc->AddressV, desc->AddressW, desc->MaxAnisotropy, desc->ComparisonFunc, border, desc->MinLOD, desc->MaxLOD, "CreateSampler");
     } else mad_sampler_info(&si, D3D12_FILTER_MIN_MAG_MIP_LINEAR, 3, 3, 3, 1, 0, 0, 0.0f, 1000.0f, "CreateSampler (no description)");
 
-    obj_handle_t smp = MTLDevice_newSamplerState(d->mtl_device, &si);
+    /* madeira-duo sampler-cache: PoE2 creates ~16 samplers a frame from a handful of
+     * descriptions; each was a new Metal sampler (a host call) kept for the process's
+     * life. Identical descriptions now share the first one (samplers are immutable). */
+    cached = mad_smp_cache_get(&si, &smp);
+    if (!cached) {
+        smp = MTLDevice_newSamplerState(d->mtl_device, &si);
+        if (smp && si.gpu_resource_id) mad_smp_cache_put(&si, smp);
+    }
     if (!smp || !si.gpu_resource_id) {
         d3d12_log("[madeira-d3d12] CreateSampler: the backend gave no argument-buffer sampler\n");
         memset(e, 0, sizeof *e);
@@ -16652,7 +16703,7 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
      * life. Samplers are few and immutable, and tying one to a descriptor slot
      * that the application may overwrite would need a lifetime story that this
      * milestone does not have. */
-    mad_note_sampler(d, smp);
+    if (!cached) mad_note_sampler(d, smp);
 }
 
 /* ---- pipeline state -------------------------------------------------------

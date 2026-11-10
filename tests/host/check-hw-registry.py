@@ -231,7 +231,7 @@ int main( void )
               and "(CTX->HostFeatures.SupportsCRC << 20) |         // SSE4.2" in cpp
               and "(SupportsAVX() << 27) |                         // OSXSAVE" in cpp
               and "(SupportsAVX() << 28) |                         // AVX" in cpp
-              and "(SupportsAVX2() << 5) |                  // AVX2 support" in cpp
+              and re.search(r"\(SupportsAVX2\(\) << 5\) \|\s+// AVX2 support", cpp) is not None
               and "if (CTX->HostFeatures.SupportsAVX) {\n    XCR0 |= XCR0_AVX;" in cpp)
         check("FEX: MADEIRA_FEX_AVX starting with '1', or exactly '2', sets SupportsAVX, ARM64EC module only (what server_ios.c mirrors)",
               'getenv("MADEIRA_FEX_AVX")' in ios

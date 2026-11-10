@@ -3750,6 +3750,22 @@ static void *ios_mach_exception_thread( void *arg )
                                         c_ok ? "" : "<unreadable>", caller,
                                         NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueProcess : 0,
                                         NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0);
+                                /* BeamNG.drive (2026-11-01): the same int3 is PartitionAlloc's
+                                 * deliberate stop when its pool reservation was refused, which
+                                 * the [jumbo#] lines above show. Name that cause here so a
+                                 * new Chromium game is diagnosed from one log. */
+                                {
+                                    extern unsigned ios_jumbo_fail_count(void);
+                                    unsigned jf = ios_jumbo_fail_count();
+                                    if (jf)
+                                        dprintf(STDERR_FILENO,
+                                                "[brp-contain] likely cause: %u large (>= 1 GB) reservation(s) failed "
+                                                "earlier in this session (see the [jumbo#] lines). Chromium's "
+                                                "PartitionAlloc stops on this int3 when its 32 GB pool is refused. "
+                                                "A program that runs Chromium in its own process needs "
+                                                "env.MADEIRA_SC_PA_POOLS = 2 and env.MADEIRA_CEF_PA_EXES = <its exe>\n",
+                                                jf);
+                                }
                             }
                         }
                     }

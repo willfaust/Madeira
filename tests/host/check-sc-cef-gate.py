@@ -95,7 +95,7 @@ hinted = native[native.index('/* task#29 CEF plan C: a HINTED jumbo reserve that
 glue = hinted[hinted.index('ios_sc_glued_pools( &pick, &sz, type, protect )') - 200:]
 assert '*size_ptr == 0x800000000ULL && !((ULONG_PTR)hint & (0x800000000ULL - 1))' in glue
 assert '!sc2 && sc_helper && *size_ptr == 0x800000000ULL' in glue, 'layout 2 routes instead (check-sc-layout)'
-assert 'int sc_helper = ios_sc_cef_enabled() && ios_sc_current_is_helper();' in hinted
+assert 'int sc_helper = ios_sc_cef_enabled() && ios_sc_current_is_cef_host();' in hinted
 assert 'if (st2 && off)' in hinted and 'else if (st2) for (slot = 0x7C00000000ULL;' in hinted
 arena = function(native, 'void ios_reserve_fex_arena(void)')
 assert 'if (i == 0 && ios_sc_pa_hold_arena( &addr, &size )) goto sc_arena_placed;' in arena
@@ -108,7 +108,7 @@ print('PASS: only SocialClubHelper.exe\'s 32 GB-aligned 32 GB reserve takes the 
 sysinfo = function(native, 'void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 )')
 real_expr = ('    if (wow64) info->HighestUserAddress = (char *)get_wow_user_space_limit() - 1;\n'
              '    else info->HighestUserAddress = (char *)user_space_limit - 1;\n')
-widen = sysinfo.index('ios_sc2_reported_highest( real, wow64, ios_sc_layout_mode, ios_sc_current_is_helper() );')
+widen = sysinfo.index('ios_sc2_reported_highest( real, wow64, ios_sc_layout_mode, ios_sc_current_is_cef_host() );')
 assert sysinfo.index(real_expr) < widen < sysinfo.index('/* ml991: report, once,'), 'widened after the real value, logged by ml991'
 assert 'if (!wow64 && ios_sc_layout_mode == 2 && ios_sc_cef_enabled())' in sysinfo
 assert 'user_space_limit =' not in sysinfo, 'only the report changes'
@@ -146,7 +146,8 @@ sc_decl += 'enum { IOS_SC_K_V1 = 8 };\nstatic int ios_sc_layout_mode = -1, grant
 # madeira-bcd: the arena starts here (IOS_SC2_RDR2_ARENA_BASE with env MADEIRA_RDR2_VA_HOLD; not modelled)
 sc_decl += 'static uint64_t ios_sc2_arena_lo = IOS_SC_ARENA_BASE;\n'
 sc_decl += 'static void *ios_jit_current_peb( void ) { return (void *)1; }\n'
-sc_decl += 'static void ios_va_release_note( void ) {}\n'   # the placement proof's epoch (check-place-proof.py)
+sc_decl += 'static void ios_va_release_note( void ) {}\n'
+sc_decl += 'static const char *ios_sc_host_name( char *b, size_t n ) { snprintf( b, n, "SocialClubHelper.exe" ); return b; }\n'   # the placement proof's epoch (check-place-proof.py)
 sc_decl += ('static void ios_sc_grant_add( uint64_t v, uint64_t r, uint64_t real, uint64_t asked, int k, void *p ) '
             '{ (void)v; (void)r; (void)real; (void)asked; (void)k; (void)p; grants++; }\n')
 # madeira-bcd pool-low: ios_sc_layout reads the alias reservation's base from region C

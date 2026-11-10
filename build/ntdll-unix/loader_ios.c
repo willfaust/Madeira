@@ -3967,6 +3967,10 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
         if (child_is_i386)
         {
             CHILD_STAGE( "guest-window-reserve" );
+            {
+                extern void ios_x64_child_no_window_mark( int on );
+                ios_x64_child_no_window_mark( 0 );   /* a 32-bit child needs its window; never inherit a stale flag */
+            }
             status = ios_wow_window_reserve();
             dprintf(STDERR_FILENO, "[Wine child] i386 image %s machine=0x%x window=%p reserve=0x%x\n",
                     argc > 1 ? argv[1] : "(none)", ios_child_main_machine,
@@ -3981,8 +3985,15 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
                                  (unsigned)status );
         }
         else
+        {
+            extern void ios_x64_child_no_window_mark( int on );
+
             dprintf(STDERR_FILENO, "[Wine child] 64-bit image %s machine=0x%x (no guest window)\n",
                     argc > 1 ? argv[1] : "(none)", ios_child_main_machine);
+            /* x64-child-no-window: this thread's TEB/PEB must never come out of a 32-bit window,
+             * even if its pthread_t matches a recycled owner of a live parent's window. */
+            if (ios_child_main_machine) ios_x64_child_no_window_mark( 1 );
+        }
     }
 
     /* Allocate a new TEB for this child "process" thread */

@@ -3792,6 +3792,17 @@ unsigned int CDECL wine_server_call( void *req_ptr )
     sigset_t old_set;
     unsigned int ret;
 
+#ifdef WINE_IOS
+    {
+        /* exe-window end-parent (process_ios.c): a launcher whose own copy waits for its
+         * fixed base ends itself here, outside every section (no ntdll lock held) */
+        extern volatile int ios_exewin_end_parent_armed;
+        extern void ios_exe_win_end_parent_check(void);
+        if (__builtin_expect( __atomic_load_n( &ios_exewin_end_parent_armed, __ATOMIC_RELAXED ), 0 ) &&
+            !(ios_section_state() & (IOS_SECTION_DEPTH | IOS_SECTION_ABORT)))
+            ios_exe_win_end_parent_check();
+    }
+#endif
     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
     ret = server_call_unlocked( req_ptr );
     pthread_sigmask( SIG_SETMASK, &old_set, NULL );

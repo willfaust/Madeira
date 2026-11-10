@@ -1683,6 +1683,82 @@ static int sc_browser_cmdline( const WCHAR *cl, int cl_len, int jitless, const c
 }
 #endif
 
+#ifdef WINE_IOS
+/* exe-window end-parent: a program that starts a copy of itself and keeps running.
+ *
+ * ios_exe_win_wait_for_handoff (virtual_ios.c) lets a new process whose main image has
+ * stripped relocations wait for the process holding the fixed base to exit, and the block
+ * in NtCreateUserProcess returns to that parent at once so it can exit. That covers a
+ * bootstrapper that starts its copy and quits. A GameMaker launcher does not quit at once:
+ * DELTARUNE's chapter select starts "DELTARUNE.exe -game data.win ..." in a chapter folder
+ * and keeps running its own frame loop (2026-11-04 player log: the launcher thread spun on
+ * GetCurrentThreadId/GetTickCount64 for 2+ minutes after the spawn). On Windows the two
+ * run side by side in their own address spaces; here they share one, so the chapter gave
+ * up after MADEIRA_EXE_WINDOW_WAIT_MS and failed c0000018, and the launcher sat on screen.
+ *
+ * So when the parent is still running some time after the spawn, and the child is still
+ * waiting for its base, the parent ends itself (exit code 0), on the thread that started
+ * the child, at its next server request made outside every uninterrupted section (no ntdll
+ * lock held). Ending it from another thread is not safe for the fixed-base owner (see
+ * ios_end_child_process_async in server_ios.c): only the owner's own thread can hand the
+ * image back. A parent that exits by itself within the grace time is not touched, and a
+ * child that already gave up disarms it.
+ *
+ * env.MADEIRA_EXE_WINDOW_END_PARENT_MS: grace time in ms after the spawn (default 2000);
+ * 0 never ends the parent (the behaviour before). Keep it below MADEIRA_EXE_WINDOW_WAIT_MS
+ * (default 10000), or the child gives up first. */
+volatile int ios_exewin_end_parent_armed;
+static void * volatile ios_exewin_end_parent_peb;
+static volatile DWORD ios_exewin_end_parent_tid;
+static volatile double ios_exewin_end_parent_at;
+
+static void ios_exe_win_arm_end_parent(void)
+{
+    static int grace_ms = -1;
+
+    if (grace_ms < 0)
+    {
+        /* how long a program that started a copy of itself may keep running while the copy waits
+         * for its fixed base, in milliseconds, before it is ended so the copy can start; 0 never ends it */
+        const char *e = getenv( "MADEIRA_EXE_WINDOW_END_PARENT_MS" );
+        grace_ms = e && *e ? atoi( e ) : 2000;
+        if (grace_ms < 0) grace_ms = 0;
+    }
+    if (!grace_ms) return;
+    ios_exewin_end_parent_peb = NtCurrentTeb()->Peb;
+    ios_exewin_end_parent_tid = HandleToULong( NtCurrentTeb()->ClientId.UniqueThread );
+    ios_exewin_end_parent_at = ios_child_now() + grace_ms / 1000.0;
+    __atomic_store_n( &ios_exewin_end_parent_armed, 1, __ATOMIC_RELEASE );
+    dprintf( 2, "[exe-window] end-parent armed: if this process (peb=%p tid=%04x) is still running "
+             "in %d ms while the new process waits, it ends itself so the new process gets the fixed "
+             "base (MADEIRA_EXE_WINDOW_END_PARENT_MS=0 turns this off)\n",
+             ios_exewin_end_parent_peb, (unsigned int)ios_exewin_end_parent_tid, grace_ms );
+}
+
+/* Called by wine_server_call (server_ios.c) while armed, only outside every uninterrupted
+ * section. Returns when nothing is to be done; does not return when it ends the process. */
+void ios_exe_win_end_parent_check(void)
+{
+    extern int ios_exe_win_handoff_waits_on( void *peb );
+    void *peb = NtCurrentTeb()->Peb;
+
+    if (peb != ios_exewin_end_parent_peb) return;
+    if (HandleToULong( NtCurrentTeb()->ClientId.UniqueThread ) != ios_exewin_end_parent_tid) return;
+    if (ios_child_now() < ios_exewin_end_parent_at) return;
+    if (!__atomic_exchange_n( &ios_exewin_end_parent_armed, 0, __ATOMIC_ACQ_REL )) return;
+    if (!ios_exe_win_handoff_waits_on( peb ))
+    {
+        dprintf( 2, "[exe-window] end-parent disarmed: no new process is waiting for this "
+                 "process's fixed base any more\n" );
+        return;
+    }
+    dprintf( 2, "[exe-window] end-parent: this process (peb=%p) is still running after the grace "
+             "time and its new copy is waiting for the fixed base; ending it with code 0 "
+             "(MADEIRA_EXE_WINDOW_END_PARENT_MS=0 turns this off)\n", peb );
+    NtTerminateProcess( NtCurrentProcess(), 0 );
+}
+#endif
+
 /**********************************************************************
  *           NtCreateUserProcess  (NTDLL.@)
  */
@@ -2822,6 +2898,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
                      "returning from process creation without waiting for its start-up\n" );
             success = TRUE;
             status = STATUS_SUCCESS;
+            ios_exe_win_arm_end_parent();
         }
         else
         {

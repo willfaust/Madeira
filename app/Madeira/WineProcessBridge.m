@@ -6,6 +6,10 @@
 #import <os/log.h>
 #import <pthread.h>
 #import "WineProcessBridge.h"
+
+/* quit-ends-children: set by wine_session_quit_asked() (Quit game), cleared per launch. */
+static int g_madeira_quit_asked;
+void wine_session_quit_asked(void) { __atomic_store_n(&g_madeira_quit_asked, 1, __ATOMIC_RELEASE); }
 /* AVFoundation: AVAudioSession activation for the Tier-2 audio driver
  * (audio_null_ios.c RemoteIO backend). AudioToolbox: pulls the framework
  * in via autolink — the static-lib driver code can't autolink itself. */
@@ -19,6 +23,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <dirent.h>
+#include <string.h>
+#include <strings.h>
 #include "../../build/madeira_cfg.h"   /* ml1095: one config file */
 #include "../../build/madeira_redact.h"   /* the arguments are logged with credential-like values redacted */
 #include <sys/stat.h>
@@ -365,6 +371,26 @@ static uint64_t g_launch_exit = 0;
  * (steam://run/<App ID>); ntdll's process gate (build/ntdll-unix/process_ios.c)
  * refuses steam.exe and reports the App ID here. 0: none since the last reset. */
 static uint32_t g_steam_run_app = 0;
+/* The session's own program ended while a steam.exe it started still ran: a Steam
+ * game started without Madeira Dock (Start with: The game, or added as its own
+ * program) that hands itself to Steam (SteamAPI_RestartAppIfNecessary) and quits.
+ * The library then says how to start it (LibraryModel.steamNeededHint). */
+static int g_handed_to_steam = 0;
+int wine_handed_to_steam(void) { return __atomic_load_n(&g_handed_to_steam, __ATOMIC_ACQUIRE); }
+static void madeira_note_handed_to_steam(const char *names) {
+    /* names: the live children's file names, space-separated (madeira_live_game_children). */
+    for (const char *p = names; p && *p; ) {
+        while (*p == ' ') p++;
+        const char *end = strchr(p, ' ');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == 9 && strncasecmp(p, "steam.exe", 9) == 0) {
+            __atomic_store_n(&g_handed_to_steam, 1, __ATOMIC_RELEASE);
+            dprintf(STDERR_FILENO, "[steam-needed] the game started steam.exe and ended: it runs only when Steam starts it\n");
+            return;
+        }
+        p += len;
+    }
+}
 void wine_steam_run_requested(unsigned int appid) {
     __atomic_store_n(&g_steam_run_app, appid, __ATOMIC_RELEASE);
 }
@@ -392,6 +418,7 @@ void wine_exit_status_reset(void) {
     __atomic_store_n(&g_launch_exit_any, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_launch_exit, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_steam_run_app, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_handed_to_steam, 0, __ATOMIC_RELEASE);
 }
 int wine_crash_exit_status(uint32_t *status) {
     uint64_t value = __atomic_load_n(&g_launch_exit, __ATOMIC_ACQUIRE);
@@ -829,6 +856,41 @@ static void madeira_overlay_vcruntime32(NSFileManager *fm, NSString *prefix)
         if ([fm createSymbolicLinkAtPath:dst withDestinationPath:[source stringByAppendingPathComponent:f] error:nil]) linked++;
     }
     dprintf(STDERR_FILENO, "[WineProc] Symlinked %d MS VC++ x86 runtime DLLs over i386 builtins (Documents/vcruntime32; MADEIRA_VCREDIST_X86=0 leaves them out)\n", linked);
+}
+
+/* C:\windows\<farm>: links whose bundle file is gone. Each session relinks
+ * every file the bundle has by its own name, but a link whose name the bundle
+ * no longer has stays behind, pointing at nothing. Wine's file lookup ignores
+ * case and takes the first name that matches, so a dead WLDAP32.dll beside
+ * the live wldap32.dll can still win and fail with c0000135. Only dead links
+ * into an app bundle are removed; links into Documents are left alone. */
+static void madeira_prune_dead_farm_links(NSString *dir)
+{
+    DIR *d = opendir(dir.fileSystemRepresentation);
+    struct dirent *e;
+    int pruned = 0;
+
+    if (!d) return;
+    while ((e = readdir(d)))
+    {
+        char path[PATH_MAX], target[PATH_MAX];
+        struct stat st;
+        ssize_t n;
+
+        if (e->d_name[0] == '.') continue;
+        if (snprintf(path, sizeof(path), "%s/%s", dir.fileSystemRepresentation, e->d_name) >= (int)sizeof(path))
+            continue;
+        if (lstat(path, &st) != 0 || !S_ISLNK(st.st_mode)) continue;
+        if (stat(path, &st) == 0) continue;   /* the link still resolves */
+        n = readlink(path, target, sizeof(target) - 1);
+        if (n <= 0) continue;
+        target[n] = 0;
+        if (!strstr(target, ".app/")) continue;
+        if (unlink(path) == 0) pruned++;
+    }
+    closedir(d);
+    if (pruned)
+        dprintf(STDERR_FILENO, "[farm-names] removed %d dead bundle links from %s\n", pruned, dir.UTF8String);
 }
 
 /* C:\windows\syswow64: the i386 farm, the Windows name for this pattern. A
@@ -2260,6 +2322,9 @@ static void *wine_process_thread(void *arg) {
             NSFileManager *fm = [NSFileManager defaultManager];
 
             [fm createDirectoryAtPath:sys32Dir withIntermediateDirectories:YES attributes:nil error:nil];
+            for (NSString *farm in @[ @"system32", @"sysx64", @"sysaa64", @"syswow64" ])
+                madeira_prune_dead_farm_links([prefix stringByAppendingPathComponent:
+                    [@"drive_c/windows" stringByAppendingPathComponent:farm]]);
 
             NSArray *dlls = [fm contentsOfDirectoryAtPath:dllSource error:nil];
             int linked = 0;
@@ -2762,6 +2827,7 @@ static void *wine_process_thread(void *arg) {
             const char *wc = getenv("MADEIRA_WAIT_CHILDREN");
             char names[256];
             int n = madeira_live_game_children(names, sizeof names, 60.0);
+            if (n > 0) madeira_note_handed_to_steam(names);
             if (n > 0 && !(wc && wc[0] == '1')) {
                 dprintf(STDERR_FILENO, "[WineProc] the main process exited while %d child process(es) it started "
                         "still run (%s); the session ends with it (MADEIRA_WAIT_CHILDREN=1 keeps it while they run)\n",
@@ -2770,9 +2836,18 @@ static void *wine_process_thread(void *arg) {
                 dprintf(STDERR_FILENO, "[WineProc] the main process exited but %d child process(es) "
                         "it started still run (%s) -- a launcher started the game; the session goes on until "
                         "they exit (MADEIRA_WAIT_CHILDREN=1)\n", n, names);
-                unsigned ticks = 0;
+                unsigned ticks = 0, quitTicks = 0;
                 while ((n = madeira_live_game_children(names, sizeof names, -1.0)) > 0) {
                     usleep(200 * 1000);
+                    /* quit-ends-children: the player quit and the desktop was closed, but a
+                     * game that ignores the close (Stardew Valley, Nov 8) kept the session,
+                     * and with it Steam downloads and Repair, held forever. 10 s after
+                     * Quit the wait ends; wineserver_stop below closes what is left. */
+                    if (__atomic_load_n(&g_madeira_quit_asked, __ATOMIC_ACQUIRE) && ++quitTicks >= 50) {
+                        dprintf(STDERR_FILENO, "[WineProc] quit-ends-children: Quit was asked; %d child process(es) (%s) "
+                                "still run 10 s later, ending the session\n", n, names);
+                        break;
+                    }
                     if ((++ticks % 300) == 0)
                         dprintf(STDERR_FILENO, "[WineProc] still running: %d child process(es) (%s), %u s\n",
                                 n, names, ticks / 5);
@@ -2830,6 +2905,7 @@ int wine_process_start(const char *prefix_path) {
         LOG("Wine process already running");
         return 0;
     }
+    __atomic_store_n(&g_madeira_quit_asked, 0, __ATOMIC_RELEASE);   /* quit-ends-children */
 
     if (g_prefix_path) free(g_prefix_path);
     g_prefix_path = strdup(prefix_path);
@@ -2912,6 +2988,7 @@ int madeira_write_continue_flag(void) {
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
+
 static void mc_sample(const char *mode, const char *phase, uint64_t *fp_out) {
     task_vm_info_data_t v; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     memset(&v, 0, sizeof v);

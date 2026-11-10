@@ -169,6 +169,36 @@ if [ ${#GNUTLS_DEFS[@]} -gt 0 ]; then
 fi
 # OpenGL: opengl32's unix side (wrappers + generated thunks). It dispatches to
 # win32u's WGL layer, whose iOS driver is build/win32u-unix/opengl_ios.c.
+#
+# [gl-wow64-patch] The wine pin's opengl32 thunks pass a 32-bit program's
+# pointers straight through (ULongToPtr). Here a 32-bit program's memory sits
+# in a window at a high base, so those raw values point at nothing: every
+# 32-bit OpenGL game (Binding of Isaac, Escapists 2, Mafia, Inscryption) died
+# while OPENGL32.dll attached its first thread, reading TEB32+0xfdc at a bare
+# address like 0x302fdc ("OPENGL32.dll failed to initialize", c0000142).
+# patches/wine-opengl-winios.patch has the converted thunks, but it was a
+# manual step (docs/BUILDING.md), so a build from a clean wine tree left it
+# out. Apply it here when the tree does not have it yet.
+# MADEIRA_WINE_OPENGL_PATCH=0 builds the tree as it is.
+OPENGL_PATCH="$REPO_ROOT/patches/wine-opengl-winios.patch"
+if [ "${MADEIRA_WINE_OPENGL_PATCH:-1}" != 0 ]; then
+    if git -C "$WINE_SRC" apply --reverse --check "$OPENGL_PATCH" >/dev/null 2>&1; then
+        echo "  [gl-wow64-patch] wine-opengl-winios.patch already in the wine tree"
+    elif git -C "$WINE_SRC" apply --check "$OPENGL_PATCH"; then
+        git -C "$WINE_SRC" apply "$OPENGL_PATCH"
+        echo "  [gl-wow64-patch] applied wine-opengl-winios.patch to the wine tree"
+    else
+        echo "ERROR: [gl-wow64-patch] patches/wine-opengl-winios.patch neither applies to nor is in the wine tree" >&2
+        echo "       (32-bit OpenGL games would crash at start). MADEIRA_WINE_OPENGL_PATCH=0 builds without it." >&2
+        exit 1
+    fi
+    grep -q 'ios_wow_host_ptr( teb32 )' "$WINE_SRC/dlls/opengl32/unix_private.h" || {
+        echo "ERROR: [gl-wow64-patch] dlls/opengl32/unix_private.h still converts the 32-bit TEB with ULongToPtr" >&2
+        exit 1
+    }
+else
+    echo "  [gl-wow64-patch] MADEIRA_WINE_OPENGL_PATCH=0: opengl32 built from the wine tree as it is"
+fi
 compile_unixlib "$WINE_SRC/dlls/opengl32/unix_wgl.c" "opengl32_wgl" "opengl32" \
     -I"$WINE_SRC/dlls/opengl32"
 compile_unixlib "$WINE_SRC/dlls/opengl32/unix_thunks.c" "opengl32_thunks" "opengl32" \

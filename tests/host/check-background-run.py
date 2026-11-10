@@ -180,7 +180,6 @@ enum MadeiraConfig {
     nonisolated(unsafe) static var values: [String: String] = [:]
     static func get(_ key: String) -> String? { values[key] }
     static func gameValue(_ key: String) -> String? { nil }
-    static func flag(_ name: String, fallback: Bool = true) -> Bool { values["env.\(name)"].map { $0 != "0" } ?? fallback }
 }
 final class LogStore {
     nonisolated(unsafe) static let shared = LogStore()
@@ -233,7 +232,7 @@ MainActor.assumeIsolated {
     post(AVAudioSession.interruptionNotification, [AVAudioSessionInterruptionTypeKey: UInt(0)])
     check(resumes == 1, "an interruption that ended restarts the endpoint")
     post(UIApplication.didBecomeActiveNotification)
-    check(audioCalls.last == [0, 0, 0] && session.options == [.mixWithOthers], "back: endpoint as the game wants it, category restored (the game mixes with other apps by default)")
+    check(audioCalls.last == [0, 0, 0] && session.options.isEmpty, "back: endpoint as the game wants it, category restored")
     check(capCalls.last == 0, "back: CPU cap off")
     let checksBefore = checks
     RunLoop.main.run(until: Date().addingTimeInterval(2))
@@ -264,7 +263,6 @@ MainActor.assumeIsolated {
 
     // background-run = 0: halted at once, as before the background mode existed.
     MadeiraConfig.values["background-run"] = "0"
-    session.options = []
     post(UIApplication.willResignActiveNotification)
     check(session.options.isEmpty, "background-run = 0: category untouched")
     post(UIApplication.didEnterBackgroundNotification)
