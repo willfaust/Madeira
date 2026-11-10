@@ -297,3 +297,15 @@ cheaper or concurrent. Each has a switch, so one run can compare them:
   also reduce compile time". Shader speed may drop, so measure it.
 - `[kk-slow]` logs the compiling thread's QoS and the MSL size. `[kk-frame]` adds `feedback N (M untimed)`, to show
   why GPU time read 0 on the Duo.
+
+## Giant generated shaders (patch 0015)
+
+The install33c live log (11 Nov 2026) showed that 31 libraries with 0.5-1.5 MB of generated MSL took 227 of the 298 s
+of library compiles, 4-24 s each. MSL size is what drives the time. `[kk-slow]` now adds `hash <fnv64 of the MSL>`.
+The same hash in a later session means Metal's library cache didn't keep that library. Sources of at least
+`MADEIRA_KK_DUMP_MSL_KB` (default 250; 0 = off) are written once to
+`$MESA_SHADER_CACHE_DIR/msl-dump/<hash>.metal`, at most 64 files, so the generator can be studied. The compile QoS
+raise (0014) now also lifts user-initiated threads: PoE2's loader runs at user-initiated, so 0014 left it alone.
+
+Keep Madeira in the foreground while it compiles. In the background, Madeira holds the game under 50% of one core
+(`[bg-run]`), and compiles practically stop.
