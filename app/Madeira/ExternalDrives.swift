@@ -44,6 +44,9 @@ final class ExternalDrives: ObservableObject {
     static var steamInstallLibrary: String? { lock.lock(); defer { lock.unlock() }; return installTarget }
     /// The name of the drive Steam downloads go to when it is not connected.
     static var steamInstallMissing: String? { lock.lock(); defer { lock.unlock() }; return installMissing }
+    /// The folders opened this launch, as picked. DockInstallers.inside reads them (from
+    /// any thread) for the install scripts of a game on one.
+    static var openedRoots: [URL] { lock.lock(); defer { lock.unlock() }; return opened.values.map(\.root) }
     /// Where Steam libraries are looked for inside a picked folder.
     private static let libraryFolders = ["", "SteamLibrary", "Steam", "Program Files (x86)/Steam", "Program Files/Steam"]
 

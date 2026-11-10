@@ -135,6 +135,8 @@ struct LogEntry { enum Level { case info, success, error, debug } }
     func log(_ message: String, level: LogEntry.Level = .info) { lines.append(message) }
 }
 enum MadeiraDock { static let executable = "C:\\windows\\system32\\dockhost.exe" }
+// ExternalDrives.swift: the folders opened this launch (Settings › External drives).
+enum ExternalDrives { nonisolated(unsafe) static var openedRoots: [URL] = [] }
 ''' + game_src
 
 checks = r'''
@@ -426,6 +428,28 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(DockInstallers.found(game, drive: drive, defaultKey: false).processes.map(\.run.name) == ["tool", "shared runtime"],
                 "MADEIRA_INSTALL_DEFAULT_KEY=0: entries without a key are ignored")
         require(DockInstallers.programCount(game, drive: drive) == 5, "the sheet's program count")
+
+        // A game in a Steam library on a folder added under External drives: C:\External\<name>
+        // is a link out of drive_c to the picked folder, so only an opened folder counts.
+        let picked = base.appendingPathComponent("picked folder")
+        try write(picked.appendingPathComponent("steamapps/common/Away Game/installscript.vdf"), script)
+        try pe(picked.appendingPathComponent("steamapps/common/Away Game/Redist/Tool.EXE"), machine: 0x8664)
+        try FileManager.default.createDirectory(at: drive.appendingPathComponent("External"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: drive.appendingPathComponent("External/SSD"), withDestinationURL: picked)
+        let away = DockGame(id: 7009, name: "Away", installDir: "Away Game", library: "External/SSD/steamapps", installed: true, customExecutables: false)
+        let awayTool = "C:\\External\\SSD\\steamapps\\common\\Away Game\\redist\\tool.exe"
+        require(DockInstallers.found(away, drive: drive).scripts == 0 && DockInstallers.resolve(awayTool, drive: drive) == nil &&
+                DockInstallers.registryValues(away, drive: drive).isEmpty, "a folder not opened this launch: nothing behind its link is read")
+        ExternalDrives.openedRoots = [picked]
+        let awayFound = DockInstallers.found(away, drive: drive, defaultKey: true)
+        require(awayFound.scripts == 1 && awayFound.processes.map(\.run.name) == ["runtime a", "tool", "package", "gone"] &&
+                awayFound.processes[1].executable == awayTool &&
+                DockInstallers.resolve(awayTool, drive: drive)?.lastPathComponent == "Tool.EXE" &&
+                DockInstallers.registryValues(away, drive: drive).count == 1,
+                "an opened external folder: the game's install scripts, their programs and its Registry values (\(awayFound.processes.map(\.run.name)))")
+        require(DockInstallers.resolve(dir + "\\link\\wine", drive: drive) == nil, "  a link to anywhere else still does not resolve")
+        ExternalDrives.openedRoots = []
+        try FileManager.default.removeItem(at: drive.appendingPathComponent("External"))
 
         // ---- prepare(): a first start on a bundle without 32-bit support or msiexec
         MadeiraConfig.values["inproc-sync"] = "1"   // madsync chosen: the per-session request applies

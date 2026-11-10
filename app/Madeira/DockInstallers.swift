@@ -872,12 +872,22 @@ enum DockInstallers {
         enabled ? found(game, drive: drive).processes.count : 0
     }
 
+    /// Whether a path, links resolved, stays inside drive_c or inside a folder added under
+    /// Settings › External drives and opened this launch. Such a folder is linked as
+    /// C:\External\<name>, a link out of drive_c: a game in a Steam library there has its
+    /// install scripts, their programs and Steam's shared redistributables behind it.
     nonisolated static func inside(_ url: URL, drive: URL) -> Bool {
-        url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(drive.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+        func real(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+        let path = real(url)
+        if path.hasPrefix(real(drive) + "/") { return true }
+        return ExternalDrives.openedRoots.contains { root in
+            let folder = real(root)
+            return path == folder || path.hasPrefix(folder + "/")
+        }
     }
 
     /// A C:\ path resolved on disk the way Wine resolves it (case-insensitive), staying
-    /// inside drive_c; nil when it does not exist.
+    /// inside drive_c or an opened external folder (inside); nil when it does not exist.
     nonisolated static func resolve(_ windowsPath: String, drive: URL) -> URL? {
         guard windowsPath.uppercased().hasPrefix("C:\\"), windowsPath.utf8.count < 1024 else { return nil }
         let parts = windowsPath.dropFirst(3).split(separator: "\\", omittingEmptySubsequences: false).map(String.init)
