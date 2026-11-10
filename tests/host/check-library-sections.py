@@ -89,16 +89,19 @@ require('if steam.refreshing { ProgressView().accessibilityLabel("Refreshing Ste
 require('@AppStorage("madeiraLibraryHideInstalled") private var hideInstalled = false' in section and
         '@AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true' in section,
         'Steam: remembered states (installed shown, Not installed open by default)')
-require('static var collapsible: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }' in section,
-        'MADEIRA_LIBRARY_COLLAPSE (on by default) makes the titles collapsible')
+require('static var collapsible: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }' in section,
+        'MADEIRA_LIBRARY_COLLAPSE (on by default) makes the titles collapsible (New look off; a new-look store page always shows its games)')
 order = [body.index('LibrarySectionHeader(title: "Steam"'), body.index('SteamSignInCard { showSignIn = true }'),
          body.index('if hideInstalled && collapsible {'),
-         body.index('LibraryCells(items: groups.downloading + installed, layout: layout, width: width)'),
+         body.index('LibraryCells(items: top, layout: layout, width: width)'),
          body.index('"Pull down to load your Steam library."'), body.index('Text("Not installed").font(.headline)'),
          body.index('LibraryCells(items: groups.notInstalled, layout: layout, width: width)')]
 require(order == sorted(order), 'Steam order: title, sign-in, downloading + installed, empty text, Not installed')
+require('let fold = NewLook.enabled && part == .all' in body
+        and 'let top = fold ? groups.downloading : groups.downloading + installed' in body,
+        'Steam: New look off, the top list is downloading + installed (a new-look store page folds the installed ones below)')
 require('"No Windows games were found in this Steam library."' in body, 'Steam: empty-library text')
-require('} else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && search.isEmpty {' in body,
+require('} else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && installed.isEmpty && search.isEmpty {' in body,
         'Steam: the empty text only when signed in, loaded, nothing owned to install and no search')
 require('if part != .installed && signedIn && !groups.notInstalled.isEmpty {' in body and 'if showUninstalled {' in body
         and '.accessibilityValue(showUninstalled ? "Shown" : "Hidden")' in body,

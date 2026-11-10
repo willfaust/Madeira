@@ -333,6 +333,17 @@ enum JITPoolAuto {
         return true
     }
 
+    /// The starting screen's words when the pool ran out before the game came up
+    /// (LibraryModel.poolRestartNote). `added`: this start added the lines; otherwise the
+    /// config already had them (or MADEIRA_JIT_POOL_AUTO=0) and a fresh run may still get
+    /// a bigger pool from iPadOS.
+    static var startHeadline: String { L("Not enough memory") }
+    static func startMessage(_ title: String, added: Bool) -> String {
+        added
+            ? String(format: L("%@ ran out of JIT memory, so Madeira gave it bigger memory settings. Tap Close Madeira (the round arrow below), then open Madeira again: %@ starts by itself."), title, title)
+            : String(format: L("%@ ran out of JIT memory. Tap Close Madeira (the round arrow below), then open Madeira again; that often gives more memory, and %@ starts by itself."), title, title)
+    }
+
     /// The alert after the session.
     static func message(_ title: String) -> String {
         "\(title) ran out of JIT memory, so Madeira gave it bigger JIT memory settings. To use them, close Madeira (swipe it away in the app switcher), open it again and start \(title)."

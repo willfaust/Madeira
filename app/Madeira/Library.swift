@@ -140,8 +140,8 @@ enum BuildStamp {
 /// 1's physical pad) so there is no second timer. While the library owns input
 /// (no session, or the in-game menu is open) GamepadInput publishes a neutral
 /// pad to Windows. D-pad or left stick moves the focus, A opens, B goes back,
-/// Y adds a game, a shoulder switches tabs (with the store sidebar: stores,
-/// MenuPad.swift); in a session Back+Start opens the menu. A held direction
+/// Y adds a game, a shoulder switches tabs, X plays (the new look's highlight,
+/// PadHighlight.swift); in a session Back+Start opens the menu. A held direction
 /// repeats (0.35 s, then every 0.1 s); the triggers page up and down and View
 /// is search. MADEIRA_FRONTEND_CONTROLLER=0 turns navigation off.
 final class LibraryController: ObservableObject, @unchecked Sendable {
@@ -157,6 +157,8 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
     private var named = Set<String>()
     /// The held direction and when it next repeats.
     private var heldDirection: UInt32 = 0
+    /// The directions the left stick is pushed in now (with its in/out gap).
+    private var stick: UInt32 = 0
     private var repeatAt = Date.distantFuture
     private let allowed = MadeiraConfig.flag("MADEIRA_FRONTEND_CONTROLLER")
     var ownsInput: Bool { lock.lock(); defer { lock.unlock() }; return enabled && owns }
@@ -171,9 +173,19 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
         guard enabled else { lock.unlock(); return }
         var buttons = UInt32(raw)
         if owns {
-            // Stick past half way (the dead zone) counts as the D-pad.
-            if lx < -16000 { buttons |= 4 }; if lx > 16000 { buttons |= 8 }
-            if ly > 16000 { buttons |= 1 }; if ly < -16000 { buttons |= 2 }
+            // Stick past half way (the dead zone) counts as the D-pad. Once in, it stays in until
+            // the stick is back under a third: a stick resting near half way no longer flickers
+            // in and out and moves two or three rows for one push (Cameron, Test 6 log: one down
+            // went st-steam -> st-epic -> st-itch in 12 ms).
+            let held = stick
+            func past(_ value: Int16, _ sign: Int32, _ mask: UInt32) -> Bool {
+                Int32(value) * sign > (held & mask != 0 ? 10000 : 16000)
+            }
+            var pushed: UInt32 = 0
+            if past(lx, -1, 4) { pushed |= 4 }; if past(lx, 1, 8) { pushed |= 8 }
+            if past(ly, 1, 1) { pushed |= 1 }; if past(ly, -1, 2) { pushed |= 2 }
+            stick = pushed
+            buttons |= pushed
             if lt > 128 { buttons |= 0x10000 }; if rt > 128 { buttons |= 0x20000 }
         }
         var pressed = buttons & ~last; last = buttons
@@ -197,7 +209,7 @@ final class LibraryController: ObservableObject, @unchecked Sendable {
         if !own, buttons & 0x30 == 0x30, pressed & 0x30 != 0 { command = "menu" }
         if own {
             let names: [(UInt32, String)] = [(1, "up"), (2, "down"), (4, "left"), (8, "right"), (0x1000, "accept"), (0x2000, "back"),
-                                             (0x8000, "add"), (0x10, "menu"), (0x20, "search"), (0x100, "previous"), (0x200, "next"),
+                                             (0x8000, "add"), (0x4000, "play"), (0x10, "menu"), (0x20, "search"), (0x100, "previous"), (0x200, "next"),
                                              (0x10000, "pageUp"), (0x20000, "pageDown")]
             for (mask, name) in names where pressed & mask != 0 { command = name; break }
             if command == nil, pressed != 0 { LogTrail.pressedUnused(pressed) }
@@ -1159,6 +1171,29 @@ final class LibraryModel: ObservableObject {
         NextSteamApp.set(id)
         return "The game asked to start \(name). Madeira runs one game per app session: close Madeira and open it again, and \(name) starts by itself."
     }
+    /// The program the library started ended while a steam.exe it started still ran,
+    /// outside a Madeira Dock session: the game only runs when Steam starts it
+    /// (SteamAPI_RestartAppIfNecessary). Slay the Spire 2 on "Start with: The game" does
+    /// this. env.MADEIRA_STEAM_NEEDED_HINT = 0 leaves the old quiet return to the library.
+    private func steamNeededHint() -> SteamNeededHint? {
+        guard !quitRequested, MadeiraConfig.flag("MADEIRA_STEAM_NEEDED_HINT"), wine_handed_to_steam() != 0,
+              let entry = activeEntry, entry.desktop != true,
+              entry.steamAppID == nil || entry.startsSteamGameDirectly else { return nil }
+        LogStore.shared.log("[steam-needed] \(entry.title) handed itself to Steam; hint shown")
+        if entry.startsSteamGameDirectly {
+            return SteamNeededHint(id: entry.id, message: L("This game only runs when Steam starts it. Switch it to Madeira Dock, then start it again."),
+                                   canSwitch: true)
+        }
+        return SteamNeededHint(id: entry.id, message: L("This game only runs when Steam starts it. Start it from your Steam games in the library instead of as its own program."),
+                               canSwitch: false)
+    }
+    /// The alert's "Use Madeira Dock": the Steam game starts through Madeira Dock again.
+    func useMadeiraDock(_ id: UUID) {
+        guard var entry = entries.first(where: { $0.id == id }), entry.startsSteamGameDirectly else { return }
+        entry.steamStart = nil
+        save(entry)
+        LogStore.shared.log("[steam-needed] \(entry.title): Start with set back to Madeira Dock")
+    }
     private var readOnly = false
     private var metadataInFlight = Set<UUID>()
     /// Entries whose scan result waits for the scroll to end (a card that reappears meanwhile does not scan again).
@@ -1739,6 +1774,20 @@ final class LibraryModel: ObservableObject {
     /// its registry is on disk (MadeiraDockModel.watchReport): the starting screen shows Close
     /// Madeira beside the live log, so the restart it asks for does not depend on the alert.
     @Published var installsRestartReady = false
+    /// A Steam game started without Madeira Dock handed itself to Steam and quit
+    /// (wine_handed_to_steam, WineProcessBridge.m): the alert says to start it through
+    /// Madeira Dock, and offers to switch a Steam game's Start with back to it.
+    struct SteamNeededHint: Identifiable, Equatable {
+        let id: UUID          // the library entry
+        let message: String
+        let canSwitch: Bool   // a Steam game on "Start with: The game"
+    }
+    @Published var steamNeeded: SteamNeededHint? { didSet { if steamNeeded != nil { preparing = nil } } }
+    /// The JIT pool ran out while the starting screen was up (JITPoolAuto): the start has
+    /// failed, so the starting screen says so in plain words at once and offers Close
+    /// Madeira, which keeps the game (NextLibraryGame) so the next app run starts it.
+    @Published var poolRestartNote: String?
+    private var poolRestartEntry: UUID?
     /// CS_DEBUGGED is set but no debugger is attached (JIT was enabled outside
     /// Madeira): the text of the alert that offers Madeira's own Enable JIT.
     @Published var jitNotice: String? { didSet { if jitNotice != nil { preparing = nil } } }
@@ -1801,7 +1850,7 @@ final class LibraryModel: ObservableObject {
     func begin(_ entry: LibraryEntry, remember: Bool = true, dock: DockGame? = nil) {
         wine_exit_status_reset()
         LogTrail.began(entry, dock: dock != nil)
-        JITPoolMeter.reset(); smallPoolNoted = false; poolAutoChecked = false; poolAutoTitle = nil
+        JITPoolMeter.reset(); smallPoolNoted = false; poolAutoChecked = false; poolAutoTitle = nil; poolRestartNote = nil; poolRestartEntry = nil
         quitRequested = false
  quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil; installsRestartReady = false
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
@@ -1869,8 +1918,13 @@ final class LibraryModel: ObservableObject {
                 showGameView(reason: "surface")
             } else if Date().timeIntervalSince(launchStarted) > 30 { launchSlow = true }
         }
-        // iPadOS gave the JIT pool less room than asked at launch: say so once the game is up.
-        if !smallPoolNoted, !launching, current != nil, JITPoolMeter.current.shrunk {
+        // iPadOS gave the JIT pool less room than asked at launch. Without pool-split that is
+        // nearly every start (896 MB asked, 560-630 MB given, the main thread's stack splits the
+        // band), and most games never need more, so the banner only alarmed players. Off by
+        // default: a start that really runs out says "Not enough memory" (poolRestartNote).
+        // env.MADEIRA_JIT_SMALL_NOTICE = 1 brings the banner back.
+        if !smallPoolNoted, !launching, current != nil, JITPoolMeter.current.shrunk,
+           MadeiraConfig.flag("MADEIRA_JIT_SMALL_NOTICE", fallback: false) {
             smallPoolNoted = true
             let words = "JIT memory is small this time (\(JITPoolMeter.current.sizeMB.map { "\($0) MB" } ?? "smaller than usual")). " +
                 "Big games may stop loading; closing and reopening Madeira can give more."
@@ -1882,9 +1936,16 @@ final class LibraryModel: ObservableObject {
         // The JIT pool ran out: a library game gets the bigger-pool lines for its next start.
         if !poolAutoChecked, JITPoolMeter.current.exhausted > 0 {
             poolAutoChecked = true
-            if let entry = activeEntry, entry.desktop != true, entries.contains(where: { $0.id == entry.id }),
-               JITPoolAuto.apply(windowsPath: entry.windowsPath, title: entry.title) {
-                poolAutoTitle = entry.title
+            if let entry = activeEntry, entry.desktop != true, entries.contains(where: { $0.id == entry.id }) {
+                let added = JITPoolAuto.apply(windowsPath: entry.windowsPath, title: entry.title)
+                // Still on the starting screen: the game's program or a DLL found no room, so
+                // the start has failed. Say so now with Close Madeira, instead of a screen that
+                // waits on (Steam's code 45 comes ~10 s later) and an alert only after the session.
+                if startingScreen, MadeiraConfig.flag("MADEIRA_JIT_POOL_NOTICE_NOW") {
+                    poolRestartEntry = entry.id
+                    poolRestartNote = JITPoolAuto.startMessage(entry.title, added: added)
+                    LogStore.shared.log("[jit-pool-auto] \(entry.title): the starting screen says so now and offers Close Madeira (\(added ? "lines added" : "no lines added"))")
+                } else if added { poolAutoTitle = entry.title }
             }
         }
         if wine_process_is_running() != 0 {
@@ -1921,9 +1982,20 @@ final class LibraryModel: ObservableObject {
     func launchFailed(_ reason: String? = nil, offerJIT: Bool = false) {
         guard current != nil && !sawProcess else { return }
         LogTrail.ending("the start failed" + (reason.map { ": " + LogTrail.clip($0, 100) } ?? ""))
+        let entry = activeEntry
         finish()
         if offerJIT, let reason { jitNotice = reason }
-        else { error = reason ?? L("The session could not start. Check the diagnostic log and JIT status.") }
+        else {
+            let words = reason ?? L("The session could not start. Check the diagnostic log and JIT status.")
+            if !getHelpInstead(words, entry: entry) { error = words }
+        }
+    }
+    /// (get-help-auto) A launch error opens Get Help by itself (GetHelpView.swift) instead of the
+    /// library's OK alert, with the error's words in the report. False when Get Help or its
+    /// offer is off, or the game is not known: the alert shows as before.
+    private func getHelpInstead(_ words: String, entry: LibraryEntry?) -> Bool {
+        guard let entry else { return false }
+        return GetHelpCenter.launchError(title: entry.title, windowsPath: entry.windowsPath, error: words, onStartScreen: false)
     }
     /// Both flags change in one transaction without animation: the animated
     /// removal of a scrolling view with live content could leave the starting
@@ -1978,6 +2050,14 @@ final class LibraryModel: ObservableObject {
     }
     /// Close Madeira on the starting screen of a finished session of one-time installs: the
     /// same exit as the Restart Madeira alert's Close Madeira (ContentView).
+    /// Close Madeira on the starting screen after the JIT pool ran out: the pool is set up
+    /// once per app run, so the game's new lines (or a bigger pool) need a fresh run, and
+    /// that run starts the game by itself (NextLibraryGame, as the Restart Madeira alert does).
+    func closeForPoolRestart() {
+        if let id = poolRestartEntry { NextLibraryGame.set(id) }
+        LogStore.shared.log("[jit-pool-auto] closed by the user for a restart; the next app run starts the game")
+        exit(0)
+    }
     func closeForInstallsRestart() {
         LogStore.shared.log("[session-once] closed by the user for a restart (one-time installs finished)")
         exit(0)
@@ -2031,6 +2111,7 @@ final class LibraryModel: ObservableObject {
                 guard ended || late else { return }
                 timer.invalidate()
                 winios_close_desktop()
+                wine_session_quit_asked()   // quit-ends-children
                 LogStore.shared.log("[frontend] Quit game: closing the desktop behind the library (\(ended ? "the Dock game ended" : "\(Int(Self.forceCloseAfter)) s after Quit"))")
             }
         }
@@ -2058,8 +2139,9 @@ final class LibraryModel: ObservableObject {
     private func finish() {
         if sawProcess, let next = steamRunRequest() { restartNotice = next }
         else if let title = poolAutoTitle { error = JITPoolAuto.message(title) }
-        else if sawProcess, let report = exitReport() { error = report }
-        poolAutoTitle = nil
+        else if sawProcess, let hint = steamNeededHint() { steamNeeded = hint }
+        else if sawProcess, let report = exitReport() { if !getHelpInstead(report, entry: activeEntry) { error = report } }
+        poolAutoTitle = nil; poolRestartNote = nil; poolRestartEntry = nil
         timer?.invalidate(); timer = nil
         saveCurrentProfile()
         controllerMode = nil
@@ -2985,6 +3067,7 @@ extension View {
     /// `pad`: the card's id for a controller (MenuPad.swift), on the store sidebar's pages.
     @ViewBuilder func libraryCardButtonStyle(grid: Bool, pad: String? = nil) -> some View {
         if let pad, MenuPad.enabled { buttonStyle(MenuPadCardStyle(id: pad, grid: grid)) }
+        else if let pad, PadHighlight.enabled { buttonStyle(PadCardStyle(id: pad, grid: grid)) }
         else if grid { buttonStyle(LibraryCardButtonStyle()) } else { buttonStyle(.plain) }
     }
 }
@@ -3029,6 +3112,8 @@ struct LibraryBadges: View {
         var texts: [String] = []
         if entry.isBatch { texts.append("Batch") }   // ml1163
         if let note { texts.append(note) }
+        // (works-now) A Get Help report from this player that "Does it work now?" has not closed.
+        if GetHelp.enabled, let report = GetHelp.reported[entry.windowsPath], !report.asked { texts.append(L("Works now?")) }
         return texts
     }
     static func sizeText(_ entry: LibraryEntry) -> String? {
@@ -3525,8 +3610,6 @@ struct LibraryView: View {
     /// The Settings tab's own search text, kept apart from the library's.
     @State private var settingsSearch = ""
     @State private var focused: UUID?
-    /// A controller changed the store while on the page: ring its first cover once it is laid out (MenuPad).
-    @State private var padEnter = false
     @ObservedObject private var controller = LibraryController.shared
     @ObservedObject private var input = InputSettings.shared
     @State private var tab = 0
@@ -3539,9 +3622,32 @@ struct LibraryView: View {
     /// The new grid (LibraryGridPage.swift): off by default, and its stored size (a position on the levels).
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
     @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
-    /// Settings › Appearance › Store sidebar (LibrarySidebar.swift).
-    @AppStorage(LibrarySidebar.settingKey) private var sidebarOn = true
-    private var sidebarShown: Bool { LibrarySidebar.enabled && sidebarOn }
+    /// Settings › Appearance › New look (NewLook.swift): the tab bar, the new Library and game page.
+    @AppStorage(NewLook.key) private var newLookOn = true
+    private var newLook: Bool { NewLook.allowed && newLookOn }
+    @State private var lookTab: NewLookTab = .library
+    @State private var lookSearch = ""
+    /// Menu on a cover: its options (NewLookOptionsSheet).
+    @State private var lookOptions: LibraryEntry?
+    /// The tab Search was opened from: B on Search goes back there.
+    @State private var lookBefore: NewLookTab = .library
+    /// Each tab's own page stack (Apple's tab bar, one NavigationStack per tab): a store's page
+    /// and a Settings page are pushed inside their tab, so Back and the edge swipe work, the tab
+    /// bar stays, and every tab keeps its own place (ux-review-0044 #1, #2).
+    @State private var libraryPath = NavigationPath()
+    @State private var storesPath = NavigationPath()
+    @State private var downloadsPath = NavigationPath()
+    @State private var settingsPath = NavigationPath()
+    @State private var searchPath = NavigationPath()
+    /// The games whose pages are pushed in the tabs, by id (a store's game may not be in the
+    /// library's list yet: its page is a new entry until it is saved).
+    @State private var lookGames: [UUID: LibraryEntry] = [:]
+    /// Tapping the open tab: back to its first page, then to the top (each tap counts up).
+    @State private var lookTop: [NewLookTab: Int] = [:]
+    /// A store's game picked in Search: its sheet opens once the store's page is up (no timer).
+    @State private var lookPendingGame: NewLookSearch.StoreGame?
+    /// The Downloads tab's % badge.
+    @ObservedObject private var lookDownloads = NewLookDownloads.shared
     @AppStorage(LibraryGridSize.key) private var gridPosition: Double = -1
     @AppStorage("madeiraLibrarySort") private var sort = "played"
     @AppStorage("madeiraLibraryGroup") private var group = "platform"
@@ -3550,8 +3656,6 @@ struct LibraryView: View {
     @AppStorage("madeiraLibraryHideOthers") private var hideOthers = false
     // The store tab shown with Group by Platform (LibraryStoreTab).
     @AppStorage(LibraryStoreTab.key) private var storeTab = LibraryStoreTab.all.rawValue
-    // The shelf the store sidebar shows (LibrarySidebar.swift).
-    @AppStorage(LibrarySidebar.key) private var shelf = LibraryShelf.ready.rawValue
     private var storeTabs: [LibraryStoreTab] {
         group == "platform" ? LibraryStoreTab.available(steam: MadeiraDock.enabled && (SteamGamesSection.shown || SteamGamesSection.hasInstalled)) : []
     }
@@ -3590,44 +3694,41 @@ struct LibraryView: View {
         // The system tab bar: on iOS 26 it is the floating Liquid Glass bar whose
         // glass selection slides between the tabs and follows a drag. Icons only; the
         // names stay for VoiceOver.
-        TabView(selection: Binding(get: { tab }, set: { switchTab(to: $0) })) {
-            // The card layouts: the zoomable page or the original one (LibraryGridArm).
-            // The store sidebar (LibrarySidebar.swift) unless env.MADEIRA_LIBRARY_SIDEBAR = 0.
-            Group {
-                if sidebarShown { sidebarLibrary }
-                else if LibraryGridArm.zoomable(setting: zoomableGrid, layout: layout) { zoomableLibrary } else { library }
+        Group {
+        if newLook {
+            newLookBody
+        } else {
+            TabView(selection: Binding(get: { tab }, set: { switchTab(to: $0) })) {
+                // The card layouts: the zoomable page or the original one (LibraryGridArm).
+                // (Wave 8's store sidebar is gone: the new look replaced it, Cameron Nov 9.)
+                Group {
+                    if LibraryGridArm.zoomable(setting: zoomableGrid, layout: layout) { zoomableLibrary } else { library }
+                }
+                    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+                    .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
+                    .tag(0)
+                settingsTab
+                    .tabItem { Image(systemName: "gearshape.fill").accessibilityLabel("Settings") }
+                    .tag(1)
             }
-                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
-                // With the sidebar the Library and Settings switch goes: Settings is the gear at the
-                // bottom of the sidebar, and Settings has its own way back to the library.
-                .toolbar(sidebarShown ? .hidden : .automatic, for: .tabBar)
-                .tag(0)
-            settingsTab
-                .tabItem { Image(systemName: "gearshape.fill").accessibilityLabel("Settings") }
-                .toolbar(sidebarShown ? .hidden : .automatic, for: .tabBar)
-                .tag(1)
+            // The system search field (Liquid Glass on iOS 26) in the title's place, left
+            // of the library's buttons, on both tabs; each tab keeps its own text.
+            .background(LibraryNavSearch(text: tab == 0 ? $search : $settingsSearch,
+                                         placeholder: tab == 0 ? L("Search your library") : L("Search settings"))
+                .frame(width: 0, height: 0))
+            // Each tab is hosted by the tab bar controller, so a toolbar set inside a tab
+            // would not reach the navigation bar: the library's lives here.
+            // The title is a large leading toolbar item, level with the library's
+            // buttons like an App Store tab title; the bar's centred one is cleared.
+            // The trailing glass group changes with the tab (switchTab animates it),
+            // which iOS 26 draws as a Liquid Glass morph between the two.
+            .navigationTitle("")
+            .toolbar {
+                LibraryLargeTitle()
+                if tab == 0 { libraryToolbar } else { settingsToolbar }
+            }
         }
-        // The system search field (Liquid Glass on iOS 26) in the title's place, left
-        // of the library's buttons, on both tabs; each tab keeps its own text.
-        .background(LibraryNavSearch(text: tab == 0 ? $search : $settingsSearch,
-                                     placeholder: tab == 0 ? L("Search your library") : L("Search settings"))
-            .frame(width: 0, height: 0))
-        // Each tab is hosted by the tab bar controller, so a toolbar set inside a tab
-        // would not reach the navigation bar: the library's lives here.
-        // The title is a large leading toolbar item, level with the library's
-        // buttons like an App Store tab title; the bar's centred one is cleared.
-        // The trailing glass group changes with the tab (switchTab animates it),
-        // which iOS 26 draws as a Liquid Glass morph between the two.
-        .navigationTitle("")
-        .toolbar {
-            LibraryLargeTitle()
-            if tab == 0 { libraryToolbar } else { settingsToolbar }
         }
-        // The store sidebar runs the full height of the screen, so on its page the title,
-        // search and buttons move beside it (LibrarySidebarHeader) and the bar is hidden.
-        // iPad Settings with the sidebar (SettingsSplit) draws its own title, search and status too.
-        .toolbar(sidebarShown && (tab == 0 || (LibrarySidebar.padSettings && SettingsPages.enabled)) ? .hidden : .automatic, for: .navigationBar)
         // On the tab view, not inside one tab's page: an alert attached to the Library
         // page cannot present while Settings is showing, so an error raised there (its
         // Enable JIT, for one) waited until the Library tab came back.
@@ -3638,6 +3739,8 @@ struct LibraryView: View {
         } message: { Text(model.error ?? "") }
         // Signing that runs out: the refresh, and the offer when it could not run (SigningRefresh.swift).
         .modifier(SigningRefreshOffer())
+        // (get-help) After a game stopped by itself: "<game> Stopped. Get Help?" (GetHelpView.swift).
+        .modifier(GetHelpOffer(play: play))
         // A setup opened from Files, a chat or a madeira://setup link (GameSetupShare.swift).
         .modifier(GameSetupInboxPresenter())
         .fullScreenCover(isPresented: $onboarding.presented) { OnboardingView() }
@@ -3657,22 +3760,16 @@ struct LibraryView: View {
         .onAppear { GlassSkin.shared.start() }
         .onDisappear { GlassSkin.shared.stop() }
         .onReceive(controller.commands) { command in
-            guard selected == nil, !browser, !onboarding.presented else { return }
-            // The shoulders switch tabs; with the store sidebar they switch stores (MenuPad.swift),
-            // and in Settings Menu (and B on iPad, where Settings has no pushed pages) goes back to
-            // the library, as the tab switch is hidden.
-            if !sidebarShown, command == "previous" || command == "next" { switchTab(to: 1 - tab) }
-            if sidebarShown, MenuPad.enabled, tab == 1, MenuPad.shared.sheets == 0, Date() >= MenuPad.shared.quietUntil,
-               command == "menu" || (command == "back" && LibrarySidebar.padSettings && SettingsPages.enabled) {
-                MenuPad.shared.show(); switchTab(to: 0)
-            }
+            guard !newLook, selected == nil, !browser, !onboarding.presented, GetHelpCenter.shared.open == nil else { return }
+            // The shoulders switch tabs.
+            if command == "previous" || command == "next" { switchTab(to: 1 - tab) }
         }
     }
     @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) { libraryOptions }
         ToolbarItem(placement: .topBarTrailing) { Button { browser = true } label: { Label("Add executable", systemImage: "plus") } }
     }
-    /// The library's layout, Group by and Sort by menu: in the bar, or beside the store sidebar.
+    /// The library's layout, Group by and Sort by menu, in the bar.
     private var libraryOptions: some View {
             Menu {
                 if zoomableGrid {
@@ -3697,15 +3794,12 @@ struct LibraryView: View {
                         Label("Compact list", systemImage: "list.dash").tag("compactList")
                     }
                 }
-                // The sidebar groups by store itself.
-                if !sidebarShown {
                 Picker("Group by", selection: $group) {
                     Label("Last played", systemImage: "clock.arrow.circlepath").tag("played")
                     Label("Installed", systemImage: "arrow.down.circle").tag("installed")
                     Label("Platform", systemImage: "square.stack").tag("platform")
                     Label("None", systemImage: "square.grid.2x2").tag("none")
                 }.pickerStyle(.menu)
-                }
                 Picker("Sort by", selection: $sort) {
                     Label("Last played", systemImage: "clock").tag("played")
                     Label("Name", systemImage: "textformat.abc").tag("name")
@@ -3715,12 +3809,6 @@ struct LibraryView: View {
             } label: { Label("Library options", systemImage: "line.3.horizontal.decrease") }
     }
     @ToolbarContentBuilder private var settingsToolbar: some ToolbarContent {
-        // The tab switch is hidden with the sidebar: the way back to the library (iPhone).
-        if sidebarShown {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { switchTab(to: 0) } label: { Label(L("Library"), systemImage: "square.grid.2x2") }
-            }
-        }
         ToolbarItem(placement: .topBarTrailing) {
             Button(action: enableJIT) {
                 HStack(spacing: 6) {
@@ -3745,11 +3833,7 @@ struct LibraryView: View {
     /// The Settings tab: its pages (SettingsPages.swift), or, while the search field holds
     /// text or with env.MADEIRA_SETTINGS_PAGES = 0, the one long page below.
     @ViewBuilder private var settingsTab: some View {
-        if sidebarShown, SettingsPages.enabled, LibrarySidebar.padSettings {
-            // iPad: laid out like the iPad's Settings app, the list always on the left (SettingsPages.swift).
-            SettingsSplit(search: $settingsSearch, startDock: startDock,
-                          enableJIT: enableJIT, library: { switchTab(to: 0) }, active: tab == 1) { settings }
-        } else if SettingsPages.enabled, settingsSearch.trimmingCharacters(in: .whitespaces).isEmpty {
+        if SettingsPages.enabled, settingsSearch.trimmingCharacters(in: .whitespaces).isEmpty {
             SettingsPagesList(startDock: startDock)
         } else {
             settings
@@ -3769,13 +3853,13 @@ struct LibraryView: View {
             if settingsShow("diagnostics", "extended logging", "logging", "log", "help", "Claude") {
                 Section {
                     Toggle("Extended logging", isOn: $input.diagnostics)
-                    // ClaudeHelp.swift: one file with the fixes guide and the player's report, for a chat.
-                    ClaudeHelpButton(entry: nil)
+                    // GetHelpView.swift: the scrubbed report as one .txt for the Madeira Discord (Cameron, Nov 8).
+                    DiscordLogButton(entry: nil, row: true)
                     NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
                         Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
                     }
                 } header: { Text("Diagnostics") } footer: {
-                    Text("Get Help from Claude makes one small file: a guide to known fixes, your settings and the key lines of the last game log, with personal details taken out. For one game's config too, use the button on its Game details page.")
+                    Text("Save copy for Discord makes one text file (up to 5 MB) with the last game's log and your settings, with personal details taken out. Post it in the Madeira Discord.")
                 }
             }
             if settingsShow("pointer", "mouse", "cursor", "touch", "trackpad", "sensitivity") {
@@ -3816,18 +3900,18 @@ struct LibraryView: View {
                     Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
                 }
             }
-            if settingsShow("appearance", "grid", "library", "new", "zoom", "pinch", "haptics", "cards", "sidebar", "store") {
+            if settingsShow("appearance", "grid", "library", "new", "zoom", "pinch", "haptics", "cards", "new look", "look", "store") {
                 Section {
-                    if LibrarySidebar.enabled {
-                        Toggle("Store sidebar", isOn: $sidebarOn)
+                    if NewLook.allowed {
+                        Toggle("New look", isOn: $newLookOn)
                     }
                     Toggle("New library grid", isOn: $zoomableGrid)
                     if zoomableGrid {
                         Toggle("Zoom haptics", isOn: $zoomHaptics)
                     }
                 } footer: {
-                    Text(LibrarySidebar.enabled
-                         ? L("Store sidebar lists your stores down the left of the library. Off, the library is one page with store tabs, as before. New library grid applies only with the sidebar off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.")
+                    Text(NewLook.allowed
+                         ? L("New look: a tab bar, every installed game on one page, the Madeira island behind it and one controller highlight. Off, the library is one page with store tabs, as before. New library grid applies only with New look off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.")
                          : L("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size."))
                 }
             }
@@ -3956,7 +4040,7 @@ struct LibraryView: View {
         }
         .refreshable { await SteamGamesSection.refresh() }
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
+            guard !newLook, tab == 0, selected == nil, !browser, !onboarding.presented else { return }
             let items = focusOrder
             let ids = [LibraryEntry.desktopID] + items.map(\.id)
             let index = ids.firstIndex(where: { $0 == focused }) ?? 0
@@ -3982,166 +4066,6 @@ struct LibraryView: View {
         }
         }
     }
-    /// The store sidebar's page (LibrarySidebar.swift): a list of shelves on the left and the
-    /// chosen one on the right. A store's page is its own section, as on the page above, so
-    /// sign-in, installs and game pages work the same; Ready to play lists every installed
-    /// game; Other games the games you added.
-    private var sidebarLibrary: some View {
-        LibrarySidebarFrame(selection: $shelf,
-                            readyCount: LibraryReadyGame.all(search: "").count,
-                            otherCount: LibraryReadyGame.added().count,
-                            search: $search,
-                            desktop: { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry },
-                            settings: { switchTab(to: 1) }) { shelf, width, rail in
-            ScrollViewReader { reader in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // The bar's buttons beside the full-height sidebar (its title and search are in the list),
-                    // and JIT and Memory+ when the list is folded to icons.
-                    LibrarySidebarHeader(search: $search, rail: rail, options: { libraryOptions }, add: { browser = true })
-                    switch shelf {
-                    case .ready:
-                        LibraryReadyGames(search: search, width: width, open: { selected = $0 })
-                    case .steam:
-                        SteamGamesSection(search: search, layout: layout, sort: sort, width: width, part: .all, open: { selected = $0 })
-                    case .epic:
-                        EpicGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
-                    case .gog:
-                        GOGGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
-                    case .itch:
-                        ItchGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
-                    case .ea:
-                        EAGamesSection(search: search, layout: layout, width: width, open: { selected = $0 })
-                    case .other:
-                        LibraryShelfTitle(title: L("Other games"), note: L("Games that aren't from a store."))
-                        if entries.isEmpty {
-                            Text(search.isEmpty
-                                 ? L("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe.")
-                                 : L("No other games match your search."))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            cells(entries, width: width)
-                        }
-                        Button { browser = true } label: {
-                            Label("Add a game", systemImage: "plus").font(.headline).frame(minHeight: 44).padding(.horizontal, 18)
-                                .foregroundStyle(.white).background(LibrarySidebar.blue, in: Capsule())
-                        }.buttonStyle(.plain)
-                            .menuPad("other:add", cornerRadius: 22) { browser = true }
-                    }
-                }
-                // Ambient light behind the store sections' cards, as on the page above.
-                .backgroundPreferenceValue(AmbientGlowKey.self) { AmbientGlowLayer(items: $0) }
-                .padding(16).frame(maxWidth: 1100, alignment: .leading).frame(maxWidth: .infinity, alignment: .leading)
-                // Where the controller-reachable covers and buttons are (MenuPad.swift).
-                .coordinateSpace(name: MenuPadSpace.name)
-                .onPreferenceChange(MenuPadFrames.self) { frames in
-                    MenuPad.shared.frames = frames
-                    if padEnter, let first = MenuPad.shared.entry(for: LibraryShelf.current(self.shelf)) {
-                        padEnter = false; MenuPad.shared.move(to: first)
-                    }
-                }
-            }
-            .refreshable { await SteamGamesSection.refresh() }
-            .id(shelf)
-            // A new store's page replaces the old one at once: no cross-fade, which looked like
-            // ghosting and felt slow (Cameron, Wave 9).
-            .transition(.identity)
-            // The ringed cover stays on screen.
-            .onReceive(MenuPad.shared.$focus) { id in
-                guard let id, !id.hasPrefix("side:") else { return }
-                withAnimation(MenuPad.animation) { reader.scrollTo(id, anchor: .center) }
-            }
-            }
-        }
-        // A controller: the ring over the sidebar and the page (MenuPad.swift); without it
-        // (env.MADEIRA_MENU_CONTROLLER = 0) up and down change the shelf and + adds a game.
-        .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented, MenuPad.shared.sheets == 0,
-                  Date() >= MenuPad.shared.quietUntil else { return }
-            if MenuPad.enabled { padCommand(command); return }
-            if command == "add" { browser = true }
-            else if command == "up" || command == "down" {
-                let shelves = LibraryShelf.available
-                let index = shelves.firstIndex(of: LibraryShelf.current(shelf)) ?? 0
-                let next = shelves[(index + (command == "up" ? -1 : 1) + shelves.count) % shelves.count]
-                next.unfold(); shelf = next.rawValue
-            }
-        }
-        .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, play: play, jit: jit))
-        .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshFlag() } }
-        .onAppear {
-            GlassSkin.shared.start()
-            if MenuPad.enabled { MenuPad.shared.claimControllerEvents() }
-        }
-        // A game page closed (B on a controller closes it): that press is not the library's too.
-        .onChange(of: selected == nil) { _, closed in if closed { MenuPad.shared.quietUntil = Date().addingTimeInterval(0.3) } }
-    }
-    /// One controller press on the store sidebar's library (MenuPad.swift).
-    private func padCommand(_ command: String) {
-        let pad = MenuPad.shared
-        let current = LibraryShelf.current(shelf)
-        // A ringed cover that is no longer on the page (another store was picked by touch):
-        // the ring goes to the store's row.
-        if !pad.onSidebar, let ringed = pad.focus, pad.frames[ringed] == nil { pad.move(to: MenuPad.side(current)) }
-        // The first press (or the first after a touch) only shows the ring, where it was;
-        // at the very first, on the page's first cover.
-        if pad.show() {
-            if pad.focus == nil { pad.move(to: pad.entry(for: current) ?? MenuPad.side(current)) }
-            if ["up", "down", "left", "right", "accept"].contains(command) { return }
-        }
-        let rows = LibraryShelf.available.map(MenuPad.side) + [MenuPad.desktopRow, MenuPad.settingsRow]
-        let focus = pad.focus ?? MenuPad.side(current)
-        func pick(_ next: LibraryShelf, enter: Bool) {
-            next.unfold()
-            if next != current {
-                var instant = Transaction(); instant.disablesAnimations = true
-                withTransaction(instant) { shelf = next.rawValue }
-                pad.frames = [:]
-            }
-            LogStore.shared.log("[menu-pad] store=\(next.rawValue)")
-            // The ring goes to the store's row, and into its page once the page is laid out
-            // (it stays on the row when the page has nothing to ring).
-            if enter, next == current, let first = pad.entry(for: next) { pad.move(to: first) }
-            else { pad.move(to: MenuPad.side(next)); padEnter = enter }
-        }
-        switch command {
-        case "up", "down":
-            if pad.onSidebar {
-                let index = rows.firstIndex(of: focus) ?? 0
-                pad.move(to: rows[max(0, min(rows.count - 1, index + (command == "up" ? -1 : 1)))])
-            } else if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: command, in: pad.frames) {
-                pad.move(to: next)
-            }
-        case "pageUp", "pageDown":
-            guard !pad.onSidebar, let from = pad.frames[focus] else { return }
-            let jump = max(300, (UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }.first ?? 800) * 0.75)
-            if let next = MenuPad.nearest(from: from, direction: command == "pageUp" ? "up" : "down", in: pad.frames, jump: jump) { pad.move(to: next) }
-        case "left":
-            guard !pad.onSidebar else { return }
-            if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: "left", in: pad.frames) { pad.move(to: next) }
-            else { pad.move(to: MenuPad.side(current)) }
-        case "right":
-            if pad.onSidebar { pick(current, enter: true) }
-            else if let from = pad.frames[focus], let next = MenuPad.nearest(from: from, direction: "right", in: pad.frames) { pad.move(to: next) }
-        case "accept":
-            if focus == MenuPad.desktopRow { selected = model.entries.first(where: { $0.desktop == true }) ?? .desktopEntry }
-            else if focus == MenuPad.settingsRow { switchTab(to: 1) }
-            else if pad.onSidebar, let next = LibraryShelf(rawValue: String(focus.dropFirst(5))) { pick(next, enter: true) }
-            else { LogStore.shared.log("[menu-pad] open \(focus)"); pad.press.send(focus) }
-        case "back":
-            if !pad.onSidebar { pad.move(to: MenuPad.side(current)) }
-        case "previous", "next":
-            let shelves = LibraryShelf.available
-            let index = shelves.firstIndex(of: current) ?? 0
-            pick(shelves[(index + (command == "previous" ? -1 : 1) + shelves.count) % shelves.count], enter: !pad.onSidebar)
-        case "add": browser = true
-        case "menu": switchTab(to: 1)
-        case "search": pad.search.send()
-        default: break
-        }
-        if !pad.onSidebar, let ringed = pad.focus { pad.remembered[LibraryShelf.current(shelf).rawValue] = ringed }
-    }
-
     /// The Desktop button at the top of the page (both grids).
     private var desktopButton: some View {
         HStack {
@@ -4200,7 +4124,7 @@ struct LibraryView: View {
                         open: { selected = $0 },
                         desktop: { AnyView(desktopButton) })
         .onReceive(controller.commands) { command in
-            guard tab == 0, selected == nil, !browser, !onboarding.presented else { return }
+            guard !newLook, tab == 0, selected == nil, !browser, !onboarding.presented else { return }
             let items = focusOrder
             let ids = [LibraryEntry.desktopID] + items.map(\.id)
             let index = ids.firstIndex(where: { $0 == focused }) ?? 0
@@ -4273,6 +4197,24 @@ private struct LibrarySheets: ViewModifier {
     @Binding var selected: LibraryEntry?
     var play: (LibraryEntry) -> Void
     @ObservedObject var jit: JITCoordinator
+    /// (new look) false: the game page is pushed inside a tab (LibraryView.lookOpenGame), not a cover.
+    var cover = true
+    private func detail(_ entry: LibraryEntry) -> some View {
+        // The details page stays up until the session's starting screen takes over (or an error needs the library's alert).
+        LibraryDetail(entry: entry, play: { profile in
+            play(profile)
+            // Not while Play is still enabling JIT: the session's start, an error, or
+            // JIT setup closes the page then.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
+            }
+        })
+        // The game page: A is Play and B is back (LibraryDetail); the system's own focus must
+        // not also walk its rows and press them (Cameron, Wave 9: A on a game card "clicks
+        // through the options"). MenuPad also claims the window.
+        .modifier(ClaimGamepadEvents())
+        .logScreen("game page: \(entry.title)")
+    }
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $browser) {
@@ -4285,22 +4227,10 @@ private struct LibrarySheets: ViewModifier {
                 .modifier(ClaimGamepadEvents())
                 .logScreen("add a game")
             }
-            .sheet(item: $selected) { entry in
-                // The details page stays up until the session's starting screen takes over (or an error needs the library's alert).
-                LibraryDetail(entry: entry, play: { profile in
-                    play(profile)
-                    // Not while Play is still enabling JIT: the session's start, an error, or
-                    // JIT setup closes the page then.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-                        if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }
-                    }
-                })
-                // The game page: A is Play and B is back (LibraryDetail); the system's own focus must
-                // not also walk its rows and press them (Cameron, Wave 9: A on a game card "clicks
-                // through the options"). MenuPad also claims the window.
-                .modifier(ClaimGamepadEvents())
-                .logScreen("game page: \(entry.title)")
-            }
+            // The game page: a sheet in the original look, a page pushed inside a tab in the new look
+            // (LibraryView.lookOpenGame; cover: false). A cover only where a caller still asks for one.
+            .sheet(item: NewLook.enabled ? .constant(nil) : $selected) { entry in detail(entry) }
+            .fullScreenCover(item: NewLook.enabled && cover ? $selected : .constant(nil)) { entry in detail(entry) }
             .onChange(of: model.current) { _, current in if current != nil { selected = nil } }
             .onChange(of: model.error) { _, error in if error != nil { selected = nil } }
             .onChange(of: model.restartNotice) { _, notice in if notice != nil { selected = nil } }
@@ -4323,6 +4253,10 @@ struct ExecutableBrowser: View {
     @State private var error: String?
     var body: some View {
         List {
+            // [battle-net] Get or add Battle.net, at the top of drive_c's list.
+            if BattleNet.enabled, folder.standardizedFileURL == LibraryModel.drive.standardizedFileURL {
+                BattleNetAddRow(select: select)
+            }
             if let error { Text(error).foregroundStyle(.red) }
             ForEach(files, id: \.path) { file in
                 if file.hasDirectoryPath {
@@ -4367,6 +4301,10 @@ private struct LibraryPlayStyle: ButtonStyle {
 struct LibraryDetail: View {
     @State internal var entry: LibraryEntry
     var play: (LibraryEntry) -> Void
+    /// (new look) The page is pushed inside a tab's page stack, like any iPhone page (ux-review-0044
+    /// #1), instead of covering the screen: its own pages are pushed on that stack too. nil: the
+    /// page is a sheet or cover with its own stack.
+    var stack: LibraryDetailStack? = nil
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
     @State private var importCover = false
@@ -4380,6 +4318,10 @@ struct LibraryDetail: View {
     @State private var confirmReset = false
     /// (compat-report) "Copied" on the button for 2 s after a tap.
     @State private var compatCopied = false
+    /// (debug-logging) "Copied" on Copy debug info for 2 s after a tap (test bundle only).
+    @State private var debugCopied = false
+    /// (get-help) The Get Help sheet (GetHelpView.swift).
+    @State private var getHelp = false
     @State private var leaving = false
     @State private var error: String?
     @State private var copiedLink = false
@@ -4400,6 +4342,15 @@ struct LibraryDetail: View {
     /// the game's config lines in its GameProfiles.swift file. This page's
     /// controls read and write them; the entry fields upstream keeps for the
     /// same options (avx, reportNVIDIA, config) are moved into them once.
+    /// (debug-logging) The level read from this game's config; setting one rewrites only the lines it manages.
+    private var debugLevel: Binding<DebugLogging.Level> {
+        Binding(get: { DebugLogging.level(of: bcd.configText) }, set: { level in
+            let text = DebugLogging.apply(level, to: bcd.configText)
+            bcd.configText = text
+            GameProfile(windowsPath: entry.windowsPath).text = text
+            LogStore.shared.log("[debug-log] level \(level.title) for \(entry.title)")
+        })
+    }
     private func reloadBCD() {
         bcd = BCDGameValues(windowsPath: entry.windowsPath)
         bcd.unityIL2CPP = BCDLaunch.isUnityIL2CPP(entry)
@@ -4542,6 +4493,7 @@ struct LibraryDetail: View {
             case .achievements: return "Achievements"
             case .library: return "Library details"
             case .iniFiles: return "Settings files"
+            case .mods: return "Mods"
             case .advanced: return "Advanced"
             }
         }
@@ -4563,7 +4515,28 @@ struct LibraryDetail: View {
             case .achievements: return "trophy"
             case .library: return "info.circle"
             case .iniFiles: return "doc.text"
+            case .mods: return "puzzlepiece.extension"
             case .advanced: return "wrench.and.screwdriver"
+            }
+        }
+        /// The new look's second line under the page's row, saying what is in it (the mock-up's
+        /// game page; Cameron, Nov 9: follow the mock-up).
+        var blurb: String {
+            switch self {
+            case .display: return L("Resolution, screen shape and upscaling.")
+            case .controls: return L("Controller mode, binds and the touch buttons.")
+            case .launch: return L("How the game starts.")
+            case .compatibility: return L("Fixes for games that crash or won't start.")
+            case .steam, .gog, .itch, .epic, .ea: return L("This game in its store.")
+            case .cloud: return L("Saves kept in Steam Cloud.")
+            case .workshop: return L("Steam Workshop items for this game.")
+            case .achievements: return L("Your achievements in this game.")
+            case .binds: return L("What each controller button presses.")
+            case .assist: return L("Gyro aiming and turbo buttons.")
+            case .library: return L("Cover art, and removing it from the library.")
+            case .iniFiles: return L("The game's .ini and .cfg files.")
+            case .mods: return L("Mods for this game.")
+            case .advanced: return L("Logs, sharing its setup, and reset.")
             }
         }
         /// A Steam game's Steam Workshop items (SteamWorkshop.swift).
@@ -4574,8 +4547,12 @@ struct LibraryDetail: View {
         /// An Epic or EA game's store page (repair, version, cloud saves, uninstall): on the
         /// details page itself before the rebuild, a page like Steam's, GOG's and itch.io's now.
         case epic, ea
+        /// The game's mods (ModsView.swift), above Advanced.
+        case mods
     }
     @State private var path: [Page] = []
+    /// (new look, pushed) The row to come back to when one of this page's own pages closes.
+    @State private var lookReturn: String?
     /// The controller's ring on this page (Cameron, Wave 11: A on a row played the game and the
     /// iPad's own focus could not get back up to Play): Play, the two switches under it, then
     /// each page's row, top to bottom. Up and down move it, A presses what it is on.
@@ -4615,8 +4592,8 @@ struct LibraryDetail: View {
         .background {
             if on {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(LibrarySidebar.picked)
-                    RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(LibrarySidebar.blue, lineWidth: 3)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(MenuPadColor.picked)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(MenuPadColor.blue, lineWidth: 3)
                 }.padding(4)
             }
         }
@@ -4627,7 +4604,7 @@ struct LibraryDetail: View {
     }
     private var padItems: [String] {
         ["play", "fps", "toggle:performance", "toggle:touch"] + pageGroups.flatMap { $0 }.map { "page:\($0)" }
-            + (steamUninstallable != nil ? ["uninstall"] : [])
+            + (GetHelp.enabled ? ["help"] : []) + (steamUninstallable != nil ? ["uninstall"] : [])
     }
     private func padMove(_ step: Int, reader: ScrollViewProxy) {
         let items = padItems
@@ -4645,6 +4622,7 @@ struct LibraryDetail: View {
         case "toggle:performance": entry.performance.toggle()
         case "toggle:touch": entry.touchControls.toggle()
         case "fps": entry.fpsMode = FPSChoice.next(after: entry.fpsMode)
+        case "help": getHelp = true
         case "uninstall": confirmSteamUninstall = true
         default:
             if let page = pageGroups.flatMap({ $0 }).first(where: { "page:\($0)" == padItem }) {
@@ -4653,8 +4631,13 @@ struct LibraryDetail: View {
             }
         }
     }
-    /// Opens a page at once, without the slide (Cameron, Nov 7: "Yes, instant").
+    /// Opens a page at once, without the slide (Cameron, Nov 7: "Yes, instant"). In the new look
+    /// it slides in again (Cameron, Nov 9: "I want it back").
     private func open(_ page: Page) {
+        // Pushed, this page goes off screen under its own page (its layer closes): back, the
+        // highlight returns to the row that opened it, not to Play.
+        if let stack { lookReturn = "gp-page-\(page)"; stack.push(page); return }
+        if NewLook.enabled { path.append(page); return }
         var instant = Transaction(); instant.disablesAnimations = true
         withTransaction(instant) { path.append(page) }
     }
@@ -4694,7 +4677,7 @@ struct LibraryDetail: View {
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
         let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
-        let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
+        let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .mods, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
     /// Steam Workshop is offered unless Steam says the game has none
@@ -4719,6 +4702,7 @@ struct LibraryDetail: View {
     }
 
     @ViewBuilder private func page(_ page: Page) -> some View {
+        ScrollViewReader { reader in
         Form {
             switch page {
             case .display: displayPage
@@ -4731,18 +4715,19 @@ struct LibraryDetail: View {
                 if let appID = entry.steamAppID, appID > 0, appID <= Int(UInt32.max) {
                     SteamWorkshopSections(appID: UInt32(appID), title: entry.title)
                 }
-            case .gog: GOGEntrySection(entry: $entry) { leaving = true; dismiss() }
-            case .itch: ItchEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .gog: GOGEntrySection(entry: $entry) { leaving = true; closePage() }
+            case .itch: ItchEntrySection(entry: $entry) { leaving = true; closePage() }
             case .achievements: if let appID = entry.steamAppID { SteamAchievementsSection(appID: appID) }
             case .library: libraryPage
             case .iniFiles: GameIniFilesSection(windowsPath: entry.windowsPath, gameFolder: iniGameFolder)
+            case .mods: ModsPage(game: modGame)
             case .advanced: advancedPage
             case .epic:
                 if let appName = entry.epicAppName {
-                    EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
+                    EpicEntrySection(entry: $entry) { leaving = true; closePage() }
                     EpicCloudSection(appName: appName)
                 }
-            case .ea: EAEntrySection(entry: $entry) { leaving = true; dismiss() }
+            case .ea: EAEntrySection(entry: $entry) { leaving = true; closePage() }
             case .binds:
                 ControllerBindsPage(binds: $entry.controllerBinds, mouseVertical: $entry.padMouseVertical)
                     .toolbar {
@@ -4753,6 +4738,11 @@ struct LibraryDetail: View {
                 PadAssistPage(settings: $entry.padAssist)
                     .toolbar { Button("Reset") { entry.padAssist = nil }.disabled(entry.padAssist == nil) }
             }
+        }
+        // (new-look) The page follows the highlight, and is its own layer: the highlight starts on
+        // its first row, B goes back to the game page and the highlight returns to that row.
+        .padScrollFollow(reader)
+        .padLayer("game-\(page)", back: { lookBack() }, page: stack != nil)
         }
         .navigationTitle(LocalizedStringKey(page.title)).navigationBarTitleDisplayMode(.inline)
         .menuPadNoSystemFocus()
@@ -4779,9 +4769,12 @@ struct LibraryDetail: View {
                     Text(saved.label).tag(entry.resolution)
                 }
             }
+            // (new-look) The controller: A steps to the next choice (Cameron, Nov 9: nothing worked in here).
+            .padItem("gd-resolution", cornerRadius: 12, inset: -6) { entry.resolution = padNext(groups.flatMap { $0.choices.map(\.value) }, after: entry.resolution) }
             Picker("Aspect & scaling", selection: Binding(get: { entry.displayMode.rawValue }, set: { entry.display = $0 })) {
                 ForEach(DisplayMode.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
             }
+            .padItem("gd-aspect", cornerRadius: 12, inset: -6) { entry.display = padNext(DisplayMode.allCases.map(\.rawValue), after: entry.displayMode.rawValue) }
             // Every setting here is the Desktop's too: its programs present through
             // the same path, and its launch applies them like a game's
             // (applyEnvironment, gameConfigText). check-frontend holds the parity.
@@ -4790,7 +4783,9 @@ struct LibraryDetail: View {
                 Text("1.5×").tag(Double?.some(1.5))
                 Text("2×").tag(Double?.some(2))
             }
+            .padItem("gd-metalfx", cornerRadius: 12, inset: -6) { entry.metalFXUpscale = padNext([nil, 1.5, 2] as [Double?], after: entry.metalFXUpscale) }
             Toggle("Frame generation (experimental)", isOn: Binding(get: { entry.frameGeneration ?? false }, set: { entry.frameGeneration = $0 ? true : nil }))
+                .padItem("gd-framegen", cornerRadius: 12, inset: -6) { entry.frameGeneration = entry.frameGeneration == true ? nil : true }
             if entry.frameGeneration == true {
                 Text("Adds a generated frame between real ones. More latency; the FPS limit is ignored.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -4804,22 +4799,31 @@ struct LibraryDetail: View {
         Section("On screen") {
             if GamepadInput.keyboardMouseAvailable {
                 ControllerModeChoice(mode: $entry.controllerMode)
+                    .padItem("gc-mode", cornerRadius: 12, inset: -6) { entry.controllerMode = padNext([nil, "dinput", "keys"] as [String?], after: entry.controllerMode) }
                 if entry.controllerMode == "dinput" {
                     Text("For older games that read the pad through DirectInput.").font(.caption).foregroundStyle(.secondary)
                 }
                 if entry.controllerMode == "keys" {
                     Text("The pad acts as keyboard and mouse. Change keys in Controller binds.").font(.caption).foregroundStyle(.secondary)
                     pageRow(.binds, icon: false)
+                        .padItem("gc-binds", cornerRadius: 12, inset: -6) { open(.binds) }
                 }
             }
             if GamepadInput.enabled {
                 pageRow(.assist, icon: false)
+                    .padItem("gc-assist", cornerRadius: 12, inset: -6) { open(.assist) }
             }
             LabeledContent("Control opacity") {
                 Slider(value: Binding(get: { entry.controlOpacity ?? 0.7 }, set: { entry.controlOpacity = $0 }), in: 0.15...1)
             }
+            .padItem("gc-opacity", cornerRadius: 12, inset: -6) {
+                entry.controlOpacity = padNext([0.25, 0.4, 0.55, 0.7, 0.85, 1.0], after: ((entry.controlOpacity ?? 0.7) * 20).rounded() / 20)
+            }
             LabeledContent("Control size") {
                 Slider(value: Binding(get: { entry.controlSize ?? 1 }, set: { entry.controlSize = $0 }), in: 0.5...2)
+            }
+            .padItem("gc-size", cornerRadius: 12, inset: -6) {
+                entry.controlSize = padNext([0.75, 1.0, 1.25, 1.5, 2.0], after: ((entry.controlSize ?? 1) * 4).rounded() / 4)
             }
             Text("Edit buttons from the in-game menu.").font(.caption).foregroundStyle(.secondary)
         }
@@ -4837,12 +4841,14 @@ struct LibraryDetail: View {
                     Text("Directly").tag("direct")
                     Text("In the Wine desktop").tag("desktop")
                 }
+                .padItem("gl-start", cornerRadius: 12, inset: -6) { entry.launchMode = entry.runsInDesktop ? nil : "desktop" }
                 TextField("Working folder (default: the program's folder)", text: Binding(get: { entry.workingDirectory ?? "" }, set: {
                     entry.workingDirectory = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0
                 })).autocorrectionDisabled().textInputAutocapitalization(.never).font(.body.monospaced())
                 Toggle("Start Windows services first", isOn: Binding(get: { entry.startServices == true }, set: {
                     entry.startServices = $0 ? true : nil
                 }))
+                .padItem("gl-services", cornerRadius: 12, inset: -6) { entry.startServices = entry.startServices == true ? nil : true }
             } header: { Text("Launch") } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("The working folder is a C:\\ path. Services are for launchers that need them.")
@@ -4861,6 +4867,8 @@ struct LibraryDetail: View {
                     .font(.body.monospaced()).lineLimit(1...4)
                     .autocorrectionDisabled().textInputAutocapitalization(.never).smartPunctuationOff()
                 LaunchFlagChips(arguments: $entry.arguments)
+                // [battle-net] Battle.net: one button per Blizzard game.
+                if BattleNet.enabled, BattleNet.isBattleNet(entry) { BattleNetGameChips(arguments: $entry.arguments) }
                 // What the next start runs (ml1163: in the Wine desktop, a batch file or
                 // the services batch, what starts the program).
                 Text(entry.commandPreview)
@@ -4880,19 +4888,23 @@ struct LibraryDetail: View {
             } label: {
                 compatLabel(L("x87 precision"), L("Automatic is fast for 32-bit games and accurate for 64-bit ones. Full can halve a 32-bit game's frame rate."))
             }
+            .padItem("gx-x87", cornerRadius: 12, inset: -6) { entry.x87Precision = padNext(LibraryEntry.X87Precision.allCases, after: entry.x87Precision) }
             Toggle(isOn: Binding(get: { entry.largeReservations ?? false }, set: { entry.largeReservations = $0 ? true : nil })) {
                 compatLabel(L("Large memory reservations"), L("For requests of 64 GB or more. Backs up to 16 GB by default."))
             }
+            .padItem("gx-large", cornerRadius: 12, inset: -6) { entry.largeReservations = entry.largeReservations == true ? nil : true }
             // madeira-bcd: AVX, NVIDIA and Wine's C++ runtime are LibraryPrefs, which
             // BCDLaunch exports at every launch (reloadBCD / migrateEntryOptions).
             Toggle(isOn: Binding(get: { bcd.avx }, set: { on in bcd.avx = on; LibraryPrefs.setAVX(on, for: entry.windowsPath) })) {
                 compatLabel(L("AVX and AVX2"), L("For games that quit with c000001d"))
             }
+            .padItem("gx-avx", cornerRadius: 12, inset: -6) { let on = !bcd.avx; bcd.avx = on; LibraryPrefs.setAVX(on, for: entry.windowsPath) }
             // Exported for this game only when chosen (applyEnvironment).
             Picker("CPU cores reported", selection: Binding(get: { entry.cpuCount ?? 0 }, set: { entry.cpuCount = $0 == 0 ? nil : $0 })) {
                 Text("Automatic").tag(0)
                 ForEach([1, 2, 4, 6], id: \.self) { Text("\($0)").tag($0) }
             }
+            .padItem("gx-cpus", cornerRadius: 12, inset: -6) { let n = padNext([0, 1, 2, 4, 6], after: entry.cpuCount ?? 0); entry.cpuCount = n == 0 ? nil : n }
             // Hidden: an old build's switch the D3D9 path no longer needs. A game that has a limit still exports it, and
             // keeps the picker so it can go back to Application default.
             if entry.anisotropyLimit != nil {
@@ -4900,6 +4912,7 @@ struct LibraryDetail: View {
                     Text("Application default").tag(0)
                     ForEach([1, 2, 4, 8], id: \.self) { Text("Up to \($0)×").tag($0) }
                 }
+                .padItem("gx-aniso", cornerRadius: 12, inset: -6) { let n = padNext([0, 1, 2, 4, 8], after: entry.anisotropyLimit ?? 0); entry.anisotropyLimit = n == 0 ? nil : n }
             }
             // GPUCards.swift: a chosen card replaces the two NVIDIA switches below.
             Picker(selection: Binding(get: { bcd.gpuCard }, set: { id in bcd.gpuCard = id; LibraryPrefs.setGPUCard(id, for: entry.windowsPath) })) {
@@ -4908,22 +4921,33 @@ struct LibraryDetail: View {
             } label: {
                 compatLabel("Graphics card the game sees", "For games that refuse this GPU or only run on cards they know")
             }
+            .padItem("gx-gpu", cornerRadius: 12, inset: -6) {
+                let id = padNext([""] + GPUCards.all.map(\.id), after: bcd.gpuCard); bcd.gpuCard = id; LibraryPrefs.setGPUCard(id, for: entry.windowsPath)
+            }
             Group {
                 Toggle(isOn: Binding(get: { bcd.nvidia }, set: { on in bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath) })) {
                     compatLabel("Report an NVIDIA GPU", "For \"no graphics card\" errors")
                 }
+                .padItem("gx-nvidia", cornerRadius: 12, when: GPUCards.card(bcd.gpuCard) == nil, inset: -6) {
+                    let on = !bcd.nvidia; bcd.nvidia = on; LibraryPrefs.setNvidia(on, for: entry.windowsPath)
+                }
                 Toggle(isOn: Binding(get: { bcd.olderNvidia }, set: { on in bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath) })) {
                     compatLabel("Older NVIDIA card (Direct3D 9)", "For older games that crash with this GPU, like Fallout 3 and New Vegas")
+                }
+                .padItem("gx-oldnvidia", cornerRadius: 12, when: GPUCards.card(bcd.gpuCard) == nil, inset: -6) {
+                    let on = !bcd.olderNvidia; bcd.olderNvidia = on; LibraryPrefs.setOlderNvidia(on, for: entry.windowsPath)
                 }
             }
             .disabled(GPUCards.card(bcd.gpuCard) != nil)
             Toggle(isOn: Binding(get: { bcd.wineVCRT }, set: { on in bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) })) {
                 compatLabel(L("Wine's C++ runtime"), L("Instead of the game's msvcp/vcruntime"))
             }
+            .padItem("gx-vcrt", cornerRadius: 12, inset: -6) { let on = !bcd.wineVCRT; bcd.wineVCRT = on; LibraryPrefs.setWineVCRT(on, for: entry.windowsPath) }
             // Japanese locale (LibraryPrefs.japanese, BCDLaunch.applyExtras, WineProcessBridge.m).
             Toggle(isOn: Binding(get: { bcd.japanese }, set: { on in bcd.japanese = on; LibraryPrefs.setJapanese(on, for: entry.windowsPath) })) {
                 compatLabel(L("Japanese locale"), L("For Japanese games and visual novels whose text shows as squares or gibberish, or that do not start"))
             }
+            .padItem("gx-japanese", cornerRadius: 12, inset: -6) { let on = !bcd.japanese; bcd.japanese = on; LibraryPrefs.setJapanese(on, for: entry.windowsPath) }
             // madeira-bcd: MADEIRA_REAL_SUSPEND for this game (BCDLaunch.realSuspend).
             Picker(selection: Binding(get: { bcd.realSuspend.map { $0 ? 1 : 2 } ?? 0 },
                                       set: { v in bcd.realSuspend = v == 0 ? nil : v == 1; LibraryPrefs.setRealSuspend(bcd.realSuspend, for: entry.windowsPath) })) {
@@ -4933,12 +4957,18 @@ struct LibraryDetail: View {
             } label: {
                 compatLabel(L("Pause threads fully"), L("For Unity games that crash while loading, like Megabonk. Can make other games freeze"))
             }
+            .padItem("gx-suspend", cornerRadius: 12, inset: -6) {
+                let v = padNext([0, 1, 2], after: bcd.realSuspend.map { $0 ? 1 : 2 } ?? 0)
+                bcd.realSuspend = v == 0 ? nil : v == 1; LibraryPrefs.setRealSuspend(bcd.realSuspend, for: entry.windowsPath)
+            }
             // Fastsync-only switches: shown for every game, usable only while
             // Settings › Sync engine is Fastsync.
             Group {
                 Toggle("Fast synchronization", isOn: Binding(get: { entry.fastSync ?? true }, set: { entry.fastSync = $0 }))
+                    .padItem("gx-fastsync", cornerRadius: 12, when: syncEngine == .fastsync, inset: -6) { entry.fastSync = !(entry.fastSync ?? true) }
                 Toggle("Fast semaphore waits (experimental)",
                        isOn: Binding(get: { entry.semaphoreFastPath ?? false }, set: { entry.semaphoreFastPath = $0 }))
+                    .padItem("gx-semaphore", cornerRadius: 12, when: syncEngine == .fastsync, inset: -6) { entry.semaphoreFastPath = !(entry.semaphoreFastPath ?? false) }
             }
             .disabled(syncEngine != .fastsync)
             if syncEngine != .fastsync {
@@ -4959,7 +4989,7 @@ struct LibraryDetail: View {
     @ViewBuilder private var steamPage: some View {
         // A Steam game's start, update, repair and Uninstall (SteamGames.swift).
         if entry.steamAppID != nil {
-            SteamEntrySection(entry: $entry) { leaving = true; dismiss() }
+            SteamEntrySection(entry: $entry) { leaving = true; closePage() }
             Section {
                 Text(entry.launchWindowsPath).font(.caption.monospaced()).textSelection(.enabled)
                 if entry.startsSteamGameDirectly, !entry.launchArguments.isEmpty {
@@ -4974,8 +5004,13 @@ struct LibraryDetail: View {
         if entry.desktop != true { Section("Library details") {
             TextField("Title", text: $entry.title)
             Button("Find on Steam", systemImage: "magnifyingglass") { findCover = true }
+                .padItem("gb-find", cornerRadius: 12, inset: -6) { findCover = true }
             Button("Choose cover image", systemImage: "photo") { importCover = true }
-            if entry.coverFile != nil { Button((entry.steamAppID ?? entry.steamID) != nil ? L("Use Steam artwork") : L("Remove cover image")) { entry.coverFile = nil } }
+                .padItem("gb-cover", cornerRadius: 12, inset: -6) { importCover = true }
+            if entry.coverFile != nil {
+                Button((entry.steamAppID ?? entry.steamID) != nil ? L("Use Steam artwork") : L("Remove cover image")) { entry.coverFile = nil }
+                    .padItem("gb-art", cornerRadius: 12, inset: -6) { entry.coverFile = nil }
+            }
         } }
         // A link that starts this game from a Home Screen icon (SavesAndShortcuts.swift).
         if entry.desktop != true {
@@ -4994,7 +5029,7 @@ struct LibraryDetail: View {
         if entry.steamAppID == nil && entry.desktop != true {
             Section("Executable") { Text(entry.windowsPath).font(.caption.monospaced()).textSelection(.enabled) }
             if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
-            Section { Button("Remove from library", role: .destructive) { remove = true } }
+            Section { Button("Remove from library", role: .destructive) { remove = true }.padItem("gb-remove", cornerRadius: 12, inset: -6) { remove = true } }
         }
         if let error { Section { Text(error).foregroundStyle(.red) } }
     }
@@ -5006,9 +5041,25 @@ struct LibraryDetail: View {
         return GameIniFiles.gameFolder(relativePath: entry.relativePath, isDirectory: exists && isDirectory.boolValue)
     }
 
+    /// What Mods (ModsView.swift) works on: the game's folder, its program, drive_c (for
+    /// plugins.txt and Fallout.ini) and the game's own config (the BepInEx line).
+    private var modGame: ModGame {
+        let folder = iniGameFolder
+        let launch = entry.launchRelativePath
+        let program = !folder.isEmpty && launch.hasPrefix(folder + "/") ? String(launch.dropFirst(folder.count + 1)) : nil
+        let gameFolder = folder.isEmpty ? LibraryModel.drive : LibraryModel.drive.appendingPathComponent(folder, isDirectory: true)
+        let windowsPath = entry.windowsPath
+        return ModGame(id: entry.id.uuidString, gameFolder: gameFolder, drive: LibraryModel.drive, program: program,
+                       bethesda: BethesdaGame.detect(steamAppID: entry.steamAppID, program: program.map { ($0 as NSString).lastPathComponent },
+                                                     gameFolder: gameFolder),
+                       readConfig: { GameProfile(windowsPath: windowsPath).text },
+                       writeConfig: { GameProfile(windowsPath: windowsPath).text = $0 })
+    }
+
     @ViewBuilder private var advancedPage: some View {
         Section {
             Toggle("Live logs", isOn: $entry.liveLogs)
+                .padItem("ga-live", cornerRadius: 12, inset: -6) { entry.liveLogs.toggle() }
             // madeira-bcd: this game's config is its own GameProfiles.swift file
             // (Application Support/GameConfigs/<hash>.cfg), the file every launch of
             // the game exports as MADEIRA_CFG_GAME. Lines an entry saved in upstream's
@@ -5024,6 +5075,39 @@ struct LibraryDetail: View {
             }
         } header: { Text("Advanced") } footer: {
             Text("Per-game madeira.cfg lines; they override the global file.")
+        }
+        // (debug-logging) Test bundle only (com.willfaust.madeora.test): a level that writes plain logging lines into
+        // this game's own config and takes exactly those lines out again; Copy debug info puts the game, build, level
+        // and config on the clipboard. Not shown in a release build. English only, like the other developer rows.
+        if DebugLogging.available {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(verbatim: "Debug logging")
+                    Picker(selection: debugLevel) {
+                        ForEach(DebugLogging.Level.allCases) { Text(verbatim: $0.title).tag($0) }
+                    } label: { Text(verbatim: "Debug logging") }
+                        .pickerStyle(.segmented).labelsHidden()
+                    Text(verbatim: debugLevel.wrappedValue.summary).font(.caption).foregroundStyle(.secondary)
+                }
+                Button {
+                    UIPasteboard.general.string = DebugLogging.debugInfo(title: entry.title, windowsPath: entry.windowsPath, recommended: recommended?.fileText)
+                    LogStore.shared.log("[debug-log] debug info copied for \(entry.title)")
+                    debugCopied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { debugCopied = false }
+                } label: {
+                    Label { Text(verbatim: debugCopied ? "Copied" : "Copy debug info") }
+                        icon: { Image(systemName: debugCopied ? "checkmark" : "doc.on.clipboard") }
+                }
+                DebugShareGameLogsButton(entry: entry)
+                DebugResetButton(entry: entry) { reloadBCD() }
+            } footer: {
+                Text(verbatim: "Test build only. A level adds plain env lines to This game's config (never madeira.cfg); changing it or choosing Off removes exactly those lines. Applies at the next start. Copy debug info copies the game, build, level, how this config differs from Madeira's Recommended settings, and the config. Share this game's logs zips only this game's last run and its config. Reset to clean state removes the Debug logging lines and the lines Get Help added.")
+            }
+        }
+        // (get-help) While lines Get Help added are in this game's config (GetHelpView.swift).
+        if GetHelp.enabled {
+            GetHelpUndoSection(windowsPath: entry.windowsPath, title: entry.title) { reloadBCD() }
+            if GetHelp.key != nil { GetHelpWorksSection(entry: entry) }
         }
         // (compat-report) Discord: a one-tap copy of #game-compatibility's report format. Here and not in
         // Game details' last group, which stays short with Uninstall on its own. env.MADEIRA_COMPAT_REPORT = 0 hides it.
@@ -5050,7 +5134,9 @@ struct LibraryDetail: View {
         // ends with Uninstall on its own.
         Section {
             Button("Share Setup", systemImage: "square.and.arrow.up") { model.save(entry); shareSetup = true }
+                .padItem("ga-share", cornerRadius: 12, inset: -6) { model.save(entry); shareSetup = true }
             Button("Apply Shared Setup", systemImage: "square.and.arrow.down") { askSetupSource = true }
+                .padItem("ga-apply", cornerRadius: 12, inset: -6) { askSetupSource = true }
                 .confirmationDialog("Apply a shared setup", isPresented: $askSetupSource, titleVisibility: .visible) {
                     Button("Choose a File") { importSetup = true }
                     Button("Paste from Clipboard") { readSetup { try GameSetup(text: UIPasteboard.general.string ?? "") } }
@@ -5059,10 +5145,12 @@ struct LibraryDetail: View {
                 let configText = entry.config ?? ""
                 UIPasteboard.general.string = configText.isEmpty ? "# Default configuration" : configText
             }
-            ClaudeHelpButton(entry: entry)
-            // LogsView.swift: the summary, last game log, this run's log and madeira.cfg in one scrubbed .zip.
-            ShareLogsButton()
+            // (get-help) Get Help from Claude is in the Get Help sheet's "Still stuck?" now (GetHelpView.swift),
+            // so the game page has one help button (Cameron, Nov 7). Settings › Diagnostics keeps its own.
+            // LogsView.swift (get-help-auto): one scrubbed "<game> log.txt", Get Help's short report.
+            ShareLogsButton(entry: entry)
             Button("Reset to Recommended", systemImage: "arrow.counterclockwise") { confirmReset = true }
+                .padItem("ga-reset", cornerRadius: 12, inset: -6) { confirmReset = true }
                 .confirmationDialog(GameRecommendations.question(recommended, desktop: entry.desktop == true),
                                     isPresented: $confirmReset, titleVisibility: .visible) {
                     Button("Reset", role: .destructive) { resetToRecommended() }
@@ -5077,7 +5165,11 @@ struct LibraryDetail: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        LibraryDetailNavigation(own: stack == nil, path: $path) {
+          Group {
+          if NewLook.enabled {
+            newLookPage
+          } else {
           ScrollViewReader { reader in
             // Game details is Madeira's own page, built like the library (Cameron, Wave 12: the
             // system list's own focus walked under the ring and cut it off at its corners). The
@@ -5115,7 +5207,7 @@ struct LibraryDetail: View {
                                 .overlay {
                                     // Play's own shape (LibraryPlayStyle: 14), grown by the gap: the ring follows it.
                                     RoundedRectangle(cornerRadius: 18)
-                                        .strokeBorder(LibrarySidebar.blue, lineWidth: 3).padding(-4)
+                                        .strokeBorder(MenuPadColor.blue, lineWidth: 3).padding(-4)
                                         .opacity(pad.ring && padItem == "play" && path.isEmpty ? 1 : 0)
                                         .allowsHitTesting(false)
                                 }
@@ -5157,6 +5249,17 @@ struct LibraryDetail: View {
                             }
                         }
                     }
+                    // (get-help) Get Help: the game's report to Madeira's help server, an answer in plain
+                    // words and settings to apply (GetHelpView.swift). env.MADEIRA_GET_HELP = 0 hides it.
+                    if GetHelp.enabled {
+                        VStack(alignment: .leading, spacing: 8) {
+                            detailGroup {
+                                detailRow("help", last: true) { GetHelpRow { getHelp = true }.buttonStyle(.plain) }
+                            }
+                            Text("Something wrong with this game? Get Help looks at what happened and tells you what to try.")
+                                .font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 16)
+                        }
+                    }
                     // A Steam game Madeira downloaded: Uninstall on this page too.
                     if steamUninstallable != nil {
                         detailGroup {
@@ -5167,7 +5270,7 @@ struct LibraryDetail: View {
                                                 isPresented: $confirmSteamUninstall, titleVisibility: .visible) {
                                 Button("Uninstall", role: .destructive) {
                                     if let installed = steamUninstallable { steam.uninstall(installed) }
-                                    leaving = true; dismiss()
+                                    leaving = true; closePage()
                                 }
                             }
                         }
@@ -5179,18 +5282,26 @@ struct LibraryDetail: View {
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             // Up and down move the ring (B and A are handled below, with the rest of the page).
             .onReceive(LibraryController.shared.commands) { command in
-                guard path.isEmpty, !leaving, !findCover, !importCover, !remove, !confirmReset,
+                guard !NewLook.enabled, path.isEmpty, !getHelp, !leaving, !findCover, !importCover, !remove, !confirmReset,
                       command == "up" || command == "down" else { return }
                 if pad.show() { return }
                 padMove(command == "up" ? -1 : 1, reader: reader)
             }
           }
-            .navigationTitle("Game details").navigationBarTitleDisplayMode(.inline)
+          }
+          }
+            .navigationTitle(stack == nil ? L("Game details") : entry.title).navigationBarTitleDisplayMode(.inline)
             .menuPadNoSystemFocus()
             .navigationDestination(for: Page.self) { item in page(item) }
             .toolbarBackground(.regularMaterial, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.save(entry); dismiss() } } }
+            .toolbarBackground(stack == nil ? .visible : .automatic, for: .navigationBar)
+            .toolbar {
+                // A pushed page has the system's Back button instead.
+                if stack == nil { ToolbarItem(placement: .confirmationAction) { Button("Done") { model.save(entry); closePage() } } }
+            }
+            // The new look's full-screen page draws its own back button over the page; pushed, it
+            // has the system's.
+            .toolbar(NewLook.enabled && stack == nil ? .hidden : .automatic, for: .navigationBar)
             .task {
                 if entry.graphicsAPI == nil, entry.desktop != true, let url = try? LibraryModel.executable(entry.relativePath) { entry.graphicsAPI = LibraryModel.graphicsImports(url) }
             }
@@ -5204,7 +5315,12 @@ struct LibraryDetail: View {
                 reloadBCD()
             }
         }
+        // The new look's controller: the page is a layer over the library; B goes back a page or
+        // closes it, X is Play (PadHighlight.swift).
+        .padLayer("game", start: lookReturn ?? "gp-play", back: { lookBack() }, play: { if path.isEmpty { start() } }, page: stack != nil)
         .sheet(isPresented: $shareSetup) { GameSetupShareSheet(entry: entry) }
+        // (get-help) Apply writes the game's config: the page reads it again when the sheet goes.
+        .getHelpSheet($getHelp, entry: entry) { reloadBCD() }
         .sheet(item: $setupToApply) { pending in
             GameSetupApplySheet(setup: pending.setup, gameTitle: entry.title,
                                 otherGame: pending.setup.match(steamAppID: entry.steamAppID, program: GameSetup.programName(entry)) == 0) { controls, ini in
@@ -5237,7 +5353,7 @@ struct LibraryDetail: View {
             } catch { self.error = error.localizedDescription }
         }
         .confirmationDialog("Remove this library entry? Your executable and saves stay in drive_c.", isPresented: $remove, titleVisibility: .visible) {
-            Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); dismiss() }
+            Button("Remove", role: .destructive) { leaving = true; model.remove(entry.id); closePage() }
         }
         .onDisappear { if !leaving { model.save(entry) } }
         // Madeira's commands never open a page here (B goes back, A plays): a page that opens
@@ -5251,9 +5367,9 @@ struct LibraryDetail: View {
             withTransaction(instant) { path = old }
         }
         .onReceive(LibraryController.shared.commands) { command in
-            guard !leaving, !findCover, !importCover, !remove, !confirmReset else { return }
+            guard !NewLook.enabled, !getHelp, !leaving, !findCover, !importCover, !remove, !confirmReset else { return }
             if command == "back" {
-                if path.isEmpty { model.save(entry); dismiss() }
+                if path.isEmpty { model.save(entry); closePage() }
                 else { var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { path.removeLast() } }
             }
             // A presses what the ring is on: Play, a switch, or a page's row.
@@ -5261,6 +5377,27 @@ struct LibraryDetail: View {
                 if MenuPad.enabled { if !pad.show() { padPress() } } else { start() }
             }
         }
+    }
+}
+
+/// (new look) How a game page pushed inside a tab moves on its tab's page stack (LibraryView.lookRoute).
+struct LibraryDetailStack {
+    /// One of the game page's own pages (Display, Controls...), pushed over it.
+    let push: (LibraryDetail.Page) -> Void
+    /// The top page off the stack (Back, B).
+    let back: () -> Void
+    /// The game page and any of its pages off the stack (uninstalled, removed).
+    let close: () -> Void
+}
+
+/// The game page's own NavigationStack when it is a sheet or a cover; none when it is pushed
+/// inside a tab's stack (a stack inside a stack breaks Back).
+private struct LibraryDetailNavigation<Content: View>: View {
+    let own: Bool
+    @Binding var path: [LibraryDetail.Page]
+    @ViewBuilder var content: Content
+    var body: some View {
+        if own { NavigationStack(path: $path) { content } } else { content }
     }
 }
 
@@ -6253,6 +6390,11 @@ struct LibraryHUD: View {
     /// The Session menu's Controller binds page (keyboard-and-mouse mode).
     @State private var bindsPage = false
     @State private var assistPage = false
+    /// The Session menu's Friends page (Madeira Dock sessions).
+    @State private var friendsPage = false
+    /// The status shown on the Friends page; Offline never reaches here (friends are off for that session).
+    @State private var steamStatus = SteamOnlineStatus.current
+    @ObservedObject private var dockFriends = DockFriends.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         GeometryReader { geo in
@@ -6264,14 +6406,22 @@ struct LibraryHUD: View {
                     Color.black.ignoresSafeArea().opacity(curtained || launchVisible ? 1 : 0)
                         .animation(.easeOut(duration: 0.12), value: launchVisible)
                         .opacity(curtain.hidesStartingScreen ? 0 : 1)
-                    launchBackdrop(entry).scaleEffect(launchVisible || reduceMotion ? 1 : 1.12)
-                        .overlay(.black.opacity(0.65)).ignoresSafeArea()
+                    Group {
+                        // (new-look) The Madeira island behind the starting screen.
+                        if NewLook.enabled { NewLookBackground(startScreen: true) }
+                        else { launchBackdrop(entry).overlay(.black.opacity(0.65)) }
+                    }
+                        .scaleEffect(launchVisible || reduceMotion ? 1 : 1.12)
+                        .ignoresSafeArea()
                         .opacity(launchVisible ? 1 : 0)
                         .animation(reduceMotion ? .easeOut(duration: 0.15) : .easeOut(duration: 1.1), value: launchVisible)
                         .opacity(curtain.hidesStartingScreen ? 0 : 1)
                     // Hidden while the flood is still growing over the details page; drawn
                     // (and measured) all the same.
-                    launchView(entry, geometry: geo).opacity(curtain.hidesStartingScreen ? 0 : 1)
+                    Group {
+                        if NewLook.enabled { newLookLaunch(entry, geometry: geo) } else { launchView(entry, geometry: geo) }
+                    }
+                    .opacity(curtain.hidesStartingScreen ? 0 : 1)
                 }
                 if !model.startingScreen && model.performance { LibraryFloatingItem(isMenu: false, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.liveLogs && !model.startingScreen { LibraryLiveLogs().frame(maxWidth: 550, maxHeight: 140).padding(.top, Self.topInset(geo) + 60).padding(.horizontal, 12).allowsHitTesting(false) }
@@ -6293,7 +6443,7 @@ struct LibraryHUD: View {
                 if !model.startingScreen { LibraryFloatingItem(isMenu: true, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.menu {
                     Color.black.opacity(SessionMenuBackground.blur ? 0.3 : 0.5).ignoresSafeArea().onTapGesture { model.menu = false }.transition(.opacity)
-                    (bindsPage ? AnyView(bindsMenu) : assistPage ? AnyView(assistMenu) : AnyView(menu))
+                    (bindsPage ? AnyView(bindsMenu) : assistPage ? AnyView(assistMenu) : friendsPage ? AnyView(friendsMenu) : AnyView(menu))
                         .frame(width: min(460, geo.size.width - 32), height: min(650, geo.size.height - geo.safeAreaInsets.top - geo.safeAreaInsets.bottom - 24))
                         .modifier(SessionMenuBackground())
                         .clipShape(RoundedRectangle(cornerRadius: 28))
@@ -6327,10 +6477,26 @@ struct LibraryHUD: View {
             }
             .preferredColorScheme(.dark)
         }.ignoresSafeArea()
-        .onAppear { model.saveCurrentProfile() }
+        .onAppear {
+            model.saveCurrentProfile()
+            if NewLook.enabled, model.startingScreen, !model.menu {
+                LibraryController.shared.configure(enabled: model.enabled, ownsInput: true)
+            }
+        }
+        // (get-help-auto) Get Help over the starting screen: by itself a second after "Madeira Dock
+        // stopped", or from its Get Help button; closing it goes back to the library.
+        .modifier(GetHelpStartScreen())
+        // (new-look) The new look's starting screen takes the controller (Stop, Get Help, the live
+        // log) until the game shows; then the pad is the game's again.
+        .onChange(of: model.startingScreen) { _, starting in
+            guard NewLook.enabled, !model.menu else { return }
+            LibraryController.shared.configure(enabled: model.enabled, ownsInput: starting)
+            LogStore.shared.log("[pad-highlight] starting screen \(starting ? "takes" : "gives back") the controller")
+        }
         .onChange(of: model.menu) { _, open in
-            LibraryController.shared.configure(enabled: model.enabled, ownsInput: open)
-            if !open { bindsPage = false; assistPage = false }
+            LibraryController.shared.configure(enabled: model.enabled, ownsInput: open || (NewLook.enabled && model.startingScreen))
+            if !open { bindsPage = false; assistPage = false; friendsPage = false }
+            if open { dockFriends.refresh() }
             if !open { model.saveCurrentProfile() }
             if open { eco = madeira_get_eco() != 0; fenceMode = FPSOverlayFenceMode.current }
         }
@@ -6367,10 +6533,13 @@ struct LibraryHUD: View {
                     .modifier(LaunchEntrance(visible: launchVisible, step: 0, rise: CGSize(width: 0, height: 26), scale: 0.84, still: curtained))
                 Text(entry.title).font(.title2.bold()).multilineTextAlignment(.center)
                     .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 0, height: 14), still: curtained))
-                if dockStart.failure == nil {
+                if dockStart.failure == nil && model.poolRestartNote == nil {
                     ProgressView().tint(.white).modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
                 }
-                if let failure = dockStart.failure {
+                if let note = model.poolRestartNote {
+                    Text(JITPoolAuto.startHeadline).font(.headline)
+                    Text(note).font(.caption).multilineTextAlignment(.center).frame(maxWidth: 360)
+                } else if let failure = dockStart.failure {
                     Text("Madeira Dock stopped").font(.headline)
                     Text(failure).font(.caption).multilineTextAlignment(.center).frame(maxWidth: 360)
                     // The elapsed time stays on a stopped start too, as while it ran.
@@ -6408,11 +6577,15 @@ struct LibraryHUD: View {
                 // start runs and once the Dock stopped, and goes back to the library; while a Dock start
                 // holds the desktop back, Show desktop reveals it.
                 HStack(spacing: 14) {
+                    launchGetHelp(entry)
                     if model.current != nil {
                         launchGlyph(L("Close session"), "stop.circle") { model.stopStartToLibrary() }
                     }
                     if model.installsRestartReady {
                         launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
+                    }
+                    if model.poolRestartNote != nil, !model.installsRestartReady {
+                        launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForPoolRestart() }
                     }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
@@ -6462,11 +6635,15 @@ struct LibraryHUD: View {
                     .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 22, height: 0), still: curtained))
                 launchWideStatus.modifier(LaunchEntrance(visible: launchVisible, step: 2, rise: CGSize(width: 22, height: 0), still: curtained))
                 HStack(spacing: 12) {
+                    launchGetHelp(entry)
                     if model.current != nil {
                         launchGlyph(L("Close session"), "stop.circle") { model.stopStartToLibrary() }
                     }
                     if model.installsRestartReady {
                         launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForInstallsRestart() }
+                    }
+                    if model.poolRestartNote != nil, !model.installsRestartReady {
+                        launchGlyph(L("Close Madeira"), "arrow.clockwise.circle") { model.closeForPoolRestart() }
                     }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
@@ -6500,7 +6677,12 @@ struct LibraryHUD: View {
     /// The landscape status: a small spinner and one line of what the start is doing,
     /// the one-time-install note and the elapsed time under it; or why the Dock stopped.
     @ViewBuilder private var launchWideStatus: some View {
-        if let failure = dockStart.failure {
+        if let note = model.poolRestartNote {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(JITPoolAuto.startHeadline).font(.headline)
+                Text(note).font(.subheadline).foregroundStyle(.white.opacity(0.75)).frame(maxWidth: 440, alignment: .leading)
+            }
+        } else if let failure = dockStart.failure {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Madeira Dock stopped").font(.headline)
@@ -6526,6 +6708,21 @@ struct LibraryHUD: View {
                         .font(.caption.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
                 }
             }
+        }
+    }
+    /// (get-help-auto) Once the Dock stopped: a big blue Get Help button first in the control
+    /// row, with words (the other buttons are glyphs), for the sheet that also opens by itself.
+    @ViewBuilder private func launchGetHelp(_ entry: LibraryEntry) -> some View {
+        if dockStart.failure != nil && GetHelp.enabled {
+            Button {
+                GetHelpCenter.shared.openOnStartScreen(entry, error: dockStart.failure)
+            } label: {
+                Label("Get Help", systemImage: "lifepreserver")
+                    .font(.system(size: 17, weight: .bold))
+                    .padding(.horizontal, 20).frame(height: 46)
+                    .background(Capsule().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain).foregroundStyle(.white)
         }
     }
     /// A round glyph button for the starting screen's control row.
@@ -6622,6 +6819,43 @@ struct LibraryHUD: View {
         }
     }
 
+    /// Friends from the running Madeira Dock session: Join a friend's lobby in
+    /// this game, or Invite a friend (to this player's lobby when in one).
+    private var friendsMenu: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("Session", systemImage: "chevron.left") { friendsPage = false }.buttonStyle(.borderless)
+                Spacer()
+                Text("Friends").font(.headline)
+                Spacer()
+                Button("Done") { model.menu = false }.buttonStyle(.bordered)
+            }.padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 8)
+            Picker("Status", selection: Binding(get: { steamStatus }, set: { steamStatus = $0; dockFriends.setStatus($0) })) {
+                ForEach(SteamOnlineStatus.allCases.filter { $0 != .offline }) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented).padding(.horizontal, 22).padding(.bottom, 8)
+            .disabled(dockFriends.pending != nil || !dockFriends.available)
+            if dockFriends.friends.isEmpty {
+                Spacer()
+                Group {
+                    if dockFriends.available { Text("No friends yet") } else { Text("Friends are available while the game runs") }
+                }
+                .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                List(dockFriends.friends, id: \.steamID) { friend in
+                    DockFriendRow(friend: friend, model: dockFriends)
+                }.scrollContentBackground(.hidden)
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                dockFriends.refresh()
+                try? await Task.sleep(for: .seconds(dockFriends.pending == nil ? 3 : 0.5))
+            }
+        }
+    }
+
     private var menu: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -6659,6 +6893,9 @@ struct LibraryHUD: View {
                     Button("Gyro aim & turbo", systemImage: "gyroscope") { assistPage = true }
                 }
                 Button("Keyboard", systemImage: "keyboard") { model.menu = false; LibraryKeyboard.show() }
+                if dockFriends.available {
+                    Button("Friends", systemImage: "person.2") { steamStatus = SteamOnlineStatus.current; friendsPage = true }
+                }
                 Divider()
                 FPSChoice(mode: Binding(get: { model.fpsMode }, set: { model.setFPS($0) }))
                 // Saved to the game with the rest of the session's profile.
@@ -7712,5 +7949,749 @@ private struct SmartPunctuationOff: UIViewRepresentable {
 extension View {
     func smartPunctuationOff() -> some View {
         background(SmartPunctuationOff().frame(width: 0, height: 0))
+    }
+}
+
+// MARK: - New look (NewLook.swift)
+
+extension LibraryView {
+    /// The new look: Apple's own tab bar (TabView; Cameron, Nov 9: "Switch to Apple's own tab
+    /// bar") with a page stack in every tab. The tab bar floats at the bottom on an iPhone and
+    /// at the top on an iPad, as the system places it. Re-tapping a tab goes back to its first page.
+    var newLookBody: some View {
+        lookTabView
+        .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, play: play, jit: jit, cover: false))
+        // A game's page: every way of opening one (a cover, the banner, Search, a store's game,
+        // Add a game) sets `selected`; in the new look it is pushed on the open tab instead.
+        .onChange(of: selected?.id) { _, id in
+            guard id != nil, let entry = selected else { return }
+            selected = nil
+            lookOpenGame(entry)
+        }
+        // The new look's own questions (the controller can answer them; Apple's cannot be
+        // reached by the pad here): a cover's options, Remove a download, a store's icon.
+        .overlay {
+            ZStack {
+                if let entry = lookOptions {
+                    NewLookOptionsSheet(entry: entry,
+                                        play: { lookOptions = nil; lookPlay(entry) },
+                                        open: { lookOptions = nil; selected = entry },
+                                        close: { lookOptions = nil })
+                        .transition(.opacity)
+                }
+                NewLookOverlays()
+            }
+        }
+        .onChange(of: lookTab) { old, new in
+            lookOptions = nil
+            if new == .search { lookBefore = old }
+            PadHighlight.shared.enterPage(String(describing: new))
+        }
+        .onAppear {
+            let pad = PadHighlight.shared
+            pad.start()
+            pad.tabs = { by in lookPick(lookTab.step(by)) }
+            pad.search = { lookPick(.search) }
+            // B with nothing over the tab: Search goes back where it came from (Cameron, Nov 9).
+            // (A pushed page is a layer of its own: its B goes back a page.)
+            pad.rootBack = { if lookTab == .search { lookPick(lookBefore) } }
+            pad.enterPage(String(describing: lookTab))
+        }
+    }
+
+    /// The open tab. A tap on the tab that is open comes here too (the setter runs with the
+    /// same tab): back to its first page, then to the top.
+    private var lookSelection: Binding<NewLookTab> {
+        Binding(get: { lookTab }, set: { new in
+            if new == lookTab { lookReselect(new) } else { lookTab = new }
+        })
+    }
+
+    /// Apple's tab bar. From iOS 18 Search is the system's search tab (on iOS 26 its own
+    /// circle beside the bar, which turns into the search field, as in Apple's apps).
+    @ViewBuilder private var lookTabView: some View {
+        if #available(iOS 18.0, *) {
+            TabView(selection: lookSelection) {
+                Tab(NewLookTab.library.title, systemImage: NewLookTab.library.symbol, value: NewLookTab.library) { lookStack(.library) }
+                Tab(NewLookTab.stores.title, systemImage: NewLookTab.stores.symbol, value: NewLookTab.stores) { lookStack(.stores) }
+                Tab(NewLookTab.downloads.title, systemImage: NewLookTab.downloads.symbol, value: NewLookTab.downloads) { lookStack(.downloads) }
+                    .badge(lookDownloads.badge.map { Text(verbatim: $0) })
+                Tab(NewLookTab.settings.title, systemImage: NewLookTab.settings.symbol, value: NewLookTab.settings) { lookStack(.settings) }
+                Tab(value: NewLookTab.search, role: .search) { lookStack(.search) }
+            }
+        } else {
+            TabView(selection: lookSelection) {
+                ForEach(NewLookTab.allCases, id: \.self) { item in
+                    lookStack(item)
+                        .tabItem { Label(item.title, systemImage: item.symbol) }
+                        .badge(item == .downloads ? lookDownloads.badge.map { Text(verbatim: $0) } : nil)
+                        .tag(item)
+                }
+            }
+        }
+    }
+
+    /// One tab: its own page stack, its first page, and the controller's hints above the bar.
+    @ViewBuilder private func lookStack(_ item: NewLookTab) -> some View {
+        Group {
+            switch item {
+            case .library:
+                NavigationStack(path: $libraryPath) {
+                    NewLookScrollPage(refresh: { await SteamGamesSection.refresh() }, top: lookTop[.library, default: 0]) { width in
+                        NewLookLibraryPage(width: width, enableJIT: enableJIT,
+                                           open: { selected = $0 }, play: { lookPlay($0) },
+                                           options: { entry in withAnimation(.easeOut(duration: 0.15)) { lookOptions = entry } },
+                                           add: { browser = true }, stores: { lookTab = .stores })
+                    }
+                    .modifier(NewLookTabRoot(title: item.title))
+                    .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                }
+            case .stores:
+                NavigationStack(path: $storesPath) {
+                    NewLookScrollPage(top: lookTop[.stores, default: 0]) { _ in NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) }) }
+                        .modifier(NewLookTabRoot(title: item.title))
+                        .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                }
+            case .downloads:
+                NavigationStack(path: $downloadsPath) {
+                    NewLookScrollPage(top: lookTop[.downloads, default: 0]) { _ in NewLookDownloadsPage(stores: { lookTab = .stores }) }
+                        .modifier(NewLookTabRoot(title: item.title))
+                        .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                }
+            case .settings:
+                NavigationStack(path: $settingsPath) {
+                    NewLookScrollPage(top: lookTop[.settings, default: 0]) { _ in
+                        NewLookSettingsList(enableJIT: enableJIT, open: { settingsPath.append(NewLookRoute.settings($0)) })
+                    }
+                    .modifier(NewLookTabRoot(title: item.title))
+                    .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                }
+            case .search:
+                // A result opens inside the Search tab (as in the App Store), and Back or a swipe
+                // returns to the results. The field is Apple's own (.searchable), always shown
+                // under the title (Cameron, Test 6: it hid until you pulled the page down).
+                NavigationStack(path: $searchPath) {
+                    NewLookScrollPage(top: lookTop[.search, default: 0]) { _ in
+                        NewLookSearchPage(text: $lookSearch, open: { selected = $0 },
+                                          store: { searchPath.append(NewLookRoute.store($0)) },
+                                          storeGame: { game in lookPendingGame = game; searchPath.append(NewLookRoute.store(game.store)) },
+                                          setting: { searchPath.append(NewLookRoute.settings($0)) })
+                    }
+                    .modifier(NewLookTabRoot(title: item.title))
+                    .searchable(text: $lookSearch, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(L("Games, stores and settings")))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                }
+            }
+        }
+        .modifier(NewLookTabChrome(tab: item))
+    }
+
+    /// A tab, from the controller (LB/RB, Y) or a button on a page.
+    private func lookPick(_ item: NewLookTab) {
+        guard item != lookTab else { return }
+        lookTab = item
+    }
+
+    /// The open tab tapped again, as on every iPhone app: a pushed page goes back to the tab's
+    /// first page; on the first page it scrolls to the top (Search also empties its field).
+    private func lookReselect(_ item: NewLookTab) {
+        let path = lookPath(item)
+        if !path.wrappedValue.isEmpty { path.wrappedValue = NavigationPath(); return }
+        lookTop[item, default: 0] += 1
+        if item == .search { lookSearch = "" }
+    }
+
+    /// A tab's page stack.
+    private func lookPath(_ item: NewLookTab) -> Binding<NavigationPath> {
+        switch item {
+        case .library: $libraryPath
+        case .stores: $storesPath
+        case .downloads: $downloadsPath
+        case .settings: $settingsPath
+        case .search: $searchPath
+        }
+    }
+
+    /// A game's page, pushed on the open tab's stack like any iPhone page (ux-review-0044 #1):
+    /// Back, the edge swipe and B take it off; the tab bar stays. Opened by X on a cover it comes
+    /// without the slide, so Play is in place when the game starts (LibraryDetail.autoPlayIfAsked).
+    private func lookOpenGame(_ entry: LibraryEntry) {
+        lookGames[entry.id] = entry
+        let tab = lookTab
+        let path = lookPath(tab)
+        let route = NewLookRoute.game(entry.id, tab: tab, depth: path.wrappedValue.count)
+        if NewLook.autoPlay == entry.id {
+            var instant = Transaction(); instant.disablesAnimations = true
+            withTransaction(instant) { path.wrappedValue.append(route) }
+        } else {
+            path.wrappedValue.append(route)
+        }
+        LogStore.shared.log("[new-look] game page pushed: \(entry.title) on \(String(describing: tab))")
+    }
+
+    /// The moves a pushed game page makes on its own tab's stack (LibraryDetail.stack). The tab
+    /// and the depth come with the page (NewLookRoute.game), never from the tab open now.
+    private func lookGameStack(tab: NewLookTab, depth: Int) -> LibraryDetailStack {
+        LibraryDetailStack(
+            push: { page in lookPath(tab).wrappedValue.append(page) },
+            back: { let path = lookPath(tab); if !path.wrappedValue.isEmpty { path.wrappedValue.removeLast() } },
+            close: {
+                // The game's page and everything over it.
+                let path = lookPath(tab)
+                let over = path.wrappedValue.count - depth
+                if over > 0 { path.wrappedValue.removeLast(over) }
+            })
+    }
+
+    /// X on a cover, or Play in its options: its page opens and starts it (all of Play's checks run there).
+    private func lookPlay(_ entry: LibraryEntry) {
+        NewLook.autoPlay = entry.id
+        selected = entry
+    }
+
+    /// A page pushed inside a tab.
+    @ViewBuilder private func lookRoute(_ route: NewLookRoute) -> some View {
+        switch route {
+        case .store(let store):
+            NewLookScrollPage { width in
+                NewLookStorePage(store: store, width: width, open: { selected = $0 }, add: { browser = true },
+                                 shown: { lookOpenPending(store) })
+            }
+            .navigationTitle(store.name)
+            .navigationBarTitleDisplayMode(.inline)
+        case .settings(let page):
+            SettingsPageView(page: page, startDock: startDock)
+        case .game(let id, let tab, let depth):
+            if let entry = lookGames[id] ?? model.entries.first(where: { $0.id == id }) {
+                LibraryDetail(entry: entry, play: { play($0) }, stack: lookGameStack(tab: tab, depth: depth))
+                    // MenuPad and PadHighlight own the pad: the system's focus must not also press rows.
+                    .modifier(ClaimGamepadEvents())
+                    .logScreen("game page: \(entry.title)")
+            }
+        }
+    }
+
+    /// The store game picked in Search: its store's own sheet, now that the store's page is up.
+    private func lookOpenPending(_ store: NewLookStore) {
+        guard let game = lookPendingGame, game.store == store else { return }
+        lookPendingGame = nil
+        NewLookSearch.openSheet(game)
+    }
+}
+
+/// A page pushed inside a new-look tab (each tab has its own NavigationStack).
+enum NewLookRoute: Hashable {
+    case store(NewLookStore)
+    case settings(SettingsPages.Page)
+    /// A game's page: the tab it is on and how many pages were under it when it opened.
+    case game(UUID, tab: NewLookTab, depth: Int)
+}
+
+/// A tab's first page: Apple's large title, which shrinks into the bar as the page scrolls.
+struct NewLookTabRoot: ViewModifier {
+    let title: String
+    func body(content: Content) -> some View {
+        content
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.large)
+    }
+}
+
+/// Every tab's stack: the controller's button hints above the tab bar while the highlight shows.
+struct NewLookTabChrome: ViewModifier {
+    let tab: NewLookTab
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) { NewLookPadHints(tab: tab) }
+    }
+}
+
+/// Play's look: on iOS 26 Apple's .glassProminent button in Play's blue (capsule, as the
+/// system draws it); before that, and with Reduce Transparency, a solid blue capsule.
+struct LookPlayStyle: ViewModifier {
+    let leaving: Bool
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), !reduceTransparency {
+            content.buttonStyle(.glassProminent).buttonBorderShape(.capsule).tint(NewLookColor.button)
+        } else {
+            content.buttonStyle(.plain)
+                .background(leaving ? Color(uiColor: .systemGray) : NewLookColor.button, in: Capsule())
+        }
+    }
+}
+
+/// The controller's buttons for the open screen, while the highlight shows.
+struct NewLookPadHints: View {
+    let tab: NewLookTab
+    @ObservedObject private var pad = PadHighlight.shared
+    var body: some View {
+        if pad.shown {
+            NewLookHints(items: pad.layerName == PadLayer.root
+                         ? (tab == .library ? [("A", L("Select")), ("X", L("Play")), ("Y", L("Search")), ("LB RB", L("Tabs"))]
+                            : tab == .search ? [("A", L("Select")), ("B", L("Back")), ("LB RB", L("Tabs"))]
+                                            : [("A", L("Select")), ("Y", L("Search")), ("LB RB", L("Tabs"))])
+                         : [("A", L("Select")), ("B", L("Back"))])
+                .padding(.bottom, 8)
+        }
+    }
+}
+
+// MARK: - New look game page
+
+extension LibraryDetail {
+    /// B on the game page: back a page, else close it (not while one of its sheets is up).
+    fileprivate func lookBack() {
+        guard !getHelp, !leaving, !findCover, !importCover, !remove, !confirmReset, !confirmSteamUninstall else { return }
+        // Pushed: B takes the top page off the tab's stack (this page, or one of its pages over it).
+        if let stack { if path.isEmpty { model.save(entry) }; stack.back(); return }
+        if path.isEmpty { model.save(entry); dismiss() }
+        else { path.removeLast() }   // slides back (Cameron, Nov 9)
+    }
+
+    /// Closes the game page: off the tab's stack with any of its pages over it (pushed), else
+    /// the sheet or cover it is in.
+    func closePage() {
+        if let stack { stack.close() } else { dismiss() }
+    }
+
+    /// The new look's game page: the cover, the name and Play at the top; the game's
+    /// settings in groups; Get Help; Uninstall last. On a wide screen, two columns.
+    var newLookPage: some View {
+        GeometryReader { geo in
+            let wide = geo.size.width >= 820
+            let top = geo.size.width > geo.size.height || geo.size.width >= 700
+            ZStack(alignment: top ? .top : .bottom) {
+                NewLookBackground()
+                ScrollViewReader { reader in
+                    ScrollView {
+                        Group {
+                            if wide {
+                                HStack(alignment: .top, spacing: 24) {
+                                    VStack(alignment: .leading, spacing: 24) { lookHero(wide: true); lookHelp }
+                                        .frame(maxWidth: .infinity)
+                                    VStack(alignment: .leading, spacing: 24) { lookSettings }
+                                        .frame(maxWidth: .infinity)
+                                }
+                            } else {
+                                VStack(alignment: .leading, spacing: 24) { lookHero(wide: false); lookSettings; lookHelp }
+                            }
+                        }
+                        .padding(.horizontal, top ? 28 : 16)
+                        // Pushed, the system's bar and tab bar hold Back and the hints (NewLookTabChrome).
+                        .padding(.top, stack != nil ? 12 : top ? 84 : 64)
+                        .padding(.bottom, stack != nil ? 32 : top ? 48 : 150)
+                        .frame(maxWidth: 1180).frame(maxWidth: .infinity)
+                        // The page's very top: the highlight on Play scrolls up to it, cover and all.
+                        .overlay(alignment: .top) { Color.clear.frame(height: 1).id("pad-top") }
+                    }
+                    .scrollIndicators(.hidden)
+                    .padScrollFollow(reader, toTop: ["gp-play"])
+                }
+                // Back, only on the full-screen page (pushed, it is the system's). (No copy of the
+                // tab bar: a page over the whole screen has none in Apple's apps: ux-review-0044 #1.)
+                if stack == nil {
+                ZStack(alignment: .topLeading) {
+                    Button { lookBack() } label: {
+                        Image(systemName: "chevron.left").font(.system(size: 19, weight: .semibold))
+                            .frame(width: 48, height: 48).contentShape(Circle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.primary)
+                    .newLookGlass()
+                    .accessibilityLabel(L("Back"))
+                    .padItem("gp-back", capsule: true) { lookBack() }
+                    .padding(.leading, top ? 24 : 16).padding(.top, top ? 18 : 6)
+                    Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
+                }
+                // The controller's buttons, at the bottom while the highlight shows.
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    NewLookPadHints(tab: .library).padding(.bottom, top ? 16 : 6)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+                }
+            }
+        }
+        // X on a cover: start once Play is laid out, where it ends up (the starting screen grows
+        // out of it). The page opens without the slide then (LibraryView.lookOpenGame), so Play's
+        // first place on screen is its last; no timer (ux-review-0044 #4).
+        .onAppear { if playFrame != .zero { autoPlayIfAsked() } }
+        .onChange(of: playFrame) { old, new in if old == .zero, new != .zero { autoPlayIfAsked() } }
+    }
+
+    /// Starts the game when the page was opened by X on its cover (NewLook.autoPlay).
+    private func autoPlayIfAsked() {
+        guard NewLook.autoPlay == entry.id else { return }
+        NewLook.autoPlay = nil
+        start()
+    }
+
+    /// Cover, name, where it is from and when it was played, and Play (the only filled button).
+    private func lookHero(wide: Bool) -> some View {
+        let playing = model.startingJIT == entry.id
+        let info: String = {
+            var parts: [String] = []
+            if entry.steamAppID != nil { parts.append("Steam") }
+            else if entry.epicAppName != nil { parts.append("Epic Games") }
+            else if entry.gogProductID != nil { parts.append("GOG") }
+            else if entry.itchGameID != nil { parts.append("itch.io") }
+            else if entry.eaOfferID != nil { parts.append("EA app") }
+            if let appID = entry.steamAppID, let summary = SteamOwnedLibrary.shared.playtime[appID]?.summary { parts.append(summary) }
+            else if let played = entry.lastPlayed { parts.append(String(format: L("Played %@"), played.formatted(.relative(presentation: .named)))) }
+            return parts.joined(separator: " · ")
+        }()
+        let playButton = Button(action: start) {
+            HStack(spacing: 12) {
+                if playing {
+                    ProgressView().tint(.white)
+                    Text("Starting JIT").fontWeight(.semibold)
+                } else {
+                    Image(systemName: "play.fill"); Text("Play").fontWeight(.semibold)
+                }
+            }
+            .font(.body)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .foregroundStyle(.white)
+            .contentShape(Capsule())
+        }
+        // Apple's own prominent glass button on iOS 26 (the one filled button on the page), the blue capsule before.
+        .modifier(LookPlayStyle(leaving: leaving))
+        .disabled(leaving)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { playFrame = $0 }
+        .padItem("gp-play", capsule: true) { start() }
+        return VStack(alignment: .leading, spacing: 16) {
+            if wide {
+                HStack(alignment: .bottom, spacing: 16) {
+                    artwork(backdrop: false).frame(width: 170, height: 255)
+                        .clipShape(RoundedRectangle(cornerRadius: NewLook.coverRadius, style: .continuous))
+                        .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(entry.title).font(.largeTitle.bold()).lineLimit(3).minimumScaleFactor(0.7)
+                        if !info.isEmpty { Text(info).font(.subheadline).foregroundStyle(.secondary) }
+                        LibraryBadges(entry: entry)
+                        playButton
+                    }
+                }
+            } else {
+                artwork(backdrop: false).frame(width: 140, height: 210)
+                    .clipShape(RoundedRectangle(cornerRadius: NewLook.coverRadius, style: .continuous))
+                    .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
+                Text(entry.title).font(.largeTitle.bold()).lineLimit(3).minimumScaleFactor(0.7)
+                if !info.isEmpty { Text(info).font(.subheadline).foregroundStyle(.secondary) }
+                LibraryBadges(entry: entry)
+                playButton
+            }
+            // A game Valve's client starts (Madeira Dock): can it start without a connection?
+            if DockOffline.enabled, let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
+                DockOfflineMark(appID: appID)
+            }
+            if let error {
+                Text(error).foregroundStyle(NewLookColor.red).padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading).newLookCard()
+            }
+            // A running update blocks Play: its progress shows here too.
+            if let appID = entry.steamAppID, let download = steam.downloads[appID] {
+                SteamDownloadStatus(download: download).padding(16).newLookCard()
+            }
+        }
+    }
+
+    /// The settings: the quick switches, then each group of pages.
+    @ViewBuilder private var lookSettings: some View {
+        NewLookSection(title: L("While playing")) {
+            lookRow("gp-fps", press: { entry.fpsMode = FPSChoice.next(after: entry.fpsMode) }) {
+                NewLookBadge(symbol: "speedometer", color: .indigo)
+                FPSChoice(mode: $entry.fpsMode)
+            }
+            lookRow("gp-overlay", press: { entry.performance.toggle() }) {
+                NewLookBadge(symbol: "chart.bar.xaxis", color: .teal)
+                Toggle(isOn: $entry.performance) {
+                    lookLabel(L("Performance overlay"), L("Frame rate and memory over the game."))
+                }
+                .tint(NewLookColor.green)
+            }
+            lookRow("gp-touch", last: true, press: { entry.touchControls.toggle() }) {
+                NewLookBadge(symbol: "hand.tap", color: .purple)
+                Toggle(isOn: $entry.touchControls) {
+                    lookLabel(L("Touch controls"), L("Buttons on the screen while you play."))
+                }
+                .tint(NewLookColor.green)
+            }
+        }
+        ForEach(Array(pageGroups.enumerated()), id: \.offset) { index, group in
+            NewLookSection(title: lookGroupTitle(group)) {
+                ForEach(group, id: \.self) { item in
+                    lookRow("gp-page-\(item)", last: item == group.last, press: { open(item) }) {
+                        NewLookBadge(symbol: item.symbol, color: Self.lookColor(item))
+                        lookLabel(L(item.title), item.blurb)
+                        Spacer(minLength: 8)
+                        if let value = summary(item) { Text(value).lineLimit(1).foregroundStyle(.secondary) }
+                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Get Help, and Uninstall at the very bottom.
+    @ViewBuilder private var lookHelp: some View {
+        if GetHelp.enabled {
+            NewLookSection(title: L("Help")) {
+                lookRow("gp-help", last: true, press: { getHelp = true }) {
+                    NewLookBadge(symbol: "lifepreserver", color: NewLookColor.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Get Help").font(.body.weight(.semibold)).foregroundStyle(.primary)
+                        Text("Looks at what happened and tells you what to try.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        if steamUninstallable != nil {
+            VStack(spacing: 0) {
+                lookRow("gp-uninstall", last: true, press: { confirmSteamUninstall = true }) {
+                    Text(String(format: L("Uninstall %@"), entry.title)).font(.body.weight(.semibold))
+                        .foregroundStyle(NewLookColor.red).lineLimit(2)
+                    Spacer(minLength: 0)
+                }
+            }
+            .newLookCard()
+            .confirmationDialog("Uninstall \(entry.title)? Its downloaded files are deleted from where it is installed. Saves stored elsewhere are kept.",
+                                isPresented: $confirmSteamUninstall, titleVisibility: .visible) {
+                Button("Uninstall", role: .destructive) {
+                    if let installed = steamUninstallable { steam.uninstall(installed) }
+                    leaving = true; closePage()
+                }
+            }
+        }
+    }
+
+    /// A row's name and, under it, what it does (as Get Help's row).
+    private func lookLabel(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.body.weight(.semibold)).foregroundStyle(.primary)
+            Text(detail).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One row of a group: tappable, highlightable, with a line under it unless it is the last.
+    private func lookRow<Content: View>(_ id: String, last: Bool = false, press: @escaping () -> Void,
+                                        @ViewBuilder _ content: () -> Content) -> some View {
+        Button(action: press) {
+            HStack(spacing: 12) { content() }
+                // Room above and below the words, so the highlight (4 pt inside the row) never
+                // crosses a two-line row's text (Cameron, Test 6: Display, Get Help).
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                .padding(.horizontal, 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) {
+            if !last { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 0.5).padding(.leading, 16 + 30 + 12) }
+        }
+        .padItem(id, cornerRadius: NewLook.cardRadius, inset: 4, press: press)
+    }
+
+    private func lookGroupTitle(_ group: [Page]) -> String? {
+        if group.contains(.display) { return L("Display and controls") }
+        if group.contains(.advanced) { return L("Game files") }
+        switch group.first {
+        case .steam?, .cloud?, .achievements?, .workshop?: return "Steam"
+        case .gog?: return "GOG"
+        case .itch?: return "itch.io"
+        case .epic?: return "Epic Games"
+        case .ea?: return "EA app"
+        default: return nil
+        }
+    }
+
+    private static func lookColor(_ page: Page) -> Color {
+        switch page {
+        case .display: return .blue
+        case .controls, .binds, .assist: return .purple
+        case .launch: return Color(uiColor: .systemGray)
+        case .compatibility: return .orange
+        case .steam, .cloud, .achievements, .workshop: return Color(red: 0.17, green: 0.36, blue: 0.58)
+        case .gog: return Color(red: 0.18, green: 0.48, blue: 0.54)
+        case .itch: return Color(red: 0.72, green: 0.26, blue: 0.23)
+        case .epic: return Color(red: 0.29, green: 0.29, blue: 0.32)
+        case .ea: return Color(red: 0.69, green: 0.45, blue: 0.16)
+        case .library, .iniFiles, .mods, .advanced: return Color(uiColor: .systemGray)
+        }
+    }
+}
+
+// MARK: - New look: the starting screen
+
+extension LibraryHUD {
+    /// (new-look) The starting screen: the Madeira island behind it (LibraryHUD's body), the
+    /// cover and "Starting <game>", one tile per step of the start, and Stop. A start that
+    /// stopped says why in a red card with Get Help first. The controller's highlight starts
+    /// on Stop (or Get Help once it failed); B only moves it to Stop, A on Stop stops.
+    func newLookLaunch(_ entry: LibraryEntry, geometry geo: GeometryProxy) -> some View {
+        let available = max(0, geo.size.height - geo.safeAreaInsets.top - geo.safeAreaInsets.bottom)
+        let wide = geo.size.width > geo.size.height && geo.size.width >= 700
+        let failed = dockStart.failure != nil || model.poolRestartNote != nil
+        let showLogs = model.launchLogs
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 16) {
+                    launchCover(entry).frame(width: wide ? 96 : 72, height: wide ? 144 : 108)
+                        .clipShape(RoundedRectangle(cornerRadius: NewLook.coverRadius, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: NewLook.coverRadius, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.5), radius: 14, y: 8)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { coverFrame = $0; LaunchCurtain.shared.track($0) }
+                        .opacity(coverLanded ? 1 : 0)
+                        .modifier(LaunchEntrance(visible: launchVisible, step: 0, rise: CGSize(width: 0, height: 20), scale: 0.88, still: curtained))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(String(format: L("Starting %@"), entry.title)).font(.title2.bold())
+                            .lineLimit(2).minimumScaleFactor(0.7)
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text("\(Int(context.date.timeIntervalSince(model.startingSince)))s")
+                                .font(.subheadline.monospacedDigit()).foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 0, height: 14), still: curtained))
+                    Spacer(minLength: 0)
+                }
+                // The steps, read again once a second (the Dock's report has no change signal).
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    VStack(spacing: 8) {
+                        ForEach(lookSteps(entry)) { NewLookStepTile(step: $0) }
+                    }
+                }
+                .padding(6)   // step tiles (16) 6 pt inside the card (22): concentric
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: NewLook.cardRadius, style: .continuous))
+                .modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
+                if failed { lookFailure(entry) } else { lookControls }
+                if showLogs {
+                    LibraryLiveLogs().frame(height: min(170, available * 0.3))
+                        .clipShape(RoundedRectangle(cornerRadius: NewLook.coverRadius, style: .continuous))
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 560, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: available)
+            .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.86), value: failed)
+        }
+        .frame(width: geo.size.width, height: available)
+        .padding(.top, geo.safeAreaInsets.top)
+        .foregroundStyle(.white)
+        .environment(\.colorScheme, .dark)
+        .padLayer("start", start: failed ? "ln-help" : "ln-stop", back: {
+            // B never stops by itself: it shows Stop, and A on it stops (Cameron's "asks first").
+            let pad = PadHighlight.shared
+            pad.show()
+            let stopped = DockStartScreen.shared.failure != nil || LibraryModel.shared.poolRestartNote != nil
+            pad.move(toAny: stopped ? ["ln-close", "ln-restart", "ln-help"] : ["ln-stop"])
+        })
+        .onChange(of: failed) { _, now in
+            // The start stopped: the highlight goes to Get Help (or Close when Get Help is off).
+            // Its buttons are laid out on the next pass.
+            if now { DispatchQueue.main.async { PadHighlight.shared.move(toAny: ["ln-help", "ln-restart", "ln-close"]) } }
+        }
+    }
+
+    /// Stop, the live log, Show desktop, Close Madeira and Show game view, as the old screen had.
+    @ViewBuilder fileprivate var lookControls: some View {
+        VStack(spacing: 12) {
+            if model.current != nil {
+                NewLookSheetButton(id: "ln-stop", title: L("Stop"), symbol: "stop.fill") { model.stopStartToLibrary() }
+            }
+            if model.installsRestartReady {
+                NewLookSheetButton(id: "ln-restart", title: L("Close Madeira"), symbol: "arrow.clockwise", filled: true) {
+                    model.closeForInstallsRestart()
+                }
+            }
+            HStack(spacing: 12) {
+                NewLookSheetButton(id: "ln-log", title: model.launchLogs ? L("Hide live log") : L("Show live log"),
+                                   symbol: "text.alignleft") { model.toggleLaunchLogs() }
+                if dockStart.holding {
+                    NewLookSheetButton(id: "ln-desktop", title: L("Show desktop"), symbol: "macwindow") { dockStart.showDesktop(model) }
+                        .accessibilityHint(L("Shows the Windows desktop"))
+                }
+            }
+            if model.launchSlow && !dockStart.holding {
+                NewLookSheetButton(id: "ln-view", title: L("Show game view"), symbol: "eye") { model.showGameView(reason: "button") }
+            }
+        }
+        .modifier(LaunchEntrance(visible: launchVisible, step: 3, still: curtained))
+    }
+
+    /// Why the start stopped: the Dock's words or "Not enough memory", then Get Help (filled),
+    /// Close Madeira when a fresh run is needed, and Close back to the library.
+    fileprivate func lookFailure(_ entry: LibraryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let note = model.poolRestartNote {
+                Text(JITPoolAuto.startHeadline).font(.headline)
+                Text(note).font(.subheadline).foregroundStyle(.white.opacity(0.88)).fixedSize(horizontal: false, vertical: true)
+            } else if let failure = dockStart.failure {
+                Text("Madeira Dock stopped").font(.headline)
+                Text(failure).font(.subheadline).foregroundStyle(.white.opacity(0.88)).fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 12) {
+                // (get-help-auto) The sheet also opens by itself a second after the Dock stopped.
+                if dockStart.failure != nil && GetHelp.enabled {
+                    NewLookSheetButton(id: "ln-help", title: L("Get Help"), symbol: "lifepreserver", filled: true) {
+                        GetHelpCenter.shared.openOnStartScreen(entry, error: dockStart.failure)
+                    }
+                }
+                if model.installsRestartReady {
+                    NewLookSheetButton(id: "ln-restart", title: L("Close Madeira"), symbol: "arrow.clockwise") { model.closeForInstallsRestart() }
+                } else if model.poolRestartNote != nil {
+                    NewLookSheetButton(id: "ln-restart", title: L("Close Madeira"), symbol: "arrow.clockwise",
+                                       filled: !(dockStart.failure != nil && GetHelp.enabled)) { model.closeForPoolRestart() }
+                }
+                HStack(spacing: 12) {
+                    if model.current != nil {
+                        NewLookSheetButton(id: "ln-close", title: L("Close"), symbol: nil) { model.stopStartToLibrary() }
+                    }
+                    NewLookSheetButton(id: "ln-log", title: model.launchLogs ? L("Hide live log") : L("Show live log"),
+                                       symbol: "text.alignleft") { model.toggleLaunchLogs() }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(Color(red: 0.32, green: 0.07, blue: 0.08).opacity(0.92)))
+    }
+
+    /// The start's steps from what Madeira knows: getting ready (JIT), then for a Madeira Dock
+    /// (Steam) start the one-time installs, Steam and the game; for any other game the game.
+    /// Steam's step is done once the Dock reports the game's launch accepted (launch-client-error 0).
+    fileprivate func lookSteps(_ entry: LibraryEntry) -> [NewLookStep] {
+        MainActor.assumeIsolated {
+            var steps: [NewLookStep] = []
+            let ready = model.current != nil && model.preparing == nil
+            steps.append(NewLookStep(id: "ready", title: L("Get ready"), detail: ready ? nil : launchIdleStatus,
+                                     symbol: "bolt.fill", state: ready ? .done : .active))
+            let open = String(format: L("Open %@"), entry.title)
+            if dockStart.active || dockStart.failure != nil {
+                let fields = MadeiraDock.pollReport().fields
+                let setupDone = DockInstallers.script == nil || DockInstallers.finishedAt != nil
+                if DockInstallers.script != nil {
+                    steps.append(NewLookStep(id: "setup", title: L("First-time setup"),
+                                             detail: ready && !setupDone ? DockInstallers.note : nil, symbol: "wrench.and.screwdriver.fill",
+                                             state: setupDone ? .done : ready ? .active : .waiting))
+                }
+                let launched = fields["launch-client-error"] == "0"
+                let steam: NewLookStep.State = dockStart.failure != nil ? .failed : launched ? .done : ready && setupDone ? .active : .waiting
+                steps.append(NewLookStep(id: "steam", title: L("Start Steam"), detail: steam == .active ? dockStatus : nil,
+                                         symbol: "cloud.fill", state: steam))
+                steps.append(NewLookStep(id: "game", title: open, detail: launched && dockStart.failure == nil ? L("Waiting for its window…") : nil,
+                                         symbol: "play.fill", state: launched && dockStart.failure == nil ? .active : .waiting))
+            } else {
+                steps.append(NewLookStep(id: "game", title: open, detail: ready ? launchIdleStatus : nil,
+                                         symbol: "play.fill", state: ready ? .active : .waiting))
+            }
+            // Not enough memory: the step that was running is the one that stopped.
+            if model.poolRestartNote != nil, let i = steps.lastIndex(where: { $0.state == .active }) { steps[i].state = .failed }
+            return steps
+        }
     }
 }

@@ -104,17 +104,6 @@ enum MadeiraConfig {
 }
 enum LogLevel { case info, error }
 final class LogStore { static let shared = LogStore(); var lines: [String] = []; func log(_ s: String, level: LogLevel = .info) { lines.append(s) } }
-// LogTrail.swift records presses for the log; the harness only needs the calls to exist.
-enum LogTrail {
-    static var ring: Int { 0 }
-    static func pressed<C>(_ command: C, ownsMenus: Bool, before: Int) {}
-    static func pressedUnused<P>(_ pressed: P) {}
-    static func inGameMenu(_ open: Bool) {}
-    static func began<E>(_ entry: E, dock: Bool) {}
-    static func ending(_ why: String) {}
-    static func clip(_ text: String, _ limit: Int) -> String { text }
-    static func backInLibrary() {}
-}
 // Big Picture's library discovery is outside this launch-profile harness.
 // Trap if a case starts using it instead of silently exercising fake storage.
 enum MadeiraDock {

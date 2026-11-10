@@ -4,10 +4,11 @@
 Source checks: the file is in the app target; LibraryController sends the new commands
 (L1/R1 as previous/next, L2/R2 as pageUp/pageDown, View as search), repeats a held
 direction, logs each controller once, and GamepadInput hands it the triggers and the
-name; every store's cards, sign-in card and game sheet are reachable; the sidebar draws
-the ring on its rows and rail; the library's page reports frames and scrolls to the ring;
-B on a game page does not also move the ring; the switch, the docs and the log lines.
-The ring's movement rule (MenuPad.nearest) is mirrored in Python and run on a grid.
+name; every store's cards, sign-in card and game sheet are reachable; the switch, the
+docs and the log lines. The ring's movement rule (MenuPad.nearest) is mirrored in Python.
+Nov 9 (new look, Cameron): Wave 8's store sidebar is gone, and this ring only runs with
+Settings › Appearance › New look off (store pages and Game details); the new look's
+highlight is checked by check-new-look.py.
 """
 from pathlib import Path
 import re, sys
@@ -26,7 +27,6 @@ def require(condition, label):
 
 pad = (app / 'MenuPad.swift').read_text()
 library = (app / 'Library.swift').read_text()
-side = (app / 'LibrarySidebar.swift').read_text()
 pages = (app / 'SettingsPages.swift').read_text()
 gamepad = (app / 'GamepadInput.swift').read_text()
 project = (root / 'app/Madeira.xcodeproj/project.pbxproj').read_text()
@@ -34,7 +34,8 @@ docs = (root / 'docs/LIBRARY.md').read_text()
 
 require(project.count('A1000D52 /* MenuPad.swift in Sources */') == 2 and project.count('A2000D52 /* MenuPad.swift */') == 3,
         'MenuPad.swift is in the app target')
-require('static var enabled: Bool { MadeiraConfig.flag("MADEIRA_MENU_CONTROLLER") }' in pad, 'the switch, on by default')
+require('static var enabled: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_MENU_CONTROLLER") }' in pad,
+        'the switch, on by default, and only with New look off')
 
 controller = library[library.index('final class LibraryController'):library.index('enum FrontendChoice')]
 for mask, name in [('0x100', 'previous'), ('0x200', 'next'), ('0x10000', 'pageUp'), ('0x20000', 'pageDown'), ('0x20', 'search'),
@@ -56,32 +57,15 @@ for store, key in [('Steam', 'steam'), ('Epic', 'epic'), ('GOG', 'gog'), ('Itch'
     require(f'.menuPad("signin:{key}"' in text, f'{store}: the sign-in card takes the ring')
     require('.menuPadSheet { primaryPress(item)?() }' in text and 'private func primaryPress(' in text,
             f'{store}: A and B on the game sheet')
-require('.libraryCardButtonStyle(grid: true, pad: "ready:\\(game.id)")' in side, 'Ready to play covers take the ring')
 require('.libraryCardButtonStyle(grid: !list, pad: "entry:" + entry.id.uuidString)' in library, 'Other games covers take the ring')
 require('if let pad, MenuPad.enabled { buttonStyle(MenuPadCardStyle(id: pad, grid: grid)) }' in library, 'the card style wraps the old one')
 
-require(side.count('.overlay { ring(MenuPad.side(shelf)') == 2 and side.count('ring(MenuPad.desktopRow') == 1
-        and side.count('ring(MenuPad.settingsRow') == 1 and 'pad: MenuPad.desktopRow' in side and 'pad: MenuPad.settingsRow' in side
-        and '.overlay { ring(id, radius: 10) }' in side, 'the ring on the list rows and the rail icons')
-require('.onReceive(pad.search)' in side, 'View opens the search field')
-page = library[library.index('private var sidebarLibrary'):library.index('/// The Desktop button at the top of the page')]
-require('.coordinateSpace(name: MenuPadSpace.name)' in page and '.onPreferenceChange(MenuPadFrames.self)' in page
-        and 'reader.scrollTo(id, anchor: .center)' in page, 'the page reports where items are and keeps the ring on screen')
-require('if MenuPad.enabled { padCommand(command); return }' in page and 'MenuPad.shared.sheets == 0' in page
-        and 'Date() >= MenuPad.shared.quietUntil' in page, 'presses go to the ring unless a sheet or a closing page has them')
-require('.onChange(of: selected == nil)' in page, 'B closing a game page does not also move the ring')
-for command in ['"up", "down"', '"pageUp", "pageDown"', '"left"', '"right"', '"accept"', '"back"', '"previous", "next"', '"add"', '"menu"', '"search"']:
-    require(f'case {command}:' in page, f'padCommand handles {command}')
-require('.toolbar(sidebarShown' in library and 'MenuPad.shared.show(); switchTab(to: 0)' in library, 'Menu in Settings goes back to the library')
-require('pad.sheets == 0' in pages and 'if selected && pad.ring {' in pages and '.menuPadSheet()' in pages,
-        'iPad Settings: up and down go through the pages; its sheets close with B')
 require('MenuPadTouchWatch' in pad and 'cancelsTouchesInView = false' in pad and 'state = .failed' in pad,
         'touch hides the ring without taking the touch')
-require('GamepadEventClaim.install(on: window)' in pad and 'MenuPad.shared.claimControllerEvents()' in page
+require('GamepadEventClaim.install(on: window)' in pad
         and '.modifier(ClaimGamepadEvents())' in pad[pad.index('struct MenuPadSheet'):]
         and library[library.index('struct LibrarySheets'):library.index('struct ExecutableBrowser')].count('.modifier(ClaimGamepadEvents())') == 2,
         'Wave 9: the system\'s own focus never gets the pad (window, game page, browser and store sheets claim it)')
-require('[menu-pad] store=' in page and '[menu-pad] open ' in page, 'the log lines')
 require('MADEIRA_MENU_CONTROLLER' in docs and '[menu-pad] connected <controller>' in docs, 'docs/LIBRARY.md')
 
 
@@ -127,19 +111,16 @@ require('[menu-pad] details: stopped a page the controller did not open' in deta
 grid = {f'{r}{c}': (c * 180, r * 280, 164, 260) for r in range(6) for c in range(4)}
 grid['signin'] = (0, -120, 700, 80)
 require(nearest(grid['00'], 'right', grid) == '01' and nearest(grid['03'], 'right', grid) is None, 'right: the next cover; none past the row')
-require(nearest(grid['00'], 'left', grid) is None, 'left from the first column: none (the sidebar takes it)')
+require(nearest(grid['00'], 'left', grid) is None, 'left from the first column: none')
 require(nearest(grid['12'], 'down', grid) == '22' and nearest(grid['12'], 'up', grid) == '02', 'up and down keep the column')
 require(nearest(grid['02'], 'up', grid) == 'signin', 'up from the top row: the sign-in card above')
 require(nearest(grid['01'], 'down', grid, jump=600) == '21', 'a page down jumps about a screen, same column')
-src = pad[pad.index('static func nearest'):pad.index('/// The item to ring when the page is entered')]
+src = pad[pad.index('static func nearest'):pad.index('/// Touching the screen hides the ring')]
 require('score = dy + abs(dx) * 2' in src and 'score = dx + abs(dy) * 3' in src and 'score = abs(abs(dy) - jump) + abs(dx) * 0.5' in src,
         'the Swift rule is the one checked here')
 
 # Cameron, Nov 7 ("Yes, instant"): the ≡ list, search, folding sections, Game details' pages and
 # the old store tabs change at once.
-side = (app / 'LibrarySidebar.swift').read_text()
-require('private var animation: Animation? { nil }' in side and 'asyncAfter(deadline: .now() + 0.3) { searchFocused' not in side,
-        'the ≡ list and search open at once')
 require('withTransaction(instant) { path.append(page) }' in detail and 'NavigationLink(value:' not in detail
         and 'case binds, assist' in detail and 'NavigationLink("Gyro aim' not in detail, "Game details' pages open at once")
 require('withTransaction(instant) { collapsed.wrappedValue.toggle() }' in library
@@ -163,7 +144,7 @@ require('if let list = view as? UICollectionView' in pad, "the list is found fro
 require('if context.previouslyFocusedItem === self, holding { return false }' in pad and 'system.requestFocusUpdate(to: self)' in pad,
         'the system focus is held off the rows while the ring shows')
 require('[menu-pad] system focus held off the rows while the ring shows' in pad, 'logged (marker)')
-require('RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(LibrarySidebar.blue, lineWidth: 3)' in detail
+require('RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(MenuPadColor.blue, lineWidth: 3)' in detail
         and '}.padding(4)' in detail, 'rows: a rounded ring inset in the row')
 require('RoundedRectangle(cornerRadius: 18)' in library, "Play's ring follows Play's shape")
 
@@ -179,14 +160,6 @@ require('case "fps": entry.fpsMode = FPSChoice.next(after: entry.fpsMode)' in de
         'A steps the FPS limit')
 require('case epic, ea' in detail and 'case .epic:' in detail and 'entry.epicAppName != nil ? [.epic]' in detail, 'Epic and EA have pages')
 require('Game details is Madeira\'s own page' in detail, 'marker comment')
-
-# Wave 12, Settings: the ring inside the row; the keyboard only from a tap or View.
-settings = (app / 'SettingsPages.swift').read_text()
-require('RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(LibrarySidebar.blue, lineWidth: 3)' in settings
-        and 'Rectangle().strokeBorder(LibrarySidebar.blue, lineWidth: 3)\n' not in settings, 'Settings: the ring inside the row')
-require('if focused, MenuPad.enabled, pad.ring, !searchAsked {' in settings and 'if command == "search" { searchAsked = true; searchFocused = true; return }' in settings,
-        'Settings: no keyboard from the controller, View opens search')
-require('[settings-split] search kept closed' in settings, 'logged (marker)')
 
 print('check-menu-pad: ' + ('FAIL' if failures else 'PASS'))
 sys.exit(1 if failures else 0)

@@ -143,6 +143,8 @@ enum LibraryGridStore: String, CaseIterable {
     @Published var epicSignIn = false
     @Published var eaGame: Game<String>?
     @Published var eaSignIn = false
+    /// (new-look) A Steam game's sheet to open from Search: the Steam section opens it (its sheet is its own).
+    @Published var steamGame: Game<Int>?
 }
 
 /// SteamGamesRules.items over the account's whole library, computed once per change of its inputs. A page build asks for it up

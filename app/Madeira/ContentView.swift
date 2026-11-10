@@ -1377,6 +1377,9 @@ struct ContentView: View {
     @ObservedObject private var library = LibraryModel.shared
     /// "Use New Interface" (actionButtons) applies at the next start.
     @State private var showFrontendRestart = false
+    /// (new-look) Settings › Appearance › New look: read here too, so switching it puts the
+    /// navigation stack back (or takes it away) at once.
+    @AppStorage(NewLook.key) private var newLookOn = true
 
     enum JITStatus {
         case unknown
@@ -1394,7 +1397,10 @@ struct ContentView: View {
          * NavigationStack is single-column on every device. Safe here: there are
          * no NavigationLinks anywhere in the app, so nothing depended on the
          * two-column selection behaviour. */
-        NavigationStack {
+        // (new-look) The new look's tab bar holds a page stack per tab (Library.swift newLookBody),
+        // and a stack inside a stack breaks Back: the new-look library is not put inside this one.
+        // Sessions, the old look and the developer screen keep it.
+        ContentNavigation(stack: !(library.enabled && library.current == nil && NewLook.allowed && newLookOn)) {
             Group {
                 if library.enabled && library.current != nil {
                     sessionBody
@@ -1414,6 +1420,7 @@ struct ContentView: View {
             // under the title, the buttons and the search field behind a
             // progressive blur (as in the App Store), with no hard edge.
             .toolbarBackground(library.enabled && !Self.systemScrollEdge ? .visible : .automatic, for: .navigationBar)
+        }
             // A second session cannot start in this process; offer to close Madeira.
             .alert("Restart Madeira", isPresented: Binding(get: { library.restartNotice != nil },
                                                             set: { if !$0 { library.restartNotice = nil } })) {
@@ -1427,6 +1434,16 @@ struct ContentView: View {
                 }
                 Button("Later", role: .cancel) { library.restartNotice = nil; library.restartEntry = nil }
             } message: { Text(library.restartNotice ?? "") }
+            // A Steam game started without Madeira Dock handed itself to Steam and quit.
+            .alert("This game needs Steam", isPresented: Binding(get: { library.steamNeeded != nil },
+                                                                 set: { if !$0 { library.steamNeeded = nil } })) {
+                if let hint = library.steamNeeded, hint.canSwitch {
+                    Button("Use Madeira Dock") { library.useMadeiraDock(hint.id); library.steamNeeded = nil }
+                    Button("Not now", role: .cancel) { library.steamNeeded = nil }
+                } else {
+                    Button("OK", role: .cancel) { library.steamNeeded = nil }
+                }
+            } message: { Text(library.steamNeeded?.message ?? "") }
             // CS_DEBUGGED without a debugger (JIT enabled outside Madeira): offer Madeira's own request.
             .alert("Enable JIT", isPresented: Binding(get: { library.jitNotice != nil },
                                                       set: { if !$0 { library.jitNotice = nil } })) {
@@ -1481,7 +1498,6 @@ struct ContentView: View {
             // now or, from a cold start, once the library is up.
             .onReceive(ShortcutRouter.shared.$pendingExe) { _ in launchPendingShortcut() }
             .onChange(of: library.enabled) { _, _ in launchPendingShortcut() }
-        }
     }
 
     /// The developer interface. Orientation comes from the view's own shape, not
@@ -3666,7 +3682,8 @@ struct ContentView: View {
             // one Steam's launch entry names, or the kept launcher goes back. No session runs.
             let program = DockStartProgram.chosen(game.id)
             if let launcher = steamEntry?.program {
-                let outcome = DockStartProgram.apply(launcher: launcher, program: program, folder: installFolder)
+                let outcome = DockStartProgram.apply(launcher: launcher, program: program, folder: installFolder,
+                                                   unityData: MadeiraConfig.flag("MADEIRA_DOCK_START_UNITY_DATA"))
                 if case .failed(let why) = outcome {
                     logStore.log("[dock-start-program] app=\(game.id) launcher=\(launcher) program=\(program ?? "steam") failed: \(why)", level: .error)
                 } else if outcome != .unchanged || program != nil {
@@ -5276,5 +5293,16 @@ struct MappingPanel: View {
                     .fill(.white.opacity(on ? 0.36 : 0.12)))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// (new-look) The app's navigation stack, or none: the new-look library's tab bar has one per
+/// tab (ContentView.body). The alerts, sheets and start-up work sit outside this, so switching
+/// it never runs them again.
+private struct ContentNavigation<Content: View>: View {
+    let stack: Bool
+    @ViewBuilder var content: Content
+    var body: some View {
+        if stack { NavigationStack { content } } else { content }
     }
 }

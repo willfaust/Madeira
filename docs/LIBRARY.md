@@ -37,62 +37,86 @@ Removing an entry never removes the game's files or saves.
 
 ## Library screen
 
-- Store sidebar (the default; Settings › Appearance › **Store sidebar** off, or
-  `env.MADEIRA_LIBRARY_SIDEBAR = 0`, brings back the page described below, with
-  **New library grid** if that is on): a list on the left with **Ready to play** (every
-  installed game of every store and the games you added, most recently played
-  first; a cover opens the game's page, where **Play** is), then **Steam**,
-  **Epic Games**, **GOG**, **itch.io** and **EA app** (the stores that are on,
-  each with its game count or **Sign in**), then **Other games** last, and
-  **Windows desktop** and **Settings** at the bottom. The right side shows the
-  chosen entry: a store's page is that store's section below (sign-in card,
-  installed games, **Not installed**), unfolded when it is opened from the
-  list. Sideways on an iPad the list shows names; upright, on an iPhone and in
-  narrow windows it is a rail of store icons, and **≡** slides the full list
-  out over the page (tap outside it to close). The chosen entry is remembered.
-  Group by is not offered (the sidebar groups by store); the layout, Sort by,
-  search and pull to refresh work as below. On a controller, up and down
-  change the entry. The sidebar runs the full height of the screen: on its page
-  the navigation bar is hidden, and the library menu and **+** sit at the top
-  right of the page. The list starts with **Madeira** (its bolt is blue while JIT
-  is on) and the search field, which filters the page as you type; on the icon
-  rail, the magnifier under **≡** slides the list out with the field ready, and
-  the page shows what is being searched for with a button to clear it. With the
-  rail, **JIT** and **Memory+** tags at the top of the page turn green when on
-  and grey when off. The Library and Settings switch at the bottom of the screen
-  is hidden with the sidebar: **Settings** at the bottom of the list (the gear
-  on the rail) opens Settings, and Settings goes back with its grid button
-  (**Library** in the navigation bar on an iPhone). The log notes
-  `[library-sidebar] shelf=<entry>`.
-- iPad Settings with the store sidebar is laid out like the iPad's own Settings
-  app, sideways and upright: on the left, **Settings** with the grid button
-  back to the library, **Search settings**, a card
-  with **JIT** and **Memory+** (green when on), the free space for games and
-  **Enable JIT** while JIT is off, then every page in its group, each with a
-  coloured icon (the picked row is highlighted to the group's corners), and the
-  installed build at the very bottom. A tap moves the highlight at once and the
-  page follows. The right side shows the chosen page, starting with a card of
-  its icon, title and a line on what it is for; while the search holds text it
-  shows the long page filtered. The chosen page is remembered. An iPhone keeps
-  the list of pages. The log notes `[settings-split] page=<page>`.
-- A controller in the store sidebar's library (`MenuPad.swift`; player 1's pad
-  through `LibraryController`, so only while no game runs): the first press shows
-  a blue ring on the page's first cover (or where it was), and touching the screen
-  hides it again. The D-pad or left stick (past half way; a held direction repeats
-  after 0.35 s, then every 0.1 s) moves the ring between covers and buttons, and
-  left from the first column goes to the store's row in the sidebar (or the icon
-  rail); up and down there go through the stores, **Windows desktop** and
-  **Settings**. **A** opens what is ringed (a store's page, a game's page, a
-  sign-in card, **Add a game**); on a game's page A is Play and B goes back; on a
-  store game's sheet A is its Install, Resume, Pause or Open, and B closes it.
-  **B** on the page goes back to the sidebar. **L1**/**R1** pick the previous or
-  next store, **L2**/**R2** move a screen up or down, **Menu** opens Settings
-  (Menu, and on an iPad B, comes back), **View** opens the search field and
-  **Y** adds a game. On iPad Settings, up and down go through the pages. Each store
-  remembers where its ring was. Alerts still need a tap. `env.MADEIRA_MENU_CONTROLLER
-  = 0` turns this off (up and down then change the store, as before). The log notes
-  `[menu-pad] connected <controller>` once per controller, `[menu-pad] store=<store>`
-  and `[menu-pad] open <item>`.
+- New look (the default; Settings › Appearance › **New look** off, or
+  `env.MADEIRA_NEW_LOOK = 0`, brings back the page described below, with
+  **New library grid** if that is on): the Madeira island behind every page and a
+  tab bar with **Library**, **Stores**, **Downloads**, **Settings** and a separate
+  **Search** button. On an iPhone held upright the bar floats at the bottom;
+  sideways and on iPad it sits at the top. On iOS 26 the bar, Search, the game
+  page's back button and the button hints are Apple's Liquid Glass and **Play** is
+  Apple's prominent glass button (before iOS 26, and with Reduce Transparency, a
+  blurred or solid capsule); cards and rows stay plain. **Library** lists every installed game
+  of every store and the games you added, most recently played first, under a
+  banner of the game played last (its wide art, **Play** and **Game page**; only
+  under All), with a chip per store, and the JIT pill (**Ready** and the free space when JIT is on, **JIT
+  is off** to enable it). Until Steam's install records are read the first time,
+  an empty Library shows **Loading your games…**, not "Nothing installed yet".
+  A pinch on the covers changes how big they are as the fingers move (a click as
+  each column goes; lifting the fingers never opens a game), and Settings ›
+  Appearance › **Cover size** picks Small, Medium or Large. A cover opens the game's page; there **Play** is the only
+  filled button, the quick switches (FPS limit, performance overlay, touch
+  controls) and each group of pages follow, each row with a line saying what it does, then **Get Help**, and **Uninstall**
+  is last. Its pages slide in and out (with New look off they open at once). **Stores** lists every store with whether you are signed in and how
+  many of its games are installed; a store's page is that store's own section
+  below (sign-in, downloading and installed games, Not installed, and each game's
+  download sheet), and the pencil on its icon changes the icon (**Choose from
+  Photos**, **Choose from Files**: the middle square of the picture, kept in
+  Documents/madeira-art/store-icon-<store>.png; **Reset icon** brings the letter
+  back). **Other games** is the games you added and **Add a game file**.
+  **Downloads** shows the running download big under **Now**, with its store's
+  steps (Get ready, Check files, Download files, Finish installing; itch.io: Get
+  ready, Download files, Unpack files) and "Step 2 of 4 · 1.2 GB of 13 GB · about 5
+  min left"; failed ones are under **Needs attention** and waiting or paused ones
+  under **Waiting**, each with **Pause**, **Resume** (**Try
+  again** after a failure) and **Remove**, which asks first (a first install also
+  loses the files downloaded so far; an update or a repair only stops). Each row
+  shows how much is done, e.g. "1.2 GB of 13 GB · about 5 min left". The tab
+  shows the overall % while one runs and **!** when one failed. **Settings** starts
+  with four tiles (JIT, Memory+, Free space, Games ready), then the pages in short
+  groups (Games, Storage, This device, Stores, Look, Help, About), each with its
+  coloured icon, under the JIT pill; a page
+  opens as before, with the island behind it. **Search** finds your installed games,
+  the games in your stores that are not installed (opening that store's page and the
+  game's own sheet), the stores, and the Settings pages; a tap outside the field or
+  a drag puts the keyboard away. The starting screen shows the
+  island, **Starting <game>** with the elapsed time, a tile per step (Get ready,
+  First-time setup when the game has one-time installs, Start Steam and Open
+  <game> for a Madeira Dock start) and **Stop**; a start that stopped says why with
+  **Get Help** first. Wave 8's store sidebar is gone.
+- A controller in the new look (`PadHighlight.swift`; player 1's pad through
+  `LibraryController`, so only while no game runs, and on the starting screen):
+  the first press shows one highlight where it was, and touching the screen hides
+  it. The D-pad or left stick moves it to the nearest item that way (a held
+  direction repeats), **A** presses it, **B** goes back, cancels or closes, **X**
+  plays the highlighted game (or the page's game), **Y** opens Search, **LB**/**RB**
+  pick the previous or next tab (B on Search goes back to the tab you came from),
+  **LT**/**RT** move a page up or down and **Menu**
+  opens a cover's options (Play, Game page, Cancel). A sheet keeps the highlight
+  inside it and starts on its safe choice; closing it puts the highlight back.
+  On the starting screen B moves the highlight to **Stop** and only A on Stop stops.
+  The highlight reaches a store's page too (its game cards, sign-in card and Not
+  installed); on a store game's sheet A is its Install, Resume, Pause or Open and B
+  closes it. The Settings list and Search's results are highlight items, and B on a
+  Settings page goes back (the switches inside a page are touch only). On a game's
+  pages (Display, Controls, Launch, Compatibility, Library, Advanced) every row is a
+  highlight item and the page scrolls with it: A flips a switch, steps a choice or a
+  slider to its next value, or opens the row. **Ready** in the JIT pill is not an
+  item (only **JIT is off** is). In the Library the page scrolls with the highlight
+  down the covers. The highlight follows the shape it is on: around a button or
+  cover at a 4 pt gap, on a tab's own capsule (so it stays inside the bar), and
+  inside a row of a card, rounded to match the card. The button hints draw the
+  controller's own symbols (a DualSense's cross, circle, square and triangle; an
+  Xbox pad's letters).
+  The log notes `[new-look] cover size <width> (<n> across)` after a pinch.
+  `env.MADEIRA_NEW_LOOK_PAD = 0` turns the highlight off. The log notes
+  `[pad-highlight] on` and `[pad-highlight] layer <name> opened`, and
+  `[new-look] downloads: pause|resume|remove <store>:<id>` and
+  `[new-look] store icon: <store> changed|reset`.
+- With New look off, the store pages and Game details keep the blue controller ring
+  (`MenuPad.swift`): the D-pad moves it, **A** opens, **B** goes back, on a store
+  game's sheet A is its Install, Resume, Pause or Open and B closes it.
+  `env.MADEIRA_MENU_CONTROLLER = 0` turns it off. The log notes
+  `[menu-pad] connected <controller>` once per controller.
 - Layouts: cards, compact cards, list and compact list (one short row per
   game). Sort by last played, name, date added or folder size. Search by title.
 - Group by: **Platform** (the default) is the sections below. **Last played**
@@ -619,8 +643,9 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_ONBOARDING` | on | first-run setup never opens, and Settings › JIT/Steam have no **Run setup again** |
 | `MADEIRA_LIBRARY_COLLAPSE` | on | the **Steam** and **Other games** titles do not collapse (**Not installed** still folds) |
 | `MADEIRA_LIBRARY_TABS` | on | no store tabs: every section on one page |
-| `MADEIRA_MENU_CONTROLLER` | on | no controller ring on the store sidebar's library: up and down change the store, as before |
-| `MADEIRA_LIBRARY_SIDEBAR` | on | the library page without the store sidebar (and no Store sidebar toggle in Appearance): the store tabs and Group by are back |
+| `MADEIRA_NEW_LOOK` | on | the library as before the new look (and no New look toggle in Appearance) |
+| `MADEIRA_NEW_LOOK_PAD` | on | the new look works by touch only: no controller highlight |
+| `MADEIRA_MENU_CONTROLLER` | on | with New look off: no controller ring on the store pages and Game details |
 | `MADEIRA_LIBRARY_AMBIENT` | on | no ambient light around the library's grid cards |
 
 Opt-in (`env.NAME = 1`), off by default:

@@ -134,6 +134,18 @@ enum SettingsPages {
         ("Device", [.jit, .signing, .saves, .drives]),
         (nil, [.appearance, .advanced, .logs, .credits]),
     ]
+
+    /// The new look's Settings tab: short groups as in its mock-up, games first. Signing in to a
+    /// store is also on the Stores tab, so the stores come lower down.
+    static let newLookGroups: [(String?, [Page])] = [
+        ("Games", [.displayGraphics, .memory, .pointer, .runtimes]),
+        ("Storage", [.saves, .drives]),
+        ("This device", [.jit, .signing]),
+        ("Stores", [.steam, .gog, .itch, .epic, .ea]),
+        ("Look", [.appearance]),
+        ("Help", [.logs, .advanced]),
+        ("About", [.credits]),
+    ]
 }
 
 /// The Settings tab's first page: the status, then a row for each page.
@@ -188,7 +200,8 @@ struct SettingsPageView: View {
     @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
     @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
-    @AppStorage(LibrarySidebar.settingKey) private var sidebarOn = true
+    @AppStorage(NewLook.key) private var newLookOn = true
+    @AppStorage(NewLook.coverWidthKey) private var coverWidth: Double = 104
     @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     @State private var developerUI = !FrontendChoice.preferNew
     @State private var restartNotice = false
@@ -199,6 +212,8 @@ struct SettingsPageView: View {
             content
         }
             .navigationTitle(page.title).navigationBarTitleDisplayMode(.inline)
+            // (new-look) The island behind the page, and B goes back.
+            .modifier(NewLookSettingsChrome())
             .alert("Restart Madeira", isPresented: $restartNotice) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -246,13 +261,13 @@ struct SettingsPageView: View {
         case .advanced:
             Section {
                 Toggle("Extended logging", isOn: $input.diagnostics)
-                // ClaudeHelp.swift: one file with the fixes guide and the player's report, for a chat.
-                ClaudeHelpButton(entry: nil)
+                // GetHelpView.swift: the scrubbed report as one .txt for the Madeira Discord (Cameron, Nov 8).
+                DiscordLogButton(entry: nil, row: true)
                 NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
                     Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
                 }
             } header: { Text("Diagnostics") } footer: {
-                Text("Get Help from Claude makes one small file: a guide to known fixes, your settings and the key lines of the last game log, with personal details taken out. For one game's config too, use the button on its Game details page.")
+                Text("Save copy for Discord makes one text file (up to 5 MB) with the last game's log and your settings, with personal details taken out. Post it in the Madeira Discord.")
             }
             Section {
                 Button("All settings") { sheet = .allSettings }
@@ -278,17 +293,27 @@ struct SettingsPageView: View {
             Text("Glass is the system's Liquid Glass. Solid draws each button as a plain opaque disc; a game's Opacity slider still fades them.")
         }
         Section {
-            // The store sidebar (LibrarySidebar.swift), on unless env.MADEIRA_LIBRARY_SIDEBAR = 0.
-            if LibrarySidebar.enabled {
-                Toggle("Store sidebar", isOn: $sidebarOn)
+            // The new look (NewLook.swift), on unless env.MADEIRA_NEW_LOOK = 0.
+            if NewLook.allowed {
+                Toggle("New look", isOn: $newLookOn)
+                if newLookOn {
+                    // (new-look) The Library's covers; a pinch on them changes it too. A on it steps to the next size.
+                    Picker("Cover size", selection: Binding(get: { NewLook.coverStep(coverWidth) },
+                                                            set: { coverWidth = NewLook.coverWidths[$0] })) {
+                        Text("Small").tag(0)
+                        Text("Medium").tag(1)
+                        Text("Large").tag(2)
+                    }
+                    .padItem("ap-cover-size", cornerRadius: 12) { coverWidth = NewLook.coverWidths[(NewLook.coverStep(coverWidth) + 1) % 3] }
+                }
             }
             Toggle("New library grid", isOn: $zoomableGrid)
             if zoomableGrid {
                 Toggle("Zoom haptics", isOn: $zoomHaptics)
             }
         } footer: {
-            Text(LibrarySidebar.enabled
-                 ? L("Store sidebar lists your stores down the left of the library. Off, the library is one page with store tabs, as before. New library grid applies only with the sidebar off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.")
+            Text(NewLook.allowed
+                 ? L("New look: a tab bar, every installed game on one page, the Madeira island behind it and one controller highlight. Off, the library is one page with store tabs, as before. New library grid applies only with New look off: pinch the cards to change how many fit across. Zoom haptics click as the pinch crosses a size.")
                  : L("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size."))
         }
         Section {
@@ -326,230 +351,6 @@ struct SettingsPageHeader: View {
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 10)
-        }
-    }
-}
-
-/// Settings on iPad with the store sidebar, laid out like the iPad's own Settings app: the
-/// full list on the left, upright and sideways (it never folds away), and the chosen page
-/// on the right. At the top of the list: Settings with the installed build under it, the
-/// way back to the library, search, then JIT, Memory+ and the free space. While the search
-/// holds text the right side shows the long page filtered (`results`), as on iPhone.
-struct SettingsSplit<Results: View>: View {
-    @Binding var search: String
-    var startDock: (DockGame, Bool) -> Void
-    let enableJIT: () -> Void
-    let library: () -> Void
-    /// Settings is the tab showing, so a controller's presses are this page's.
-    var active = true
-    @ViewBuilder let results: () -> Results
-    @AppStorage("madeiraSettingsPage") private var picked = SettingsPages.Page.appearance.key
-    /// The row just tapped: its highlight moves at once, and the page behind it (which can take
-    /// a moment to build) follows on the next turn of the run loop (Cameron, Wave 9: the
-    /// highlight felt laggy because it waited for the page).
-    @State private var tapped: String?
-    @State private var memory = false
-    @State private var free: Int64?
-    @ObservedObject private var jitState = LibraryJITState.shared
-    @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
-    @ObservedObject private var pad = MenuPad.shared
-    /// The search field: it takes the keyboard from a tap or View, never from the iPad's own
-    /// focus while the controller moves the ring (Cameron, Wave 12: up or down opened the keyboard).
-    @FocusState private var searchFocused: Bool
-    @State private var searchAsked = false
-    let ticks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-
-    private var pages: [SettingsPages.Page] { SettingsPages.groups.flatMap { $0.1 }.filter(\.shown) }
-    private var current: SettingsPages.Page { pages.first { $0.key == picked } ?? pages.first ?? .appearance }
-    private var searching: Bool { !search.trimmingCharacters(in: .whitespaces).isEmpty }
-
-    var body: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                list
-                    .frame(width: min(330, geometry.size.width * 0.42))
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .background(LibrarySidebar.bar.ignoresSafeArea(edges: [.top, .bottom, .leading]))
-                    .overlay(alignment: .trailing) { LibrarySidebar.line.frame(width: 1).ignoresSafeArea(edges: [.top, .bottom]) }
-                Group {
-                    if searching { results() }
-                    else { SettingsPageView(page: current, startDock: startDock, header: true).id(current) }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .background(LibrarySidebar.page.ignoresSafeArea())
-        .onAppear { update(); LogStore.shared.log("[settings-split] page=\(current.key)") }
-        .onReceive(ticks) { _ in update() }
-        // A controller (MenuPad.swift): up and down go through the pages, the ring on the
-        // chosen one; B or Menu goes back to the library (LibraryView).
-        .onReceive(LibraryController.shared.commands) { command in
-            guard active, MenuPad.enabled, pad.sheets == 0, Date() >= pad.quietUntil else { return }
-            // View: the search field, with its keyboard.
-            if command == "search" { searchAsked = true; searchFocused = true; return }
-            guard command == "up" || command == "down" else { return }
-            if pad.show() { return }
-            let index = pages.firstIndex(of: current) ?? 0
-            let next = pages[max(0, min(pages.count - 1, index + (command == "up" ? -1 : 1)))]
-            search = ""; picked = next.key
-            LogStore.shared.log("[settings-split] page=\(next.key)")
-        }
-    }
-
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                Text("Settings").font(.title.bold()).accessibilityAddTraits(.isHeader)
-                Spacer(minLength: 8)
-                Button(action: library) {
-                    Image(systemName: "square.grid.2x2").font(.title3).frame(width: 42, height: 42)
-                        .background(LibrarySidebar.chip, in: Circle())
-                }
-                .buttonStyle(.plain).accessibilityLabel(L("Library"))
-            }
-            // Holds the iPad's own focus while the ring shows (MenuPadNoSystemFocus.Probe).
-            .background(MenuPadNoSystemFocus().frame(width: 1, height: 1).allowsHitTesting(false).accessibilityHidden(true))
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                TextField(L("Search settings"), text: $search)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.search)
-                    .focused($searchFocused)
-                    .onChange(of: searchFocused) { _, focused in
-                        if focused, MenuPad.enabled, pad.ring, !searchAsked {
-                            searchFocused = false
-                            LogStore.shared.log("[settings-split] search kept closed: the controller's focus, not a tap or View")
-                        }
-                        if !focused { searchAsked = false }
-                    }
-                if searching {
-                    Button { search = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        .buttonStyle(.plain).accessibilityLabel("Clear")
-                }
-            }
-            .padding(.horizontal, 12).frame(minHeight: 38)
-            .background(LibrarySidebar.chip, in: Capsule())
-            status
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(SettingsPages.groups.enumerated()), id: \.offset) { _, group in
-                        let shown = group.1.filter(\.shown)
-                        if !shown.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                if let title = group.0 {
-                                    Text(L(title)).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).padding(.leading, 12)
-                                }
-                                VStack(spacing: 0) {
-                                    ForEach(Array(shown.enumerated()), id: \.element) { index, page in
-                                        if index > 0 { LibrarySidebar.line.frame(height: 1).padding(.leading, 50) }
-                                        row(page)
-                                    }
-                                }
-                                .background(LibrarySidebar.card)
-                                // The picked row's highlight fills its row to the group's own corners
-                                // (Cameron, Wave 9: a smaller rounded highlight left the card's corners showing).
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            }
-                        }
-                    }
-                    // The installed build, at the very bottom of the list (Cameron, Wave 9).
-                    Text(verbatim: "Madeira \(BuildStamp.text)").font(.footnote).foregroundStyle(.secondary)
-                        .lineLimit(1).minimumScaleFactor(0.7)
-                        .frame(maxWidth: .infinity).padding(.top, 6)
-                        .accessibilityLabel(Text(verbatim: "Madeira \(BuildStamp.text)"))
-                }
-                .padding(.bottom, 12)
-            }
-        }
-        .padding(.horizontal, 12).padding(.top, 10)
-    }
-
-    /// JIT and Memory+ (green when on), the free space for games, and Enable JIT while it is off.
-    private var status: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                dot("JIT", jitState.enabled)
-                dot("Memory+", memory)
-                Spacer(minLength: 6)
-                if let text = LibraryInfoLine.freeText(free) {
-                    Text(text).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            if !jitState.enabled {
-                Button(action: enableJIT) {
-                    Label("Enable JIT", systemImage: "bolt.fill").font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .foregroundStyle(.white).background(LibrarySidebar.blue, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-            if !memory {
-                Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(LibrarySidebar.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func dot(_ name: String, _ on: Bool) -> some View {
-        HStack(spacing: 5) {
-            Circle().frame(width: 8, height: 8)
-            Text(verbatim: name)
-        }
-        .font(.footnote.weight(.semibold)).foregroundStyle(on ? LibrarySidebar.green : Color.secondary)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: name)).accessibilityValue(on ? L("On") : L("Off"))
-    }
-
-    private func row(_ page: SettingsPages.Page) -> some View {
-        let selected = !searching && page.key == (tapped ?? current.key)
-        return Button {
-            var instant = Transaction(); instant.disablesAnimations = true
-            withTransaction(instant) { tapped = page.key }
-            DispatchQueue.main.async {
-                withTransaction(instant) { search = ""; picked = page.key; tapped = nil }
-                LogStore.shared.log("[settings-split] page=\(page.key)")
-            }
-        } label: {
-            HStack(spacing: 11) {
-                SettingsPageIcon(page: page, size: 28)
-                Text(page.title).font(.body).lineLimit(1)
-                Spacer(minLength: 6)
-                if let value = summary(page) { Text(value).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
-            }
-            .padding(.horizontal, 10).frame(minHeight: 44)
-            // A tap: the fill to the row's edges (Cameron, Wave 9). The controller's ring: a rounded
-            // fill and blue edge inside the row, so the group's corners never cut it off (Wave 12).
-            .background {
-                if selected && pad.ring {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous).fill(LibrarySidebar.picked)
-                        RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(LibrarySidebar.blue, lineWidth: 3)
-                    }.padding(3)
-                } else if selected {
-                    LibrarySidebar.picked
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private func summary(_ page: SettingsPages.Page) -> String? {
-        switch page {
-        case .jit: return jitState.enabled ? L("On") : L("Off")
-        case .appearance: return liquidMetal.on ? "Liquid metal" : "Liquid Glass"
-        default: return nil
-        }
-    }
-
-    private func update() {
-        memory = EntitlementStatus.check().increasedMemory
-        let drive = LibraryModel.drive
-        DispatchQueue.global(qos: .utility).async {
-            let bytes = drive.freeSpace
-            DispatchQueue.main.async { free = bytes }
         }
     }
 }

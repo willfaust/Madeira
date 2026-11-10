@@ -6,27 +6,18 @@ import UIKit
 import Combine
 import GameController
 
-// A controller in Madeira's own menus, on the store sidebar's library (LibrarySidebar.swift).
-// The pad is player 1's, read by GamepadInput and turned into commands by LibraryController,
-// so it only reaches the menus while no game runs. A blue ring shows what a press acts on:
-//
-//   D-pad / left stick  moves the ring over the covers and buttons of the page, and from the
-//                       left column to the sidebar (the icon rail) and back; a held direction
-//                       repeats
-//   A                   opens what is ringed: a store in the sidebar, a game's page from a cover
-//   B                   back: from the page to the sidebar; on a game page, back to the library
-//   Menu                Settings (B or Menu there comes back)
-//   View                search
-//   L1 / R1             the previous or next store
-//   L2 / R2             a screen up or down in a long grid
-//
-// The first press only shows the ring (where it was); touching the screen hides it. Each store
-// remembers where the ring was. env.MADEIRA_MENU_CONTROLLER = 0 turns this off (the sidebar's
-// shelves then follow up and down, as before).
+// A controller in Madeira's own menus with New look off (Settings › Appearance): the blue ring
+// on the store pages, their game sheets and Game details. The pad is player 1's, read by GamepadInput and
+// turned into commands by LibraryController, so it only reaches the menus while no game runs.
+// Wave 8's store sidebar, which this ring was first made for, is gone (Cameron, Nov 9); with New
+// look on, PadHighlight.swift does all of this and MenuPad.enabled is false.
+// The first press only shows the ring (where it was); touching the screen hides it.
+// env.MADEIRA_MENU_CONTROLLER = 0 turns this off.
 
 @MainActor final class MenuPad: ObservableObject {
     static let shared = MenuPad()
-    static var enabled: Bool { MadeiraConfig.flag("MADEIRA_MENU_CONTROLLER") }
+    /// (new-look) Only with New look off: the new look has its own highlight (PadHighlight.swift).
+    static var enabled: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_MENU_CONTROLLER") }
 
     /// The ring is showing (the controller was used since the last touch).
     @Published private(set) var ring = false
@@ -48,9 +39,6 @@ import GameController
     var remembered: [String: String] = [:]
     private var watching = false
 
-    static func side(_ shelf: LibraryShelf) -> String { "side:" + shelf.rawValue }
-    static let desktopRow = "side:desktop", settingsRow = "side:settings"
-    var onSidebar: Bool { focus?.hasPrefix("side:") ?? true }
 
     /// Shows the ring; true when it was hidden, so this press only brings it back.
     @discardableResult func show() -> Bool {
@@ -93,14 +81,6 @@ import GameController
             if best == nil || score < best!.1 { best = (id, score) }
         }
         return best?.0
-    }
-
-    /// The item to ring when the page is entered: the remembered one, else the first (top left).
-    func entry(for shelf: LibraryShelf) -> String? {
-        if let kept = remembered[shelf.rawValue], frames[kept] != nil { return kept }
-        return frames.min { a, b in
-            abs(a.value.minY - b.value.minY) > 8 ? a.value.minY < b.value.minY : a.value.minX < b.value.minX
-        }?.key
     }
 
     /// Touching the screen hides the ring: a recognizer on the window that never takes a touch.
@@ -183,7 +163,10 @@ struct MenuPadNoSystemFocus: UIViewRepresentable {
         }
         required init?(coder: NSCoder) { nil }
         deinit { if let watch { NotificationCenter.default.removeObserver(watch) } }
-        private var holding: Bool { MenuPad.enabled && MenuPad.shared.ring && window != nil && !GCController.controllers().isEmpty }
+        private var holding: Bool {
+            let shown = (MenuPad.enabled && MenuPad.shared.ring) || (PadHighlight.enabled && PadHighlight.shared.shown)
+            return shown && window != nil && !GCController.controllers().isEmpty
+        }
         override var canBecomeFocused: Bool { holding }
         override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
             if context.previouslyFocusedItem === self, holding { return false }
@@ -275,7 +258,7 @@ struct MenuPadFocusable: ViewModifier {
             .scaleEffect(on ? 1.04 : 1)
             .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(LibrarySidebar.blue, lineWidth: 4)
+                    .stroke(MenuPadColor.blue, lineWidth: 4)
                     .padding(-5)
                     .opacity(on ? 1 : 0)
                     .allowsHitTesting(false)
@@ -292,13 +275,16 @@ struct MenuPadFocusable: ViewModifier {
 extension View {
     /// A controller-reachable item (MenuPad): `id` is unique on the page.
     @ViewBuilder func menuPad(_ id: String, cornerRadius: CGFloat = 14, action: @escaping () -> Void) -> some View {
-        if MenuPad.enabled { modifier(MenuPadFocusable(id: id, cornerRadius: cornerRadius, action: action)) } else { self }
+        if MenuPad.enabled { modifier(MenuPadFocusable(id: id, cornerRadius: cornerRadius, action: action)) }
+        // (new-look) The same item for the new highlight (a store's sign-in card).
+        else if PadHighlight.enabled { padItem(id, cornerRadius: cornerRadius, press: action) }
+        else { self }
     }
 
     /// A Form the system's focus must not walk while a controller is connected
     /// (MenuPadNoSystemFocus): Game details and its pages.
     @ViewBuilder func menuPadNoSystemFocus() -> some View {
-        if MenuPad.enabled, GamepadInput.enabled, !GCController.controllers().isEmpty {
+        if MenuPad.enabled || PadHighlight.enabled, GamepadInput.enabled, !GCController.controllers().isEmpty {
             background(MenuPadNoSystemFocus().frame(width: 1, height: 1).allowsHitTesting(false))
         } else { self }
     }
@@ -314,6 +300,8 @@ struct MenuPadSheet: ViewModifier {
     func body(content: Content) -> some View {
         content
             .modifier(ClaimGamepadEvents())
+            // (new-look) The new highlight: B closes the sheet, A runs its Install or Open.
+            .padLayer("sheet", back: { dismiss() }, accept: accept)
             .onAppear { MenuPad.shared.sheets += 1 }
             .onDisappear {
                 MenuPad.shared.sheets = max(0, MenuPad.shared.sheets - 1)
@@ -324,6 +312,19 @@ struct MenuPadSheet: ViewModifier {
                 if command == "back" { dismiss() }
                 else if command == "accept", let accept { accept() }
             }
+    }
+}
+
+/// (new-look) A store's game card for the new highlight: A presses it, as a tap does.
+struct PadCardStyle: PrimitiveButtonStyle {
+    let id: String
+    let grid: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        Group {
+            if grid { Button(action: configuration.trigger) { configuration.label }.buttonStyle(LibraryCardButtonStyle()) }
+            else { Button(action: configuration.trigger) { configuration.label }.buttonStyle(.plain) }
+        }
+        .padItem(id, cornerRadius: grid ? 16 : 12, press: configuration.trigger)
     }
 }
 
@@ -339,4 +340,18 @@ struct MenuPadCardStyle: PrimitiveButtonStyle {
         }
         .modifier(MenuPadFocusable(id: id, cornerRadius: grid ? 16 : 12, action: configuration.trigger))
     }
+}
+
+/// The old ring's colours (Wave 8's design D), kept for Game details and Settings with New look off.
+enum MenuPadColor {
+    // Design D's colours in dark mode; the system's grouped colours in light mode.
+    static let page = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x14 / 255, green: 0x15 / 255, blue: 0x18 / 255, alpha: 1) : .systemGroupedBackground })
+    static let bar = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x1c / 255, green: 0x1d / 255, blue: 0x21 / 255, alpha: 1) : .secondarySystemGroupedBackground })
+    static let picked = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x30 / 255, green: 0x32 / 255, blue: 0x3a / 255, alpha: 1) : .tertiarySystemFill })
+    static let line = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x2c / 255, green: 0x2d / 255, blue: 0x33 / 255, alpha: 1) : .separator })
+    static let blue = Color(red: 0x4a / 255, green: 0x8c / 255, blue: 0xff / 255)
+    static let green = Color(red: 0x34 / 255, green: 0xc7 / 255, blue: 0x59 / 255)
+    /// Search fields, the page's buttons and the status card.
+    static let chip = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x2a / 255, green: 0x2b / 255, blue: 0x31 / 255, alpha: 1) : .tertiarySystemFill })
+    static let card = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0x22 / 255, green: 0x23 / 255, blue: 0x28 / 255, alpha: 1) : .systemBackground })
 }
