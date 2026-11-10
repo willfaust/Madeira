@@ -15,7 +15,7 @@
    defaults are swap tier off, Fastsync and display-rate hold off, the
    Sync engine picker writes through SyncEngine.apply, game details offer the
    Fastsync-only switches greyed out unless Fastsync is chosen, launches export
-   them only with Fastsync, and MADEIRA_RUNTIME_SETTINGS=0 hides both sections.
+   them only with Fastsync, and MADEIRA_RUNTIME_SETTINGS=0 hides both sections (SettingsPages.swift).
 
 Run from anywhere; needs `swift` on PATH.
 """
@@ -149,11 +149,13 @@ check('@State private var hold = ProMotionIntent.holdMaximum' in display
       and 'MadeiraConfig.set("env.MADEIRA_PROMOTE", on ? "1" : nil)' in display, 'display-rate hold writes env.MADEIRA_PROMOTE')
 check('static var holdMaximum: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE", fallback: false) }' in fps,
       'display-rate hold is off by default')
-# Both sections sit inside the one MADEIRA_RUNTIME_SETTINGS block (each is also
-# wrapped in the Settings search filter, settingsShow(...), since main d5a8e0a).
-_rt = lib[lib.index('if MadeiraConfig.flag("MADEIRA_RUNTIME_SETTINGS") {'):]
-_rt = _rt[:_rt.index('\n            }\n')]
-check('DisplayRateSettings()' in _rt and 'RuntimeMemorySyncSettings(' in _rt,
+# Both sections are behind MADEIRA_RUNTIME_SETTINGS (LibraryView.runtimeSettingsShown): the Memory and
+# sync page is hidden from the Settings list, and the display rate section leaves its page.
+pages = (root / 'app/Madeira/SettingsPages.swift').read_text()
+check('static var runtimeSettingsShown: Bool { MadeiraConfig.flag("MADEIRA_RUNTIME_SETTINGS") }' in lib
+      and 'case .memory: return LibraryView.runtimeSettingsShown' in pages
+      and 'case .memory: RuntimeMemorySyncSettings(' in pages
+      and 'if LibraryView.runtimeSettingsShown { DisplayRateSettings() }' in pages,
       'MADEIRA_RUNTIME_SETTINGS=0 hides both sections')
 print('check-runtime-settings:', 'FAIL' if failures else 'PASS')
 sys.exit(1 if failures else 0)

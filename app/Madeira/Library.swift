@@ -2279,115 +2279,18 @@ struct LibraryBadges: View {
     }
 }
 
-/// Settings' status line, at its far right (after JIT, Memory+ and Ready to play, in Ready to
-/// play's font): the installed Madeira (BuildStamp) and the free space on the drive games go to.
-/// Players asked for both in an easy place; Cameron wanted them here rather than on the library
-/// page (Wave 7). Read when Settings appears and every 30 s. env.MADEIRA_LIBRARY_INFO = 0 hides it.
-struct LibraryInfoLine: View {
-    @State private var free: Int64?
-    let ticks = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
-    static let shown = MadeiraConfig.flag("MADEIRA_LIBRARY_INFO")
-    static func freeText(_ bytes: Int64?) -> String? {
-        guard let bytes, bytes >= 0 else { return nil }
-        return String(format: L("%@ free"), ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
-    }
-    var body: some View {
-        if Self.shown {
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(verbatim: "Madeira \(BuildStamp.text)").lineLimit(1).minimumScaleFactor(0.7)
-                if let text = Self.freeText(free) { Text(text).lineLimit(1) }
-            }
-            .font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-            .accessibilityElement(children: .combine)
-            .onAppear { update() }.onReceive(ticks) { _ in update() }
-        }
-    }
-    private func update() {
-        let drive = LibraryModel.drive
-        DispatchQueue.global(qos: .utility).async {
-            let bytes = drive.freeSpace
-            DispatchQueue.main.async { free = bytes }
-        }
-    }
-}
-
-/// JIT and Memory+ at the top of Settings, each with a green check or a red cross (the
-/// developer interface's badges), and "Ready to play" beside them once both are there.
-/// Checked every 2 s.
-struct LibraryStatus: View {
-    @State private var jit = false
-    @State private var memory = false
-    let ticks = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                badge("JIT", jit)
-                badge("Memory+", memory)
-                if jit && memory {
-                    Text("Ready to play").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                        .padding(.leading, 4)
-                }
-                // The build and the free space, at the line's far right (settings-info-right).
-                Spacer(minLength: 8)
-                LibraryInfoLine()
-            }
-            if !memory {
-                Text("Memory+ requires the Increased Memory Limit entitlement in this signed copy of Madeira. Enabling JIT does not grant it. Check that your signing tool enables this capability for Madeira, then sign and install the updated app without deleting your existing installation.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .onAppear { update() }.onReceive(ticks) { _ in update() }
-    }
-    private func badge(_ label: String, _ enabled: Bool) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: enabled ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(enabled ? Color.green : Color.red)
-            Text(label).foregroundStyle(enabled ? .primary : .secondary)
-        }
-        .font(.footnote)
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background((enabled ? Color.green : Color.red).opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
-        .accessibilityElement(children: .ignore).accessibilityLabel("\(label): \(enabled ? "enabled" : "unavailable")")
-    }
-    private func update() { jit = StikJITHelper.ready; memory = EntitlementStatus.check().increasedMemory }
-}
-
-/// A section title with a count; with `collapsed` set, tapping the title
-/// collapses or expands the section (the state is the caller's, persisted).
+/// A section title with a count.
 struct LibrarySectionHeader<Trailing: View>: View {
     let title: String
     var count: Int?
-    var collapsed: Binding<Bool>? = nil
     @ViewBuilder var trailing: Trailing
     var body: some View {
-        if let collapsed {
-            HStack(alignment: .firstTextBaseline) {
-                Button {
-                    // At once (Cameron, Nov 7: "Yes, instant").
-                    var instant = Transaction(); instant.disablesAnimations = true
-                    withTransaction(instant) { collapsed.wrappedValue.toggle() }
-                } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(title).font(.title2.bold())
-                        if let count, count > 0 { Text("\(count)").font(.subheadline).foregroundStyle(.secondary) }
-                        Image(systemName: "chevron.right").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(collapsed.wrappedValue ? 0 : 90))
-                    }.contentShape(Rectangle()).frame(minHeight: 44)
-                }.buttonStyle(.plain)
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityValue(collapsed.wrappedValue ? "Collapsed" : "Expanded")
-                Spacer()
-                trailing
-            }
-        } else {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title).font(.title2.bold())
-                if let count, count > 0 { Text("\(count)").font(.subheadline).foregroundStyle(.secondary) }
-                Spacer()
-                trailing
-            }.accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
-        }
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.title2.bold())
+            if let count, count > 0 { Text("\(count)").font(.subheadline).foregroundStyle(.secondary) }
+            Spacer()
+            trailing
+        }.accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -2412,114 +2315,6 @@ struct LibraryCells<Item: Identifiable, Cell: View>: View {
                 ForEach(items) { item in cell(item, false, false) }
             }.frame(maxWidth: .infinity, alignment: .center)
         }
-    }
-}
-
-// MARK: - Group by rules (Foundation only; tests/host/check-library-groups.py compiles this part)
-
-/// The library's Group by choice: "platform" is the sections (LibraryView);
-/// "played" groups by when a game was last played, "installed" into Installed
-/// and Not installed, and "none" is one grid. Those three list the games you
-/// added and Steam's games together, each group in the library's Sort by order.
-enum LibraryGrouping {
-    enum Source: Hashable {
-        case entry(UUID), steam(Int)
-        var key: String {
-            switch self {
-            case .entry(let id): return "entry:" + id.uuidString
-            case .steam(let appID): return "steam:\(appID)"
-            }
-        }
-    }
-
-    /// One game of any source, as far as the groups and the sort need it.
-    struct Game: Identifiable, Equatable {
-        let source: Source
-        var title: String
-        /// On disk; a Steam game being downloaded counts, as under the Steam title.
-        var installed: Bool
-        var lastPlayed: Date?
-        var bytes: Int64?
-        /// Its library entry's place in the library file (later is newer); nil without one.
-        var position: Int?
-        var id: Source { source }
-    }
-
-    struct Group: Identifiable, Equatable {
-        let id: String
-        /// nil: no header (Group by None).
-        let title: String?
-        var games: [Game]
-    }
-
-    /// Sort by ("played", "name", "added" or "size") as the library sorts the games
-    /// you added: a game without a library entry sorts as never played, of unknown
-    /// size and, for "added", after the games that have one; ties go by name.
-    static func sorted(_ games: [Game], by sort: String) -> [Game] {
-        games.sorted { a, b in
-            switch sort {
-            case "played":
-                if a.lastPlayed != b.lastPlayed { return (a.lastPlayed ?? .distantPast) > (b.lastPlayed ?? .distantPast) }
-            case "added":
-                if a.position != b.position { return (a.position ?? -1) > (b.position ?? -1) }
-            case "size":
-                if a.bytes != b.bytes { return (a.bytes ?? -1) > (b.bytes ?? -1) }
-            default:
-                break
-            }
-            let order = a.title.localizedStandardCompare(b.title)
-            return order == .orderedSame ? a.source.key < b.source.key : order == .orderedAscending
-        }
-    }
-
-    /// The groups of a Group by choice other than "platform", in page order,
-    /// without empty ones. Last played: today, the past 7 and 30 days (counted
-    /// from the start of today), earlier, then never played.
-    static func groups(_ games: [Game], by grouping: String, sort: String,
-                       now: Date = Date(), calendar: Calendar = .current) -> [Group] {
-        let games = sorted(games, by: sort)
-        var groups: [Group]
-        switch grouping {
-        case "played":
-            let today = calendar.startOfDay(for: now)
-            let week = calendar.date(byAdding: .day, value: -6, to: today) ?? today
-            let month = calendar.date(byAdding: .day, value: -29, to: today) ?? today
-            groups = [Group(id: "today", title: L("Today"), games: []), Group(id: "week", title: L("Past 7 days"), games: []),
-                      Group(id: "month", title: L("Past 30 days"), games: []), Group(id: "earlier", title: L("Earlier"), games: []),
-                      Group(id: "never", title: L("Never played"), games: [])]
-            for game in games {
-                let index: Int
-                if let played = game.lastPlayed {
-                    index = played >= today ? 0 : played >= week ? 1 : played >= month ? 2 : 3
-                } else {
-                    index = 4
-                }
-                groups[index].games.append(game)
-            }
-        case "installed":
-            groups = [Group(id: "installed", title: "Installed", games: games.filter(\.installed)),
-                      Group(id: "notInstalled", title: "Not installed", games: games.filter { !$0.installed })]
-        default:
-            groups = [Group(id: "all", title: nil, games: games)]
-        }
-        return groups.filter { !$0.games.isEmpty }
-    }
-
-    /// The collapsed groups' ids, stored comma-separated ("played.today,installed.notInstalled").
-    static func collapsed(_ stored: String) -> Set<String> {
-        Set(stored.split(separator: ",").map(String.init))
-    }
-
-    static func storing(_ collapsed: Set<String>) -> String { collapsed.sorted().joined(separator: ",") }
-}
-
-// MARK: - Group by view
-
-extension LibraryGrouping.Game {
-    /// A game you added; `position` is its index in LibraryModel.entries.
-    init(entry: LibraryEntry, position: Int) {
-        self.init(source: .entry(entry.id), title: entry.title, installed: true,
-                  lastPlayed: entry.lastPlayed, bytes: entry.folderBytes, position: position)
     }
 }
 

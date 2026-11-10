@@ -45,14 +45,14 @@ check("finish clears the notice", "poolRestartNote = nil; poolRestartEntry = nil
 close = body(lib, "    func closeForPoolRestart() {")
 check("Close Madeira keeps the game for the next run, then exits",
       close.index("NextLibraryGame.set(id)") < close.index("exit(0)"))
-check("both starting screens offer Close Madeira for it",
-      lib.count("if model.poolRestartNote != nil, !model.installsRestartReady {\n                        launchGlyph(L(\"Close Madeira\"), \"arrow.clockwise.circle\") { model.closeForPoolRestart() }") == 2)
-check("column screen: the note replaces the spinner and comes before the Dock failure",
-      "if dockStart.failure == nil && model.poolRestartNote == nil {" in lib
-      and re.search(r"if let note = model\.poolRestartNote \{\n\s*Text\(JITPoolAuto\.startHeadline\)[^\n]*\n[^\n]*\n\s*\} else if let failure = dockStart\.failure \{", lib) is not None)
-wide = body(lib, "    @ViewBuilder private var launchWideStatus: some View {")
-check("wide screen: the note before the Dock failure",
-      wide.index("if let note = model.poolRestartNote {") < wide.index("} else if let failure = dockStart.failure {"))
+fail = body(lib, "    fileprivate func lookFailure(_ entry: LibraryEntry) -> some View {", "\n    }\n")
+check("the starting screen offers Close Madeira for it (the note's own button, after an installs restart)",
+      re.search(r'\} else if model\.poolRestartNote != nil \{\n\s*NewLookSheetButton\(id: "ln-restart", title: L\("Close Madeira"\)[^\n]*\n[^\n]*\{ model\.closeForPoolRestart\(\) \}', fail) is not None)
+check("the failure card shows the note (headline and message) before the Dock failure",
+      re.search(r"if let note = model\.poolRestartNote \{\n\s*Text\(JITPoolAuto\.startHeadline\)[^\n]*\n\s*Text\(note\)[^\n]*\n\s*\} else if let failure = dockStart\.failure \{", fail) is not None)
+check("the starting screen counts the note as a failure and marks the active step failed",
+      "let failed = dockStart.failure != nil || model.poolRestartNote != nil" in lib
+      and "if model.poolRestartNote != nil, let i = steps.lastIndex(where: { $0.state == .active }) { steps[i].state = .failed }" in lib)
 
 auto = body(bcd, "enum JITPoolAuto {", "\n}\n")
 A = "%@ ran out of JIT memory, so Madeira gave it bigger memory settings. Tap Close Madeira (the round arrow below), then open Madeira again: %@ starts by itself."

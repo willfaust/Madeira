@@ -88,13 +88,11 @@ for v, where in sorted(fonts.items(), key=lambda kv: num(kv[0]) or 0):
 # Concentric: a glass bar of radius R with .padding(p) inside it should hold shapes of radius R - p.
 print('\nCONCENTRIC CHECKS')
 look = (app / 'NewLook.swift').read_text(encoding='utf-8')
-bar = re.search(r'\.padding\((\d+)\)[^\n]*\n\s*\.newLookGlass\(\)', look)
-tab = re.search(r'\.padItem\("tab-\\\(item\.rawValue\)", capsule: true, inset: 0\)', look)
-if bar and tab:
-    print(f'  tab bar: a capsule; the tabs are capsules {bar.group(1)} pt inside it (concentric), and the'
-          ' highlight sits on the tab\'s own edge (inset 0), so it stays inside the bar')
+library = (app / 'Library.swift').read_text(encoding='utf-8')
+if 'TabView(selection: lookSelection)' in library and 'struct NewLookTabBar' not in look:
+    print("  tab bar: Apple's own TabView (three tabs); nothing of ours to line up")
 else:
-    print('  tab bar: pattern not found (check by hand)')
+    print('  tab bar: a home-made bar is back (check its concentric corners by hand)')
 ring = (app / 'PadHighlight.swift').read_text(encoding='utf-8')
 if 'cornerRadius: max(0, cornerRadius - inset)' in ring and '.padding(inset)' in ring:
     print('  highlight ring: the item\'s own shape moved out or in by `inset`, corners changed by the same amount (concentric)')

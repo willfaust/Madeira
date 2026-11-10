@@ -37,7 +37,7 @@ def block(src, start, end="\n}\n"):
 
 redist = (APP / "VCRedist.swift").read_text(encoding="utf-8")
 onboarding = (APP / "Onboarding.swift").read_text(encoding="utf-8")
-library = (APP / "Library.swift").read_text(encoding="utf-8")
+pages = (APP / "SettingsPages.swift").read_text(encoding="utf-8")
 bridge = (APP / "WineProcessBridge.m").read_text(encoding="utf-8")
 header = (APP / "Madeira-Bridging-Header.h").read_text(encoding="utf-8")
 project = (ROOT / "app/Madeira.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
@@ -70,7 +70,7 @@ require('secondary("Set up later") { model.next() }' in page and "redist.install
         "setup page: Set up later, install through the model, says no session runs")
 require("case .vcRedist: vcRedistPage" in onboarding and "offerVCRedist = Self.vcRedistOffered()" in onboarding,
         "setup shows the page while the device lacks the runtime")
-require("VCRedistSettingsSection()" in library and "VCRedistModel.enabled" in library, "Settings: the section, behind the switch")
+require("if VCRedistModel.enabled { VCRedistSettingsSection() }" in pages, "Settings: the section on the Runtimes page, behind the switch")
 require('MadeiraConfig.flag("MADEIRA_VCREDIST")' in redist, "the feature switch is read through MadeiraConfig.flag")
 for forbidden in ["runWineFullSequence", "launchRequest", "wine_process_start", "MADEIRA_EXE", "install.cmd", "startSetupSession"]:
     require(forbidden not in redist, f"VCRedist.swift: no {forbidden} (no Wine session)")

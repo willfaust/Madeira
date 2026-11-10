@@ -63,8 +63,6 @@ struct EAGamesSection: View {
     @AppStorage("madeiraEAShowUninstalled") private var showUninstalled = true
     /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
     @AppStorage("madeiraNewLookEAShowInstalled") private var showInstalled = false
-    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EASheets (LibraryGridPage.swift).
-    var inGrid = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
@@ -115,7 +113,7 @@ struct EAGamesSection: View {
                 }
             }
         }
-        .modifier(EASheets(open: open, attached: !inGrid))
+        .modifier(EASheets(open: open, attached: true))
     }
 
     private func cell(_ item: EAItem, list: Bool, dense: Bool) -> some View {
@@ -131,7 +129,7 @@ struct EAGamesSection: View {
 }
 
 /// What the EA app section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
+/// sign-in sheets and the error alert. The section attaches it
 /// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
 struct EASheets: ViewModifier {
     let open: (LibraryEntry) -> Void

@@ -17,7 +17,7 @@ app = root / 'app/Madeira'
 gecko = (app / 'WineGecko.swift').read_text(encoding='utf-8')
 bridge = (app / 'WineProcessBridge.m').read_text(encoding='utf-8')
 main = (app / 'MadeiraApp.swift').read_text(encoding='utf-8')
-library = (app / 'Library.swift').read_text(encoding='utf-8')
+pages = (app / 'SettingsPages.swift').read_text(encoding='utf-8')
 pbx = (app.parent / 'Madeira.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
 failures = 0
 
@@ -70,7 +70,8 @@ check('setenv("HOME", g_prefix_path, 1);' in bridge, 'HOME (Wine\'s WINEHOMEDIR)
 check('madeira_link_wine_mono(fm, prefix, bundlePath);\n            madeira_link_wine_gecko(fm, prefix);' in bridge,
       'linked every session, next to Wine Mono')
 check('WineGeckoModel.shared.installAutomatically()' in main, 'the app starts the automatic download')
-check('WineGeckoSettingsSection()' in library, 'Settings shows Web pages in programs')
+check('case .runtimes:' in pages and 'WineGeckoSettingsSection()' in pages[pages.index('case .runtimes:'):pages.index('case .displayGraphics:\n')],
+      'Settings shows Web pages in programs (the Runtimes page)')
 check(pbx.count('/* WineGecko.swift in Sources */') == 2 and pbx.count('/* WineGecko.swift */ = {isa = PBXFileReference') == 1,
       'WineGecko.swift is in the Xcode project and its Sources phase')
 

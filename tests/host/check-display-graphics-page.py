@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Settings: Display and Graphics are one page (display-graphics).
 
-The Settings tab's "Running games" group had a Graphics row (Direct3D and Vulkan
+The Settings tab's games group had a Graphics row (Direct3D and Vulkan
 pickers) and a Display row (one toggle). They are one row now, "Display and
 Graphics": the Graphics section first, then Display in its own section. Each part
-keeps its own switch, so the row shows when either part would. The long page that
-search shows keeps both sections, so searching "display" or "graphics" still works.
+keeps its own switch, so the row shows when either part would. The Settings tab's
+search matches a page by its title or blurb, so "display" and "graphics" both find it.
 """
 from pathlib import Path
 import json, re, sys
@@ -27,7 +27,7 @@ cases = re.search(r'enum Page: Hashable, CaseIterable \{\s*case ([^\n]+\n[^\n]+)
 check('displayGraphics' in cases and not re.search(r'\bgraphics\b|\bdisplay\b', cases),
       'one page case, no separate graphics or display page')
 check('case .displayGraphics: return "Display and Graphics"' in pages, 'row title is "Display and Graphics"')
-check('("Running games", [.displayGraphics, .memory, .pointer])' in pages, 'Running games: one row, then Memory and Pointer')
+check('("Games", [.displayGraphics, .memory, .pointer, .runtimes])' in pages, 'Games: one row first, then Memory, Pointer and Runtimes')
 check('case .displayGraphics: return GraphicsSettings.shown || LibraryView.runtimeSettingsShown' in pages,
       'row shows when either part would')
 body = pages[pages.index('case .displayGraphics:\n'):]
@@ -38,8 +38,11 @@ check('if GraphicsSettings.shown { GraphicsSettings' in body and 'if LibraryView
 check('(display-graphics)' in pages, 'tree marker (display-graphics)')
 check('} header: { Text("Display") }' in library and '} header: { Text("Graphics") }' in library,
       'each part keeps its own section header')
-check('settingsShow("display", "refresh"' in library and 'settingsShow("graphics", "Direct3D"' in library,
-      'search still finds both sections')
+newlook = (app / 'NewLook.swift').read_text(encoding='utf-8')
+check('page.title.localizedCaseInsensitiveContains(query)' in newlook and 'page.blurb.localizedCaseInsensitiveContains(query)' in newlook
+      and 'SettingsPages.newLookGroups.flatMap' in newlook
+      and 'case .displayGraphics: return "Display and Graphics"' in pages,
+      'search still finds the page by "display" or "graphics" (page title)')
 
 catalog = json.loads((app / 'Localizable.xcstrings').read_text(encoding='utf-8'))['strings']
 for key in ('Display', 'Graphics'):

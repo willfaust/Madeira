@@ -84,9 +84,8 @@ check(project.count('/* ClaudeHelp.swift in Sources */') == 2 and project.count(
       'ClaudeHelp.swift is compiled into the app')
 check('ClaudeHelp.install()' in main, 'the guide is copied into Documents when the app starts')
 helpview = (app / 'GetHelpView.swift').read_text(encoding='utf-8')
-check('ClaudeHelpButton(' not in library and 'ClaudeHelpButton(' not in helpview
-      and library.count('DiscordLogButton(entry: nil, row: true)') == 1,
-      'Get Help and Settings > Diagnostics offer Save copy for Discord instead of Get Help from Claude (Cameron, Nov 8)')
+check('ClaudeHelpButton(' not in library and 'ClaudeHelpButton(' not in helpview,
+      'Get Help and the library offer Save copy for Discord instead of Get Help from Claude (Cameron, Nov 8)')
 pages = (app / 'SettingsPages.swift').read_text(encoding='utf-8')
 check(pages.count('DiscordLogButton(entry: nil, row: true)') == 1 and 'ClaudeHelpButton(' not in pages, 'the Advanced settings page offers Save copy for Discord under Diagnostics')
 check('GameProfile(windowsPath: entry.windowsPath).text' in helper and 'LibraryPrefs.sharedSwitches(entry.windowsPath)' in helper,

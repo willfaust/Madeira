@@ -51,9 +51,9 @@ require(games.startswith('// SPDX-License-Identifier: GPL-3.0-or-later\n// Copyr
 require('/* SteamGames.swift in Sources */,' in project and 'path = "SteamGames.swift"' in project,
         'SteamGames.swift is built by the Xcode project')
 content_view = (app / 'ContentView.swift').read_text()
-require('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,\n'
-        '                                      part: .installed, open: { selected = $0 })' in library,
-        "Library: the Steam section is in the library and opens the library's Game details page")
+newlook_src = (app / 'NewLook.swift').read_text()
+require('case .steam: SteamGamesSection(search: "", layout: "cards", width: width, part: .all, open: open)' in newlook_src,
+        "Stores: the Steam section is on the Steam page and opens the library's Game details page")
 require('MadeiraDock.games(drive: drive)' in games and 'let drive = MadeiraDock.drive' in games,
         "the section lists exactly what Dock's own discovery finds")
 # Game details: a Steam game is a library entry (its per-game settings) with a Steam section.
@@ -82,17 +82,21 @@ for label in ['"Start with"', '"Madeira Dock"', '"Smaller JIT pool (512 MB) for 
     require(label in steam_section, f'Steam section: {label}')
 for label in ['"Library details"', '"Choose cover image"', '"Use Steam artwork"', '"Display"', '"Resolution"',
               '"Aspect & scaling"', '"Compatibility & performance"', '"x87 precision"', '"CPU cores reported"',
-              '"D3D9 anisotropic filtering"', '"On screen"', '"Performance overlay"', '"Live logs"', '"Touch controls"',
+              '"D3D9 anisotropic filtering"', '"On screen"', '"Live logs"',
               '"Control opacity"', '"Control size"', '"Executable"', '"Game details"']:
     require(label in detail, f'Game details: {label}')
+detail_look = library[library.index('extension LibraryDetail {'):]
+for label in ['L("Performance overlay")', 'L("Touch controls")']:
+    require(label in detail_look, f'Game details (New look page): {label}')
 require('if entry.anisotropyLimit != nil {\n                Picker("D3D9 anisotropic filtering"' in detail,
         'Game details: D3D9 anisotropic filtering only for a game that already has a limit (to set it back)')
 # #461: every library entry but the Desktop has Launch arguments, Steam games too.
 require('if entry.desktop != true {\n            Section {\n                TextField("Launch arguments"' in detail,
         'Launch arguments for every entry but the Desktop, Steam games included (#461)')
-entries_start = library.index('private var entries: [LibraryEntry] {')
-require('$0.steamAppID == nil' in library[entries_start:library.index('var body: some View {', entries_start)],
-        'Steam games are listed in the Steam section only, not also under Games')
+newlook = (app / 'NewLook.swift').read_text()
+added = newlook[newlook.index('static func added()'):newlook.index('static func all(search:')]
+require('entry.steamAppID == nil' in added,
+        'Steam games are listed in the Steam section only, not also under Other games')
 # A card's pills: an installed game shows a library game's (its size), no
 # "Madeira Dock" or "Steam" pill; "Update" joins them; any other state keeps its own pill.
 cell = games[games.index('struct SteamGameCell: View {'):games.index('/// Progress, speed and the state of one download.')]
@@ -103,7 +107,7 @@ require('@ViewBuilder private func pills(_ status: SteamGamesRules.Status, _ ent
         '"Madeira Dock"' not in rules and '"Steam"' not in rules,
         "an installed game's card shows the library pills (and Update), any other state its own pill, in all three "
         "layouts (dense list, list, grid); no Dock or Steam pill")
-badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibraryStatus: View {')]
+badges = library[library.index('struct LibraryBadges: View {'):library.index('struct LibrarySectionHeader')]
 # The pills' texts are one rule (LibraryBadges.formatTexts, also the zoomable grid's measured labels).
 # No bitness or graphics API pill: both were read from the program before it ran and were often wrong.
 require('entry.bits' not in badges and 'graphicsAPI' not in badges and 'if let note { texts.append(note) }' in badges and
@@ -127,11 +131,11 @@ require('stored?.steamProgramSource == "choice" ? stored?.steamProgram : nil' in
         'LibraryMetadataScanner.shared.scan(program.url, drive: drive, countBytes: false)' in steam_meta,
         'the program is the one "The game" starts; bits from its PE header, the API as for any library game')
 require(steam_meta.count('Task.detached(priority: .utility)') == 3 and 'updated.folderBytes = record.size ?? updated.folderBytes' in steam_meta
-        and 'guard !Task.isCancelled else { return }' in steam_meta and 'landSteamMetadata(updated)' in steam_meta,
+        and 'guard !Task.isCancelled else { return }' in steam_meta and '        save(updated)\n' in steam_meta,
         "file reads off the main thread; the size is the install record's; the result is kept on the game's entry")
 require('LogStore.shared.log("[steam-games] metadata app=\\(game.id) bits=\\(updated.bits) api=\\(api ?? "unknown")")' in steam_meta
         and steam_meta.count('LogStore') == 1, '[steam-games] metadata logs the App ID, bits and API only')
-save_body = library[library.index('    func save(_ entry: LibraryEntry, metadata: Bool = false) {'):library.index('    func remove(_ id: UUID) {')]
+save_body = library[library.index('    func save(_ entry: LibraryEntry) {'):library.index('    func remove(_ id: UUID) {')]
 require('next.firstIndex(where: { entry.steamAppID != nil && $0.steamAppID == entry.steamAppID })' in save_body and
         'entry.bits = next[i].bits; entry.steamMetadataInstall = next[i].steamMetadataInstall' in save_body,
         "a Steam game keeps one entry, and a details page saved later keeps the card's newer format")

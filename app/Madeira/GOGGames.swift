@@ -65,8 +65,6 @@ struct GOGGamesSection: View {
     @AppStorage("madeiraGOGShowUninstalled") private var showUninstalled = true
     /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
     @AppStorage("madeiraNewLookGOGShowInstalled") private var showInstalled = false
-    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches GOGSheets (LibraryGridPage.swift).
-    var inGrid = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
@@ -117,7 +115,7 @@ struct GOGGamesSection: View {
                 }
             }
         }
-        .modifier(GOGSheets(open: open, attached: !inGrid))
+        .modifier(GOGSheets(open: open, attached: true))
     }
 
     private func cell(_ item: GOGItem, list: Bool, dense: Bool) -> some View {
@@ -133,7 +131,7 @@ struct GOGGamesSection: View {
 }
 
 /// What the GOG section's page owns: the library's start and its reconcile after every session, the download and sign-in
-/// sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it itself,
+/// sheets and the error alert. The section attaches it
 /// as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
 struct GOGSheets: ViewModifier {
     let open: (LibraryEntry) -> Void

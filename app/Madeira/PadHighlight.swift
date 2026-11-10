@@ -78,10 +78,6 @@ import Combine
     /// What the tab bar does: LB/RB, Y, and the tab's own first item.
     var tabs: ((Int) -> Void)?
     var search: (() -> Void)?
-    /// B on a tab with no layer over it: Search goes back to the tab you came from
-    /// (LibraryView.newLookBody). A pushed page (a store's, a Settings page) is a layer of its
-    /// own, and its B goes back a page.
-    var rootBack: (() -> Void)?
     /// The highlight's last place on each root page (a tab), for coming back to it.
     private var remembered: [String: String] = [:]
     /// The item a closed layer hands the highlight back to while that item is not laid out again
@@ -379,7 +375,7 @@ import Combine
         case "menu":
             if let focus, let item = items[focus], item.layer == top.name, item.menu { show(); action.send((focus, .menu)) }
         case "back":
-            if let back = top.back { back() } else if layers.count == 1 { rootBack?() }
+            if let back = top.back { back() }
         case "previous", "next":
             // Over pages pushed in the tab too (Cameron, Test 6: LB/RB stuck on Settings and
             // Search with a page open there); never under a popup or sheet.

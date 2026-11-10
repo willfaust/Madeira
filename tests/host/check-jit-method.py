@@ -70,8 +70,8 @@ require("ensureLoopback" in coordinator_enable and "self?.enableResolved" in coo
         and "enableBuiltIn(completion: completion)" in coordinator_route
         and setup.count("StikJITHelper.enableJIT") == 1,
         "the coordinator routes each selected JIT method once, after the loopback check")
-require("JITSetupView()" in content and "JITSettingsSection()" in library,
-        "JIT setup is reachable from the main flow and Settings")
+require("JITSetupView()" in content and "case .jit: JITSettingsSection()" in (app / "SettingsPages.swift").read_text(),
+        "JIT setup is reachable from the main flow and the JIT Settings page")
 require('dictionary["public_key"]' in setup
         and 'dictionary["private_key"]' in setup
         and 'dictionary["identifier"]' in setup,
@@ -157,12 +157,12 @@ require(setup.count("helperFailure(response.message)") == 2,
 library_source = (app / "Library.swift").read_text()
 require("if let jitProblem { jitConnectionActions(jitProblem, retry: enableJIT) { model.error = nil } }" in library_source,
         "the library's JIT error offers Pair Again and LocalDevVPN (or the shortcut)")
-# The error alert hangs off LibraryView's tab view, so it presents from Settings too
-# (an alert inside the Library page waited until that tab came back).
+# The error alert hangs off LibraryView's body, over newLookBody (every tab), so it presents from
+# Settings too (an alert inside one tab's page waited until that tab came back).
 body = library_source[library_source.index('struct LibraryView: View {'):]
-body = body[body.index('    var body: some View {'):body.index('    @ToolbarContentBuilder private var libraryToolbar')]
+body = body[body.index('    var body: some View {\n        newLookBody'):body.index('.fullScreenCover(isPresented: $onboarding.presented)')]
 require('.alert(jitProblem == nil ? L("Library") : L("Couldn\'t Enable JIT")' in body,
-        "the library's error alert is on the tab view, shown on the Settings tab as well")
+        "the library's error alert is over every tab (newLookBody), shown on the Settings tab as well")
 require('URL(string: "localdevvpn://enable?scheme=madeira")' in setup
         and "localdevvpn" in app_plist["LSApplicationQueriesSchemes"]
         and any("madeira" in t.get("CFBundleURLSchemes", []) for t in app_plist.get("CFBundleURLTypes", [])),
@@ -181,11 +181,12 @@ require("launchAfterJIT = nil" in ended
         and "guard started, StikJITHelper.ready, library.current == nil, wine_process_is_running() == 0 else {" in ended
         and ended.index("launchAfterJIT = nil") < ended.index("library.startingJIT = nil") < ended.index("launch()"),
         "the waiting game starts once, only when JIT came on and nothing else started")
-require('if model.startingJIT == entry.id {' in library and 'Text("Starting JIT")' in library and 'ProgressView()' in library
-        and "if selected?.id == entry.id, model.startingJIT != entry.id { selected = nil }" in library
-        and ".onChange(of: jit.showSetup) { _, show in if show { selected = nil } }" in library,
-        "the Play button reads Starting JIT with a spinner meanwhile; the details page stays up for it, "
-        "and closes for JIT setup")
+hero = function(library, "private func lookHero(wide: Bool)")
+require("let playing = model.startingJIT == entry.id" in hero and 'Text("Starting JIT")' in hero and "ProgressView()" in hero
+        and ".onChange(of: jit.showSetup) { _, show in if show { selected = nil } }" in library
+        and ".onChange(of: model.current) { _, current in if current != nil { selected = nil } }" in library,
+        "the game page's Play button reads Starting JIT with a spinner meanwhile (the page is pushed in its tab, "
+        "so it stays up for it); a session or JIT setup closes it")
 enable_jit = function(content, "private func enableJIT()")
 require(enable_jit.count("launchAfterJITEnded(started: false)") == 2 and enable_jit.count("launchAfterJITEnded(started: true)") == 1,
         "every way Enable JIT ends settles the waiting game")

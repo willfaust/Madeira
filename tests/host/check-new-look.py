@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-"""The new look (Settings › Appearance › New look, NewLook.swift + PadHighlight.swift), on the host.
+"""The new look, the app's only look (NewLook.swift + PadHighlight.swift), on the host.
 
-Cameron, Nov 9: the approved mock-up (Apple + Build Monitor blend) built into the app behind one
-switch. Stage 1: the tab bar, the Library (every installed game, last played first), the game
-page (Play is the only filled button, Uninstall at the bottom), the starting screen with the
-Madeira island and step tiles, and one controller highlight for all of it. Wave 8's store
-sidebar is gone; its blue ring (MenuPad) only runs with New look off.
-Stage 2: the Stores tab (every store, signed in or not, and its counts), a store's page (the
-store's own section, so sign-in, downloads and its game sheets work as before) with the pencil
-on its icon (Change icon from Photos or Files, Reset icon), and Pause, Resume, Try again and
-Remove (asks first) on the Downloads tab.
-Stage 3: Settings (the pages in their groups with coloured icons and the JIT pill; a page is the
-same page as before, pushed, with the island behind it and B back) and Search over installed
-games, the stores' games you have not installed (opens its store's own sheet), stores and Settings.
+Cameron, Nov 9: the approved mock-up (Apple + Build Monitor blend). The old design is deleted:
+no Settings > New look switch, no NewLook.enabled branches, no zoomable grid, no ambient glow.
+Three tabs on Apple's tab bar (Library, Stores, Settings), each with its own page stack and its
+own search field; Downloads sit under the stores on the Stores page (a % badge on the tab). The
+Library (every installed game, last played first), the game page (Play is the only filled
+button, Uninstall at the bottom), the starting screen with the Madeira island and step tiles,
+a store's page (the store's own section, with its fixed logo), Settings (the pages in their
+groups, one neutral icon tile, the JIT pill) and one controller highlight for all of it.
 
 Source checks only (no Swift compiler here); the PC's typecheck and the build compile it.
 """
@@ -37,6 +33,7 @@ library = (app / 'Library.swift').read_text(encoding='utf-8')
 menupad = (app / 'MenuPad.swift').read_text(encoding='utf-8')
 pages = (app / 'SettingsPages.swift').read_text(encoding='utf-8')
 project = (root / 'app/Madeira.xcodeproj/project.pbxproj').read_text(encoding='utf-8')
+catalog_text = (app / 'ConfigCatalog.generated.swift').read_text(encoding='utf-8')
 catalog = json.loads((app / 'Localizable.xcstrings').read_text(encoding='utf-8'))['strings']
 
 # 1. In the app.
@@ -52,24 +49,28 @@ check('Bundle.main.url(forResource: "MadeiraIsland", withExtension: "png")' in l
 check('LibrarySidebar' not in project and not (app / 'LibrarySidebar.swift').exists(), "Wave 8's store sidebar is gone")
 check('struct SettingsSplit' not in pages and 'SettingsSplit(' not in library, "and its iPad Settings split")
 
-# 2. The switch.
-check('static var allowed: Bool { MadeiraConfig.flag("MADEIRA_NEW_LOOK") }' in look, 'env.MADEIRA_NEW_LOOK = 0 takes it away')
-check('UserDefaults.standard.object(forKey: key) as? Bool ?? true' in look, 'on by default')
-toggle = re.compile(r'if NewLook\.allowed \{\s*Toggle\("New look", isOn: \$newLookOn\)\s*[\}\n]')
-check(len(toggle.findall(library)) == 1 and len(toggle.findall(pages)) == 1,
-      'Settings › Appearance › New look, on the long page and the Appearance page')
-check('if newLook {\n            newLookBody\n        } else {' in library, 'off, the library is the earlier page with store tabs')
-check('static var enabled: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_MENU_CONTROLLER") }' in menupad,
-      'the old blue ring only with New look off')
-check('static var enabled: Bool { NewLook.enabled && MadeiraConfig.flag("MADEIRA_NEW_LOOK_PAD") }' in pad,
-      'the new highlight only with New look on; env.MADEIRA_NEW_LOOK_PAD = 0 turns it off alone')
+# 2. The new look is the only look: no switch, no old design.
+swift = {f.name: f.read_text(encoding='utf-8') for f in app.glob('*.swift')}
+every = '\n'.join(swift.values())
+code = re.sub(r'(?m)^\s*//.*$', '', every)   # comments may still name the old design
+check(not re.search(r'NewLook\.(enabled|allowed|key)\b|MADEIRA_NEW_LOOK"|"madeiraNewLook"|madeiraNewLook\b|newLookOn|L\("New look"\)', code),
+      'no New look switch or NewLook.enabled/allowed/key branch is left in the app')
+check(not any((app / n).exists() for n in ['LibraryGridPage.swift', 'InteractionFrameRate.swift']) and not re.search(r'LibraryGrid\w*|InteractionFrameRate|MenuPadRing|MenuPadCardStyle', code)
+      and 'MADEIRA_MENU_CONTROLLER' not in code + catalog_text and 'LibraryGrid' not in project,
+      'the zoomable grid, the interaction frame rate, the blue ring and MADEIRA_MENU_CONTROLLER are gone')
+check('static var enabled: Bool { MadeiraConfig.flag("MADEIRA_NEW_LOOK_PAD") }' in pad,
+      'the highlight is on by default; env.MADEIRA_NEW_LOOK_PAD = 0 turns it off')
+check('static var enabled' not in menupad and 'if PadHighlight.enabled { padItem(id, cornerRadius: cornerRadius, press: action) } else { self }' in menupad,
+      "menuPad() only forwards to the new highlight (MenuPad's own ring is gone)")
+check('func step(_ by: Int) -> NewLookTab' in look and 'all[(index + by + all.count) % all.count]' in look,
+      'LB/RB go round the three tabs')
 
 # 3. The controller (Cameron's map).
 controller = library[library.index('final class LibraryController'):library.index('enum FrontendChoice')]
 check('(0x4000, "play")' in controller, 'X is sent as play')
 handle = pad[pad.index('    func handle(_ command: String) {'):pad.index('    // MARK: Touch')]
 check('case "accept":' in handle and 'action.send((focus, .press))' in handle, 'A selects')
-check('case "back":\n            if let back = top.back { back() } else if layers.count == 1 { rootBack?() }' in handle, 'B: back, cancel or stop, whatever the layer says')
+check('case "back":\n            if let back = top.back { back() }' in handle, 'B: back, cancel or stop, whatever the layer says')
 check('case "play":' in handle and 'item.play { action.send((focus, .play)) }' in handle and 'else { top.play?() }' in handle,
       'X: play or install the highlighted game, or the page\'s game')
 check('case "add", "search":\n            if onTabPage { search?() }' in handle, 'Y: search (from a tab, or a page pushed in it)')
@@ -98,9 +99,10 @@ check(".filter { $0.value.layer == layer" in pad and "items[$0]?.layer == top.na
 # 5. The Library and the game page.
 check('LibraryReadyGame.all(search: "")' in look and 'static func all(search: String) -> [LibraryReadyGame]' in look,
       'the Library lists every installed game, last played first')
-check('struct NewLookTabBar' not in look and 'case library, stores, downloads, settings, search' in look,
-      "tabs: Library, Stores, Downloads, Settings and Search, on Apple's tab bar only (the game page has no copy of it)")
-check('cover: false))' in library and 'lookOpenGame(entry)' in library and 'case .game(let id, let tab, let depth):' in library
+check('struct NewLookTabBar' not in look and 'case library, stores, settings\n' in look
+      and not re.search(r'case (downloads|search)\b', look[look.index('enum NewLookTab'):look.index('struct NewLookHints')]),
+      "three tabs only: Library, Stores and Settings, on Apple's tab bar (no Downloads or Search tab)")
+check('lookOpenGame(entry)' in library and 'case .game(let id, let tab, let depth):' in library
       and 'LibraryDetailNavigation(own: stack == nil, path: $path)' in library,
       "the game page is pushed inside its tab like any iPhone page (system Back, swipe, tab bar stays)")
 check("withTransaction(instant) { path.wrappedValue.append(route) }" in library and 'autoPlayIfAsked()' in library
@@ -118,9 +120,8 @@ check('.padLayer("game", start: lookReturn ?? "gp-play"' in library and 'lookRet
 
 # 6. The starting screen.
 start = library[library.index('// MARK: - New look: the starting screen'):]
-check('if NewLook.enabled { NewLookBackground(startScreen: true) }' in library, 'the island behind it')
-check('if NewLook.enabled { newLookLaunch(entry, geometry: geo) } else { launchView(entry, geometry: geo) }' in library,
-      'the old screen stays with New look off')
+check('NewLookBackground(startScreen: true)' in library and 'newLookLaunch(entry, geometry: geo)' in library
+      and 'launchView(entry' not in library, 'the island behind it; the old starting screen is gone')
 for step in ['L("Get ready")', 'L("First-time setup")', 'L("Start Steam")', 'L("Open %@")']:
     check(step in start, f'step tile {step}')
 check('fields["launch-client-error"] == "0"' in start, "Steam's step is done once the Dock says the launch was accepted")
@@ -131,42 +132,60 @@ check('pad.move(toAny:' in start and 'B never stops by itself' in start, 'B move
 check('.onChange(of: model.startingScreen) { _, starting in' in library
       and 'LibraryController.shared.configure(enabled: model.enabled, ownsInput: starting)' in library,
       'the starting screen takes the controller until the game shows')
-check("ownsInput: open || (NewLook.enabled && model.startingScreen)" in library, 'closing the Session menu on it keeps it')
+check("ownsInput: open || model.startingScreen" in library, 'closing the Session menu on it keeps it')
 
 # 6b. Stage 2: Stores, a store's page, its icon, and the Downloads tab's buttons.
 steamgames = (app / 'SteamGames.swift').read_text(encoding='utf-8')
-# 0045 (Cameron, Nov 9: "Switch to Apple's own tab bar"): a page stack per tab.
-check('TabView(selection: lookSelection)' in library and library.count('NavigationStack(path: $') >= 5
-      and library.count('.navigationDestination(for: NewLookRoute.self) { lookRoute($0) }') == 5,
-      "Apple's tab bar: every tab has its own page stack")
-check('Tab(value: NewLookTab.search, role: .search)' in library, "iOS 18: Search is the system's search tab")
-check('ContentNavigation(stack: !(library.enabled && library.current == nil && NewLook.allowed && newLookOn))' in (app / 'ContentView.swift').read_text(encoding='utf-8'),
-      'the new-look library is not inside a second NavigationStack (it breaks Back)')
+# 0045 (Cameron, Nov 9: "Switch to Apple's own tab bar"): a page stack per tab; no Search tab.
+check('TabView(selection: lookSelection)' in library
+      and len(re.findall(r'NavigationStack\(path: \$(library|stores|settings)Path\)', library)) == 3
+      and library.count('.navigationDestination(for: NewLookRoute.self) { lookRoute($0) }') == 3,
+      "Apple's tab bar: each of the three tabs has its own page stack")
+check('role: .search' not in library and 'NewLookTab.search' not in library and 'searchPath' not in library,
+      'no Search tab (each tab has its own search field)')
+check('ContentNavigation(stack: !(library.enabled && library.current == nil))' in (app / 'ContentView.swift').read_text(encoding='utf-8'),
+      'the library is not inside a second NavigationStack (it breaks Back)')
 check('NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) })' in library and 'case .store(let store):' in library,
       'the Stores tab: the list of stores; a store\'s page is pushed inside the tab')
-check('// The store sections as before, until the Stores redesign (stage 2).' not in library, 'the old store sections are gone from the Stores tab')
 check('if new == lookTab { lookReselect(new) } else { lookTab = new }' in library
       and 'if !path.wrappedValue.isEmpty { path.wrappedValue = NavigationPath(); return }' in library and 'lookTop[item, default: 0] += 1' in library,
       'tapping the open tab goes back to its first page, then to the top')
+# Each tab has its search field; results come from NewLookSearchPage in the tab's own scope.
+for tab, prompt in [('library', 'Search installed games'), ('stores', 'Search games across stores'), ('settings', 'Search settings')]:
+    check(f'.modifier(NewLookSearchField(text: lookText(.{tab}), prompt: L("{prompt}"), field: $lookField))' in library
+          and f'lookResults(.{tab})' in library, f'the {tab} tab has its own search field and results')
+check('NewLookSearchPage(scope: item == .library ? .library : item == .stores ? .stores : .settings,' in library
+      and 'enum NewLookSearchScope { case library, stores, settings }' in look, 'search results: library, stores or settings scope')
+check('NewLookDownloadsSection()' in look[look.index('struct NewLookStoresPage'):look.index('struct NewLookInstalledHeader')]
+      and 'NewLookDownloadsSection()' not in library and look.count('NewLookDownloadsSection()') == 1,
+      'Downloads are a section under the Stores page, not a tab')
+check('.badge(lookDownloads.badge.map { Text(verbatim: $0) })' in library and '.badge(item == .stores ? lookDownloads.badge' in library,
+      'a % badge on the Stores tab while something downloads')
 for store, section in [('steam', 'SteamGamesSection('), ('epic', 'EpicGamesSection('), ('gog', 'GOGGamesSection('),
                        ('itch', 'ItchGamesSection('), ('ea', 'EAGamesSection(')]:
     check(f'case .{store}: {section}' in look, f'the {store} page is the store\'s own section')
 check('.padLayer("store", back: { dismiss() }, page: true)' in look and '"sp-back"' not in look,
       "B on a store's page goes back a page (the system Back button; no home-made one)")
-check('static var collapsible: Bool { !NewLook.enabled && ' in steamgames, "a store's page never hides its games under a folded title")
-check('else if let pad, PadHighlight.enabled { buttonStyle(PadCardStyle(id: pad, grid: grid)) }' in library
+check('collapsible' not in steamgames and 'MADEIRA_LIBRARY_COLLAPSE' not in every, "a store's page never hides its games under a folded title")
+check('if let pad, PadHighlight.enabled { buttonStyle(PadCardStyle(id: pad, grid: grid)) }' in library
       and '.padItem(id, cornerRadius: grid ? 16 : 12, press: configuration.trigger)' in menupad,
       "the highlight reaches a store's game cards (A = a tap)")
-check('else if PadHighlight.enabled { padItem(id, cornerRadius: cornerRadius, press: action) }' in menupad,
+check('if PadHighlight.enabled { padItem(id, cornerRadius: cornerRadius, press: action) } else { self }' in menupad,
       'and the sign-in cards')
 for f, store in [('SteamGames', 'steam'), ('EpicGames', 'epic'), ('GOGGames', 'gog'), ('ItchGames', 'itch'), ('EAGames', 'ea')]:
     check(f'.padItem("{store}-not-installed"' in (app / f'{f}.swift').read_text(encoding='utf-8'), f'and {store}\'s Not installed')
-check('store-icon-\\(store.rawValue).png' in look and 'kCGImageSourceThumbnailMaxPixelSize: 1024' in look
-      and 'width: 256, height: 256' in look, "a store's own icon: the middle square of any picture, 256 x 256, in madeira-art")
-check('"ic-photos"' in look and '"ic-files"' in look and '"ic-reset"' in look and '.padLayer("icon", start: "ic-cancel"' in look
-      and '.photosPicker(isPresented: $icons.photos' in look and '.fileImporter(isPresented: $icons.files' in look,
-      'the pencil: Photos, Files, Reset icon; Cancel first')
-check('if icons.has(store) {' in look, 'Reset icon only when the store has its own icon')
+# Stores have fixed logos (no icon editor): one asset-catalog set per store, drawn by NewLookStoreIcon.
+check(not re.search(r'NewLookStoreIcons|NewLookIconSheet|photosPicker|fileImporter|PhotosUI|store-icon-|"ic-photos"|"ic-files"|"ic-reset"|Reset icon|Change icon|pencil', re.sub(r'(?m)^\s*//.*$', '', look)),
+      'no store icon editor (no pencil, Photos or Files picker, Reset icon)')
+logos = {'steam': 'StoreSteam', 'epic': 'StoreEpic', 'gog': 'StoreGOG', 'itch': 'StoreItch', 'ea': 'StoreEA'}
+for store, asset in logos.items():
+    folder = app / 'Assets.xcassets' / f'{asset}.imageset'
+    contents = json.loads((folder / 'Contents.json').read_text(encoding='utf-8')) if (folder / 'Contents.json').exists() else {}
+    files = [i.get('filename') for i in contents.get('images', []) if i.get('filename')]
+    check(files and all((folder / f).is_file() for f in files) and f'case .{store}: return "{asset}"' in look,
+          f'{store}: the {asset} logo set exists and NewLookStore.logo names it')
+check('case .other: return nil' in look and 'Image(asset).renderingMode(.template)' in look and 'if let asset = store.logo {' in look
+      and look.count('NewLookStoreIcon(') >= 5, 'NewLookStoreIcon draws the logo (Other games its letter)')
 dl = look[look.index('// MARK: - Downloads'):look.index('// MARK: - Stores')]
 for store, pause, resume, remove in [
         ('steam', 'SteamOwnedLibrary.shared.pause(id)', 'SteamOwnedLibrary.shared.install(id)',
@@ -183,7 +202,6 @@ check('NewLookOverlays()' in library, 'the questions sit over every tab')
 
 # 6c. Stage 3: Settings and Search.
 pages_src = pages
-grid = (app / 'LibraryGridPage.swift').read_text(encoding='utf-8')
 check('NewLookSettingsList(enableJIT: enableJIT, open: { settingsPath.append(NewLookRoute.settings($0)) })' in library,
       'the Settings tab is the new-look list of pages')
 check('SettingsPagesList(startDock: startDock).scrollContentBackground(.hidden)' not in library, 'the old Settings list is gone from the new look')
@@ -191,8 +209,12 @@ check('case .settings(let page):\n            SettingsPageView(page: page, start
       'a Settings page is the same page as before, pushed inside its tab (the tab bar stays)')
 check('.modifier(NewLookSettingsChrome())' in pages_src and '.padLayer("settings-page", back: { dismiss() }, page: true)' in look,
       'a Settings page: the island behind it, B goes back')
-check('NewLookBadge(symbol: page.symbol, color: page.color)' in look and '.padItem("set-" + page.key' in look,
-      "Settings rows: the page's coloured icon, and the highlight")
+check('NewLookPageIcon(symbol: page.symbol, store: page.store)' in look and '.padItem("set-" + page.key' in look,
+      "Settings rows: the page's icon (a store's page its logo), and the highlight")
+check('var color' not in pages and 'page.color' not in code and 'color:' not in look[look.index('struct NewLookBadge'):look.index('struct NewLookPageIcon')]
+      and 'NewLookColor.tile' in look[look.index('struct NewLookBadge'):look.index('struct NewLookPageIcon')]
+      and 'static let tile = Color(white: 0.39)' in look,
+      'Settings rows use no per-page colour: every icon sits on the one neutral tile')
 check('NewLookStatusPill(enableJIT: enableJIT)' in look[look.index('struct NewLookSettingsList'):], 'Settings: the JIT pill')
 srch = look[look.index('@MainActor enum NewLookSearch'):look.index('// MARK: - Settings')]
 for rules in ['SteamGamesRules.items(', 'EpicGamesRules.items(', 'GOGGamesRules.items(', 'ItchGamesRules.items(', 'EAGamesRules.items(']:
@@ -201,24 +223,27 @@ check('where item.installed == nil && item.owned != nil' in srch, 'Search: only 
 check('L("Installed")' in srch and 'L("In your stores")' in srch and 'L("Stores")' in srch and 'L("Settings")' in srch,
       'Search: Installed, In your stores, Stores, Settings')
 check('sheets.epicGame = .init(id: game.key)' in srch and 'sheets.steamGame = .init(id: id)' in srch
-      and '@Published var steamGame: Game<Int>?' in grid and '.onReceive(LibraryStoreSheets.shared.$steamGame)' in steamgames,
+      and '@Published var steamGame: Game<Int>?' in look and '.onReceive(LibraryStoreSheets.shared.$steamGame)' in steamgames,
       "Search: a store game opens its store's page and its own sheet")
-check('setting: { searchPath.append(NewLookRoute.settings($0)) }' in library and 'store: { searchPath.append(NewLookRoute.store($0)) }' in library,
-      'Search: a store or a Settings page opens inside the Search tab')
-check('storeGame: { game in lookPendingGame = game; searchPath.append(NewLookRoute.store(game.store)) }' in library
+check('setting: { settingsPath.append(NewLookRoute.settings($0)) }' in library and 'store: { storesPath.append(NewLookRoute.store($0)) }' in library,
+      'Search: a store opens on the Stores stack, a Settings page on the Settings stack (inside the tab it was found in)')
+check('storeGame: { game in lookPendingGame = game; storesPath.append(NewLookRoute.store(game.store)) }' in library
       and '.task { shown() }' in look and 'asyncAfter' not in srch,
       "Search: a store game's sheet opens once its store's page is up (no timer)")
 
 # 6d. Cameron's Test 2 findings (Nov 9).
-check('if let back = top.back { back() } else if layers.count == 1 { rootBack?() }' in pad
-      and 'if lookTab == .search { lookPick(lookBefore) }' in library and 'if new == .search { lookBefore = old }' in library,
-      'B on Search goes back to the tab it came from')
-check('.background(Color.clear.contentShape(Rectangle()).onTapGesture { field = false })' in look
-      and '.scrollDismissesKeyboard(.immediately)' in look, 'Search: a tap or a drag puts the keyboard away')
-check('.searchable(text: $lookSearch, placement: .navigationBarDrawer(displayMode: .always)' in library and 'content.searchFocused(field)' in look and '"search-field"' in look,
-      "Search: Apple's own field; the controller puts the keyboard up from a button")
-check('ContentUnavailableView.search(text: query)' in look and look.count('ContentUnavailableView {') == 2,
-      "Apple's empty screens: no results, nothing downloading, nothing installed")
+check('enum NewLookCatalog' in look and 'guard scope == .stores, query.count >= 2 else { catalog = .init(); return }' in look
+      and 'SteamCatalog.search(query)' in look and 'NewLookCatalog.itch(query)' in look,
+      "Search: Steam's and itch.io's catalogs are asked only from the Stores tab's field")
+# (Search tab removed: its "B goes back to the tab it came from" and the tap-away keyboard background went with it.)
+check('.scrollDismissesKeyboard(.immediately)' in look, 'Search: a drag puts the keyboard away')
+check('.searchable(text: text, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(prompt))' in library
+      and 'content.searchFocused(field)' in look and 'pad.search = { lookField = true }' in library
+      and 'lookField = false' in library,
+      "Search: Apple's own field on every tab; Y puts the keyboard up in the open tab's field, changing tab puts it away")
+check('ContentUnavailableView.search(text: query)' in look and look.count('ContentUnavailableView {') == 1
+      and 'if !downloads.rows.isEmpty {' in dl,
+      "Apple's empty screens: no results, nothing installed; the Downloads section shows nothing while nothing downloads")
 check('.navigationBarTitleDisplayMode(.large)' in library[library.index('struct NewLookTabRoot'):],
       "every tab: Apple's large title")
 check('guard pressed.0 == id, last.visible else { return }' in pad and 'if owner == nil || items[id]?.owner == owner' in pad
@@ -242,8 +267,8 @@ check('.padLayer("game-\\(page)", back: { lookBack() }, page: stack != nil)' in 
 for item in ['gd-resolution', 'gd-aspect', 'gd-metalfx', 'gd-framegen', 'gc-mode', 'gc-opacity', 'gc-size', 'gl-start', 'gl-services',
              'gx-x87', 'gx-large', 'gx-avx', 'gx-cpus', 'gx-gpu', 'gx-vcrt', 'gx-japanese', 'gx-suspend', 'gb-find', 'ga-live', 'ga-reset']:
     check(f'.padItem("{item}"' in library, f'game pages: {item} on the controller')
-check('if NewLook.enabled { path.append(page); return }' in library and 'else { path.removeLast() }   // slides back' in library,
-      'game pages slide in and out again in the new look')
+check('        path.append(page)\n    }' in library and 'else { path.removeLast() }   // slides back' in library,
+      'game pages slide in and out again')
 check('let loading = all.isEmpty && MadeiraDock.enabled && !ready.steamScanned' in look and '.onAppear { Self.load() }' in look
       and 'SteamGamesModel.shared.$scanned.removeDuplicates()' in look and 'let scanned = SteamGamesModel.shared.scanned' in look
       and 'SteamGamesModel.shared.refresh()' in look and 'if !self.scanned { self.scanned = true }' in steamgames,
@@ -297,12 +322,12 @@ check('.system(size:' not in look[look.index('struct NewLookHints'):look.index('
 
 # 7. Words in all six languages.
 langs = ['de', 'es', 'ko', 'pt-BR', 'ru', 'zh-Hans']
-words = ['New look', 'Library', 'Stores', 'Downloads', 'Settings', 'Search', 'Stop', 'Get ready', 'First-time setup',
+words = ['Library', 'Stores', 'Downloads', 'Settings', 'Search', 'Stop', 'Get ready', 'First-time setup',
          'Start Steam', 'Starting %@', 'Open %@', 'Waiting for its window…', 'While playing', 'Uninstall %@', 'Go to Stores',
-         '%@ of %@ signed in', '%@ installed · %@ in your library', 'Sign in to see your games', 'Change icon', 'Reset icon',
-         'Choose from Photos', 'Choose from Files', 'Remove %@ from Downloads?', 'Keep downloading', 'Pause', 'Resume', 'Try again',
-         'Games, stores and settings', 'In your stores', 'Nothing downloading', 'Games you install from a store show up here.',
-         'Type a name', "Steam's game list is taking a while.", 'Getting games', 'Steam and Dock',
+         '%@ installed · %@ in your library', 'Sign in to see your games', 'Search installed games', 'Search games across stores',
+         'Search settings', 'Remove %@ from Downloads?', 'Keep downloading', 'Pause', 'Resume', 'Try again',
+         'In your stores', 'On Steam', 'On itch.io', 'Steam · Store page', 'itch.io · Store page',
+         "Steam's game list is taking a while.", 'Getting games', 'Steam and Dock',
          'Cover size', 'Small', 'Medium', 'Large', 'Loading your games…', '%@ of %@', 'about %@ left',
          'Now', 'Needs attention', 'Free space', 'Games ready', 'Step %@ of %@', 'Check files', 'Download files',
          'Finish installing', 'In progress · %@%%', 'How the game starts.', 'Buttons on the screen while you play.',
@@ -349,19 +374,19 @@ check('Text(number).font(.title2.bold()).monospacedDigit()' in speed_view and '.
 
 # 0057: store pages list the games to install first; the installed ones fold away under them.
 steam_src = (app / 'SteamGames.swift').read_text(encoding='utf-8')
-check('let fold = NewLook.enabled && part == .all' in steam_src
+check('let fold = part == .all' in steam_src
       and 'let top = fold ? groups.downloading : groups.downloading + installed' in steam_src
       and steam_src.index('Text("Not installed").font(.headline)') < steam_src.index('NewLookInstalledHeader(id: "steam-installed"')
       and '@AppStorage("madeiraNewLookSteamShowInstalled") private var showInstalled = false' in steam_src,
-      'Steam store page: downloading, then Not installed, then Installed (closed at first); the old look is unchanged')
+      'Steam store page: downloading, then Not installed, then Installed (closed at first)')
 for name, var, key in [('EpicGames', 'epic', 'Epic'), ('GOGGames', 'gog', 'GOG'), ('ItchGames', 'itch', 'Itch'), ('EAGames', 'ea', 'EA')]:
     src = (app / (name + '.swift')).read_text(encoding='utf-8')
-    check(f'let top = NewLook.enabled ? mine.filter {{ {var}.downloads[$0.id] != nil }} : mine' in src
-          and f'let folded = NewLook.enabled ? mine.filter {{ {var}.downloads[$0.id] == nil }} : []' in src
+    check(f'let top = mine.filter {{ {var}.downloads[$0.id] != nil }}' in src
+          and f'let folded = mine.filter {{ {var}.downloads[$0.id] == nil }}' in src
           and src.index('Text("Not installed").font(.headline)') < src.index(f'NewLookInstalledHeader(id: "{var}-installed"')
           and f'@AppStorage("madeiraNewLook{key}ShowInstalled") private var showInstalled = false' in src
           and 'others.isEmpty && folded.isEmpty && search.isEmpty' in src,
-          f'{name}: games to install first, installed folded (closed at first); the old look is unchanged')
+          f'{name}: games to install first, installed folded (closed at first)')
 fold_view = look.split('struct NewLookInstalledHeader: View {')[1].split('\n}\n')[0]
 check('.padItem(id, cornerRadius: 16) { toggle(open) }' in fold_view and 'if let open {' in fold_view
       and '.accessibilityAddTraits(.isHeader)' in fold_view and '[new-look] store page: Installed' in fold_view,
@@ -369,7 +394,7 @@ check('.padItem(id, cornerRadius: 16) { toggle(open) }' in fold_view and 'if let
 
 # 8. Markers.
 check('[pad-highlight] on' in pad and '[pad-highlight] layer \\(name) opened' in pad, 'log lines (markers)')
-check('[new-look] downloads: remove' in look and '[new-look] store icon: ' in look, 'log lines for Remove and a store icon (markers)')
+check('[new-look] downloads: remove' in look and '[new-look] store icon' not in look, 'log line for Remove (marker); the store icon editor logs nothing any more')
 
 print('check-new-look: ' + ('FAIL' if failures else 'PASS'))
 sys.exit(1 if failures else 0)

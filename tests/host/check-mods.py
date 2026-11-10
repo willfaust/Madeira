@@ -52,9 +52,9 @@ strings = json.loads((app / 'Localizable.xcstrings').read_text(encoding='utf-8')
 check('case .mods: return "Mods"' in library and 'case .mods: return "puzzlepiece.extension"' in library,
       'Game details has a Mods page with its title and icon')
 check('[.library, .iniFiles, .mods, .advanced]' in library, 'the Mods row sits above Advanced, for every game but the Desktop')
-check('detailRow("page:\\(item)", last: item == group.last, tap: { open(item) }) { pageRowLabel(item) }' in library and
-      'pageGroups.flatMap { $0 }.map { "page:\\($0)" }' in library,
-      'its row is a detailRow, so the controller ring stops on it and A opens it')
+check('ForEach(Array(pageGroups.enumerated()), id: \\.offset)' in library and
+      'lookRow("gp-page-\\(item)", last: item == group.last, press: { open(item) })' in library,
+      'its row is a lookRow with a pad id (gp-page-...), so the controller highlight stops on it and A opens it')
 check('case .mods: ModsPage(game: modGame)' in library, 'the page opens ModsPage')
 model = library[library.index('    private var modGame: ModGame {'):]
 model = model[:model.index('\n    }\n') + 6]

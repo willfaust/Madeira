@@ -164,15 +164,16 @@ assert 'MadeiraConfig.flag("MADEIRA_BIG_PICTURE_PIN", fallback: true)' in librar
     and 'fm.fileExists(atPath: "\\(folder.unix)/bin/cef/cef.win7/steamwebhelper.exe")' in library \
     and '(pinned ? " -nobootstrapperupdate -skipinitialbootstrap" : "")' in library
 # Big Picture is compiled out of every build without the MADEIRA_BIG_PICTURE_UI condition (no IPA build sets it).
-bp_button = library[library.index('#if MADEIRA_BIG_PICTURE_UI\n            if LibraryEntry.steamClientInstalled {'):]
+newlook = (app / 'NewLook.swift').read_text()
+bp_button = newlook[newlook.index('#if MADEIRA_BIG_PICTURE_UI\n            if LibraryEntry.steamClientInstalled {'):]
 bp_button = bp_button[:bp_button.index('#endif')]
-assert 'Label("Big Picture", systemImage: "gamecontroller")' in bp_button and '.id(LibraryEntry.bigPictureID)' in bp_button, \
-    'the Big Picture button exists only under MADEIRA_BIG_PICTURE_UI'
-assert library.count('Label("Big Picture", systemImage: "gamecontroller")') == bp_button.count('Label("Big Picture", systemImage: "gamecontroller")'), \
+bp_pill = 'pill("big-picture", "Big Picture", "gamecontroller") { desktop(true) }'
+assert bp_pill in bp_button, 'the Big Picture button exists only under MADEIRA_BIG_PICTURE_UI'
+assert newlook.count('"Big Picture", "gamecontroller"') == 1 and 'Label("Big Picture"' not in library + newlook, \
     'no Big Picture button outside that block'
 assert '#if MADEIRA_BIG_PICTURE_UI\n    static let bigPictureShown = true\n#else\n    static let bigPictureShown = false\n#endif' in library \
     and 'MADEIRA_BIG_PICTURE"' not in library \
-    and library.count('$0.desktop != true && $0.listedInLibrary') == 2 and 'entry.desktop != true && entry.listedInLibrary' in library, \
+    and 'entry.desktop != true && entry.listedInLibrary' in newlook[newlook.index('static func added()'):], \
     'without MADEIRA_BIG_PICTURE_UI no Big Picture card is listed, and no runtime switch brings it back'
 
 # madeira-bcd's defaults where upstream's differ: every game madeira-bcd ran had them,
@@ -577,15 +578,16 @@ assert other_legacy['tested'] == [line for line in legacy['tested'] if not line.
 assert other_legacy['switches'] == legacy['switches'] and other_legacy['version'] == 1, other_legacy
 
 # Where the app applies them.
-save = block(library, '    func save(_ entry: LibraryEntry, metadata: Bool = false) {', '\n    }\n')
+save = block(library, '    func save(_ entry: LibraryEntry) {', '\n    }\n')
 assert save.index('let isNew = !next.contains { $0.id == entry.id || (entry.steamAppID != nil && $0.steamAppID == entry.steamAppID) }') \
-    < save.index('GameRecommendations.prepare(&entry, new: isNew)') < save.index('persist(next, metadata:')
+    < save.index('GameRecommendations.prepare(&entry, new: isNew)') < save.index('persist(next)')
 init = block(library, '    private init() {\n        refreshFlag()', '\n    }\n')
 assert init.index('resetPhoneResolution()') < init.index('applyRecommendations()')
 apply_all = block(library, '    private func applyRecommendations() {', '\n    }\n')
-# The new grid writes Steam metadata results itself (applySteamMetadata); it asks for the same recommendations.
-steam_apply = block(library, '    private func applySteamMetadata() {', '\n    }\n')
-assert 'GameRecommendations.prepare(&fresh, new: true)' in steam_apply and 'GameRecommendations.prepare(&next[i])' in steam_apply
+# A Steam game's metadata result is stored through save(), so it gets the same recommendations (the deferred
+# applySteamMetadata writer went with the zoomable grid).
+steam_meta = block(library, '    func refreshSteamMetadata(', '\n    }\n')
+assert '        save(updated)\n' in steam_meta and 'applySteamMetadata' not in library
 assert 'guard !readOnly' in apply_all and 'GameRecommendations.prepare(&next[i])' in apply_all and 'persist(next)' in apply_all
 detail = block(library, 'struct LibraryDetail: View {', '\n/// madeira-bcd: a game\'s own options as the fork stores them')
 assert '.onAppear {\n                migrateEntryOptions()\n                prepareRecommendation()\n                reloadBCD()\n            }' in detail
@@ -609,7 +611,7 @@ assert 'Button("Reset to Recommended"' not in detail[detail.index('    var body:
 # shown with the page's other sections since the Game details pages).
 assert detail.index('Button("Remove from library"') < detail.index('Button("Reset to Recommended"')
 assert 'if let error { Section' in detail
-assert '!remove, !confirmReset else { return }' in detail
+assert '!remove, !confirmReset, !confirmSteamUninstall else { return }' in library[library.index('extension LibraryDetail {'):]   # B on the game page is ignored while a sheet is up
 launch = block(content, '    private func launchLibraryEntry(_ entry: LibraryEntry) {', '\n    }\n')
 assert launch.index('if GameRecommendations.prepare(&entry, new: isNew) { library.save(entry) }') < launch.index('BCDLaunch.applyLibrary(entry)')
 for name in ('GameRecommendations.swift', 'GameRecommendationsApply.swift'):
