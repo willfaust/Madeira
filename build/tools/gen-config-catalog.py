@@ -154,6 +154,17 @@ OVERLAY = {
                         "pool: reusable 3 seconds later, once no thread runs in them. Before, they stayed in use "
                         "until Madeira closed, and a game started after many such exits got 16 MB code buffers and "
                         "ran slowly. 0 keeps them in use, as before."},
+    "env.MADEIRA_JIT_SMALL_NOTICE": {"category": "Memory & JIT pool", "title": "Banner when the JIT pool came out smaller",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: once a game is up, a banner says JIT memory is small this time whenever iPadOS "
+                        "gave the pool less than asked (nearly every start without pool-split, and most games are fine). "
+                        "A start that really runs out says Not enough memory either way."},
+    "env.MADEIRA_JIT_POOL_NOTICE_NOW": {"category": "Memory & JIT pool", "title": "Say at once when a game ran out of JIT memory",
+                "kind": "bool", "default": "1",
+                "note": "Default on. When a library game's start runs out of JIT pool ([jit-pool] EXHAUSTED) while the "
+                        "starting screen is up, the screen says Not enough memory at once and offers Close Madeira; the "
+                        "next app run starts the game by itself. 0: the start waits for Steam's code 45 and the alert "
+                        "comes after the session, as before."},
     "env.MADEIRA_JIT_POOL_AUTO": {"category": "Memory & JIT pool", "title": "Bigger JIT pool for a game that ran out",
                 "kind": "bool", "default": "1",
                 "note": "Default on. A library game whose session logs [jit-pool] EXHAUSTED gets pool-split = 1 and "
@@ -611,6 +622,7 @@ OVERLAY = {
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
     "env.MADEIRA_WOW_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 32-bit window's anonymous RWX memory is plain read/write to the host once Wine Mono's libmono-2.0-x86.dll is mapped there (ml1279/ml1282). 1: in every 32-bit window. 0: never (stores go through the JIT pool's alias, and FEX's Mono bridge stays off)."},
+    "env.MADEIRA_X64_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 64-bit program's anonymous RWX memory is plain read/write to the host once Unity's mono-2.0-bdwgc.dll is mapped. 1: in every 64-bit process. 0: never (stores go through the JIT pool's alias)."},
     "env.MADEIRA_WINEMONO_BRIDGE": {"note": "FEX's Mono backpatcher bridge (ml712). On by itself for Wine Mono, 32- and 64-bit (ml1282/ml1286); for the 32-bit runtime in a guest window it also turns SMC detection off once the backpatcher is found (ml1280). 0 keeps it off."},
     "env.MADEIRA_MONO_DEFAULTS": {"category": "Wine libraries", "note": "Wine Mono, 32- and 64-bit: mscoree sets MONO_THREADS_SUSPEND=coop and adds keep-delegates to MONO_DEBUG before Mono loads, and puts the previous values back once Mono has read them (ml1282); values already set win. 0 sets nothing."},
     "cpu-count": {"title": "Reported CPU count (0 = device)"},
@@ -875,6 +887,19 @@ OVERLAY = {
                         "must start on a 32 GB boundary, gets 0x7800000000 (20 GB of it really reserved). 2: also "
                         "libcef.dll's (0x7000000000) and Oilpan's; the JIT pool's RW alias moves to 0x7900000000. "
                         "Off by default; set it in the game's own file; read at session start."},
+    "env.MADEIRA_CEF_CMDLINE": {"category": "Memory & JIT pool", "title": "Let in-process Chromium read the game's command line",
+                "kind": "bool", "default": "0",
+                "note": "1: in a program named by env.MADEIRA_CEF_PA_EXES, libcef.dll's cef_initialize clears the game's "
+                        "command_line_args_disabled, so Chromium switches given with env.MADEIRA_CHILD_ARGS (such as "
+                        "--single-process) reach it. For a game whose Chromium helper processes are refused memory "
+                        "(BeamNG.drive). Default off; set it in the game's own file; log [cef-cmdline]."},
+    "env.MADEIRA_CEF_PA_EXES": {"category": "Memory & JIT pool", "title": "Games that run Chromium in their own process",
+                "kind": "text", "default": "",
+                "note": "Exe names, separated by ';' (e.g. BeamNG.drive.x64.exe). A listed program gets the address "
+                        "space SocialClubHelper.exe gets under env.MADEIRA_SC_PA_POOLS: room for chrome_elf.dll's and "
+                        "libcef.dll's PartitionAlloc pools, Oilpan and V8's cage. Use it with env.MADEIRA_SC_PA_POOLS = 2 "
+                        "for a game that loads libcef.dll itself and stops in chrome_elf.dll (80000003). Empty by "
+                        "default; set it in the game's own file; read at session start."},
     "avail-phys": {"category": "Memory & JIT pool", "title": "Report the memory left before the app's limit as available",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: Windows programs' available physical memory (GlobalMemoryStatusEx) is what "
@@ -1105,6 +1130,12 @@ OVERLAY = {
                         "Launcher 132 MB, Social Club 68 MB through a whole RDR2 session). Larger uploads still get a "
                         "block of their own; each named program logs one [small-rings] line. Unset or 0 (default): "
                         "32 MB, as before. Set it in the game's own file; read when the program starts."},
+    "env.MADEIRA_D3D11_NO_VIDEO_DEVICE": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Direct3D 11: use software video presentation",
+                "kind": "bool", "default": "0",
+                "sources": ["build/dxmt-patches/0002-d3d11-video-device-fallback.patch"],
+                "note": "1: reject D3D11 devices explicitly requested with VIDEO_SUPPORT so Unity can fall back "
+                        "to CPU-backed Media Foundation samples. Direct3D rendering still uses Metal. Set per game."},
     # DXMT's Direct3D 9 index buffers read it (dxmt, build/dxmt-patches/0001-d3d9-index-range-per-draw.patch).
     "env.MADEIRA_D3D9_INDEX_RANGE": {"category": "Direct3D 9/10/11 (DXMT)",
                 "title": "Direct3D 9: upload only the index bytes a draw reads",

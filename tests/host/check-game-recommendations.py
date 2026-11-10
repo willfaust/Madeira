@@ -74,16 +74,17 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
           'batman-arkham-city-goty', 'trails-in-the-sky-1st-chapter', 'subnautica-2', 'rdr1-steam', 'resident-evil-requiem', 'resident-evil-requiem-demo',
           'life-is-strange-remastered', 'life-is-strange-2', 'project-zomboid', 'spiderheck', 'rounds', 'plateup',
           'final-fantasy-tactics-ivalice-chronicles', 'jetboard-joust', 'dead-as-disco', 'tung', 'sekiro-shadows-die-twice', 'stardew-valley',
-          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod', 'persona-3-reload'}
+          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod', 'persona-3-reload', 'grounded', 'innerspace'}
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
-                        'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2',
-                        'standard'} | MERGED, \
+                        'battle-net', 'battle-net-setup', 'steam-big-picture', 'dark-souls-remastered', 'dark-souls-iii', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2',
+                        'standard', 'avicii-invector'} | MERGED, \
     sorted(presets)
 assert ('static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,\n'
         '                      ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,\n'
-        '                      crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,\n'
+        '                      crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, battleNet, battleNetSetup,\n'
+        '                      steamBigPicture,\n'
         '                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]\n'
         '        + steamTitles.map(\\.list)') in lists_src
 # The Rockstar Games Launcher outside Steam (logs 91-93, 2026-10-28): Launcher.exe in its own folder gets the
@@ -102,13 +103,32 @@ for line in ('env.MADEIRA_SC_PA_POOLS = 2', 'env.MADEIRA_X64_IMAGE_NOCOPY = 1', 
     assert line in launcher_lines, ('rockstar-launcher', line)
 assert not any(l.startswith('env.MADEIRA_SPAWN_BLOCK') for l in presets['rockstar-launcher-setup']['lines']), \
     'the installer runs its embedded vc_redist'
+# [battle-net] Battle.net (version 4 from the old builds, home page at 60 FPS) and its installer: both start in the
+# Wine desktop with Windows services; Battle.net.exe is a 32-bit Chromium, so none of the 64-bit Chromium lines.
+assert ('        case "battle.net launcher.exe", "battle.net.exe":\n'
+        '            // [battle-net] Blizzard\'s Battle.net app, wherever it was installed.\n'
+        '            return battleNet\n'
+        '        case "battle.net-setup.exe":\n'
+        '            return battleNetSetup\n') in lists_src
+for ident in ('battle-net', 'battle-net-setup'):
+    assert presets[ident]['switches'].endswith('launchMode: "desktop", startServices: true'), (ident, presets[ident]['switches'])
+bnet_lines = presets['battle-net']['lines']
+assert presets['battle-net']['version'] == 4
+for line in ('pool-split = 1', 'env.MADEIRA_WOW_PLACEHOLDERS = 1', 'env.WINEDLLOVERRIDES = locationapi=d',
+             'env.DXMT_SMALL_RINGS = Battle.net Launcher.exe;Battle.net.exe;Agent.exe'):
+    assert line in bnet_lines, ('battle-net', line)
+child = [l for l in bnet_lines if l.startswith('env.MADEIRA_CHILD_ARGS = Battle.net.exe ')]
+assert len(child) == 1 and '--renderer-process-limit=1' in child[0] and '--jitless' not in child[0] \
+    and 'MAP *.googlevideo.com ~NOTFOUND' in child[0], child
+assert not any(l.startswith(('env.MADEIRA_SC_PA_POOLS', 'pool-low', 'env.MADEIRA_X64_IMAGE_NOCOPY')) for l in bnet_lines), \
+    'a 32-bit Chromium: none of the 64-bit Chromium lines'
 assert 'if let mode = rec.launchMode { entry.launchMode = mode == "desktop" ? mode : nil }' in apply_src
 assert 'if let on = rec.startServices { entry.startServices = on ? true : nil }' in apply_src
-# Every merged list is in the recognition table, once.
+# Each list in the Steam title table is recognised once.
 titles_src = block(lists_src, '    static let steamTitles: [SteamTitle] = [', '\n    ]\n')
-for ident in MERGED:
+for ident in MERGED | {'avicii-invector'}:
     assert titles_src.count('list: %s)' % presets[ident]['name']) == 1, ident
-assert titles_src.count('SteamTitle(') == len(MERGED)
+assert titles_src.count('SteamTitle(') == len(MERGED) + 1
 # ml2021: the Big Picture entry (C:\big-picture.bat) is recognised by its batch name and gets the Steam Big Picture list
 assert 'if last == "big-picture.bat" { return steamBigPicture }' in lists_src
 assert 'static var bigPictureEntry: LibraryEntry' in library and 'relativePath: "big-picture.bat"' in library \
@@ -166,8 +186,8 @@ for ident, p in presets.items():
     if ident in ('dark-souls-remastered', 'dark-souls-iii'):
         p['tested'], p['fork'] = [line for line in p['lines'][2:] if not line.startswith('#')], []
         continue
-    # The Fallout lists are the standard one plus a switch: the games ran with it. Persona 3 Reload's is the list as it ran.
-    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2', 'persona-3-reload'):
+    # These lists were tested without madeira-bcd's defaults.
+    if ident in ('standard', 'fallout-new-vegas', 'fallout-3', 'black-ops-1', 'black-ops-2', 'borderlands-2', 'persona-3-reload', 'avicii-invector'):
         assert not set(FORK_DEFAULTS) & set(p['lines']), (ident, "the standard list has none of madeira-bcd's defaults")
         p['tested'], p['fork'] = p['lines'][2:], []
         continue
@@ -202,7 +222,7 @@ for ident, p in presets.items():
         assert 'socialclub' not in named and 'MADEIRA_DLL_LOCAL' not in line, (ident, line)
 for ident in ('fallout-new-vegas', 'fallout-3'):
     assert presets[ident]['tested'] == presets['standard']['tested'] and presets[ident]['switches'] == 'olderNvidia: true', presets[ident]
-print('PASS: seventy-seven lists (twenty-six plus 51 merged Steam titles), two comment lines each, every game list but Dark Souls ends with the four fork defaults and the standard, Fallout and Black Ops II ones have none, no key twice, '
+print(f'PASS: {len(presets)} lists, two comment lines each, tested fork defaults where applicable, no key twice, '
       'every non-env key in the settings catalog, no Social Club DLL lines, no variant DLL switches')
 
 # Red Dead Redemption 2 from Steam: the owner's list of 2026-10-09 (build 463), line for line,
@@ -312,7 +332,13 @@ gta_other = presets['gta5e-other']
 dock_lines = {'env.MADEIRA_DOCK_GAME_SCM = 1', 'env.MADEIRA_DOCK_KEEP_ALIVE = Launcher.exe;GTA5_Enhanced.exe'}
 def settings(lines):
     return {l for l in lines if not l.startswith('#')}
-assert settings(gta_other['lines']) == (settings(gta['lines']) - dock_lines) | {'env.SteamDeck = 1', 'env.MADEIRA_EC_HOOK_TRACE = 0'}, \
+# Version 11 (the old line's device-tested Epic config): dxcore off (SocialClubHelper.exe crashed in DXCore.dll,
+# in-game error 17), the launcher installer's VCRed\\vc_redist not started, small argument rings for the launcher.
+epic_v11 = {'env.WINEDLLOVERRIDES = dxcore=;video64=', 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;VCRed\\vc_redist;.be\\vc_redist',
+            'env.DXMT_SMALL_RINGS = Launcher.exe;SocialClubHelper.exe'}
+epic_steam_only = {'env.WINEDLLOVERRIDES = video64=', 'env.MADEIRA_SPAWN_BLOCK = RockstarErrorHandler;.be\\vc_redist'}
+assert settings(gta_other['lines']) == ((settings(gta['lines']) - dock_lines - epic_steam_only)
+                                        | {'env.SteamDeck = 1', 'env.MADEIRA_EC_HOOK_TRACE = 0'} | epic_v11), \
     sorted(settings(gta_other['lines']) ^ settings(gta['lines']))
 assert 'env.MADEIRA_FASTSYNC_SEM = 1' not in gta_other['lines']
 # Version 10 (ml2280): it starts in the Wine desktop, an aarch64 session, so the launcher installer's
@@ -330,7 +356,7 @@ for ident in ('gta5e-steam', 'gta5e-other', 'rdr2-steam', 'rdr2-other', 'horizon
 # chunks, and under 12 GB of RAM the video budget's trim starts 3584 MB below the limit.
 # Versions 9 / 8 (logs 103-106): the small-device memory guard; version 8 / 7's semaphore cells and lean
 # diagnostics are gone again (the game's loading stalled with them).
-assert presets['gta5e-steam']['version'] == 10 and presets['gta5e-other']['version'] == 10, \
+assert presets['gta5e-steam']['version'] == 10 and presets['gta5e-other']['version'] == 11, \
     (presets['gta5e-steam']['version'], presets['gta5e-other']['version'])
 for ident in ('gta5e-steam', 'gta5e-other'):
     assert 'pso-async = 1' in presets[ident]['lines'], ident
@@ -454,15 +480,20 @@ assert not any(line.startswith('mip0-full') for ident, p in presets.items() if p
 assert presets['gta4-steam']['version'] == 3 and presets['gta4-steam']['switches'] == \
     'avx: false, fastSync: true, semaphoreFastPath: true, display: "fit"', presets['gta4-steam']
 # The merged lists: version 1 (Arkham City 2, with the switch the owner's test found; Counter-Strike 2 2, with
-# mouse-look at the iPad screen edge, MADEIRA_POINTER_RAW_LOOK), none of the community
+# mouse-look at the iPad screen edge, MADEIRA_POINTER_RAW_LOOK; BeamNG.drive 2, its device-tested
+# single-process CEF lines), none of the community
 # variant or app-side switches, and no MADEIRA_SPAWN_SWAP (its engine code is not in this tree).
 for ident in MERGED:
     p = presets[ident]
-    assert p['version'] == (2 if ident in ('batman-arkham-city-goty', 'counter-strike-2') else 1), ident
+    assert p['version'] == (2 if ident in ('batman-arkham-city-goty', 'counter-strike-2', 'beamng-drive') else 1), ident
     assert not any(line.startswith(('env.MADEIRA_WINTYPES', 'env.MADEIRA_OPTIN_DLLS', 'env.MADEIRA_D3D8 ',
                                     'env.MADEIRA_STEAM_IDENTITY', 'env.MADEIRA_MFC_DOCK', 'pool-split-retry'))
                    for line in p['lines']), (ident, p['lines'])
 assert [ident for ident, p in presets.items() if any(line.startswith('env.MADEIRA_SPAWN_SWAP') for line in p['lines'])] == []
+assert presets['beamng-drive']['tested'][-4:] == [
+    'env.MADEIRA_SC_PA_POOLS = 2', 'env.MADEIRA_CEF_PA_EXES = BeamNG.drive.x64.exe',
+    'env.MADEIRA_CHILD_ARGS = BeamNG.drive.x64.exe --single-process --js-flags=--jitless '
+    '--disable-features=PartitionAllocBackupRefPtr', 'env.MADEIRA_CEF_CMDLINE = 1'], presets['beamng-drive']['lines']
 print('PASS: RDR2 (Steam) is the owner\'s 463 list plus the 466, 467, 470, 472, 475, 476, 480 and 514 test lines (v10), line for line with its switches (720 lines of this screen), and outside Steam the same without the Dock lines, with the ec-hook reporter off (v1); GTA V Enhanced keeps its tested lines plus the stamped orphan-lock mode (v2) and, from Steam, the VC++ engine block (v3), GoW its tested lines; Horizon Zero Dawn has build 491\'s proven list plus build 494\'s frame-rate switches (v16), GoT the owner\'s build 515 list (v3); every other game and the Desktop the standard list (v3)')
 
 # Crysis Remastered, version 1 (community build 528, 2026-10-13 22:08, it ran perfectly): the
@@ -808,7 +839,12 @@ check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMo
       "Garry's Mod by App ID and folder (either branch) and by its 64-bit program")
 check(id(steam + #"\P3R"#, 2161700) == "persona-3-reload" && id(steam + #"\P3R\P3R\Binaries\Win64\P3R.exe"#) == "persona-3-reload",
       "Persona 3 Reload by App ID, folder and program")
-check(R.steamTitles.count == 52 && R.all.count == 78, "52 merged titles, 78 lists")
+check(id(steam + #"\AVICII"#, 986800) == "avicii-invector"
+      && id(steam + #"\Avicii - Invector"#) == "avicii-invector"
+      && id(#"C:\Games\AVICII Invector.exe"#) == "avicii-invector", "AVICII Invector by App ID, folder and program")
+check(id(#"C:\Games\Avicii - Invector\UnityCrashHandler64.exe"#) == "none", "do not match the Unity redistributable")
+check(id(#"C:\Program Files\Epic Games\InnerSpace\InnerSpace.exe"#) == "innerspace", "InnerSpace (Epic) by its program")
+check(R.steamTitles.count == 55 && R.all.count == 83, "55 titles in the Steam table, 83 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 51 merged Steam titles, others none")
