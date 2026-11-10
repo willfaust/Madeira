@@ -13,8 +13,9 @@ import UniformTypeIdentifiers
 // bar, large titles, grouped rows) with the Madeira island behind it, and one controller
 // highlight on every screen (PadHighlight.swift).
 //
-// Tabs: Library (every installed game, last played first), Stores, Downloads (a % badge
-// while something downloads), Settings, and Search. On an iPhone held upright the tab bar
+// Tabs: Library (every installed game, last played first), Stores (with the downloads under
+// the stores, and a % badge on the tab while something downloads) and Settings; each has its own
+// search field. On an iPhone held upright the tab bar
 // floats at the bottom; sideways and on iPad it sits at the top.
 
 enum NewLook {
@@ -215,30 +216,26 @@ struct NewLookBackground: View {
 // MARK: - Tabs
 
 enum NewLookTab: Int, CaseIterable {
-    case library, stores, downloads, settings, search
+    case library, stores, settings
     var title: String {
         switch self {
         case .library: return L("Library")
         case .stores: return L("Stores")
-        case .downloads: return L("Downloads")
         case .settings: return L("Settings")
-        case .search: return L("Search")
         }
     }
     var symbol: String {
         switch self {
         case .library: return "square.grid.2x2"
         case .stores: return "bag"
-        case .downloads: return "arrow.down.circle"
         case .settings: return "gearshape"
-        case .search: return "magnifyingglass"
         }
     }
-    /// LB and RB go round the four tabs (Search is Y).
+    /// LB and RB go round the tabs (Y is the open tab's search field).
     func step(_ by: Int) -> NewLookTab {
-        let ring: [NewLookTab] = [.library, .stores, .downloads, .settings]
-        let index = ring.firstIndex(of: self) ?? 0
-        return ring[(index + by + ring.count) % ring.count]
+        let all = NewLookTab.allCases
+        let index = all.firstIndex(of: self) ?? 0
+        return all[(index + by + all.count) % all.count]
     }
 }
 
@@ -551,29 +548,17 @@ struct NewLookHints: View {
     }
 }
 
-/// The Downloads tab, as in the mock-up: the running download big under "Now", with each of its
-/// steps; then what failed ("Needs attention") and what waits or is paused ("Waiting"). Pause,
-/// Resume (Try again after a failure) and Remove on each.
-struct NewLookDownloadsPage: View {
+/// The downloads, under the stores on the Stores tab: the running download big under "Now", with each
+/// of its steps; then what failed ("Needs attention") and what waits or is paused ("Waiting"). Pause,
+/// Resume (Try again after a failure) and Remove on each. Nothing shows while nothing downloads.
+struct NewLookDownloadsSection: View {
     @ObservedObject private var downloads = NewLookDownloads.shared
-    let stores: () -> Void
     var body: some View {
         let now = downloads.rows.first(where: \.active)
         let failed = downloads.rows.filter(\.failed)
         let waiting = downloads.rows.filter { !$0.failed && $0.id != now?.id }
-        VStack(alignment: .leading, spacing: 24) {
-            NewLookTitle(title: L("Downloads"), note: downloads.rows.isEmpty ? "" : String(format: L("%@ in the list"), String(downloads.rows.count)))
-            if downloads.rows.isEmpty {
-                // Apple's empty screen, with the next step.
-                ContentUnavailableView {
-                    Label(L("Nothing downloading"), systemImage: "arrow.down.circle")
-                } description: {
-                    Text("Games you install from a store show up here.")
-                } actions: {
-                    NewLookSheetButton(id: "dl-stores", title: L("Go to Stores"), symbol: nil, filled: true, action: stores)
-                        .frame(maxWidth: 320)
-                }
-            } else {
+        if !downloads.rows.isEmpty {
+            VStack(alignment: .leading, spacing: 24) {
                 if let now {
                     NewLookSection(title: L("Now")) { nowCard(now) }
                 }
@@ -910,7 +895,8 @@ struct NewLookStoreIcon: View {
     }
 }
 
-/// The Stores tab: every store, whether you are signed in, and how many of its games are here.
+/// The Stores tab: every store, whether you are signed in, and how many of its games are here; the
+/// downloads sit under them.
 struct NewLookStoresPage: View {
     let open: (NewLookStore) -> Void
     @ObservedObject private var steam = SteamOwnedLibrary.shared
@@ -922,21 +908,8 @@ struct NewLookStoresPage: View {
     @ObservedObject private var readyGames = NewLookGames.shared
     var body: some View {
         let stores = NewLookStore.shown
-        let accounts = stores.filter { $0.signedIn != nil }
-        let signed = accounts.filter { $0.signedIn == true }.count
         let ready = readyGames.all
-        VStack(alignment: .leading, spacing: 16) {
-            NewLookTitle(title: L("Stores")) {
-                HStack(spacing: 8) {
-                    Circle().fill(signed > 0 ? NewLookColor.green : NewLookColor.orange).frame(width: 9, height: 9)
-                    Text(String(format: L("%@ of %@ signed in"), String(signed), String(accounts.count)))
-                        .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                }
-                .padding(.horizontal, 16).frame(minHeight: 36)
-                .background(.regularMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
-                .accessibilityElement(children: .combine)
-            }
+        VStack(alignment: .leading, spacing: 24) {
             VStack(spacing: 0) {
                 ForEach(Array(stores.enumerated()), id: \.element) { index, store in
                     let installed = ready.filter { $0.id.hasPrefix(store.prefix) }.count
@@ -968,6 +941,7 @@ struct NewLookStoresPage: View {
                 }
             }
             .newLookCard()
+            NewLookDownloadsSection()
         }
     }
 
@@ -1685,86 +1659,136 @@ struct NewLookSheetButton: View {
     }
 }
 
-/// The Search tab: your installed games, the stores' games you have not installed, the
-/// stores, and the Settings pages.
+/// What a tab's search field looks in.
+enum NewLookSearchScope { case library, stores, settings }
+
+/// A tab's search results, shown in place of the tab's page while its field holds text.
+/// Library: your installed games. Stores: installed games, the not installed games of the stores you
+/// are signed in to, the stores, and what Steam's and itch.io's catalogs have (Epic Games, GOG and EA
+/// have no search that works without owning the game). Settings: the Settings pages.
 struct NewLookSearchPage: View {
-    @Binding var text: String
+    let scope: NewLookSearchScope
+    let text: String
     let open: (LibraryEntry) -> Void
     let store: (NewLookStore) -> Void
     let storeGame: (NewLookSearch.StoreGame) -> Void
     let setting: (SettingsPages.Page) -> Void
-    @FocusState private var field: Bool
-    @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var ready = NewLookGames.shared
+    @Environment(\.openURL) private var openURL
+    @State private var catalog = NewLookCatalog.Found()
     var body: some View {
         let query = text.trimmingCharacters(in: .whitespaces)
-        let games = query.isEmpty ? [] : ready.matching(query)
-        let others = NewLookSearch.storeGames(query)
-        let stores = NewLookSearch.stores(query)
-        let pages = NewLookSearch.settings(query)
+        let games = scope == .settings ? [] : ready.matching(query)
+        let others = scope == .stores ? NewLookSearch.storeGames(query) : []
+        let stores = scope == .stores ? NewLookSearch.stores(query) : []
+        let pages = scope == .settings ? NewLookSearch.settings(query) : []
+        let owned = Set(others.filter { $0.store == .steam }.map(\.key))
+        let steam = catalog.steam.filter { !owned.contains(String($0.id)) }
+        let itch = catalog.itch
         VStack(alignment: .leading, spacing: 16) {
-            // The field is Apple's (.searchable on this tab's page, LibraryView.lookStack). The
-            // controller cannot reach the system's field, so while the highlight shows, a button
-            // puts the keyboard up in it.
-            if text.isEmpty { NewLookTypeButton(field: $field) }
-            if !query.isEmpty {
-                if games.isEmpty && others.isEmpty && stores.isEmpty && pages.isEmpty {
-                    ContentUnavailableView.search(text: query)
-                }
-                if !games.isEmpty {
-                    NewLookSection(title: L("Installed")) {
-                        ForEach(Array(games.enumerated()), id: \.element.id) { index, game in
-                            NewLookSearchRow(id: "sr-" + game.id, last: index == games.count - 1, title: game.entry.title, note: game.note,
-                                             action: { open(game.entry) }) {
-                                LibraryArtwork(entry: game.entry).frame(width: 46, height: 69)
-                                    .clipShape(RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
-                            }
+            if games.isEmpty && others.isEmpty && stores.isEmpty && pages.isEmpty && steam.isEmpty && itch.isEmpty {
+                if catalog.loading { ProgressView().frame(maxWidth: .infinity).padding(.top, 24) }
+                else { ContentUnavailableView.search(text: query) }
+            }
+            if !games.isEmpty {
+                NewLookSection(title: L("Installed")) {
+                    ForEach(Array(games.enumerated()), id: \.element.id) { index, game in
+                        NewLookSearchRow(id: "sr-" + game.id, last: index == games.count - 1, title: game.entry.title, note: game.note,
+                                         action: { open(game.entry) }) {
+                            LibraryArtwork(entry: game.entry).frame(width: 46, height: 69)
+                                .clipShape(RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
                         }
                     }
                 }
-                if !others.isEmpty {
-                    NewLookSection(title: L("In your stores")) {
-                        ForEach(Array(others.enumerated()), id: \.element.id) { index, game in
-                            NewLookSearchRow(id: "so-" + game.id, last: index == others.count - 1, title: game.title,
-                                             note: game.store.name + " · " + L("Not installed"), action: { storeGame(game) }) {
-                                // The game's own picture, as an installed game's row shows its cover
-                                // (Cameron, Test 6: these showed the store's icon).
-                                NewLookStoreGameArt(game: game).frame(width: 46, height: 69)
-                                    .clipShape(RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
-                            }
+            }
+            if !others.isEmpty {
+                NewLookSection(title: L("In your stores")) {
+                    ForEach(Array(others.enumerated()), id: \.element.id) { index, game in
+                        NewLookSearchRow(id: "so-" + game.id, last: index == others.count - 1, title: game.title,
+                                         note: game.store.name + " · " + L("Not installed"), action: { storeGame(game) }) {
+                            // The game's own picture, as an installed game's row shows its cover.
+                            NewLookStoreGameArt(game: game).frame(width: 46, height: 69)
+                                .clipShape(RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
                         }
                     }
                 }
-                if !stores.isEmpty {
-                    NewLookSection(title: L("Stores")) {
-                        ForEach(Array(stores.enumerated()), id: \.element) { index, item in
-                            NewLookSearchRow(id: "ss-" + item.rawValue, last: index == stores.count - 1, title: item.name,
-                                             note: item.signedIn.map { $0 ? L("Signed in") : L("Not signed in") } ?? "",
-                                             action: { store(item) }) {
-                                NewLookStoreIcon(store: item, size: 40)
-                            }
+            }
+            if !steam.isEmpty {
+                NewLookSection(title: L("On Steam")) {
+                    ForEach(Array(steam.enumerated()), id: \.element.id) { index, match in
+                        NewLookSearchRow(id: "cs-\(match.id)", last: index == steam.count - 1, title: match.name,
+                                         note: L("Steam · Store page"), action: {
+                            if let url = URL(string: "https://store.steampowered.com/app/\(match.id)") { openURL(url) }
+                        }) { NewLookCatalog.cover(SteamCatalog.cover(match.id)) }
+                    }
+                }
+            }
+            if !itch.isEmpty {
+                NewLookSection(title: L("On itch.io")) {
+                    ForEach(Array(itch.enumerated()), id: \.element.id) { index, game in
+                        NewLookSearchRow(id: "ci-\(game.id)", last: index == itch.count - 1, title: game.title,
+                                         note: [game.author, L("itch.io · Store page")].compactMap { $0 }.joined(separator: " · "), action: {
+                            if let url = game.url { openURL(url) }
+                        }) { NewLookCatalog.cover(game.cover) }
+                    }
+                }
+            }
+            if !stores.isEmpty {
+                NewLookSection(title: L("Stores")) {
+                    ForEach(Array(stores.enumerated()), id: \.element) { index, item in
+                        NewLookSearchRow(id: "ss-" + item.rawValue, last: index == stores.count - 1, title: item.name,
+                                         note: item.signedIn.map { $0 ? L("Signed in") : L("Not signed in") } ?? "",
+                                         action: { store(item) }) {
+                            NewLookStoreIcon(store: item, size: 40)
                         }
                     }
                 }
-                if !pages.isEmpty {
-                    NewLookSection(title: L("Settings")) {
-                        ForEach(Array(pages.enumerated()), id: \.element) { index, page in
-                            NewLookSearchRow(id: "sp-" + page.key, last: index == pages.count - 1, title: L(page.title), note: page.blurb,
-                                             action: { setting(page) }) {
-                                NewLookBadge(symbol: page.symbol, color: page.color)
-                            }
+            }
+            if !pages.isEmpty {
+                NewLookSection(title: L("Settings")) {
+                    ForEach(Array(pages.enumerated()), id: \.element) { index, page in
+                        NewLookSearchRow(id: "sp-" + page.key, last: index == pages.count - 1, title: L(page.title), note: page.blurb,
+                                         action: { setting(page) }) {
+                            NewLookBadge(symbol: page.symbol, color: page.color)
                         }
                     }
                 }
             }
         }
-        // A tap anywhere but the field or a result puts the keyboard away (Cameron, Nov 9).
-        // (Behind everything, so the field and the results keep their own taps.)
         .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)
-        .background(Color.clear.contentShape(Rectangle()).onTapGesture { field = false })
-        .modifier(NewLookSearchFocus(field: $field))
-        .onAppear { if text.isEmpty, !PadHighlight.shared.shown { field = true } }
-        .onDisappear { field = false }
+        // The catalogs are asked a moment after the last key, and only on the Stores tab.
+        .task(id: query) {
+            guard scope == .stores, query.count >= 2 else { catalog = .init(); return }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            catalog.loading = true
+            async let steam = try? await SteamCatalog.search(query)
+            async let itch = NewLookCatalog.itch(query)
+            let found = await NewLookCatalog.Found(steam: steam ?? [], itch: itch, loading: false)
+            if !Task.isCancelled { catalog = found }
+        }
+    }
+}
+
+/// What the catalogs of the stores that have a public search return for a name.
+enum NewLookCatalog {
+    struct Found {
+        var steam: [SteamMatch] = []
+        var itch: [ItchOwnedGame] = []
+        var loading = false
+    }
+
+    /// itch.io's search, when it is on (it needs the account's key).
+    @MainActor static func itch(_ query: String) async -> [ItchOwnedGame] {
+        guard ItchLibrary.enabled, ItchLibrary.shared.signedIn else { return [] }
+        return Array(((try? await ItchLibrary.shared.search(query)) ?? []).prefix(12))
+    }
+
+    /// A result's picture, or a plain tile while it loads or when it has none.
+    @ViewBuilder static func cover(_ url: URL?) -> some View {
+        AsyncImage(url: url) { $0.resizable().scaledToFill() } placeholder: { Color.primary.opacity(0.08) }
+            .frame(width: 46, height: 69)
+            .clipShape(RoundedRectangle(cornerRadius: NewLook.badgeRadius, style: .continuous))
     }
 }
 
@@ -1783,24 +1807,9 @@ struct NewLookStoreGameArt: View {
     }
 }
 
-/// Search's "Type a name", only while the controller's highlight shows (iOS 18: the button
-/// needs .searchFocused). Its own view, so moving the highlight never redraws the results.
-private struct NewLookTypeButton: View {
-    var field: FocusState<Bool>.Binding
-    @ObservedObject private var pad = PadHighlight.shared
-    var body: some View {
-        if pad.shown {
-            if #available(iOS 18.0, *) {
-                NewLookSheetButton(id: "search-field", title: L("Type a name"), symbol: "keyboard", action: { field.wrappedValue = true })
-                    .frame(maxWidth: 360)
-            }
-        }
-    }
-}
-
-/// Ties `field` to the system search field above (iOS 18: .searchFocused). Before iOS 18 the
+/// Ties `field` to the tab's system search field (iOS 18: .searchFocused), so the controller's Y can put the keyboard up in it. Before iOS 18 the
 /// field is focused by a tap only.
-private struct NewLookSearchFocus: ViewModifier {
+struct NewLookSearchFocus: ViewModifier {
     var field: FocusState<Bool>.Binding
     @ViewBuilder func body(content: Content) -> some View {
         if #available(iOS 18.0, *) { content.searchFocused(field) } else { content }

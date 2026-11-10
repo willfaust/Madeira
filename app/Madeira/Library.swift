@@ -2540,27 +2540,26 @@ struct LibraryView: View {
     @State private var browser = false
     @State private var selected: LibraryEntry?
     @State private var lookTab: NewLookTab = .library
-    @State private var lookSearch = ""
+    /// Each tab's search text (its field is Apple's .searchable, under the title), and whether the
+    /// open tab's field has the keyboard (the controller's Y).
+    @State private var lookQuery: [NewLookTab: String] = [:]
+    @FocusState private var lookField: Bool
     /// Menu on a cover: its options (NewLookOptionsSheet).
     @State private var lookOptions: LibraryEntry?
-    /// The tab Search was opened from: B on Search goes back there.
-    @State private var lookBefore: NewLookTab = .library
     /// Each tab's own page stack (Apple's tab bar, one NavigationStack per tab): a store's page
     /// and a Settings page are pushed inside their tab, so Back and the edge swipe work, the tab
     /// bar stays, and every tab keeps its own place (ux-review-0044 #1, #2).
     @State private var libraryPath = NavigationPath()
     @State private var storesPath = NavigationPath()
-    @State private var downloadsPath = NavigationPath()
     @State private var settingsPath = NavigationPath()
-    @State private var searchPath = NavigationPath()
     /// The games whose pages are pushed in the tabs, by id (a store's game may not be in the
     /// library's list yet: its page is a new entry until it is saved).
     @State private var lookGames: [UUID: LibraryEntry] = [:]
     /// Tapping the open tab: back to its first page, then to the top (each tap counts up).
     @State private var lookTop: [NewLookTab: Int] = [:]
-    /// A store's game picked in Search: its sheet opens once the store's page is up (no timer).
+    /// A store's game picked in the Stores search: its sheet opens once the store's page is up (no timer).
     @State private var lookPendingGame: NewLookSearch.StoreGame?
-    /// The Downloads tab's % badge.
+    /// The Stores tab's % badge (the downloads are on that tab).
     @ObservedObject private var lookDownloads = NewLookDownloads.shared
 
     /// The Display and Memory and sync settings pages.
@@ -5872,19 +5871,17 @@ extension LibraryView {
                 NewLookOverlays()
             }
         }
-        .onChange(of: lookTab) { old, new in
+        .onChange(of: lookTab) { _, new in
             lookOptions = nil
-            if new == .search { lookBefore = old }
+            lookField = false
             PadHighlight.shared.enterPage(String(describing: new))
         }
         .onAppear {
             let pad = PadHighlight.shared
             pad.start()
             pad.tabs = { by in lookPick(lookTab.step(by)) }
-            pad.search = { lookPick(.search) }
-            // B with nothing over the tab: Search goes back where it came from (Cameron, Nov 9).
-            // (A pushed page is a layer of its own: its B goes back a page.)
-            pad.rootBack = { if lookTab == .search { lookPick(lookBefore) } }
+            // Y: the open tab's search field takes the keyboard.
+            pad.search = { lookField = true }
             pad.enterPage(String(describing: lookTab))
         }
     }
@@ -5897,80 +5894,81 @@ extension LibraryView {
         })
     }
 
-    /// Apple's tab bar. From iOS 18 Search is the system's search tab (on iOS 26 its own
-    /// circle beside the bar, which turns into the search field, as in Apple's apps).
+    /// Apple's tab bar.
     @ViewBuilder private var lookTabView: some View {
         if #available(iOS 18.0, *) {
             TabView(selection: lookSelection) {
                 Tab(NewLookTab.library.title, systemImage: NewLookTab.library.symbol, value: NewLookTab.library) { lookStack(.library) }
                 Tab(NewLookTab.stores.title, systemImage: NewLookTab.stores.symbol, value: NewLookTab.stores) { lookStack(.stores) }
-                Tab(NewLookTab.downloads.title, systemImage: NewLookTab.downloads.symbol, value: NewLookTab.downloads) { lookStack(.downloads) }
                     .badge(lookDownloads.badge.map { Text(verbatim: $0) })
                 Tab(NewLookTab.settings.title, systemImage: NewLookTab.settings.symbol, value: NewLookTab.settings) { lookStack(.settings) }
-                Tab(value: NewLookTab.search, role: .search) { lookStack(.search) }
             }
         } else {
             TabView(selection: lookSelection) {
                 ForEach(NewLookTab.allCases, id: \.self) { item in
                     lookStack(item)
                         .tabItem { Label(item.title, systemImage: item.symbol) }
-                        .badge(item == .downloads ? lookDownloads.badge.map { Text(verbatim: $0) } : nil)
+                        .badge(item == .stores ? lookDownloads.badge.map { Text(verbatim: $0) } : nil)
                         .tag(item)
                 }
             }
         }
     }
 
-    /// One tab: its own page stack, its first page, and the controller's hints above the bar.
+    /// A tab's search text.
+    private func lookText(_ item: NewLookTab) -> Binding<String> {
+        Binding(get: { lookQuery[item] ?? "" }, set: { lookQuery[item] = $0 })
+    }
+
+    private func lookSearching(_ item: NewLookTab) -> Bool {
+        !(lookQuery[item] ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// One tab: its own page stack, its first page (or its search results, while its field holds
+    /// text), and the controller's hints above the bar.
     @ViewBuilder private func lookStack(_ item: NewLookTab) -> some View {
         Group {
             switch item {
             case .library:
                 NavigationStack(path: $libraryPath) {
                     NewLookScrollPage(refresh: { await SteamGamesSection.refresh() }, top: lookTop[.library, default: 0]) { width in
-                        NewLookLibraryPage(width: width, enableJIT: enableJIT,
-                                           open: { selected = $0 }, play: { lookPlay($0) },
-                                           options: { entry in withAnimation(.easeOut(duration: 0.15)) { lookOptions = entry } },
-                                           add: { browser = true }, stores: { lookTab = .stores })
+                        if lookSearching(.library) {
+                            lookResults(.library)
+                        } else {
+                            NewLookLibraryPage(width: width, enableJIT: enableJIT,
+                                               open: { selected = $0 }, play: { lookPlay($0) },
+                                               options: { entry in withAnimation(.easeOut(duration: 0.15)) { lookOptions = entry } },
+                                               add: { browser = true }, stores: { lookTab = .stores })
+                        }
                     }
                     .modifier(NewLookTabRoot(title: item.title))
+                    .modifier(NewLookSearchField(text: lookText(.library), prompt: L("Search installed games"), field: $lookField))
                     .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
                 }
             case .stores:
                 NavigationStack(path: $storesPath) {
-                    NewLookScrollPage(top: lookTop[.stores, default: 0]) { _ in NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) }) }
-                        .modifier(NewLookTabRoot(title: item.title))
-                        .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
-                }
-            case .downloads:
-                NavigationStack(path: $downloadsPath) {
-                    NewLookScrollPage(top: lookTop[.downloads, default: 0]) { _ in NewLookDownloadsPage(stores: { lookTab = .stores }) }
-                        .modifier(NewLookTabRoot(title: item.title))
-                        .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
+                    NewLookScrollPage(top: lookTop[.stores, default: 0]) { _ in
+                        if lookSearching(.stores) {
+                            lookResults(.stores)
+                        } else {
+                            NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) })
+                        }
+                    }
+                    .modifier(NewLookTabRoot(title: item.title))
+                    .modifier(NewLookSearchField(text: lookText(.stores), prompt: L("Search games across stores"), field: $lookField))
+                    .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
                 }
             case .settings:
                 NavigationStack(path: $settingsPath) {
                     NewLookScrollPage(top: lookTop[.settings, default: 0]) { _ in
-                        NewLookSettingsList(enableJIT: enableJIT, open: { settingsPath.append(NewLookRoute.settings($0)) })
+                        if lookSearching(.settings) {
+                            lookResults(.settings)
+                        } else {
+                            NewLookSettingsList(enableJIT: enableJIT, open: { settingsPath.append(NewLookRoute.settings($0)) })
+                        }
                     }
                     .modifier(NewLookTabRoot(title: item.title))
-                    .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
-                }
-            case .search:
-                // A result opens inside the Search tab (as in the App Store), and Back or a swipe
-                // returns to the results. The field is Apple's own (.searchable), always shown
-                // under the title (Cameron, Test 6: it hid until you pulled the page down).
-                NavigationStack(path: $searchPath) {
-                    NewLookScrollPage(top: lookTop[.search, default: 0]) { _ in
-                        NewLookSearchPage(text: $lookSearch, open: { selected = $0 },
-                                          store: { searchPath.append(NewLookRoute.store($0)) },
-                                          storeGame: { game in lookPendingGame = game; searchPath.append(NewLookRoute.store(game.store)) },
-                                          setting: { searchPath.append(NewLookRoute.settings($0)) })
-                    }
-                    .modifier(NewLookTabRoot(title: item.title))
-                    .searchable(text: $lookSearch, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(L("Games, stores and settings")))
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
+                    .modifier(NewLookSearchField(text: lookText(.settings), prompt: L("Search settings"), field: $lookField))
                     .navigationDestination(for: NewLookRoute.self) { lookRoute($0) }
                 }
             }
@@ -5978,19 +5976,29 @@ extension LibraryView {
         .modifier(NewLookTabChrome(tab: item))
     }
 
-    /// A tab, from the controller (LB/RB, Y) or a button on a page.
+    /// A tab's search results; a result opens inside the same tab, and Back returns to the results.
+    private func lookResults(_ item: NewLookTab) -> some View {
+        NewLookSearchPage(scope: item == .library ? .library : item == .stores ? .stores : .settings,
+                          text: lookQuery[item] ?? "",
+                          open: { selected = $0 },
+                          store: { storesPath.append(NewLookRoute.store($0)) },
+                          storeGame: { game in lookPendingGame = game; storesPath.append(NewLookRoute.store(game.store)) },
+                          setting: { settingsPath.append(NewLookRoute.settings($0)) })
+    }
+
+    /// A tab, from the controller (LB/RB) or a button on a page.
     private func lookPick(_ item: NewLookTab) {
         guard item != lookTab else { return }
         lookTab = item
     }
 
     /// The open tab tapped again, as on every iPhone app: a pushed page goes back to the tab's
-    /// first page; on the first page it scrolls to the top (Search also empties its field).
+    /// first page; on the first page it scrolls to the top (and empties the tab's search field).
     private func lookReselect(_ item: NewLookTab) {
         let path = lookPath(item)
         if !path.wrappedValue.isEmpty { path.wrappedValue = NavigationPath(); return }
         lookTop[item, default: 0] += 1
-        if item == .search { lookSearch = "" }
+        lookQuery[item] = ""
     }
 
     /// A tab's page stack.
@@ -5998,9 +6006,7 @@ extension LibraryView {
         switch item {
         case .library: $libraryPath
         case .stores: $storesPath
-        case .downloads: $downloadsPath
         case .settings: $settingsPath
-        case .search: $searchPath
         }
     }
 
@@ -6089,6 +6095,21 @@ struct NewLookTabRoot: ViewModifier {
     }
 }
 
+/// A tab's search field: Apple's own, always shown under the title (it hid until you pulled the page
+/// down), tied to the controller's Y.
+struct NewLookSearchField: ViewModifier {
+    let text: Binding<String>
+    let prompt: String
+    var field: FocusState<Bool>.Binding
+    func body(content: Content) -> some View {
+        content
+            .searchable(text: text, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(prompt))
+            .modifier(NewLookSearchFocus(field: field))
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+    }
+}
+
 /// Every tab's stack: the controller's button hints above the tab bar while the highlight shows.
 struct NewLookTabChrome: ViewModifier {
     let tab: NewLookTab
@@ -6120,7 +6141,6 @@ struct NewLookPadHints: View {
         if pad.shown {
             NewLookHints(items: pad.layerName == PadLayer.root
                          ? (tab == .library ? [("A", L("Select")), ("X", L("Play")), ("Y", L("Search")), ("LB RB", L("Tabs"))]
-                            : tab == .search ? [("A", L("Select")), ("B", L("Back")), ("LB RB", L("Tabs"))]
                                             : [("A", L("Select")), ("Y", L("Search")), ("LB RB", L("Tabs"))])
                          : [("A", L("Select")), ("B", L("Back"))])
                 .padding(.bottom, 8)
