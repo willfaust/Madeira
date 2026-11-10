@@ -3,12 +3,10 @@
 #
 #   tools/sim/setup.sh            # build, install, launch, screenshot (needs the device runtime built once)
 #   tools/sim/setup.sh --runtime  # build the device runtime first (tools/build-ipa.sh)
-#   SIM_WITH_IPAD=1 tools/sim/setup.sh   # also install on an iPad simulator
 #
 # What this runs is the real app UI. Games do not run: the native archives are the device builds relabelled
 # for the simulator (relabel-archives.py), and FEXBridge.mm, WiniosGL.m and MetalFX are replaced by SimStubs.m.
 # Pick devices with SIM_IPHONE and SIM_IPAD (name or UDID); the newest installed ones are used otherwise.
-# An iPad is used only with SIM_WITH_IPAD=1 or SIM_IPAD.
 # Output (build, logs, screenshots): build/sim/
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -45,13 +43,10 @@ for rt in sorted(d, key=ver, reverse=True):
 print(best or "")
 PY
 }
-IPHONE="$(pick iPhone "${SIM_IPHONE:-}")"; [ -n "$IPHONE" ] || die "no iPhone simulator"
-DEVICES=("$IPHONE"); IPAD=""
-if [ -n "${SIM_WITH_IPAD:-}${SIM_IPAD:-}" ]; then
-  IPAD="$(pick iPad "${SIM_IPAD:-}")"; [ -n "$IPAD" ] || die "no iPad simulator"; DEVICES+=("$IPAD")
-fi
-echo "iPhone $IPHONE${IPAD:+, iPad $IPAD}"
-for d in "${DEVICES[@]}"; do xcrun simctl boot "$d" 2>/dev/null || true; done
+IPHONE="$(pick iPhone "${SIM_IPHONE:-}")"; IPAD="$(pick iPad "${SIM_IPAD:-}")"
+[ -n "$IPHONE" ] || die "no iPhone simulator"; [ -n "$IPAD" ] || die "no iPad simulator"
+echo "iPhone $IPHONE, iPad $IPAD"
+for d in "$IPHONE" "$IPAD"; do xcrun simctl boot "$d" 2>/dev/null || true; done
 open -b com.apple.iphonesimulator || true
 
 say "native archives for the simulator"
@@ -71,34 +66,20 @@ say "licences and project"
 bash "$ROOT/build/stage-licenses.sh" >/dev/null
 python3 -I "$ROOT/tools/sim/make-sim-project.py"
 
-# Keychain access (Steam, itch.io sign-in tokens) on the simulator reads the app's entitlements from a section of
-# the binary, as Xcode's own simulator builds embed them; without it every sign-in fails with "keychain-store failed".
-# (Signing them in with codesign makes the simulator refuse to launch the app.)
-BUNDLE_ID="$(sed -n 's/.*MADEIRA_BUNDLE_IDENTIFIER = \(.*\);/\1/p' "$ROOT/app/Madeira.xcodeproj/project.pbxproj" | head -1)"
-[ -n "$BUNDLE_ID" ] || die "bundle identifier not found in the Xcode project"
-cat > "$OUT/sim.entitlements" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>application-identifier</key><string>SIM0000000.$BUNDLE_ID</string>
-<key>keychain-access-groups</key><array><string>SIM0000000.$BUNDLE_ID</string></array>
-</dict></plist>
-PLIST
-
 say "build (iOS 18.0, Debug)"
 xcodebuild build -project "$ROOT/app/MadeiraSim.xcodeproj" -scheme Madeira -configuration Debug \
   -destination "platform=iOS Simulator,id=$IPHONE" -derivedDataPath "$DERIVED" \
   IPHONEOS_DEPLOYMENT_TARGET=18.0 CODE_SIGNING_ALLOWED=NO \
   EXCLUDED_SOURCE_FILE_NAMES="FEXBridge.mm WiniosGL.m" LIBRARY_SEARCH_PATHS="$LIB" \
-  OTHER_LDFLAGS="\$(inherited) -force_load $LIB/libsimstubs.a -Wl,-sectcreate,__TEXT,__entitlements,$OUT/sim.entitlements" > "$OUT/build.log" 2>&1 \
+  OTHER_LDFLAGS="\$(inherited) -force_load $LIB/libsimstubs.a" > "$OUT/build.log" 2>&1 \
   || { grep -E 'error:|^ld:' "$OUT/build.log" | sort -u | head -20; die "build failed, see $OUT/build.log"; }
 APP="$DERIVED/Build/Products/Debug-iphonesimulator/Madeira.app"
-BID="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")"
 # The device entitlements (extended addressing, JIT) stop a simulator app from launching: sign without them.
 codesign --force --deep --sign - "$APP"
+BID="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")"
 
 say "install and launch $BID"
-for d in "${DEVICES[@]}"; do
+for d in "$IPHONE" "$IPAD"; do
   xcrun simctl terminate "$d" "$BID" 2>/dev/null || true
   xcrun simctl install "$d" "$APP"
   # Opens the library instead of first-run setup (OnboardingRules.revisionKey); SKIP_ONBOARDING=0 keeps setup.
@@ -107,6 +88,6 @@ for d in "${DEVICES[@]}"; do
 done
 sleep 8
 xcrun simctl io "$IPHONE" screenshot "$OUT/shots/iphone-launch.png" 2>/dev/null
-[ -z "$IPAD" ] || xcrun simctl io "$IPAD" screenshot "$OUT/shots/ipad-launch.png" 2>/dev/null
-echo "$IPHONE" > "$OUT/iphone.udid"; [ -z "$IPAD" ] || echo "$IPAD" > "$OUT/ipad.udid"; echo "$BID" > "$OUT/bundle.id"
+xcrun simctl io "$IPAD" screenshot "$OUT/shots/ipad-launch.png" 2>/dev/null
+echo "$IPHONE" > "$OUT/iphone.udid"; echo "$IPAD" > "$OUT/ipad.udid"; echo "$BID" > "$OUT/bundle.id"
 say "done: screenshots in $OUT/shots"
