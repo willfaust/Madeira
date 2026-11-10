@@ -273,9 +273,7 @@ enum LogTrail {
             guard let focus = pad.focus else { return pad.shown ? "on nothing" : "hidden" }
             return (pad.shown ? focus : "hidden (was \(focus))") + (pad.layerName == PadLayer.root ? "" : " in \(pad.layerName)")
         }
-        let pad = MenuPad.shared
-        guard let focus = pad.focus else { return pad.ring ? "on nothing" : "hidden" }
-        return pad.ring ? focus : "hidden (was \(focus))"
+        return "off"
     }
 
     static let buttonNames: [String: String] = [

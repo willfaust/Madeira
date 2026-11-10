@@ -16,18 +16,15 @@ import UniformTypeIdentifiers
 // Tabs: Library (every installed game, last played first), Stores, Downloads (a % badge
 // while something downloads), Settings, and Search. On an iPhone held upright the tab bar
 // floats at the bottom; sideways and on iPad it sits at the top.
-// Off (the switch, or env.MADEIRA_NEW_LOOK = 0): the library as it was before.
 
 enum NewLook {
-    static let key = "madeiraNewLook"
-    /// madeira.cfg env.MADEIRA_NEW_LOOK = 0 keeps the old look whatever the switch says.
-    static var allowed: Bool { MadeiraConfig.flag("MADEIRA_NEW_LOOK") }
-    static var enabled: Bool { allowed && (UserDefaults.standard.object(forKey: key) as? Bool ?? true) }
     /// A game whose page opens to start it at once (X on a cover): LibraryDetail reads and clears it.
     @MainActor static var autoPlay: UUID?
     /// The Library's cover width in points on a phone (a pinch sets any width between; Settings
     /// › Appearance › Cover size picks Small, Medium or Large). Wide screens use it × 1.27.
     static let coverWidthKey = "madeiraNewLookCoverWidth"
+    /// Settings › Appearance › Zoom haptics (the key the zoomable grid used).
+    static let zoomHapticsKey = "madeiraLibraryZoomHaptics"
     /// The shape scale (tests/host/audit-new-look-shapes.py): small badges 10, covers 16, cards 22;
     /// buttons, pills, chips and bars are capsules.
     static let badgeRadius: CGFloat = 8
@@ -1298,7 +1295,7 @@ struct NewLookLibraryPage: View {
     @AppStorage("madeiraNewLookStore") private var store = ""
     /// Cover width (a pinch on the covers, or Settings › Appearance › Cover size).
     @AppStorage(NewLook.coverWidthKey) private var coverWidth: Double = 104
-    @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    @AppStorage(NewLook.zoomHapticsKey) private var zoomHaptics = true
     /// The pinch in progress: the grid follows the fingers live.
     @State private var pinch: CGFloat?
     /// When a pinch ended: lifting the fingers must not open the cover under them.
@@ -1666,7 +1663,7 @@ struct NewLookSheetButton: View {
     /// Settings pages by their name or what they are for.
     static func settings(_ query: String) -> [SettingsPages.Page] {
         guard !query.isEmpty else { return [] }
-        return SettingsPages.groups.flatMap { $0.1 }.filter { page in
+        return SettingsPages.newLookGroups.flatMap { $0.1 }.filter { page in
             page.shown && (L(page.title).localizedCaseInsensitiveContains(query) || page.title.localizedCaseInsensitiveContains(query)
                            || page.blurb.localizedCaseInsensitiveContains(query))
         }
@@ -1890,7 +1887,7 @@ struct NewLookSettingsList: View {
     private func summary(_ page: SettingsPages.Page) -> String? {
         switch page {
         case .jit: return jitState.enabled ? L("On") : L("Off")
-        case .appearance: return NewLook.enabled ? L("New look") : (liquidMetal.on ? L("Liquid metal") : L("Liquid Glass"))
+        case .appearance: return liquidMetal.on ? L("Liquid metal") : L("Liquid Glass")
         default: return nil
         }
     }
@@ -1935,15 +1932,11 @@ struct NewLookStatusTiles: View {
 /// A Settings page in the new look: the island behind it, and B goes back.
 struct NewLookSettingsChrome: ViewModifier {
     @Environment(\.dismiss) private var dismiss
-    @ViewBuilder func body(content: Content) -> some View {
-        if NewLook.enabled {
-            content
-                .scrollContentBackground(.hidden)
-                .background { NewLookBackground().ignoresSafeArea() }
-                .padLayer("settings-page", back: { dismiss() }, page: true)
-        } else {
-            content
-        }
+    func body(content: Content) -> some View {
+        content
+            .scrollContentBackground(.hidden)
+            .background { NewLookBackground().ignoresSafeArea() }
+            .padLayer("settings-page", back: { dismiss() }, page: true)
     }
 }
 
@@ -2161,4 +2154,22 @@ struct NewLookStepTile: View {
         default: return Color.primary.opacity(0.08)
         }
     }
+}
+
+/// The store sections' sheets, shared by the section that asks for one and the store page that presents it (GOGSheets, ItchSheets,
+/// EpicSheets, EASheets).
+@MainActor final class LibraryStoreSheets: ObservableObject {
+    static let shared = LibraryStoreSheets()
+    struct Game<ID: Hashable>: Identifiable { let id: ID }
+    @Published var gogGame: Game<String>?
+    @Published var gogSignIn = false
+    @Published var itchGame: Game<Int>?
+    @Published var itchSignIn = false
+    @Published var itchFind = false
+    @Published var epicGame: Game<String>?
+    @Published var epicSignIn = false
+    @Published var eaGame: Game<String>?
+    @Published var eaSignIn = false
+    /// A Steam game's sheet to open from Search: the Steam section opens it (its sheet is its own).
+    @Published var steamGame: Game<Int>?
 }

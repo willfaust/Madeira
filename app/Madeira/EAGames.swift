@@ -60,7 +60,6 @@ struct EAGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var ea = EALibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @AppStorage("madeiraLibraryHideEA") private var hidden = false
     @AppStorage("madeiraEAShowUninstalled") private var showUninstalled = true
     /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
     @AppStorage("madeiraNewLookEAShowInstalled") private var showInstalled = false
@@ -74,48 +73,45 @@ struct EAGamesSection: View {
         let others = items.filter { $0.installed == nil && ea.downloads[$0.id] == nil }
         // (new-look) Games to install come first (the Library tab already has the installed ones): what is
         // downloading stays on top, the installed games go under Not installed in a group that starts closed.
-        let top = NewLook.enabled ? mine.filter { ea.downloads[$0.id] != nil } : mine
-        let folded = NewLook.enabled ? mine.filter { ea.downloads[$0.id] == nil } : []
-        let collapsible = SteamGamesSection.collapsible
+        let top = mine.filter { ea.downloads[$0.id] != nil }
+        let folded = mine.filter { ea.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "EA app", count: mine.count, collapsed: collapsible ? $hidden : nil) {
+            LibrarySectionHeader(title: "EA app", count: mine.count) {
                 if ea.refreshing { ProgressView().accessibilityLabel("Refreshing EA library") }
             }
-            if !(hidden && collapsible) {
-                if !ea.signedIn {
-                    EASignInCard { sheets.eaSignIn = true }
+            if !ea.signedIn {
+                EASignInCard { sheets.eaSignIn = true }
+            }
+            if !top.isEmpty {
+                LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+            } else if ea.signedIn && !ea.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
+                Text(ea.libraryUpdated == nil ? "Pull down to load your EA library."
+                     : "No PC games were found in this EA account.").foregroundStyle(.secondary)
+            }
+            if ea.signedIn && !others.isEmpty {
+                Button {
+                    var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
+                } label: {
+                    HStack {
+                        Text("Not installed").font(.headline)
+                        Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
+                    }.contentShape(Rectangle()).frame(minHeight: 44)
+                }.buttonStyle(.plain)
+                    .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                    .padItem("ea-not-installed", cornerRadius: 16) { showUninstalled.toggle() }
+                if showUninstalled {
+                    LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
-                if !top.isEmpty {
-                    LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if ea.signedIn && !ea.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
-                    Text(ea.libraryUpdated == nil ? "Pull down to load your EA library."
-                         : "No PC games were found in this EA account.").foregroundStyle(.secondary)
-                }
-                if ea.signedIn && !others.isEmpty {
-                    Button {
-                        var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
-                    } label: {
-                        HStack {
-                            Text("Not installed").font(.headline)
-                            Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                                .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
-                        }.contentShape(Rectangle()).frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                        .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
-                        .padItem("ea-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
-                    if showUninstalled {
-                        LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
-                }
-                if !folded.isEmpty {
-                    // Nothing to install or download: the installed games just show, with a plain title.
-                    let only = top.isEmpty && !(ea.signedIn && !others.isEmpty)
-                    NewLookInstalledHeader(id: "ea-installed", count: folded.count, open: only ? nil : $showInstalled)
-                    if only || showInstalled {
-                        LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
+            }
+            if !folded.isEmpty {
+                // Nothing to install or download: the installed games just show, with a plain title.
+                let only = top.isEmpty && !(ea.signedIn && !others.isEmpty)
+                NewLookInstalledHeader(id: "ea-installed", count: folded.count, open: only ? nil : $showInstalled)
+                if only || showInstalled {
+                    LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
             }
         }

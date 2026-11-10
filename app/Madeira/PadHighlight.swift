@@ -26,7 +26,7 @@ import Combine
 
 @MainActor final class PadHighlight: ObservableObject {
     static let shared = PadHighlight()
-    static var enabled: Bool { NewLook.enabled && MadeiraConfig.flag("MADEIRA_NEW_LOOK_PAD") }
+    static var enabled: Bool { MadeiraConfig.flag("MADEIRA_NEW_LOOK_PAD") }
 
     /// The highlight is showing: the controller was used since the last touch.
     @Published private(set) var shown = false

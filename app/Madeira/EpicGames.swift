@@ -63,7 +63,6 @@ struct EpicGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var epic = EpicLibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @AppStorage("madeiraLibraryHideEpic") private var hidden = false
     @AppStorage("madeiraEpicShowUninstalled") private var showUninstalled = true
     /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
     @AppStorage("madeiraNewLookEpicShowInstalled") private var showInstalled = false
@@ -77,48 +76,45 @@ struct EpicGamesSection: View {
         let others = items.filter { $0.installed == nil && epic.downloads[$0.id] == nil }
         // (new-look) Games to install come first (the Library tab already has the installed ones): what is
         // downloading stays on top, the installed games go under Not installed in a group that starts closed.
-        let top = NewLook.enabled ? mine.filter { epic.downloads[$0.id] != nil } : mine
-        let folded = NewLook.enabled ? mine.filter { epic.downloads[$0.id] == nil } : []
-        let collapsible = SteamGamesSection.collapsible
+        let top = mine.filter { epic.downloads[$0.id] != nil }
+        let folded = mine.filter { epic.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "Epic Games", count: mine.count, collapsed: collapsible ? $hidden : nil) {
+            LibrarySectionHeader(title: "Epic Games", count: mine.count) {
                 if epic.refreshing { ProgressView().accessibilityLabel("Refreshing Epic Games library") }
             }
-            if !(hidden && collapsible) {
-                if !epic.signedIn {
-                    EpicSignInCard { sheets.epicSignIn = true }
+            if !epic.signedIn {
+                EpicSignInCard { sheets.epicSignIn = true }
+            }
+            if !top.isEmpty {
+                LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+            } else if epic.signedIn && !epic.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
+                Text(epic.libraryUpdated == nil ? "Pull down to load your Epic Games library."
+                     : "No Windows games were found in this Epic Games library.").foregroundStyle(.secondary)
+            }
+            if epic.signedIn && !others.isEmpty {
+                Button {
+                    var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
+                } label: {
+                    HStack {
+                        Text("Not installed").font(.headline)
+                        Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
+                    }.contentShape(Rectangle()).frame(minHeight: 44)
+                }.buttonStyle(.plain)
+                    .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                    .padItem("epic-not-installed", cornerRadius: 16) { showUninstalled.toggle() }
+                if showUninstalled {
+                    LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
-                if !top.isEmpty {
-                    LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if epic.signedIn && !epic.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
-                    Text(epic.libraryUpdated == nil ? "Pull down to load your Epic Games library."
-                         : "No Windows games were found in this Epic Games library.").foregroundStyle(.secondary)
-                }
-                if epic.signedIn && !others.isEmpty {
-                    Button {
-                        var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
-                    } label: {
-                        HStack {
-                            Text("Not installed").font(.headline)
-                            Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                                .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
-                        }.contentShape(Rectangle()).frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                        .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
-                        .padItem("epic-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
-                    if showUninstalled {
-                        LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
-                }
-                if !folded.isEmpty {
-                    // Nothing to install or download: the installed games just show, with a plain title.
-                    let only = top.isEmpty && !(epic.signedIn && !others.isEmpty)
-                    NewLookInstalledHeader(id: "epic-installed", count: folded.count, open: only ? nil : $showInstalled)
-                    if only || showInstalled {
-                        LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
+            }
+            if !folded.isEmpty {
+                // Nothing to install or download: the installed games just show, with a plain title.
+                let only = top.isEmpty && !(epic.signedIn && !others.isEmpty)
+                NewLookInstalledHeader(id: "epic-installed", count: folded.count, open: only ? nil : $showInstalled)
+                if only || showInstalled {
+                    LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
             }
         }

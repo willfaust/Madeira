@@ -67,13 +67,8 @@ final class LibraryCoverCache {
 
     nonisolated private static let folderMade: Void = { try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }()
 
-    private var releaseObserver: NSObjectProtocol?
-
     private init() {
         memory.totalCostLimit = Self.budget
-        releaseObserver = NotificationCenter.default.addObserver(forName: LibraryGridArm.releaseMemory, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.releaseMemory() }
-        }
         Self.trimDiskInBackground()
     }
 
@@ -477,7 +472,7 @@ final class LibraryCoverCache {
         }
     }
 
-    // The landed covers are told to the views once per frame (a fling lands several a frame, each notification a pass over the visible cells).
+    // The landed covers are told to the views once per run-loop turn (a fling lands several a frame, each notification a pass over the visible cells).
     private var landedKeys = Set<String>()
     private var flushScheduled = false
 
@@ -485,7 +480,7 @@ final class LibraryCoverCache {
         landedKeys.insert(key)
         guard !flushScheduled else { return }
         flushScheduled = true
-        LibraryGridNextFrame.run { [weak self] in MainActor.assumeIsolated { self?.flush() } }
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.flush() } }
     }
 
     private func flush() {
@@ -536,7 +531,7 @@ final class LibraryCoverCache {
 
     /// The width the blur spot is baked at, and of the baked copy kept on disk: the widest bucket a card asks for. A narrower bucket
     /// downsamples that copy, which matches baking at the narrower width (the blur and fade radii are fractions of the art's short side).
-    nonisolated static let spotWidth = bucket(Int(((LibraryGridGeometry.maxCard - 2 * LibraryGridGeometry.cardPadding) * 3).rounded(.up)))
+    nonisolated static let spotWidth = bucket(636)   // a 220 pt card less its 4 pt padding either side, at 3x
 
     /// The not-downloaded variant of a cover: its baked copy on disk (beside the plain copy, under its own key, with the candidate
     /// record), else the cover file or the plain disk copy baked once and kept. Every later decode downsamples the baked copy.

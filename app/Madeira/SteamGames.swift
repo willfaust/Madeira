@@ -376,18 +376,6 @@ enum SteamDirectStart {
     private var rescan = false
     private var lastCount = -1
 
-    /// The last scan's result, kept so the next launch's first page already has the installed games (their pills, sizes
-    /// and update badges) and the scan only confirms it.
-    private struct Snapshot: Codable { var games: [DockGame]; var builds: [Int: Int] }
-    private static let snapshotKey = "madeiraSteamInstalledSnapshot.v1"
-
-    private init() {
-        guard LibraryGridArm.enabled, MadeiraDock.enabled,
-              let data = UserDefaults.standard.data(forKey: Self.snapshotKey),
-              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
-        games = snapshot.games; builds = snapshot.builds; lastCount = snapshot.games.count
-    }
-
     /// Reads the install records again, off the main thread.
     func refresh() {
         guard MadeiraDock.enabled else { return }
@@ -417,13 +405,6 @@ enum SteamDirectStart {
                 self.rescan = false
                 if self.games != found { self.games = found }
                 if self.builds != recorded { self.builds = recorded }
-                if LibraryGridArm.enabled {
-                    let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
-                    if let data = try? encoder.encode(Snapshot(games: found, builds: recorded)),
-                       data != UserDefaults.standard.data(forKey: Self.snapshotKey) {
-                        UserDefaults.standard.set(data, forKey: Self.snapshotKey)
-                    }
-                }
                 if self.languages != recordedLanguages { self.languages = recordedLanguages }
                 if self.depots != recordedDepots { self.depots = recordedDepots }
                 if self.installedDLC != recordedDLC { self.installedDLC = recordedDLC }
@@ -469,7 +450,6 @@ struct SteamGamesSection: View {
     @ObservedObject private var library = LibraryModel.shared
     @Environment(\.scenePhase) private var scenePhase
     // Collapsed state of the installed games (the Steam title) and of Not installed.
-    @AppStorage("madeiraLibraryHideInstalled") private var hideInstalled = false
     @AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true
     /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
     @AppStorage("madeiraNewLookSteamShowInstalled") private var showInstalled = false
@@ -477,9 +457,6 @@ struct SteamGamesSection: View {
     @State private var showSignIn = false
     @State private var showWorkshop = false
 
-    /// MADEIRA_LIBRARY_COLLAPSE=0: the section titles do not collapse.
-    /// (new-look) Never in the new look: a store's page always shows its games.
-    static var collapsible: Bool { !NewLook.enabled && MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }
     private var libraryEnabled: Bool { SteamOwnedLibrary.enabled }
 
     /// Whether the library shows this section, and with it the sectioned
@@ -547,15 +524,13 @@ struct SteamGamesSection: View {
         let installed = SteamGamesRules.sorted(groups.installed, by: sort, recorded: recorded)
         // (new-look) Games to install come first (the Library tab already has the installed ones): what is
         // downloading stays on top, the installed games go under Not installed in a group that starts closed.
-        let fold = NewLook.enabled && part == .all
+        let fold = part == .all
         let top = fold ? groups.downloading : groups.downloading + installed
-        let collapsible = Self.collapsible
         Group {
             if Self.shown {
                 VStack(alignment: .leading, spacing: 14) {
                     if part != .notInstalled {
-                    LibrarySectionHeader(title: "Steam", count: installed.count,
-                                         collapsed: collapsible ? $hideInstalled : nil) {
+                    LibrarySectionHeader(title: "Steam", count: installed.count) {
                         if steam.refreshing { ProgressView().accessibilityLabel("Refreshing Steam library") }
                         // The Workshop area: every installed game's Workshop items (SteamWorkshop.swift).
                         if SteamOwnedLibrary.workshopEnabled && signedIn && !installed.isEmpty {
@@ -585,9 +560,7 @@ struct SteamGamesSection: View {
                             Text("Syncing \(model.games.first { $0.id == waiting }?.name ?? "the game")'s Steam Cloud saves, then starting it…")
                         }.font(.footnote).foregroundStyle(.secondary)
                     }
-                    if hideInstalled && collapsible {
-                        EmptyView()
-                    } else if !top.isEmpty {
+                    if !top.isEmpty {
                         LibraryCells(items: top, layout: layout, width: width) { item, list, dense in
                             cell(item, list: list, dense: dense)
                         }
@@ -609,7 +582,7 @@ struct SteamGamesSection: View {
                             }.contentShape(Rectangle()).frame(minHeight: 44)
                         }.buttonStyle(.plain)
                             .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
-                            .padItem("steam-not-installed", cornerRadius: NewLook.enabled ? 16 : 12) { showUninstalled.toggle() }
+                            .padItem("steam-not-installed", cornerRadius: 16) { showUninstalled.toggle() }
                         if showUninstalled {
                             LibraryCells(items: groups.notInstalled, layout: layout, width: width) { item, list, dense in
                                 cell(item, list: list, dense: dense)
@@ -859,10 +832,7 @@ struct SteamGameCell: View {
                         .overlay { overlay(download) }
                         .overlay { if notDownloaded { notDownloadedFace(.largeTitle) } }
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .modifier(LibraryCardArtworkPress { pressed, bounds in
-                            AmbientGlowItem(id: "steam-\(item.id)", seed: item.id, art: .steam(item.id), dimmed: notDownloaded,
-                                            pressed: pressed, bounds: bounds)
-                        })
+                        .modifier(LibraryCardArtworkPress())
                     Text(item.name).font(.subheadline.weight(.semibold)).lineLimit(2)
                     pills(status, entry)
                     if let played = steam.playtime[item.id]?.played {

@@ -1377,10 +1377,6 @@ struct ContentView: View {
     @ObservedObject private var library = LibraryModel.shared
     /// "Use New Interface" (actionButtons) applies at the next start.
     @State private var showFrontendRestart = false
-    /// (new-look) Settings › Appearance › New look: read here too, so switching it puts the
-    /// navigation stack back (or takes it away) at once.
-    @AppStorage(NewLook.key) private var newLookOn = true
-
     enum JITStatus {
         case unknown
         case testing
@@ -1399,8 +1395,8 @@ struct ContentView: View {
          * two-column selection behaviour. */
         // (new-look) The new look's tab bar holds a page stack per tab (Library.swift newLookBody),
         // and a stack inside a stack breaks Back: the new-look library is not put inside this one.
-        // Sessions, the old look and the developer screen keep it.
-        ContentNavigation(stack: !(library.enabled && library.current == nil && NewLook.allowed && newLookOn)) {
+        // Sessions and the developer screen keep it.
+        ContentNavigation(stack: !(library.enabled && library.current == nil)) {
             Group {
                 if library.enabled && library.current != nil {
                     sessionBody
