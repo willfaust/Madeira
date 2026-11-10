@@ -180,6 +180,7 @@ enum MadeiraConfig {
     nonisolated(unsafe) static var values: [String: String] = [:]
     static func get(_ key: String) -> String? { values[key] }
     static func gameValue(_ key: String) -> String? { nil }
+    static func flag(_ key: String, fallback: Bool = false) -> Bool { values[key].map { $0 != "0" } ?? fallback }
 }
 final class LogStore {
     nonisolated(unsafe) static let shared = LogStore()

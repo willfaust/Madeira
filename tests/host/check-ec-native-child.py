@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-ec-native-child-') as directory
 recs = (root / 'app/Madeira/GameRecommendations.swift').read_text(encoding='utf-8')
 other = recs[recs.index('static let gta5EnhancedOther = GameRecommendation('):]
 other = other[:other.index('\n    ///')]
-assert 'version: 10,' in other and 'launchMode: "desktop"' in other, 'the outside-Steam list starts in the Wine desktop'
+assert 'version: 11,' in other and 'launchMode: "desktop"' in other, 'the outside-Steam list starts in the Wine desktop'
 assert 'startServices' not in other, 'no services batch (it would carry the Epic sign-in arguments)'
 
 catalog = root / 'app/Madeira/ConfigCatalog.generated.swift'
