@@ -126,7 +126,7 @@ check('restartHint: DockInstallers.installsOnly\n' in library and
 check('MainActor.assumeIsolated { (DockInstallers.installsOnly, DockInstallers.finishedAt) }' in screen and
       'if installsOnly, !model.installsRestartReady, let finished = installsFinished,' in screen and
       'Date().timeIntervalSince(finished) >= 45' in screen and view.count('LibraryModel.shared.installsRestartReady = true') == 2 and
-      library.count('if model.installsRestartReady {') == 2 and 'installsRestartReady = false' in library,
+      library.count('if model.installsRestartReady {') == 4 and 'installsRestartReady = false' in library,  # 2 old layouts + new look
       'the starting screen offers Close Madeira 45 s after the installs (after a registry save)')
 check('restartWords' not in library and 'restartWords' not in screen, 'only the end of the session asks for the restart')
 check('nonisolated static let restartWords' in installers and 'nonisolated static let closingWords' in installers,

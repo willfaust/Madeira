@@ -93,8 +93,8 @@ require(quit.index('requestQuit()') < quit.index('finish()') < quit.index('while
 require('Button(role: .destructive) { model.quitToLibrary() }' in library and '{ model.requestQuit() }' not in library,
         'the in-game Quit game uses quitToLibrary')
 require('whileClosing || wine_process_is_running() == 0' in library, 'the ended-desktop hide can skip the wait for Wine')
-require(row.count('{ model.stopStartToLibrary() }') == 1 and library.count('{ model.stopStartToLibrary() }') == 2 and 'model.requestQuit() }' not in row,
-        'both starting-screen layouts use stopStartToLibrary')
+require(row.count('{ model.stopStartToLibrary() }') == 1 and library.count('{ model.stopStartToLibrary() }') == 4 and 'model.requestQuit() }' not in row,
+        'both starting-screen layouts and the new look\'s Stop and Close use stopStartToLibrary')
 require(library.count('if model.current != nil {\n                        launchGlyph(L("Close session"), "stop.circle")') == 2,
         'Close session shows once the session has begun')
 content = (root / 'app/Madeira/ContentView.swift').read_text()
@@ -106,7 +106,11 @@ require('Text("Madeira Dock stopped")' in library and 'DockInstallers.note' in l
         'the starting screen shows the Dock status, the one-time-install note, and a stop with its words')
 
 # A stopped Dock start keeps the elapsed-time line (portrait and landscape).
-stopped = [m.start() for m in re.finditer(r'Text\("Madeira Dock stopped"\)', library)]
+old = library[:library.index('// MARK: - New look: the starting screen')]
+stopped = [m.start() for m in re.finditer(r'Text\("Madeira Dock stopped"\)', old)]
+new = library[library.index('// MARK: - New look: the starting screen'):]
+require('Text("Madeira Dock stopped")' in new and 'timeIntervalSince(model.startingSince)' in new[:new.index('lookSteps(entry)')],
+        'the new look: the elapsed time sits under the title, stopped or not')
 require(len(stopped) == 2 and all('timeIntervalSince(model.startingSince)' in library[i:library.index('} else', i)] for i in stopped),
         'the stopped starting screen still shows the elapsed time')
 
