@@ -136,7 +136,7 @@ struct ItchGamesSection: View {
                 }
             }
         }
-        .modifier(ItchSheets(open: open, attached: true))
+        .modifier(ItchSheets(open: open))
     }
 
     private func cell(_ item: ItchItem, list: Bool, dense: Bool) -> some View {
@@ -152,40 +152,34 @@ struct ItchGamesSection: View {
 }
 
 /// What the itch.io section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it
-/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+/// sign-in sheets and the error alert. The section attaches it.
 struct ItchSheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var itch = ItchLibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if ItchLibrary.enabled { itch.start(); itch.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && ItchLibrary.enabled { itch.reconcileSession() } }
-            .sheet(item: $sheets.itchGame) { selection in
-                ItchGameSheet(gameID: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if ItchLibrary.enabled { itch.start(); itch.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && ItchLibrary.enabled { itch.reconcileSession() } }
+        .sheet(item: $sheets.itchGame) { selection in
+            ItchGameSheet(gameID: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.itchSignIn) { ItchSignInView() }
-            .sheet(isPresented: $sheets.itchFind) {
-                ItchFindView { id in
-                    sheets.itchFind = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheets.itchGame = .init(id: id) }
-                }
-            }
-            .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
-                Button("OK", role: .cancel) { itch.error = nil }
-            } message: { Text(itch.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.itchSignIn) { ItchSignInView() }
+        .sheet(isPresented: $sheets.itchFind) {
+            ItchFindView { id in
+                sheets.itchFind = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheets.itchGame = .init(id: id) }
+            }
+        }
+        .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
+            Button("OK", role: .cancel) { itch.error = nil }
+        } message: { Text(itch.error ?? "") }
     }
 }
 

@@ -116,7 +116,7 @@ struct EpicGamesSection: View {
                 }
             }
         }
-        .modifier(EpicSheets(open: open, attached: true))
+        .modifier(EpicSheets(open: open))
     }
 
     private func cell(_ item: EpicItem, list: Bool, dense: Bool) -> some View {
@@ -132,34 +132,28 @@ struct EpicGamesSection: View {
 }
 
 /// What the Epic Games section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it
-/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+/// sign-in sheets and the error alert. The section attaches it.
 struct EpicSheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var epic = EpicLibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if EpicLibrary.enabled { epic.start(); epic.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && EpicLibrary.enabled { epic.reconcileSession() } }
-            .sheet(item: $sheets.epicGame) { selection in
-                EpicGameSheet(appName: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if EpicLibrary.enabled { epic.start(); epic.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && EpicLibrary.enabled { epic.reconcileSession() } }
+        .sheet(item: $sheets.epicGame) { selection in
+            EpicGameSheet(appName: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.epicSignIn) { EpicSignInView() }
-            .alert("Epic Games", isPresented: Binding(get: { epic.error != nil }, set: { if !$0 { epic.error = nil } })) {
-                Button("OK", role: .cancel) { epic.error = nil }
-            } message: { Text(epic.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.epicSignIn) { EpicSignInView() }
+        .alert("Epic Games", isPresented: Binding(get: { epic.error != nil }, set: { if !$0 { epic.error = nil } })) {
+            Button("OK", role: .cancel) { epic.error = nil }
+        } message: { Text(epic.error ?? "") }
     }
 }
 

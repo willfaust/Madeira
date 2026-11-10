@@ -113,7 +113,7 @@ struct EAGamesSection: View {
                 }
             }
         }
-        .modifier(EASheets(open: open, attached: true))
+        .modifier(EASheets(open: open))
     }
 
     private func cell(_ item: EAItem, list: Bool, dense: Bool) -> some View {
@@ -129,34 +129,28 @@ struct EAGamesSection: View {
 }
 
 /// What the EA app section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it
-/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+/// sign-in sheets and the error alert. The section attaches it.
 struct EASheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var ea = EALibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if EALibrary.enabled { ea.start(); ea.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && EALibrary.enabled { ea.reconcileSession() } }
-            .sheet(item: $sheets.eaGame) { selection in
-                EAGameSheet(offerID: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if EALibrary.enabled { ea.start(); ea.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && EALibrary.enabled { ea.reconcileSession() } }
+        .sheet(item: $sheets.eaGame) { selection in
+            EAGameSheet(offerID: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.eaSignIn) { EASignInView() }
-            .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
-                Button("OK", role: .cancel) { ea.error = nil }
-            } message: { Text(ea.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.eaSignIn) { EASignInView() }
+        .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
+            Button("OK", role: .cancel) { ea.error = nil }
+        } message: { Text(ea.error ?? "") }
     }
 }
 

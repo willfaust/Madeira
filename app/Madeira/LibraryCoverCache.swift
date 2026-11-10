@@ -109,20 +109,6 @@ final class LibraryCoverCache {
 
     private(set) var budgetBytes = LibraryCoverCache.budget
 
-    /// Room for `screens` screens of the current level (a screen is `cardsPerScreen` bitmaps of `pixelWidth` x 1.5 x 4 bytes), a
-    /// quarter more for the neighbour level and the old size a zoom leaves behind, between 48 MB and 128 MB. NSCache gives bitmaps
-    /// back under memory pressure on its own.
-    func sizeBudget(cardsPerScreen: Int, pixelWidth: Int, screens: Int = 3) {
-        let bucket = Self.bucket(pixelWidth)
-        let bytes = bucket * bucket * 3 / 2 * 4 * cardsPerScreen * screens * 5 / 4
-        setBudget(min(Self.budgetCeiling, max(Self.budget, bytes)))
-    }
-
-    func releaseMemory() {
-        memory.removeAllObjects()
-        sizes = [:]
-    }
-
     private func setBudget(_ bytes: Int) {
         guard bytes != budgetBytes else { return }
         budgetBytes = bytes

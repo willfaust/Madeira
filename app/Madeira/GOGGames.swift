@@ -115,7 +115,7 @@ struct GOGGamesSection: View {
                 }
             }
         }
-        .modifier(GOGSheets(open: open, attached: true))
+        .modifier(GOGSheets(open: open))
     }
 
     private func cell(_ item: GOGItem, list: Bool, dense: Bool) -> some View {
@@ -135,30 +135,25 @@ struct GOGGamesSection: View {
 /// as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
 struct GOGSheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var gog = GOGLibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if GOGLibrary.enabled { gog.start(); gog.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && GOGLibrary.enabled { gog.reconcileSession() } }
-            .sheet(item: $sheets.gogGame) { selection in
-                GOGGameSheet(productID: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if GOGLibrary.enabled { gog.start(); gog.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && GOGLibrary.enabled { gog.reconcileSession() } }
+        .sheet(item: $sheets.gogGame) { selection in
+            GOGGameSheet(productID: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.gogSignIn) { GOGSignInView() }
-            .alert("GOG", isPresented: Binding(get: { gog.error != nil }, set: { if !$0 { gog.error = nil } })) {
-                Button("OK", role: .cancel) { gog.error = nil }
-            } message: { Text(gog.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.gogSignIn) { GOGSignInView() }
+        .alert("GOG", isPresented: Binding(get: { gog.error != nil }, set: { if !$0 { gog.error = nil } })) {
+            Button("OK", role: .cancel) { gog.error = nil }
+        } message: { Text(gog.error ?? "") }
     }
 }
 

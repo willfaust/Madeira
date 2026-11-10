@@ -1577,7 +1577,10 @@ struct NewLookSearchPage: View {
         VStack(alignment: .leading, spacing: 16) {
             if games.isEmpty && others.isEmpty && stores.isEmpty && pages.isEmpty && steam.isEmpty && itch.isEmpty {
                 if catalog.loading { ProgressView().frame(maxWidth: .infinity).padding(.top, 24) }
-                else { ContentUnavailableView.search(text: query) }
+                else if catalog.failed {
+                    ContentUnavailableView(L("Couldn't search the stores"), systemImage: "wifi.exclamationmark",
+                                           description: Text("Check your connection and try again."))
+                } else { ContentUnavailableView.search(text: query) }
             }
             if !games.isEmpty {
                 NewLookSection(title: L("Installed")) {
@@ -1647,14 +1650,16 @@ struct NewLookSearchPage: View {
         .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)
         // The catalogs are asked a moment after the last key, and only on the Stores tab.
         .task(id: query) {
+            // The last query's rows go at once, so a tap never opens the wrong game's page.
             guard scope == .stores, query.count >= 2 else { catalog = .init(); return }
+            catalog = .init(loading: true)
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
-            catalog.loading = true
-            async let steam = try? await SteamCatalog.search(query)
+            async let steam = NewLookCatalog.steam(query)
             async let itch = NewLookCatalog.itch(query)
-            let found = await NewLookCatalog.Found(steam: steam ?? [], itch: itch, loading: false)
-            if !Task.isCancelled { catalog = found }
+            let (steamResult, itchResult) = await (steam, itch)
+            guard !Task.isCancelled else { return }
+            catalog = NewLookCatalog.Found(steam: steamResult ?? [], itch: itchResult, loading: false, failed: steamResult == nil)
         }
     }
 }
@@ -1665,7 +1670,12 @@ enum NewLookCatalog {
         var steam: [SteamMatch] = []
         var itch: [ItchOwnedGame] = []
         var loading = false
+        /// Steam's search could not be reached (itch.io's is optional and says nothing).
+        var failed = false
     }
+
+    /// Steam's public store search; nil when it could not be reached.
+    static func steam(_ query: String) async -> [SteamMatch]? { try? await SteamCatalog.search(query) }
 
     /// itch.io's search, when it is on (it needs the account's key).
     @MainActor static func itch(_ query: String) async -> [ItchOwnedGame] {
