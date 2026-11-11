@@ -81,8 +81,16 @@ with tempfile.TemporaryDirectory(prefix='madeira-ci-llvm-') as tmp:
     (gnutls / 'obj').mkdir(parents=True)
     script = gnutls / 'build.sh'
     script.write_text((root / 'build/gnutls-ios/build.sh').read_text())
-    for stage in ['gmp', 'nettle', 'gnutls']:
-        (gnutls / 'obj' / (stage + '.done')).touch()
+    src = gnutls / 'src'
+    src.mkdir()
+    hashes = {}
+    for name in ['nettle-3.10.2.tar.gz', 'gnutls-3.8.13.tar.xz']:
+        (src / name).write_bytes(name.encode())
+        hashes[name] = hashlib.sha256((src / name).read_bytes()).hexdigest()
+    (src / 'SHA256SUMS').write_text(''.join(value + '  ' + name + '\n' for name, value in hashes.items()))
+    (gnutls / 'obj/gmp.done').touch()
+    (gnutls / 'obj/nettle.done').write_text(hashes['nettle-3.10.2.tar.gz'] + '\n')
+    (gnutls / 'obj/gnutls.done').write_text(hashes['gnutls-3.8.13.tar.xz'] + ':' + hashes['nettle-3.10.2.tar.gz'] + '\n')
     prefix = fixture / 'toolchains/gnutls-ios/lib'
     prefix.mkdir(parents=True)
     for lib in ['gmp', 'nettle', 'hogweed', 'gnutls']:
