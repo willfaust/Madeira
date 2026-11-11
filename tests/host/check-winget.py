@@ -18,6 +18,7 @@ parser.add_argument('--require-swift', action='store_true')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 core = (root / 'app/Madeira/WingetCore.swift').read_text()
+plan = (root / 'app/Madeira/WingetPlan.swift').read_text()
 project = (root / 'app/Madeira.xcodeproj/project.pbxproj').read_text()
 failures = 0
 
@@ -28,7 +29,8 @@ def check(ok, label):
     failures += 0 if ok else 1
 
 
-check(project.count('WingetCore.swift') >= 4, 'WingetCore.swift is in the project')
+for name in ('WingetCore.swift', 'WingetPlan.swift', 'WingetCatalog.swift', 'WingetViews.swift'):
+    check(project.count(name) >= 4, name + ' is in the project')
 check('rowid IN (SELECT package FROM tags2_map WHERE tag IN (SELECT rowid FROM tags2' in core,
       'tags and commands use uncorrelated subqueries')
 check('SQLITE_OPEN_READONLY' in core, 'the index opens read-only')
@@ -113,6 +115,28 @@ if compiler and os.uname().sysname == 'Darwin':
         (t / 'versionData.mszyml').write_bytes(b'\x0aQ\xe5\xc0' + b'\0' * 24 + b'CK' + deflated)
         (t / 'manifest.yaml').write_text(MANIFEST)
         (t / 'plain.bin').write_bytes(b'abc')
+        (t / 'system.reg').write_text('''WINE REGISTRY Version 2
+[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\Foo] 1700000000
+"DisplayName"="Foo App"
+"DisplayVersion"="1.0"
+"InstallLocation"="C:\\\\Program Files\\\\Foo"
+"UninstallString"="\\"C:\\\\Program Files\\\\Foo\\\\unins000.exe\\" /SILENT"
+"EstimatedSize"=dword:00000001
+
+[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\Foo\\\\Sub] 1
+"DisplayName"="not a program"
+
+[Software\\\\Wow6432Node\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\Bar] 1700000001
+"DisplayName"="Bar Tool"
+"DisplayVersion"="2.0"
+
+[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\{G-1}] 1700000002
+"DisplayName"="Other Thing"
+"Publisher"="Acme"
+
+[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run] 1
+"X"="y"
+''')
         main = r'''
 import Foundation
 var bad = 0
@@ -148,11 +172,55 @@ expect(a?.sha256 == "706ba8b326d87637a923676076eb2936060be6de5c0ae4691b3f76d2cac
 expect(m?.agreements.first?.label == "EULA", "agreements")
 expect(wingetSHA256Hex(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256")
 expect(WingetManifest.parse("nonsense") == nil && WingetManifest.parse("") == nil, "not a manifest")
+
+func inst(_ type: String, arch: String = "x64", scope: String? = nil, sw: [String: String] = [:], nested: String? = nil, nestedFiles: [String] = []) -> WingetInstaller {
+    var i = WingetInstaller(); i.type = type; i.architecture = arch; i.scope = scope; i.switches = sw; i.nestedType = nested; i.nestedFiles = nestedFiles; i.url = "https://example.test/Setup-1.2"; return i
+}
+func choice(_ l: [WingetInstaller]) -> (WingetInstaller, WingetStep)? { if case .success(let c) = WingetPlan.choose(l) { return (c.installer, c.step) }; return nil }
+func refusal(_ l: [WingetInstaller]) -> WingetRefusal? { if case .failure(let r) = WingetPlan.choose(l) { return r }; return nil }
+expect(choice([inst("inno", arch: "arm64"), inst("inno", arch: "x64")])?.0.architecture == "x64", "x64 over arm64")
+expect(refusal([inst("inno", arch: "arm64")]) == .onlyArm, "only arm is refused")
+expect(refusal([]) == .noInstaller, "no installer")
+expect(choice([inst("inno", arch: "x86"), inst("inno", arch: "x64")])?.0.architecture == "x64", "x64 over x86")
+expect(choice([inst("inno", scope: "machine"), inst("inno", scope: "user")])?.0.scope == "user", "user scope first")
+expect(choice([inst("burn"), inst("nullsoft")])?.0.type == "nullsoft", "burn last")
+expect(choice([inst("inno")])?.1 == .installer(arguments: "/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART"), "inno defaults")
+expect(choice([inst("nullsoft", sw: ["Custom": "/D=x"])])?.1 == .installer(arguments: "/S /D=x"), "nullsoft with custom")
+expect(choice([inst("wix")])?.1 == .msi(arguments: "/quiet /norestart"), "wix is msi")
+expect(choice([inst("msi", sw: ["Silent": "/qn"])])?.1 == .msi(arguments: "/qn"), "manifest silent wins")
+expect(refusal([inst("exe")]) == .needsSilentSwitch, "bare exe needs a switch")
+expect(choice([inst("exe", sw: ["Silent": "-q"])])?.1 == .installer(arguments: "-q"), "exe with silent")
+expect(refusal([inst("msix")]) == .packaged("msix"), "msix refused")
+expect(choice([inst("portable")])?.1 == .portable, "portable")
+expect(choice([inst("zip", nested: "portable", nestedFiles: ["a/b.exe"])])?.1 == .archive(nested: "a/b.exe", then: .portable), "zip with portable inside")
+expect(choice([inst("zip", nested: "msi", nestedFiles: ["x.msi"])])?.1 == .archive(nested: "x.msi", then: .msi(arguments: "/quiet /norestart")), "zip with msi inside")
+expect(refusal([inst("zip")]) == .noNestedFile, "zip without nested file")
+expect(choice([inst("exe"), inst("inno", arch: "x86")])?.0.type == "inno", "usable installer beats refused one")
+expect(WingetPlan.fileName(for: inst("msi")) == "Setup-1.2.msi" && WingetPlan.fileName(for: inst("inno")) == "Setup-1.2.exe", "file names get an extension")
+expect(WingetPlan.folderName("A/B:C") == "A_B_C", "folder names")
+expect(WingetPlan.isNewer("1.10", than: "1.9") && !WingetPlan.isNewer("1.2", than: "1.2.0") && WingetPlan.isNewer("2", than: "1.9.9"), "versions compare by number")
+let plainURL = URL(fileURLWithPath: dir + "/plain.bin")
+expect(WingetPlan.sha256Hex(ofFile: plainURL) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "file hash streams")
+let reg = try! String(contentsOfFile: dir + "/system.reg", encoding: .utf8)
+let entries = WingetRegistry.uninstallEntries(reg)
+expect(entries.count == 3, "three uninstall entries: \(entries.keys.sorted())")
+expect(entries["64|Foo"]?.name == "Foo App" && entries["64|Foo"]?.location == "C:\\Program Files\\Foo" && entries["64|Foo"]?.uninstall == "\"C:\\Program Files\\Foo\\unins000.exe\" /SILENT", "values unescaped")
+expect(entries["32|Bar"]?.version == "2.0" && entries["64|{G-1}"]?.publisher == "Acme", "wow64 view and guid keys")
+let added = WingetRegistry.added(before: Set(["64|Foo"]), after: entries, name: "Bar Tool")
+expect(added.map(\.key).first == "32|Bar" && added.count == 2, "only new keys, best name first: \(added.map(\.key))")
+expect(WingetRegistry.driveCRelative("\"C:\\Program Files\\Foo\\a.exe\"") == "Program Files/Foo/a.exe" && WingetRegistry.driveCRelative("D:\\x") == nil, "windows path to drive_c")
+let q1 = WingetRegistry.splitCommand("\"C:\\Program Files\\Foo\\unins000.exe\" /SILENT")
+expect(q1?.program == "C:\\Program Files\\Foo\\unins000.exe" && q1?.arguments == "/SILENT", "quoted uninstall command")
+let q2 = WingetRegistry.splitCommand("MsiExec.exe /X{AAAA-BBBB}")
+expect(q2?.program == "MsiExec.exe" && q2?.arguments == "/X{AAAA-BBBB}", "msiexec uninstall command")
+let q3 = WingetRegistry.splitCommand("C:\\Foo\\u.exe /S")
+expect(q3?.program == "C:\\Foo\\u.exe" && q3?.arguments == "/S" && WingetRegistry.splitCommand("") == nil, "plain uninstall command")
 exit(bad == 0 ? 0 : 1)
 '''
         (t / 'main.swift').write_text(main)
         (t / 'WingetCore.swift').write_text(core)
-        subprocess.run([compiler, str(t / 'WingetCore.swift'), str(t / 'main.swift'), '-o', str(t / 'wg')], check=True)
+        (t / 'WingetPlan.swift').write_text(plan)
+        subprocess.run([compiler, str(t / 'WingetCore.swift'), str(t / 'WingetPlan.swift'), str(t / 'main.swift'), '-o', str(t / 'wg')], check=True)
         check(subprocess.run([str(t / 'wg'), str(t)]).returncode == 0, 'Swift fixture')
 elif args.require_swift:
     check(False, 'swiftc on macOS is required')

@@ -5656,6 +5656,9 @@ extension LibraryView {
     var newLookBody: some View {
         lookTabView
         .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, jit: jit))
+        // A winget install or uninstall that was played: what it changed in the registry.
+        .task { WingetInstalls.shared.reconcile() }
+        .onChange(of: model.current) { _, current in if current == nil { WingetInstalls.shared.reconcile() } }
         // A game's page: every way of opening one (a cover, the banner, Search, a store's game,
         // Add a game) sets `selected`; in the new look it is pushed on the open tab instead.
         .onChange(of: selected?.id) { _, id in

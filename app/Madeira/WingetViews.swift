@@ -55,8 +55,12 @@ struct WingetResults: View {
 struct WingetDetailPage: View {
     let id: String
     @ObservedObject private var catalog = WingetCatalog.shared
+    @ObservedObject private var installs = WingetInstalls.shared
+    @ObservedObject private var library = LibraryModel.shared
     @State private var manifest: WingetManifest?
     @State private var error: String?
+    @State private var working = false
+    @State private var actionError: String?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -87,6 +91,7 @@ struct WingetDetailPage: View {
             }
         }
         if !m.shortDescription.isEmpty { Text(m.shortDescription).font(.body) }
+        installSection(m)
         NewLookSection(title: L("Installers")) {
             ForEach(Array(m.installers.enumerated()), id: \.offset) { index, i in
                 HStack {
@@ -109,3 +114,87 @@ struct WingetDetailPage: View {
         }
     }
 }
+
+extension WingetDetailPage {
+    @ViewBuilder fileprivate func installSection(_ m: WingetManifest) -> some View {
+        let choice = WingetPlan.choose(m.installers)
+        let record = installs.records[m.id]
+        let waiting = installs.pending.flatMap { $0.id == m.id ? $0 : nil }
+        NewLookSection(title: nil) {
+            VStack(alignment: .leading, spacing: 12) {
+                if let record {
+                    Label(String(format: L("Installed %@"), record.version), systemImage: "checkmark.circle.fill").font(.headline)
+                    if WingetPlan.isNewer(m.version, than: record.version) {
+                        action(String(format: L("Update to %@"), m.version), primary: true) { await prepare(m) }
+                    }
+                    if let first = installs.programs(for: m.id).first {
+                        action(L("Add to library"), primary: false) { addToLibrary(first, name: m.name) }
+                    }
+                    action(L("Uninstall"), primary: false) { await uninstall(m.id) }
+                } else if let waiting {
+                    Text(waiting.kind == .install ? L("The installer is ready in your library. Open it and tap Play to install.")
+                                                  : L("The uninstaller is ready in your library. Open it and tap Play."))
+                        .font(.subheadline)
+                    action(L("Open it"), primary: true) { library.showDetail = waiting.entry }
+                } else {
+                    switch choice {
+                    case .success: action(L("Install"), primary: true) { await prepare(m) }
+                    case .failure(let why): Text(Self.reason(why)).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    Text("Runs the publisher's installer inside Madeira's Windows. Nothing is installed on your iPhone.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let note = installs.messages[m.id] { Text(note).font(.footnote).foregroundStyle(.orange) }
+                if let actionError { Text(actionError).font(.footnote).foregroundStyle(.red) }
+            }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func action(_ title: String, primary: Bool, run: @escaping () async -> Void) -> some View {
+        Button { Task { await run() } } label: {
+            HStack { Text(title).font(.headline); Spacer(); if working { ProgressView() } }
+                .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 44)
+                .background(primary ? NewLookColor.button : Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: NewLook.cardRadius, style: .continuous))
+                .foregroundStyle(primary ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain).disabled(working)
+    }
+
+    private func prepare(_ m: WingetManifest) async {
+        working = true; actionError = nil; defer { working = false }
+        do {
+            let entry = try await installs.prepare(m)
+            library.save(entry)
+            library.showDetail = entry.id
+        } catch let refusal as WingetRefusal { actionError = Self.reason(refusal) }
+        catch { actionError = error.localizedDescription }
+    }
+
+    private func uninstall(_ id: String) async {
+        actionError = nil
+        do {
+            let entry = try installs.prepareUninstall(id)
+            library.save(entry)
+            library.showDetail = entry.id
+        } catch { actionError = error.localizedDescription }
+    }
+
+    private func addToLibrary(_ program: URL, name: String) {
+        guard var entry = library.entry(running: program) ?? (try? LibraryModel.inspect(program)) else { return }
+        entry.title = name
+        library.save(entry)
+        library.showDetail = entry.id
+    }
+
+    static func reason(_ r: WingetRefusal) -> String {
+        switch r {
+        case .noInstaller: return L("This app has no installer Madeira can use.")
+        case .onlyArm: return L("This app only comes in an ARM version. Madeira runs x64 and x86 programs.")
+        case .packaged(let type): return String(format: L("This app is a Windows Store package (%@). Madeira cannot install those."), type)
+        case .needsSilentSwitch: return L("This installer has no silent mode, so it would open a window nobody can use.")
+        case .noNestedFile: return L("This archive does not say which file to run.")
+        }
+    }
+}
+
