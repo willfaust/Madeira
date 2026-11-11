@@ -88,7 +88,7 @@ PLIST
 say "build (iOS 18.0, Debug)"
 xcodebuild build -project "$ROOT/app/MadeiraSim.xcodeproj" -scheme Madeira -configuration Debug \
   -destination "platform=iOS Simulator,id=$IPHONE" -derivedDataPath "$DERIVED" \
-  IPHONEOS_DEPLOYMENT_TARGET=18.0 CODE_SIGNING_ALLOWED=NO \
+  IPHONEOS_DEPLOYMENT_TARGET=18.0 CODE_SIGNING_ALLOWED=NO ENABLE_DEBUG_DYLIB=NO \
   EXCLUDED_SOURCE_FILE_NAMES="FEXBridge.mm WiniosGL.m" LIBRARY_SEARCH_PATHS="$LIB" \
   OTHER_LDFLAGS="\$(inherited) -force_load $LIB/libsimstubs.a -Wl,-sectcreate,__TEXT,__entitlements,$OUT/sim.entitlements" > "$OUT/build.log" 2>&1 \
   || { grep -E 'error:|^ld:' "$OUT/build.log" | sort -u | head -20; die "build failed, see $OUT/build.log"; }
