@@ -4045,6 +4045,9 @@ struct LibraryPointerSettings: View {
         LabeledContent("Touch sensitivity") {
             Slider(value: input.relative ? $input.sensRel : $input.sensAbs, in: 0.1...8)
         }
+        Toggle("Command works as Control", isOn: $input.commandIsControl)
+        Text("On the Wine desktop, a keyboard's Command key does what Control does in Windows programs: Command-C copies, Command-Z undoes. A tap of Command alone still opens the Start menu.")
+            .font(.caption).foregroundStyle(.secondary)
     }
 }
 
@@ -5272,16 +5275,16 @@ final class LibraryKeyInput: UIView, UIKeyInput {
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 650, height: 52)); scroll.backgroundColor = .secondarySystemBackground
         let row = UIStackView(); row.axis = .horizontal; row.spacing = 5
         accessoryRow = row
-        for (title, key) in [("Paste", -1), ("Esc", 0x1b), ("Ctrl", 0x11), ("Shift", 0x10), ("Alt", 0x12), ("Tab", 0x09), ("Enter", 0x0d), ("←", 0x25), ("↑", 0x26), ("↓", 0x28), ("→", 0x27), ("Done", 0)] {
+        for (title, key) in DesktopKeys.accessory {
             let button = UIButton(type: .system); button.configuration = .tinted(); button.setTitle(title, for: .normal)
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
             button.addAction(UIAction { [weak self, weak button] _ in
                 guard let self else { return }
                 if key == -1 { HardwareInput.shared.pasteClipboard(); return }
                 HardwareInput.shared.cancelPaste()
-                let vk = Int32(key)
+                let vk = key
                 if key == 0 { LibraryKeyboard.hide() }
-                else if [0x10, 0x11, 0x12].contains(key) {
+                else if DesktopKeys.modifiers.contains(key) {
                     if self.held.contains(vk) { self.held.remove(vk); winios_post_key(vk, 0) }
                     else { self.held.insert(vk); winios_post_key(vk, 1) }
                     button?.isSelected = self.held.contains(vk)

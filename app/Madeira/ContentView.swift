@@ -1307,6 +1307,9 @@ final class InputSettings: ObservableObject {
     /// "Right stick controls mouse" (HardwareInput.swift, PadStickMouse). Off by
     /// default: a program that reads the controller already gets the stick.
     @Published var padRightStickMouse = false { didSet { save() } }
+    /// On the Wine desktop a keyboard's Command acts as Control in shortcuts (DesktopKeys.postedKey).
+    /// Off by default: Command is Windows' key as before.
+    @Published var commandIsControl = false { didSet { save() } }
 
     /// didSet fires for assignments made in init() because the properties are
     /// already initialised by then; without this the first launch would write
@@ -1330,6 +1333,7 @@ final class InputSettings: ObservableObject {
             sensMouse = j["sensMouse"] as? Double ?? 1.0
             ignoreTouchesWithMouse = j["ignoreTouchesWithMouse"] as? Bool ?? true
             padRightStickMouse = j["padRightStickMouse"] as? Bool ?? false
+            commandIsControl = j["commandIsControl"] as? Bool ?? false
         }
         loading = false
         madeira_set_diag_enabled(diagnostics ? 1 : 0)   // push the restored value down
@@ -1339,7 +1343,7 @@ final class InputSettings: ObservableObject {
         guard !loading else { return }
         let j: [String: Any] = ["relative": relative, "sensAbs": sensAbs, "sensRel": sensRel, "diagnostics": diagnostics,
                                 "sensMouse": sensMouse, "ignoreTouchesWithMouse": ignoreTouchesWithMouse,
-                                "padRightStickMouse": padRightStickMouse,
+                                "padRightStickMouse": padRightStickMouse, "commandIsControl": commandIsControl,
                                 "touchMode": touchMode]
         guard let d = try? JSONSerialization.data(withJSONObject: j) else { return }
         try? d.write(to: Self.url, options: .atomic)

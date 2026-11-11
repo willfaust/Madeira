@@ -46240,6 +46240,86 @@
           }
         }
       }
+    },
+    "Command works as Control": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Befehlstaste wirkt wie Strg"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comando funciona como Control"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command 키를 Control처럼 사용"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command funciona como Control"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command работает как Control"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Command 键当作 Control 使用"
+          }
+        }
+      }
+    },
+    "On the Wine desktop, a keyboard's Command key does what Control does in Windows programs: Command-C copies, Command-Z undoes. A tap of Command alone still opens the Start menu.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf dem Wine-Desktop wirkt die Befehlstaste einer Tastatur in Windows-Programmen wie Strg: Befehl-C kopiert, Befehl-Z macht rückgängig. Ein einzelnes Tippen auf Befehl öffnet weiterhin das Startmenü."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "En el escritorio de Wine, la tecla Comando de un teclado hace en los programas de Windows lo que hace Control: Comando-C copia, Comando-Z deshace. Pulsar Comando solo sigue abriendo el menú Inicio."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wine 데스크톱에서 키보드의 Command 키는 Windows 프로그램에서 Control처럼 동작합니다. Command-C는 복사, Command-Z는 실행 취소입니다. Command만 누르면 계속 시작 메뉴가 열립니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Na área de trabalho do Wine, a tecla Command de um teclado faz nos programas do Windows o que o Control faz: Command-C copia, Command-Z desfaz. Tocar só em Command continua abrindo o menu Iniciar."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "На рабочем столе Wine клавиша Command клавиатуры работает в программах Windows как Control: Command-C копирует, Command-Z отменяет. Одиночное нажатие Command по-прежнему открывает меню «Пуск»."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 Wine 桌面上，键盘的 Command 键在 Windows 程序中等同于 Control：Command-C 复制，Command-Z 撤销。单独按一下 Command 仍会打开“开始”菜单。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -1284,7 +1284,7 @@ final class HardwareInput: ObservableObject {
             // Post the modifier BEFORE the other key, even though Windows VK
             // sort order places e.g. A before LWIN.
             let wanted = keysPosted.down.union(deferredCommands.intersection(keys.wanted(focused: keyboardFocused)))
-            for command in keysPosted.update(wanted).down { winios_post_key(command, 1) }
+            for command in keysPosted.update(wanted).down { winios_post_key(postedKey(command), 1) }
             deferredCommands.removeAll()
         }
         if pressed, keyboardFocused, Self.pointerLockAvailable,
@@ -1300,8 +1300,14 @@ final class HardwareInput: ObservableObject {
 
     private func syncKeys() {
         let edges = keysPosted.update(keys.wanted(focused: keyboardFocused).subtracting(deferredCommands))
-        for vk in edges.up { winios_post_key(vk, 0) }
-        for vk in edges.down { winios_post_key(vk, 1) }
+        for vk in edges.up { winios_post_key(postedKey(vk), 0) }
+        for vk in edges.down { winios_post_key(postedKey(vk), 1) }
+    }
+
+    /// Command as Control on the Wine desktop, when the setting says so (DesktopKeys). The same mapping
+    /// posts a key's press and its release, so a held Command is never left down as Windows' key.
+    private func postedKey(_ vk: Int32) -> Int32 {
+        DesktopKeys.postedKey(vk, commandIsControl: InputSettings.shared.commandIsControl && LibraryModel.shared.activeEntry?.desktop == true)
     }
 
     /// Read only in response to an explicit paste gesture, never on a timer.

@@ -175,7 +175,8 @@ assert 'if !keyboard { keys.focusLost(); deferredCommands.removeAll(); cancelPas
 assert '!(fr is LibraryKeyInput)' in hardware
 assert 'guard canPaste, let text = UIPasteboard.general.string' in hardware
 library = (app/'Library.swift').read_text()
-assert '[("Paste", -1), ("Esc", 0x1b)' in library
+assert 'for (title, key) in DesktopKeys.accessory {' in library
+assert '("Paste", -1), ("Esc", 0x1b)' in (app/'DesktopKeys.swift').read_text()
 assert 'if key == -1 { HardwareInput.shared.pasteClipboard(); return }' in library
 assert 'HardwareInput.shared.cancelPaste()' in library.split('static func hide() {', 1)[1]
 assert 'button.isSelected = false' in library
