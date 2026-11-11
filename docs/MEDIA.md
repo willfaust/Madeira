@@ -30,7 +30,7 @@ Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
 | `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov), MPEG audio / PCM decode through libavcodec + libswresample, a packet queue, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c` / `media_source.c` ask for. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
-| `build/ffmpeg/build.sh` | FFmpeg 7.1.1, pinned by SHA-256, LGPL-only configuration. |
+| `build/ffmpeg/build.sh` | FFmpeg 7.1.5, pinned by SHA-256, LGPL-only configuration. |
 
 FFmpeg is built with no H.264, HEVC or AAC decoder or parser: those streams go
 to the platform decoders. See `THIRD-PARTY-NOTICES.md` for the exact component
