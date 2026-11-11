@@ -351,6 +351,9 @@ struct mad_copy {
     UINT64 len;
 };
 
+struct mad_smp_cache_ent;
+static SRWLOCK g_smp_cache_lock = SRWLOCK_INIT;
+
 struct mad_device {
     ID3D12Device10Vtbl *vtbl;   /* ml877: full Device10 slot table, Device1..8 answered */
     LONG refs;
@@ -378,6 +381,8 @@ struct mad_device {
     volatile LONG64 aidx_ver;   /* ml1132: odd while a writer changes aidx; lets mad_resolve_address read it lock-free */
     obj_handle_t *samplers;      /* held for the process's life; see CreateSampler */
     unsigned nsamplers, samplers_cap;
+    struct mad_smp_cache_ent *smp_cache;
+    LONG smp_cache_n;
     /* Guards samplers, srv_res and uav_res. D3D12 device methods are
      * free-threaded: Ghost of Tsushima's streaming threads create samplers and
      * views at the same time, and two unlocked reallocs of one array corrupted
@@ -1152,15 +1157,16 @@ static int mad_smpdesc_get(UINT64 id, struct mad_smpdesc *out) {
     ReleaseSRWLockShared(&g_smpdesc_lock);
     return found;
 }
-static void mad_note_sampler(struct mad_device *d, obj_handle_t smp) {
+static int mad_note_sampler(struct mad_device *d, obj_handle_t smp) {
     int kept = 0;
-    if (!d || !smp) return;
+    if (!d || !smp) return 0;
     AcquireSRWLockExclusive(&d->list_lock);
     if (mad_grow((void **)&d->samplers, &d->samplers_cap, d->nsamplers + 1, sizeof *d->samplers)) {
         d->samplers[d->nsamplers++] = smp; kept = 1;
     }
     ReleaseSRWLockExclusive(&d->list_lock);
     if (!kept) NSObject_release(smp);
+    return kept;
 }
 
 /* ---- resources ----------------------------------------------------------
@@ -12066,6 +12072,7 @@ static ULONG STDMETHODCALLTYPE device_Release(ID3D12Device *This) {
         if (d->dsso) NSObject_release(d->dsso);
         if (d->mtl_queue) NSObject_release(d->mtl_queue);
         if (d->mtl_device) NSObject_release(d->mtl_device);
+        free(d->smp_cache);
         DeleteCriticalSection(&d->live_lock);
         DeleteCriticalSection(&d->view_lock); free(d->vmap);
         d3d12_log("[madeira-d3d12] destroyed %s\n", d->name);
@@ -16601,28 +16608,27 @@ static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UI
 
 #define MAD_SMP_CACHE_N 512
 struct mad_smp_cache_ent { unsigned char key[offsetof(struct WMTSamplerInfo, gpu_resource_id)]; UINT64 id; obj_handle_t smp; };
-static struct mad_smp_cache_ent g_smp_cache[MAD_SMP_CACHE_N];
-static LONG g_smp_cache_n, g_smp_cache_said;
-static SRWLOCK g_smp_cache_lock = SRWLOCK_INIT;
-static int mad_smp_cache_get(struct WMTSamplerInfo *si, obj_handle_t *out) {
+static LONG g_smp_cache_said;
+static int mad_smp_cache_get(struct mad_device *d, struct WMTSamplerInfo *si, obj_handle_t *out) {
     LONG i, n; int hit = 0;
     AcquireSRWLockShared(&g_smp_cache_lock);
-    n = g_smp_cache_n;
+    n = d->smp_cache_n;
     for (i = 0; i < n; i++)
-        if (!memcmp(g_smp_cache[i].key, si, sizeof g_smp_cache[i].key)) {
-            si->gpu_resource_id = g_smp_cache[i].id; *out = g_smp_cache[i].smp; hit = 1; break;
+        if (!memcmp(d->smp_cache[i].key, si, sizeof d->smp_cache[i].key)) {
+            si->gpu_resource_id = d->smp_cache[i].id; *out = d->smp_cache[i].smp; hit = 1; break;
         }
     ReleaseSRWLockShared(&g_smp_cache_lock);
     if (hit && !g_smp_cache_said && !InterlockedExchange(&g_smp_cache_said, 1))
         d3d12_log("[madeira-d3d12] sampler-cache: identical CreateSampler descriptions share one Metal sampler\n");
     return hit;
 }
-static void mad_smp_cache_put(const struct WMTSamplerInfo *si, obj_handle_t smp) {
+static void mad_smp_cache_put(struct mad_device *d, const struct WMTSamplerInfo *si, obj_handle_t smp) {
     AcquireSRWLockExclusive(&g_smp_cache_lock);
-    if (g_smp_cache_n < MAD_SMP_CACHE_N) {
-        struct mad_smp_cache_ent *e = &g_smp_cache[g_smp_cache_n];
+    if (!d->smp_cache) d->smp_cache = calloc(MAD_SMP_CACHE_N, sizeof *d->smp_cache);
+    if (d->smp_cache && d->smp_cache_n < MAD_SMP_CACHE_N) {
+        struct mad_smp_cache_ent *e = &d->smp_cache[d->smp_cache_n];
         memcpy(e->key, si, sizeof e->key); e->id = si->gpu_resource_id; e->smp = smp;
-        MemoryBarrier(); g_smp_cache_n++;
+        d->smp_cache_n++;
     }
     ReleaseSRWLockExclusive(&g_smp_cache_lock);
 }
@@ -16644,10 +16650,11 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
     /* madeira-duo sampler-cache: PoE2 creates ~16 samplers a frame from a handful of
      * descriptions; each was a new Metal sampler (a host call) kept for the process's
      * life. Identical descriptions now share the first one (samplers are immutable). */
-    cached = mad_smp_cache_get(&si, &smp);
+    cached = mad_smp_cache_get(d, &si, &smp);
     if (!cached) {
         smp = MTLDevice_newSamplerState(d->mtl_device, &si);
-        if (smp && si.gpu_resource_id) mad_smp_cache_put(&si, smp);
+        if (smp && !mad_note_sampler(d, smp)) smp = 0;
+        if (smp && si.gpu_resource_id) mad_smp_cache_put(d, &si, smp);
     }
     if (!smp || !si.gpu_resource_id) {
         d3d12_log("[madeira-d3d12] CreateSampler: the backend gave no argument-buffer sampler\n");
@@ -16674,7 +16681,6 @@ static void STDMETHODCALLTYPE device_CreateSampler(ID3D12Device *This,
      * life. Samplers are few and immutable, and tying one to a descriptor slot
      * that the application may overwrite would need a lifetime story that this
      * milestone does not have. */
-    if (!cached) mad_note_sampler(d, smp);
 }
 
 /* ---- pipeline state -------------------------------------------------------

@@ -1446,13 +1446,17 @@ static void *mad_dxc_initial_prune(void *arg)
 {
     char dir[1200];
     unsigned nfiles = 0, removed = 0;
-    uint64_t left;
+    uint64_t left, before, current, estimate;
     if (!mad_dxc_dir(dir, sizeof dir)) return NULL;
     pthread_setname_np("MadeiraDxilScan");
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
     pthread_mutex_lock(&g_dxc_prune_lock);
+    before = __atomic_load_n(&g_dxc_bytes, __ATOMIC_RELAXED);
     left = mad_dxc_prune(dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target, &nfiles, &removed);
-    __atomic_store_n(&g_dxc_bytes, left, __ATOMIC_RELAXED);
+    current = __atomic_load_n(&g_dxc_bytes, __ATOMIC_RELAXED);
+    do {
+        estimate = left + (current - before);
+    } while (!__atomic_compare_exchange_n(&g_dxc_bytes, &current, estimate, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
     pthread_mutex_unlock(&g_dxc_prune_lock);
     dprintf(2, "[d3d12-dxil-cache] ml1990 enabled: %u entries, %llu KB, bound %llu MB, %u evicted; retry slots %s (scanned off the caller's thread)\n",
             nfiles, (unsigned long long)(left >> 10), (unsigned long long)(uintptr_t)arg,
