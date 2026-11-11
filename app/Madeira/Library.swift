@@ -6337,22 +6337,24 @@ struct LibraryMetrics: View {
     @State private var donatedMB = 0
     @State private var donorPoolMB = 0
     @State private var donorGuarded = 0
-    /// madeira-duo overlay-shader: madeira_shader_overlay_stats (winemetal_unix.c). Per
-    /// second over the last refresh: shader stages madeira-d3d12's cache did not have, and
-    /// pipelines the pso-archive did not have (-1 = not measured yet); the pso-async queue
-    /// draws wait on, and the create-time queue behind it, right now; the flags it gave.
+    /// madeira-duo overlay-shader: madeira_shader_overlay_stats (winemetal_unix.c). Totals since the
+    /// overlay started showing them (vk4: totals, not rates, so the figures don't drop back to zero
+    /// between bursts): shader stages madeira-d3d12's cache did not have (converted), and pipelines
+    /// Metal compiled because the pso-archive did not have them; right now, the pipelines the game
+    /// waits on (pso-async queue, and pso-create-block builds inside a create call) and the
+    /// create-time queue behind them; the flags it gave.
     @State private var shaderPrimed = false
-    @State private var lastShaderMisses: UInt64 = 0
-    @State private var lastPipelineMisses: UInt64 = 0
-    @State private var shaderRate = -1.0
-    @State private var pipelineRate = -1.0
+    @State private var baseShaderMisses: UInt64 = 0
+    @State private var basePipelineMisses: UInt64 = 0
+    @State private var shaderTotal = 0
+    @State private var pipelineTotal = 0
     @State private var psoQueue = 0
     @State private var psoBackground = 0
     @State private var shaderFlags = 0
-    /// madeira-duo vk3: Vulkan builds KosmicKrisp reported (madeira_vulkan_compile_stats): compiles a second
-    /// over the last refresh (-1 = none seen yet), builds running now, slow compiles since the game started.
-    @State private var lastVulkanCompiles: UInt64 = 0
-    @State private var vulkanRate = -1.0
+    /// madeira-duo vk3/vk4: Vulkan builds KosmicKrisp reported (madeira_vulkan_compile_stats): compiles since
+    /// the overlay started showing them, builds running now, slow compiles since the game started.
+    @State private var baseVulkanCompiles: UInt64 = 0
+    @State private var vulkanTotal = 0
     @State private var vulkanInFlight = 0
     @State private var vulkanSlow = 0
     @State private var vulkanSeen = false
@@ -6408,13 +6410,16 @@ struct LibraryMetrics: View {
         }
         if model.overlayFields.contains("Shader misses") {
             if vulkanSeen {
-                // Vulkan (KosmicKrisp): compiles a second, builds running now, slow compiles this game.
-                result.append(Cell(id: "miss", label: "MISS/s", value: vulkanRate < 0 ? "–" : perSecond(vulkanRate), width: 64))
+                // Vulkan (KosmicKrisp): compiles so far, builds running now, slow compiles this game.
+                result.append(Cell(id: "miss", label: "BUILT", value: "\(vulkanTotal)", width: 64))
                 result.append(Cell(id: "psoq", label: "BUILD", value: "\(vulkanInFlight)", width: 50))
                 result.append(Cell(id: "slow", label: "SLOW", value: "\(vulkanSlow)", width: 54))
             } else {
-                result.append(Cell(id: "miss", label: "MISS/s", value: missText, width: 64))
-                result.append(Cell(id: "psoq", label: "PSO Q", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
+                // D3D12: shaders converted and pipelines compiled so far, pipelines the game waits on now.
+                let known = shaderPrimed && shaderFlags & 1 != 0
+                result.append(Cell(id: "miss", label: "SHADERS", value: known ? "\(shaderTotal)" : "–", width: 64))
+                result.append(Cell(id: "pso", label: "PSO", value: known && shaderFlags & 8 != 0 ? "\(pipelineTotal)" : "–", width: 56))
+                result.append(Cell(id: "psoq", label: "WAIT", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
             }
         }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append(Cell(id: "bat", label: "BAT", value: "\(battery)%", width: 50)) }
@@ -6431,13 +6436,6 @@ struct LibraryMetrics: View {
             result.append(Cell(id: "temp", label: "TEMP", value: word, width: 62, dot: dot))
         }
         return result
-    }
-    /// Any miss in the interval shows as at least 1. "shaders/pipelines"; just the shader
-    /// figure while the pso-archive is off (its misses can't be told from Metal's cache hits).
-    private func perSecond(_ rate: Double) -> String { rate <= 0 ? "0" : String(format: "%.0f", max(1, rate.rounded())) }
-    private var missText: String {
-        guard shaderRate >= 0, shaderFlags & 1 != 0 else { return "–" }   // no madeira-d3d12 (a D3D11 game) or not yet
-        return shaderFlags & 8 != 0 ? "\(perSecond(shaderRate))/\(perSecond(pipelineRate))" : perSecond(shaderRate)
     }
     private func value(_ c: Cell) -> some View {
         HStack(spacing: 4 * s) {
@@ -6566,21 +6564,22 @@ struct LibraryMetrics: View {
                     var vkBuilds: UInt64 = 0, vkCompiles: UInt64 = 0, vkSlow: UInt64 = 0, vkMs: UInt64 = 0
                     var vkInFlight: Int64 = 0, vkLibraries: UInt64 = 0, vkPipelines: UInt64 = 0
                     madeira_vulkan_compile_stats(&vkBuilds, &vkCompiles, &vkSlow, &vkMs, &vkInFlight, &vkLibraries, &vkPipelines)
+                    // The counters run for the app (a new game's madeira-d3d12 block starts at
+                    // zero again): totals count from the first sample, and a counter that went
+                    // backwards (a new game process) counts from zero.
                     if vkBuilds > 0 {
-                        if vulkanSeen {
-                            vulkanRate = Double(vkCompiles >= lastVulkanCompiles ? vkCompiles - lastVulkanCompiles : 0) / max(0.001, dt)
-                        }
-                        lastVulkanCompiles = vkCompiles; vulkanSeen = true
+                        if !vulkanSeen || vkCompiles < baseVulkanCompiles { baseVulkanCompiles = vulkanSeen ? 0 : vkCompiles }
+                        vulkanSeen = true
+                        vulkanTotal = Int(vkCompiles - baseVulkanCompiles)
                         vulkanInFlight = Int(vkInFlight); vulkanSlow = Int(vkSlow)
                     }
-                    if shaderPrimed {
-                        shaderRate = Double(shaders >= lastShaderMisses ? shaders - lastShaderMisses : 0) / max(0.001, dt)
-                        pipelineRate = Double(pipelines >= lastPipelineMisses ? pipelines - lastPipelineMisses : 0) / max(0.001, dt)
-                    }
-                    lastShaderMisses = shaders; lastPipelineMisses = pipelines; shaderPrimed = true
+                    if !shaderPrimed { baseShaderMisses = shaders; basePipelineMisses = pipelines; shaderPrimed = true }
+                    if shaders < baseShaderMisses { baseShaderMisses = 0 }
+                    if pipelines < basePipelineMisses { basePipelineMisses = 0 }
+                    shaderTotal = Int(shaders - baseShaderMisses); pipelineTotal = Int(pipelines - basePipelineMisses)
                     psoQueue = Int(queue); psoBackground = Int(background); shaderFlags = Int(flags)
                 } else if shaderPrimed {
-                    shaderPrimed = false; shaderRate = -1; pipelineRate = -1
+                    shaderPrimed = false; shaderTotal = 0; pipelineTotal = 0
                 }
                 if model.overlayFields.contains("GPU") {
                     let busy = madeira_gpu_meter_busy_seconds(), buffers = madeira_gpu_meter_cmdbufs()
@@ -6625,12 +6624,12 @@ struct LibraryMetrics: View {
             result.append("Swap \(swapFileMB) MB")
         }
         if model.overlayFields.contains("Shader misses"), vulkanSeen {
-            result.append("\(vulkanRate < 0 ? "0" : perSecond(vulkanRate)) shader compiles a second, \(vulkanInFlight) building, \(vulkanSlow) slow")
+            result.append("\(vulkanTotal) shaders compiled, \(vulkanInFlight) building, \(vulkanSlow) slow")
         } else if model.overlayFields.contains("Shader misses") {
-            if shaderRate < 0 || shaderFlags & 1 == 0 { result.append("Shader misses —") }
+            if !shaderPrimed || shaderFlags & 1 == 0 { result.append("Shader misses —") }
             else if shaderFlags & 8 != 0 {
-                result.append("\(perSecond(shaderRate)) shader and \(perSecond(pipelineRate)) pipeline misses a second")
-            } else { result.append("\(perSecond(shaderRate)) shader misses a second") }
+                result.append("\(shaderTotal) shaders converted, \(pipelineTotal) pipelines compiled")
+            } else { result.append("\(shaderTotal) shaders converted") }
             if shaderFlags & 1 == 0 { result.append("Pipeline queue —") }
             else if shaderFlags & 4 == 0 { result.append("Pipeline queue off") }
             else { result.append("Pipeline queue \(psoQueue) (\(psoBackground) queued at creation)") }

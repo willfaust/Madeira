@@ -279,11 +279,13 @@ another Metal counter API that the phone does support.
   waits for it, and the game-start replay is then skipped for that app run. The game-start replay now uses
   every core too (`fossilize-threads` still overrides; `fossilize-precompile-threads` does the same for the
   button).
-- **Overlay ▸ Shader misses** shows, on Vulkan: MISS/s (builds that compiled, 2 ms or more, per second), BUILD
-  (builds running now) and SLOW (compiles of 150 ms or more since the game started). The source is patch 0013:
-  KosmicKrisp reports every library and pipeline build to `madeira_vulkan_compile_mark` (WiniosGL.m). On D3D12
-  the field shows the overlay-shader branch's MISS/s and PSO Q cells, provided this build's DXMT has
-  `madeira_shader_overlay_stats` (looked up at run time).
+- **Overlay ▸ Shader misses** shows totals since the overlay started, so the figures don't drop back to zero
+  between bursts. On Vulkan: BUILT (builds that compiled, 2 ms or more), BUILD (builds running now) and SLOW
+  (compiles of 150 ms or more since the game started). The source is patch 0013: KosmicKrisp reports every
+  library and pipeline build to `madeira_vulkan_compile_mark` (WiniosGL.m). On D3D12: SHADERS (stages
+  madeira-d3d12 converted), PSO (pipelines Metal compiled because the pso-archive didn't have them) and WAIT
+  (pipelines the game waits on now, including pso-create-block builds inside a create call), provided this
+  build's DXMT has `madeira_shader_overlay_stats` (looked up at run time; vk4 pins DXMT duo/overlay-shader).
 
 ## Compile-speed levers within the current design (patch 0014)
 
