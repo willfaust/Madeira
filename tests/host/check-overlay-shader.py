@@ -58,8 +58,10 @@ check(pe.count('InterlockedIncrement64(&g_xp.shader.sc_miss)') == 3 and pe.count
 ovl = pe[pe.index('static void mad_ovl_conv('):pe.index('/* madeira-duo: the res3 log')]
 check('a->out_buf && a->ret_len <= a->out_cap' in ovl and 'a->ret_status != MADEIRA_IR_BUFFER_TOO_SMALL' in ovl,
       'a sizing call is not counted; a fill call or a refusal is')
-check(pe.count('InterlockedIncrement64(&g_xp.shader.pa_wait);') == 1 and pe.count('InterlockedIncrement64(&g_xp.shader.pcb_wait);') == 2,
-      'pso-async queue +1 at its one enqueue; the create-time queue at its two (graphics, compute)')
+block = pe[pe.index('static void mad_pcbk_build(struct mad_pso *p) {'):pe.index('/* At creation: 1 when the pipeline went to the low-priority queue. */')]
+check(pe.count('InterlockedIncrement64(&g_xp.shader.pa_wait);') == 2 and pe.count('InterlockedIncrement64(&g_xp.shader.pcb_wait);') == 2
+      and 'InterlockedIncrement64(&g_xp.shader.pa_wait);' in block and 'InterlockedDecrement64(&g_xp.shader.pa_wait);' in block,
+      'pso-async queue +1 at its one enqueue and around a pso-create-block build; the create-time queue at its two (graphics, compute)')
 worker = pe[pe.index('static DWORD WINAPI mad_pa_worker(void *arg) {'):pe.index('static int mad_pa_start(void) {')]
 check('InterlockedDecrement64(low ? &g_xp.shader.pcb_wait : &g_xp.shader.pa_wait);' in worker,
       'the builder takes it off once the pipeline is built (or failed)')

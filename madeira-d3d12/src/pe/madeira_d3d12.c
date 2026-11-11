@@ -7041,7 +7041,7 @@ static int mad_pso_async_queue(struct mad_pso *p) {
  * waiting for, and a queued pipeline that gets drawn is moved to the front.
  * Needs pso-async = 1. pso-seen-record = 1 keeps the list with the build off,
  * to collect it before trying 1. */
-static int g_pcb_mode = -1, g_seen_record;
+static int g_pcb_mode = -1, g_seen_record, g_pcb_block;   /* g_pcb_block: pso-create-block */
 static volatile LONG g_pcb_queued, g_pcb_built_n, g_pcb_failed, g_pcb_full, g_pcb_hits, g_pcb_misses;
 #define MAD_SEEN_CAP 131072   /* table slots, a power of two; at most half are used */
 static UINT64 *g_seen_tab;
@@ -7053,7 +7053,10 @@ static int mad_pcb_mode(void) {
     if (g_pcb_mode < 0) {
         long long m = mad_cfg_int_pe("pso-create-build", 0);   /* madeira-duo: 1 = pipelines drawn in an earlier session are built in the background when the game creates them, 2 = every plain render pipeline; 0 = at their first draw (as before) */
         int v = m <= 0 ? 0 : m >= 2 ? 2 : 1;
-        g_seen_record = v == 1 || mad_cfg_int_pe("pso-seen-record", 0) > 0;   /* madeira-duo: 1 = remember the pipelines drawn (pso-create-build = 1 does it anyway) */
+        g_pcb_block = mad_cfg_int_pe("pso-create-block", 0) > 0;   /* madeira-duo: 1 = pipelines drawn in an earlier session are built inside the game's create call, on its thread (no draw finds them unbuilt); 0 = off */
+        g_seen_record = v == 1 || g_pcb_block || mad_cfg_int_pe("pso-seen-record", 0) > 0;   /* madeira-duo: 1 = remember the pipelines drawn (pso-create-build = 1 does it anyway) */
+        if (g_pcb_block)
+            d3d12_log("[madeira-d3d12] pso-create-block = 1: pipelines drawn in earlier sessions are built inside the create call, on the game's thread\n");
         if (v || g_seen_record)
             d3d12_log("[madeira-d3d12] pso-create-build = %d%s: %s\n", v, g_seen_record ? ", pso-seen-record" : "",
                       v == 2 ? "every plain render pipeline is queued for the background builders when the game creates it"
@@ -7212,11 +7215,86 @@ static void mad_pcb_built(struct mad_pso *p) {
                   "full; on the drawn-before list %ld, not on it %ld)\n", (long)g_pcb_built_n, (long)g_pcb_failed, (long)g_pcb_queued,
                   (long)g_pcb_full, (long)g_pcb_hits, (long)g_pcb_misses);
 }
+/* madeira-duo PIPELINES BUILT INSIDE THE CREATE CALL (madeira.cfg pso-create-block,
+ * opt-in, default 0). PoE2 creates its pipelines on a thread of its own and keeps
+ * rendering meanwhile (vk3d: one thread sat in 8-53 s compiles while frames held
+ * 24 fps); a lazy pipeline built at its first draw is built on the render thread
+ * instead, and with pso-async its draws are skipped until it is ready (enemies
+ * invisible). With the switch on, a pipeline on the drawn-before list
+ * (pso-create-build's list) is built before CreateGraphicsPipelineState returns,
+ * on the game's creating thread at that thread's priority: an area load waits for
+ * it, a mid-map effect arrives once it is ready, and no draw finds it unbuilt.
+ * Pipelines not on the list follow pso-create-build (2 = queued for the background
+ * builders, which fills the archive; 1 or 0 = built at their first draw). A
+ * [pso-block] line at the first build, at every 100th and at each one of 150 ms
+ * or more (first 40) gives the time and the creating thread, beside the thread
+ * that submits frames, so the log says whether a block ever lands on it. */
+static volatile LONG g_pcbk_n, g_pcbk_failed, g_pcbk_slow, g_pcbk_slow_said;
+static volatile LONG64 g_pcbk_t, g_pcbk_max;
+static volatile DWORD g_ecl_tid;   /* the thread that last called ExecuteCommandLists */
+static struct { volatile DWORD tid; volatile LONG n; char name[40]; } g_pcbk_thr[8];
+static double mad_pcbk_ms(LONG64 ticks) {
+    static LONG64 freq;
+    if (!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq = f.QuadPart ? f.QuadPart : 1; }
+    return (double)ticks * 1000.0 / (double)freq;
+}
+static int mad_pcbk_thread_slot(void) {
+    DWORD me = GetCurrentThreadId(); int i;
+    for (i = 0; i < 8; i++) {
+        if (g_pcbk_thr[i].tid == me) return i;
+        if (!g_pcbk_thr[i].tid && !InterlockedCompareExchange((volatile LONG *)&g_pcbk_thr[i].tid, (LONG)me, 0)) {
+            WCHAR *wn = NULL;
+            strcpy(g_pcbk_thr[i].name, "?");
+            if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &wn)) && wn) {
+                if (wn[0]) WideCharToMultiByte(CP_UTF8, 0, wn, -1, g_pcbk_thr[i].name, sizeof g_pcbk_thr[i].name, NULL, NULL);
+                LocalFree(wn);
+            }
+            return i;
+        }
+    }
+    return -1;   /* more than 8 creating threads: counted, not named */
+}
+static void mad_pcbk_build(struct mad_pso *p) {
+    obj_handle_t pool = NSAutoreleasePool_alloc_init();
+    LONG64 t0 = mad_qpc(), dt, was;
+    LONG n; int built, slot = mad_pcbk_thread_slot(), slow;
+    double ms;
+    InterlockedIncrement64(&g_xp.shader.pa_wait);   /* overlay-shader: counted with the pipelines the game waits for */
+    built = mad_pso_realize(p) != 0;
+    InterlockedDecrement64(&g_xp.shader.pa_wait);
+    if (pool) NSObject_release(pool);
+    dt = mad_qpc() - t0; ms = mad_pcbk_ms(dt);
+    InterlockedExchangeAdd64(&g_pcbk_t, dt);
+    do { was = g_pcbk_max; } while (dt > was && InterlockedCompareExchange64(&g_pcbk_max, dt, was) != was);
+    if (slot >= 0) InterlockedIncrement(&g_pcbk_thr[slot].n);
+    if (!built) InterlockedIncrement(&g_pcbk_failed);
+    n = InterlockedIncrement(&g_pcbk_n);
+    slow = ms >= 150.0;
+    if (slow) InterlockedIncrement(&g_pcbk_slow);
+    if (slow && InterlockedIncrement(&g_pcbk_slow_said) <= 40)
+        d3d12_log("[pso-block] %.0f ms on thread %04lx '%s'%s (vs '%s', ps '%s')\n", ms, GetCurrentThreadId(),
+                  slot >= 0 ? g_pcbk_thr[slot].name : "?", GetCurrentThreadId() == g_ecl_tid ? " = THE SUBMIT THREAD" : "",
+                  p->vs_name, p->ps_name);
+    if (n == 1 || !(n % 100)) {
+        char thr[400]; int i, at = 0;
+        thr[0] = 0;
+        for (i = 0; i < 8 && g_pcbk_thr[i].tid && at < (int)sizeof thr - 64; i++)
+            at += _snprintf(thr + at, sizeof thr - at, " %04lx '%s' x%ld%s;", g_pcbk_thr[i].tid, g_pcbk_thr[i].name,
+                            (long)g_pcbk_thr[i].n, g_pcbk_thr[i].tid == g_ecl_tid ? " (submit thread)" : "");
+        d3d12_log("[pso-block] %ld built in the create call (%ld failed, %ld of 150 ms+), %.0f ms in all, max %.0f ms; "
+                  "creating threads:%s submit thread %04lx\n", (long)n, (long)g_pcbk_failed, (long)g_pcbk_slow,
+                  mad_pcbk_ms(g_pcbk_t), mad_pcbk_ms(g_pcbk_max), thr, g_ecl_tid);
+    }
+}
 /* At creation: 1 when the pipeline went to the low-priority queue. */
 static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
     int mode = mad_pcb_mode();
     static int said_noasync;
     if (g_seen_record) p->seen_key = mad_seen_key(desc);   /* drawn ones go on the list (mad_seen_mark) */
+    if (g_pcb_block && p->lazy && !p->rps) {   /* pso-create-block: drawn before = built now, on the game's thread */
+        if (mad_seen_has(p->seen_key)) { InterlockedIncrement(&g_pcb_hits); mad_pcbk_build(p); return 0; }
+        if (mode != 2) { InterlockedIncrement(&g_pcb_misses); return 0; }
+    }
     if (!mode) return 0;
     if (mode == 1) {
         if (!mad_seen_has(p->seen_key)) { InterlockedIncrement(&g_pcb_misses); return 0; }
@@ -12149,6 +12227,7 @@ static void STDMETHODCALLTYPE queue_ExecuteCommandLists(ID3D12CommandQueue *This
     QueryPerformanceCounter(&t0);   /* ml1119: caller-thread time in here */
     InterlockedIncrement(&g_perf_ecl);   /* ml1109 */
     mad_xp_role('E'); InterlockedIncrement64(&g_xp.ecl_calls);   /* ml1128 */
+    g_ecl_tid = GetCurrentThreadId();   /* madeira-duo pso-create-block: named in its [pso-block] lines */
     mad_tvs_refresh();   /* madeira-bcd typed-view-shadow: the game wrote this submission's UPLOAD data by now */
     if (g_vt_on < 0) mad_vt_load();   /* madeira-bcd vis-trace / readback-far */
     if (g_sd_state > 0 && g_qtrace) mad_qtrace("ExecuteCommandLists", q, NULL, 0, count);   /* madeira-bcd */
