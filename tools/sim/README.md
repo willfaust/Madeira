@@ -1,6 +1,6 @@
 # Madeira in the iOS Simulator
 
-`tools/sim/setup.sh` builds the app for the simulator, installs it on an iPhone and an iPad simulator and
+`tools/sim/setup.sh` builds the app for the simulator, installs it on an iPhone simulator (and an iPad one on request) and
 launches it. It is for looking at and testing the app's screens (library, settings, onboarding, game pages),
 not for running games.
 
@@ -9,8 +9,7 @@ tools/build-ipa.sh        # once: the device runtime the simulator build is made
 tools/sim/setup.sh        # or: tools/sim/setup.sh --runtime, which runs build-ipa.sh first
 ```
 
-Devices are the newest iPhone and iPad simulators installed; set `SIM_IPHONE` / `SIM_IPAD` (name or UDID) to
-choose. `SKIP_ONBOARDING=0` keeps first-run setup (the default opens the library). Build output, `build.log`, the device UDIDs and launch screenshots go to `build/sim/`.
+The device is the newest iPhone simulator installed; set `SIM_IPHONE` (name or UDID) to choose. `SIM_WITH_IPAD=1` (or `SIM_IPAD`) also installs on an iPad simulator. `SKIP_ONBOARDING=0` keeps first-run setup (the default opens the library). Build output, `build.log`, the device UDIDs and launch screenshots go to `build/sim/`.
 
 ## How it works
 
@@ -22,7 +21,7 @@ choose. `SKIP_ONBOARDING=0` keeps first-run setup (the default opens the library
 - `SimStubs.m` supplies what the simulator build leaves out: `FEXBridge.mm` and `WiniosGL.m` are excluded
   (FEX's generated headers, EAGL's IOSurface upload and `presentDrawable:afterMinimumDuration:` are
   device-only), and MetalFX's classes are empty stand-ins.
-- The app is signed ad hoc without the device entitlements; with them the simulator refuses to launch it.
+- The app is signed ad hoc without the device entitlements; with them the simulator refuses to launch it. It carries only an application identifier and a Keychain access group, which the store sign-ins (Steam, itch.io) need to save their tokens.
 
 ## Limits
 
@@ -33,4 +32,13 @@ OpenGL presenter, no MetalFX and no JIT. Use a device for anything that touches 
 
 With the skills from `.claude/skills/README.md` checked out (`run-simulator`, `ios-simulator-skill`,
 `flow-walkthrough`), an agent can map the screen, tap by accessibility label and screenshot, using the UDIDs in
-`build/sim/*.udid`. `ios-simulator-skill` needs `idb`.
+`build/sim/*.udid`. `ios-simulator-skill` needs `idb`:
+
+```sh
+brew trust --formula meta/fb/idb-companion && brew install meta/fb/idb-companion   # after: brew tap meta/fb
+pip3 install fb-idb
+bash .claude/skills/ios-simulator-skill/scripts/sim_health_check.sh                # all green: ready
+python3 .claude/skills/ios-simulator-skill/scripts/navigator.py --udid "$(cat build/sim/iphone.udid)" --find-text "Stores" --tap
+```
+
+Tap a coordinate with `idb ui tap X Y --udid ...` (points, not pixels: a screenshot's pixels divided by 3).
