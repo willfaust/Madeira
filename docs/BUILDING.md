@@ -39,7 +39,7 @@ git-ignored and consumed by the app project.
    `app/Madeira/lib{gmp,nettle,hogweed,gnutls}.a` (these four outputs are
    also tracked). Verified: built on the development machine; not re-run
    from a clean checkout.
-   `build/ffmpeg/build.sh`: FFmpeg 7.1.1 in an LGPL-only configuration (WMA,
+   `build/ffmpeg/build.sh`: FFmpeg 7.1.5 in an LGPL-only configuration (WMA,
    MPEG audio and PCM decoders; mp3/wav/mov demuxers; no H.264/HEVC/AAC),
    built from the tracked, unmodified release tarball in `build/ffmpeg/src`
    after verifying it against `build/ffmpeg/src/SHA256SUMS` -> headers in `toolchains/ffmpeg-ios/include`

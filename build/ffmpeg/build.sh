@@ -38,9 +38,9 @@
 # needs no network. It is checked against build/ffmpeg/src/SHA256SUMS before
 # anything is extracted; a mismatch aborts. No patches are applied. The
 # checksum is the one pinned when the tarball was downloaded from
-# https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz.
+# https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz.
 #
-# Re-runnable: configure runs again only when the configure arguments change
+# Re-runnable: configure runs again only when the source checksum or configure arguments change
 # (they are stamped into the build tree) or when --reconfigure is passed.
 set -euo pipefail
 
@@ -51,7 +51,7 @@ OBJ_DIR="$BUILD_DIR/obj"
 PREFIX="$REPO_ROOT/toolchains/ffmpeg-ios"
 APP_DIR="$REPO_ROOT/app/Madeira"
 
-FFMPEG_VERSION=7.1.1
+FFMPEG_VERSION=7.1.5
 TARBALL="$SRC_DIR/ffmpeg-${FFMPEG_VERSION}.tar.xz"
 SRC="$OBJ_DIR/ffmpeg-${FFMPEG_VERSION}"
 BUILD="$OBJ_DIR/build"
@@ -147,9 +147,9 @@ CONFIG_ARGS=(
 
 mkdir -p "$BUILD"
 STAMP="$BUILD/madeira-configure.args"
-WANT_STAMP="$(printf '%s\n' "${CONFIG_ARGS[@]}")"
+WANT_STAMP="$(printf '%s\n' "$GOT" "${CONFIG_ARGS[@]}")"
 if [ $RECONFIGURE -eq 0 ] && [ -f "$BUILD/config.h" ] && [ "$(cat "$STAMP" 2>/dev/null)" != "$WANT_STAMP" ]; then
-    echo "=== configure arguments changed: reconfiguring ==="
+    echo "=== FFmpeg source or configure arguments changed: reconfiguring ==="
     RECONFIGURE=1
 fi
 if [ $RECONFIGURE -eq 1 ] || [ ! -f "$BUILD/config.h" ]; then

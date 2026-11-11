@@ -13,7 +13,7 @@ decode (random bytes) to check that the concealment still produces time rather t
 The production file is compiled as it is for the device (winegstreamer_unixlib_ios.c, which also
 #includes wg_parser_av_ios.c), against the Wine headers of a configured tree, under ASan/UBSan.
 
-Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.1.tar.xz, the tracked
+Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.5.tar.xz, the tracked
 source), MADEIRA_HOST_FFMPEG (prefix of an existing host build with the components below),
 MADEIRA_WINE_BUILD (a configured Wine build tree whose include/ holds config.h and the
 widl-generated headers; default: wine/build-macos, the tree build/ntdll-unix/build.sh uses).
@@ -58,7 +58,7 @@ print("PASS: 64-bit callers get the WMA table unless MADEIRA_WG_64BIT=0, their p
       "32-bit callers get the wow64 table")
 
 # ------------------------------------------------------------------ host FFmpeg
-tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.1.tar.xz")
+tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.5.tar.xz")
 FLAGS = [
     "--disable-everything", "--disable-autodetect", "--disable-gpl", "--disable-nonfree", "--disable-version3",
     # the decoder set build/ffmpeg/build.sh ships (WMA family) ...
@@ -75,17 +75,17 @@ FLAGS = [
 prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
 if not prefix:
     key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.1-" + key))
+    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
     if not (Path(prefix) / "lib/libavcodec.a").exists():
         assert Path(tarball).exists(), "no FFmpeg tarball at %s" % tarball
         src = Path(prefix + "-src")
         src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.1/configure").exists():
+        if not (src / "ffmpeg-7.1.5/configure").exists():
             subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
         bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
         print("building host FFmpeg into", prefix, flush=True)
         log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.1/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
+        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
                        cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
