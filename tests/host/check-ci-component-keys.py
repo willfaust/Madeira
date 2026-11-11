@@ -12,6 +12,7 @@ workflow = (root / '.github/workflows/build.yml').read_text()
 gnutls_build = (root / 'build/gnutls-ios/build.sh').read_text()
 assert '"$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH"' in gnutls_build
 assert 'printf \'%s\\n\' "$GNUTLS_HASH" > "$OBJ_DIR/gnutls.done"' in gnutls_build
+assert 'GNUTLS_SRC="$OBJ_DIR/gnutls-$GNUTLS_VER-$GNUTLS_HASH"' in gnutls_build
 assert 'restore-keys:' not in workflow, 'cache reuse must use exact input keys'
 parts = re.split(r'^  ([a-z0-9_-]+):\n', workflow.split('jobs:\n', 1)[1], flags=re.M)
 jobs = dict(zip(parts[1::2], parts[2::2]))
