@@ -34,7 +34,7 @@ there, for 64-bit and 32-bit games (`app/Madeira/VCRedist.swift`, docs/LIBRARY.m
 Run in this order after the inputs above are in place. Outputs are
 git-ignored and consumed by the app project.
 
-1. `build/gnutls-ios/build.sh`: GMP 6.3.0, Nettle 3.10.1, GnuTLS 3.8.9 from
+1. `build/gnutls-ios/build.sh`: GMP 6.3.0, Nettle 3.10.1, GnuTLS 3.8.13 from
    the tracked tarballs in `build/gnutls-ios/src` (SHA256SUMS there) ->
    `app/Madeira/lib{gmp,nettle,hogweed,gnutls}.a` (these four outputs are
    also tracked). Verified: built on the development machine; not re-run

@@ -19,7 +19,7 @@ dependency license texts are in `LICENSES/`. See "Why GPL-3.0-or-later" below.
 | **rpmalloc** | 0BSD | 0BSD + **Will Faust's modifications GPL-3.0-or-later** | Nested submodule of FEX, forked to `willfaust/rpmalloc`. Commits by Ryan Houdek are **not** relicensed. |
 | **GMP** 6.3.0 | **LGPL-3.0-or-later** or GPL-2.0-or-later | Static (`libgmp.a`). |
 | **Nettle / Hogweed** 3.10.1 | **LGPL-3.0-or-later** or GPL-2.0-or-later | Static (`libnettle.a`, `libhogweed.a`). |
-| **GnuTLS** 3.8.9 | LGPL-2.1-or-later | Static (`libgnutls.a`). Used by Wine's bcrypt/secur32/crypt32. |
+| **GnuTLS** 3.8.13 | LGPL-2.1-or-later | Static (`libgnutls.a`). Used by Wine's bcrypt/secur32/crypt32. |
 | **FFmpeg** 7.1.5 — libavformat, libavcodec, libavutil, libswresample | **LGPL-2.1-or-later** | Static (`libavformat.a`, `libavcodec.a`, `libavutil.a`, `libswresample.a`). Configured `--disable-gpl --disable-nonfree --disable-version3 --disable-everything`, then only: the WMA-family decoders (`wmav1,wmav2,wmapro,wmalossless,xma1,xma2`), the `mp1,mp2,mp3` and `pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le` decoders, the `mp3`, `wav` and `mov` (MP4/MOV/M4A) demuxers and the `mpegaudio` parser. No H.264, HEVC or AAC decoder or parser (those streams are decoded by Apple's VideoToolbox/AudioToolbox), no protocols, no muxers, no zlib. No GPL, version3 or non-free component is enabled, so the result is LGPL-2.1-or-later. Used only by `build/ntdll-unix/winegstreamer_unixlib_ios.c` and `build/ntdll-unix/wg_parser_av_ios.c`, winegstreamer's unix side on this port (the Windows WMA decoder MFT/DMO, and the wg_parser behind quartz's MP3/WAV splitters and Media Foundation's MP4 source); upstream Wine implements both with GStreamer, which does not exist on iOS. |
 | **{fmt}** | MIT | Static (`libfmt.a`), via FEX. |
 | **xxHash** | BSD-2-Clause | Static (`libxxhash.a`). |
@@ -239,7 +239,7 @@ compiled binaries, so the exact sources they were built from are tracked too:
 
 - `build/gnutls-ios/src/gmp-6.3.0.tar.xz`
 - `build/gnutls-ios/src/nettle-3.10.1.tar.gz`
-- `build/gnutls-ios/src/gnutls-3.8.9.tar.xz`
+- `build/gnutls-ios/src/gnutls-3.8.13.tar.xz`
 - `build/gnutls-ios/src/SHA256SUMS` -- checksums for the above
 - `build/gnutls-ios/build.sh` -- the exact build machinery and configure flags
 

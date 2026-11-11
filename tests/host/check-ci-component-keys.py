@@ -17,6 +17,9 @@ assert 'WANT_STAMP="$(printf \'%s\\n\' "$GOT" "${CONFIG_ARGS[@]}")"' in ffmpeg_b
 ffmpeg_version = re.search(r'^FFMPEG_VERSION=([^\s]+)$', ffmpeg_build, re.M)[1]
 assert f'FFmpeg {ffmpeg_version} (' in (root / 'app/Madeira/licenses/THIRD-PARTY-NOTICES.txt').read_text(), \
     'bundled notices must name the FFmpeg version being built'
+gnutls_build = (root / 'build/gnutls-ios/build.sh').read_text()
+assert '"$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH"' in gnutls_build
+assert 'printf \'%s\\n\' "$GNUTLS_HASH" > "$OBJ_DIR/gnutls.done"' in gnutls_build
 assert 'restore-keys:' not in workflow, 'cache reuse must use exact input keys'
 parts = re.split(r'^  ([a-z0-9_-]+):\n', workflow.split('jobs:\n', 1)[1], flags=re.M)
 jobs = dict(zip(parts[1::2], parts[2::2]))
@@ -46,7 +49,7 @@ cases = {
     'rust': ('build/rppairing-ios/src/lib.rs', {'rppairing', 'ipa'}),
     'shaders': ('tools/build/build-shader-headers.sh', {'i386', 'dxmt', 'ipa'}),
     'converter': ('madeira-d3d12/src/unix/madeira_ir_unix.mm', {'dxmt', 'ipa'}),
-    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.9.tar.xz', {'gnutls', 'ipa'}),
+    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.13.tar.xz', {'gnutls', 'ipa'}),
     'font-wrapper': ('tools/build/build-freetype-ios.sh', {'freetype', 'ipa'}),
     'rust-lock': ('build/rppairing-ios/Cargo.lock', {'rppairing', 'ipa'}),
     'rust-notices': ('build/rppairing-ios/notices.py', {'rppairing', 'ipa'}),
