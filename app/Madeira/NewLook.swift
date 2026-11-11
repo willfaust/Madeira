@@ -847,6 +847,7 @@ struct NewLookStoreIcon: View {
 /// downloads sit under them.
 struct NewLookStoresPage: View {
     let open: (NewLookStore) -> Void
+    let software: () -> Void
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     @ObservedObject private var epic = EpicLibrary.shared
     @ObservedObject private var gog = GOGLibrary.shared
@@ -888,6 +889,25 @@ struct NewLookStoresPage: View {
                     .padItem("st-" + store.rawValue, cornerRadius: NewLook.cardRadius, inset: 4) { open(store) }
                 }
             }
+            .newLookCard()
+            Button(action: software) {
+                HStack(spacing: 16) {
+                    NewLookBadge(symbol: "shippingbox")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Software").font(.headline).foregroundStyle(.primary)
+                        Text("Apps and tools from winget").font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .padItem("st-software", cornerRadius: NewLook.cardRadius, inset: 4, press: software)
             .newLookCard()
             NewLookDownloadsSection()
         }
@@ -1562,9 +1582,11 @@ struct NewLookSearchPage: View {
     let store: (NewLookStore) -> Void
     let storeGame: (NewLookSearch.StoreGame) -> Void
     let setting: (SettingsPages.Page) -> Void
+    let software: (String) -> Void
     @ObservedObject private var ready = NewLookGames.shared
     @Environment(\.openURL) private var openURL
     @State private var catalog = NewLookCatalog.Found()
+    @State private var apps: [WingetPackage] = []
     var body: some View {
         let query = text.trimmingCharacters(in: .whitespaces)
         let games = scope == .settings ? [] : ready.matching(query)
@@ -1575,7 +1597,7 @@ struct NewLookSearchPage: View {
         let steam = catalog.steam.filter { !owned.contains(String($0.id)) }
         let itch = catalog.itch
         VStack(alignment: .leading, spacing: 16) {
-            if games.isEmpty && others.isEmpty && stores.isEmpty && pages.isEmpty && steam.isEmpty && itch.isEmpty {
+            if games.isEmpty && others.isEmpty && stores.isEmpty && pages.isEmpty && steam.isEmpty && itch.isEmpty && apps.isEmpty {
                 if catalog.loading { ProgressView().frame(maxWidth: .infinity).padding(.top, 24) }
                 else if catalog.failed {
                     ContentUnavailableView(L("Couldn't search the stores"), systemImage: "wifi.exclamationmark",
@@ -1625,6 +1647,14 @@ struct NewLookSearchPage: View {
                     }
                 }
             }
+            if !apps.isEmpty {
+                NewLookSection(title: L("Software")) {
+                    ForEach(Array(apps.enumerated()), id: \.element.id) { index, p in
+                        NewLookSearchRow(id: "sw-" + p.id, last: index == apps.count - 1, title: p.name, note: p.id + " · " + p.latest,
+                                         action: { software(p.id) }) { NewLookBadge(symbol: "shippingbox") }
+                    }
+                }
+            }
             if !stores.isEmpty {
                 NewLookSection(title: L("Stores")) {
                     ForEach(Array(stores.enumerated()), id: \.element) { index, item in
@@ -1648,6 +1678,14 @@ struct NewLookSearchPage: View {
             }
         }
         .frame(maxWidth: .infinity, minHeight: 500, alignment: .topLeading)
+        .task(id: query) {
+            guard scope == .stores, query.count >= 2 else { apps = []; return }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            await WingetCatalog.shared.load()
+            guard !Task.isCancelled else { return }
+            apps = await WingetCatalog.shared.search(query, limit: 8)
+        }
         // The catalogs are asked a moment after the last key, and only on the Stores tab.
         .task(id: query) {
             // The last query's rows go at once, so a tap never opens the wrong game's page.

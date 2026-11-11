@@ -145,7 +145,7 @@ check('role: .search' not in library and 'NewLookTab.search' not in library and 
       'no Search tab (each tab has its own search field)')
 check('ContentNavigation(stack: !(library.enabled && library.current == nil))' in (app / 'ContentView.swift').read_text(encoding='utf-8'),
       'the library is not inside a second NavigationStack (it breaks Back)')
-check('NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) })' in library and 'case .store(let store):' in library,
+check('NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) }, software: { storesPath.append(NewLookRoute.software) })' in library and 'case .store(let store):' in library,
       'the Stores tab: the list of stores; a store\'s page is pushed inside the tab')
 check('if new == lookTab { lookReselect(new) } else { lookTab = new }' in library
       and 'if !path.wrappedValue.isEmpty { path.wrappedValue = NavigationPath(); return }' in library and 'lookTop[item, default: 0] += 1' in library,

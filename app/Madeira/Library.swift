@@ -5762,7 +5762,7 @@ extension LibraryView {
                         if lookSearching(.stores) {
                             lookResults(.stores)
                         } else {
-                            NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) })
+                            NewLookStoresPage(open: { storesPath.append(NewLookRoute.store($0)) }, software: { storesPath.append(NewLookRoute.software) })
                         }
                     }
                     .modifier(NewLookTabRoot(title: item.title))
@@ -5794,7 +5794,8 @@ extension LibraryView {
                           open: { selected = $0 },
                           store: { storesPath.append(NewLookRoute.store($0)) },
                           storeGame: { game in lookPendingGame = game; storesPath.append(NewLookRoute.store(game.store)) },
-                          setting: { settingsPath.append(NewLookRoute.settings($0)) })
+                          setting: { settingsPath.append(NewLookRoute.settings($0)) },
+                          software: { storesPath.append(NewLookRoute.package($0)) })
     }
 
     /// A tab, from the controller (LB/RB) or a button on a page.
@@ -5870,6 +5871,12 @@ extension LibraryView {
             .navigationBarTitleDisplayMode(.inline)
         case .settings(let page):
             SettingsPageView(page: page, startDock: startDock)
+        case .software:
+            NewLookScrollPage { _ in WingetPage(open: { storesPath.append(NewLookRoute.package($0)) }) }
+                .navigationTitle(L("Software"))
+                .navigationBarTitleDisplayMode(.inline)
+        case .package(let id):
+            WingetDetailPage(id: id)
         case .game(let id, let tab, let depth):
             if let entry = lookGames[id] ?? model.entries.first(where: { $0.id == id }) {
                 LibraryDetail(entry: entry, play: { play($0) }, stack: lookGameStack(tab: tab, depth: depth))
@@ -5894,6 +5901,9 @@ enum NewLookRoute: Hashable {
     case settings(SettingsPages.Page)
     /// A game's page: the tab it is on and how many pages were under it when it opened.
     case game(UUID, tab: NewLookTab, depth: Int)
+    /// Software (winget) and one of its packages, by id.
+    case software
+    case package(String)
 }
 
 /// A tab's first page: Apple's large title, which shrinks into the bar as the page scrolls.
