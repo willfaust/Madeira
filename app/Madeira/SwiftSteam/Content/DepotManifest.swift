@@ -102,6 +102,9 @@ struct DepotManifest {
             case 1: // FileMapping
                 let fileData = try decoder.readBytes()
                 if let entry = try parseFileEntry(from: fileData, depotKey: depotKey) {
+                    guard entry.size <= UInt64(Int64.max) - totalUncompressed else {
+                        throw SteamError.manifestFetchFailed("Manifest size is too large")
+                    }
                     totalUncompressed += entry.size
                     for chunk in entry.chunks {
                         totalCompressed += UInt64(chunk.compressedSize)

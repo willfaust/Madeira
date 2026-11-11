@@ -177,6 +177,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
     require(run('manifest', b'PK\x03\x04\x00'.hex()) == 'threw', 'a 5-byte blob throws')
     require(run('manifest', framed(HUGE_TAG + b'\x00').hex()) == 'threw', 'a manifest with an oversized tag throws')
+    large = field(1, 2, mapping(b'a', 1 << 63, 0))
+    overflow = field(1, 2, mapping(b'a', (1 << 64) - 1, 0)) + field(1, 2, mapping(b'b', 1, 0))
+    require(run('manifest', large.hex()) == 'threw', 'a file larger than Int64.max throws')
+    require(run('manifest', overflow.hex()) == 'threw', 'file sizes that overflow the total throw')
+    limit = field(1, 2, mapping(b'a', (1 << 63) - 1, 0))
+    require(run('manifest', limit.hex()) == 'parsed a:9223372036854775807:0:', 'Int64.max remains valid')
+    over_limit = limit + field(1, 2, mapping(b'b', 1, 0))
+    require(run('manifest', over_limit.hex()) == 'threw', 'a total above Int64.max throws')
     # uint32 fields above 2^32 keep their low 32 bits, as protobuf's uint32 and the other Steam decoders do.
     require(run('manifest', field(1, 2, mapping(b'a', 1, 1 << 32 | 0x40)).hex()) == 'parsed a:1:64:',
             'flags above 2^32 keep their low 32 bits')
