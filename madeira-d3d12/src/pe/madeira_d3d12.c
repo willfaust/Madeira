@@ -18956,6 +18956,11 @@ static int mad_sc_init(void) {
                 char uuid[40] = "";
                 DWORD ul = GetEnvironmentVariableA("MADEIRA_APP_IMAGE_UUID", uuid, sizeof uuid);   /* set by the app: not a switch */
                 if (!ul || ul >= sizeof uuid) uuid[0] = 0;
+                /* madeira-duo: a build whose converter identity is pinned (MADEIRA_CONVERTER_ID_PIN,
+                 * so the DXIL shader pack survives app rebuilds) asserts the converter is unchanged,
+                 * and the app image adds nothing; keyed by it, every app rebuild deleted this cache
+                 * (vk4: 11.6k stages redone in the first session, on the game's loading thread). */
+                if (!mad_cfg_int_pe("shader-cache-app-key", 1)) uuid[0] = 0;   /* madeira-duo: 0 = the cache directory ignores the app build (only for a pinned converter identity); 1 = every app build starts a new cache */
                 mad_sc_feed(&h, g_sc_stamp, strlen(g_sc_stamp) + 1);
                 mad_sc_feed(&h, uuid, strlen(uuid) + 1);
                 mad_sc_feed(&hr, g_sc_rt, strlen(g_sc_rt) < 96 ? 96 : sizeof g_sc_rt);   /* madeira-duo: as in mad_sc_key */
