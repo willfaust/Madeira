@@ -333,13 +333,6 @@ final class ExternalDrives: ObservableObject {
 /// Games already on an external folder: the programs that look like a game's
 /// own executable, a few folders deep. Steam libraries are left to Steam.
 enum ExternalGameScan {
-    private static let skipNames = ["unins", "setup", "install", "redist", "vcredist", "vc_redist", "dxsetup", "directx",
-                                    "dotnet", "crash", "report", "update", "patch", "launcherhelper", "helper", "cef",
-                                    "touchup", "easyanticheat", "battleye", "ue4prereq", "prereq", "config", "settings"]
-    private static let skipFolders: Set<String> = ["steamapps", "_commonredist", "commonredist", "redist",
-                                                   "redistributables", "directx", "dotnet", "vcredist", "__installer", "windows", "system32",
-                                                   "$recycle.bin", "system volume information", "engine", "node_modules"]
-
     /// Every subfolder is searched, within a budget of folders and time so a
     /// huge drive still returns.
     static func scan(_ root: URL) -> [URL] {
@@ -357,8 +350,8 @@ enum ExternalGameScan {
         for item in items.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
             let name = item.lastPathComponent.lowercased()
             if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                if depth > 0, !skipFolders.contains(name), !item.isSymlink { walk(item, depth: depth - 1, into: &found, budget: &budget) }
-            } else if item.pathExtension.lowercased() == "exe", !skipNames.contains(where: { name.hasPrefix($0) || name.contains("_" + $0) || name.contains("-" + $0) }) {
+                if depth > 0, !GameCandidate.skipFolders.contains(name), !item.isSymlink { walk(item, depth: depth - 1, into: &found, budget: &budget) }
+            } else if item.pathExtension.lowercased() == "exe", !GameCandidate.isSkipped(name) {
                 found.append(item)
             }
         }

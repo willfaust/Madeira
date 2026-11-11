@@ -7,7 +7,7 @@
 Source checks that the Stores tab lists every store's section and Other games, and that the
 Steam section keeps its parts: title, sign-in card, downloading games, empty text, Not installed
 (folding on its own) and the installed games folded below; Other games is the games you added
-with Add a game file; pull to refresh on the Library tab; the texts and remembered states.
+with Add a game; pull to refresh on the Library tab; the texts and remembered states.
 The old zoomable grid, store tabs, collapsible titles and MADEIRA_LIBRARY_COLLAPSE/TABS
 switches were removed with the old design.
 The rules behind the groups and the sort are compiled and run by
@@ -55,8 +55,8 @@ require('.refreshable { await refresh() }' in newlook
 
 # ------------------------------------------------------------------ Other games
 others = between(newlook, '    private var otherGames: some View {', '/// The new look\'s question over every tab')
-require('title: L("Add a game file")' in others and 'action: add' in others, 'Other games: Add a game file button')
-require('"Copy a game\'s folder into Madeira › wine › drive_c with the Files app, then tap Add a game file and choose its .exe."' in others
+require('title: L("Add a game")' in others and 'action: add' in others, 'Other games: Add a game button')
+require('"Import a game\'s folder, a .zip or .7z, or an .exe, or choose one already on this device."' in others
         and 'if games.isEmpty {' in others, 'Other games: empty text')
 require('NewLookStore.other.prefix' in others and 'open(game.entry)' in others, 'Other games: the games you added, each opens its page')
 added = between(newlook, 'static func added()', 'static func all(search:')

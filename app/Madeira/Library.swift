@@ -2403,10 +2403,10 @@ private struct LibrarySheets: ViewModifier {
     func body(content: Content) -> some View {
         content
             .sheet(isPresented: $browser) {
-                NavigationStack { ExecutableBrowser(folder: LibraryModel.drive) { entry in
+                AddGameSheet { entry in
                     // madeira-bcd: the page shows the entry as stored, with its recommended settings.
                     model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
-                } }
+                }
                 // A sheet is its own hosting view: without this, iOS 18 lets the controller also move
                 // the system's own focus and press buttons on it, besides Madeira's commands.
                 .modifier(ClaimGamepadEvents())

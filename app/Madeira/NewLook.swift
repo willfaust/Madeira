@@ -990,7 +990,7 @@ struct NewLookStorePage: View {
         }
     }
 
-    /// Other games: the games you added, and Add a game file.
+    /// Other games: the games you added, and Add a game.
     private var otherGames: some View {
         let games = readyGames.all.filter { $0.id.hasPrefix(NewLookStore.other.prefix) }
         let minimum: CGFloat = width < 600 ? 104 : 132
@@ -998,10 +998,10 @@ struct NewLookStorePage: View {
         let columns = max(2, Int((width + spacing) / (minimum + spacing)))
         let ids = games.map { "og-" + $0.id }
         return VStack(alignment: .leading, spacing: 16) {
-            NewLookSheetButton(id: "og-add", title: L("Add a game file"), symbol: "plus", filled: true, action: add)
+            NewLookSheetButton(id: "og-add", title: L("Add a game"), symbol: "plus", filled: true, action: add)
                 .frame(maxWidth: 360)
             if games.isEmpty {
-                Text("Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap Add a game file and choose its .exe.")
+                Text("Import a game's folder, a .zip or .7z, or an .exe, or choose one already on this device.")
                     .font(.subheadline).foregroundStyle(.secondary)
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: columns),

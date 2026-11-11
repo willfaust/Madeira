@@ -37961,46 +37961,6 @@
         }
       }
     },
-    "Add a game file": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Spieldatei hinzufügen"
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Añadir un archivo de juego"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "게임 파일 추가"
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Adicionar um arquivo de jogo"
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Добавить файл игры"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "添加游戏文件"
-          }
-        }
-      }
-    },
     "Back to Stores": {
       "localizations": {
         "de": {
@@ -38037,46 +37997,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "返回商店"
-          }
-        }
-      }
-    },
-    "Copy a game's folder into Madeira › wine › drive_c with the Files app, then tap Add a game file and choose its .exe.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kopiere den Ordner eines Spiels mit der Dateien-App nach Madeira › wine › drive_c, tippe dann auf „Spieldatei hinzufügen“ und wähle seine .exe."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Copia la carpeta de un juego en Madeira › wine › drive_c con la app Archivos, luego toca Añadir un archivo de juego y elige su .exe."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "파일 앱으로 게임 폴더를 Madeira › wine › drive_c에 복사한 다음 게임 파일 추가를 탭하고 .exe를 선택하세요."
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Copie a pasta de um jogo para Madeira › wine › drive_c com o app Arquivos, depois toque em Adicionar um arquivo de jogo e escolha o .exe."
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Скопируйте папку игры в Madeira › wine › drive_c через приложение «Файлы», затем нажмите «Добавить файл игры» и выберите её .exe."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "用“文件”App 把游戏文件夹复制到 Madeira › wine › drive_c，然后轻点“添加游戏文件”并选择它的 .exe。"
           }
         }
       }
@@ -43877,6 +43797,446 @@
           "stringUnit": {
             "state": "translated",
             "value": "请检查网络连接后重试。"
+          }
+        }
+      }
+    },
+    "Best match": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beste Übereinstimmung"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mejor coincidencia"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "가장 유력"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Melhor correspondência"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Лучшее совпадение"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最佳匹配"
+          }
+        }
+      }
+    },
+    "Choose a folder, a .zip or .7z, or an .exe.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wähle einen Ordner, eine .zip- oder .7z-Datei oder eine .exe."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Elige una carpeta, un .zip o .7z, o un .exe."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "폴더, .zip, .7z 또는 .exe를 선택하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escolha uma pasta, um .zip ou .7z, ou um .exe."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выберите папку, файл .zip или .7z либо .exe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择文件夹、.zip 或 .7z 文件，或 .exe。"
+          }
+        }
+      }
+    },
+    "Choose an executable": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Programmdatei wählen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Elegir un ejecutable"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "실행 파일 선택"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Escolher um executável"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выбрать исполняемый файл"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择可执行文件"
+          }
+        }
+      }
+    },
+    "Found on this device": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf diesem Gerät gefunden"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Encontrados en este dispositivo"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 기기에서 찾음"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Encontrados neste dispositivo"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Найдено на этом устройстве"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在此设备上找到"
+          }
+        }
+      }
+    },
+    "Import a game's folder, a .zip or .7z, or an .exe, or choose one already on this device.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importiere den Ordner eines Spiels, eine .zip- oder .7z-Datei oder eine .exe, oder wähle ein bereits vorhandenes Spiel."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importa la carpeta de un juego, un .zip o .7z, o un .exe, o elige uno que ya esté en este dispositivo."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 폴더, .zip, .7z 또는 .exe를 가져오거나 이 기기에 이미 있는 게임을 선택하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importe a pasta de um jogo, um .zip ou .7z, ou um .exe, ou escolha um que já esteja neste dispositivo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Импортируйте папку игры, файл .zip или .7z либо .exe или выберите игру, уже имеющуюся на устройстве."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导入游戏文件夹、.zip 或 .7z 文件，或 .exe，也可选择此设备上已有的游戏。"
+          }
+        }
+      }
+    },
+    "Import a game's folder, a .zip or .7z, or an .exe. Madeira copies it into drive_c › Games.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importiere den Ordner eines Spiels, eine .zip- oder .7z-Datei oder eine .exe. Madeira kopiert sie nach drive_c › Games."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importa la carpeta de un juego, un .zip o .7z, o un .exe. Madeira lo copia en drive_c › Games."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임 폴더, .zip, .7z 또는 .exe를 가져오세요. Madeira가 drive_c › Games로 복사합니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importe a pasta de um jogo, um .zip ou .7z, ou um .exe. O Madeira copia para drive_c › Games."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Импортируйте папку игры, файл .zip или .7z либо .exe. Madeira скопирует его в drive_c › Games."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导入游戏文件夹、.zip 或 .7z 文件，或 .exe。Madeira 会将其复制到 drive_c › Games。"
+          }
+        }
+      }
+    },
+    "Import from Files": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus Dateien importieren"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar desde Archivos"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "파일에서 가져오기"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar de Arquivos"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Импорт из «Файлов»"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从“文件”导入"
+          }
+        }
+      }
+    },
+    "Importing": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird importiert"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importando"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "가져오는 중"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importando"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Импорт"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在导入"
+          }
+        }
+      }
+    },
+    "Looking for programs": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Suche nach Programmen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscando programas"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "프로그램 찾는 중"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Procurando programas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Поиск программ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在查找程序"
+          }
+        }
+      }
+    },
+    "No games found. Import one, or copy it into Madeira › wine › drive_c with Files.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Spiele gefunden. Importiere eines oder kopiere es mit Dateien nach Madeira › wine › drive_c."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se encontraron juegos. Importa uno o cópialo en Madeira › wine › drive_c con Archivos."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "게임을 찾을 수 없습니다. 가져오거나 파일 앱으로 Madeira › wine › drive_c에 복사하세요."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nenhum jogo encontrado. Importe um ou copie-o para Madeira › wine › drive_c com Arquivos."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Игры не найдены. Импортируйте игру или скопируйте её в Madeira › wine › drive_c через «Файлы»."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到游戏。请导入游戏，或用“文件”将其复制到 Madeira › wine › drive_c。"
+          }
+        }
+      }
+    },
+    "No programs found in this folder.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In diesem Ordner wurden keine Programme gefunden."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se encontraron programas en esta carpeta."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 폴더에서 프로그램을 찾을 수 없습니다."
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nenhum programa encontrado nesta pasta."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "В этой папке программ не найдено."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此文件夹中未找到程序。"
           }
         }
       }
