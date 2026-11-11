@@ -93,9 +93,14 @@ if [ -z "$GNUTLS_EXPECTED" ] || [ "$GNUTLS_HASH" != "$GNUTLS_EXPECTED" ]; then
     exit 1
 fi
 if [ "$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH" ]; then
-    extract "gnutls-$GNUTLS_VER.tar.xz" "gnutls-$GNUTLS_VER"
+    GNUTLS_SRC="$OBJ_DIR/gnutls-$GNUTLS_VER-$GNUTLS_HASH"
+    if [ ! -f "$GNUTLS_SRC/.madeira-extracted" ]; then
+        mkdir -p "$GNUTLS_SRC"
+        tar -C "$GNUTLS_SRC" --strip-components=1 -xf "$SRC_DIR/$GNUTLS_TARBALL"
+        touch "$GNUTLS_SRC/.madeira-extracted"
+    fi
     echo "=== configuring GnuTLS ==="
-    cd "$OBJ_DIR/gnutls-$GNUTLS_VER"
+    cd "$GNUTLS_SRC"
     ./configure --host=$HOST --prefix="$PREFIX" \
         --enable-static --disable-shared \
         --with-included-libtasn1 --with-included-unistring \
