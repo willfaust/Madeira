@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that a changed GnuTLS archive is rebuilt, even at the same version."""
+"""Check that changed crypto archives are rebuilt, even at the same version."""
 import hashlib
 import io
 import os
@@ -33,33 +33,41 @@ with tempfile.TemporaryDirectory(prefix='madeira-gnutls-reuse-') as tmp:
         f.chmod(0o755)
     env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ['PATH'],
                TASK_GNUTLS_LOG=str(root / 'configured'), TASK_GNUTLS_PREFIX=str(root / 'toolchains/gnutls-ios'))
-    archive = src / 'gnutls-3.8.13.tar.xz'
+    archives = {name: src / filename for name, filename in {
+        'nettle': 'nettle-3.10.2.tar.gz', 'gnutls': 'gnutls-3.8.13.tar.xz'
+    }.items()}
+    digests = {}
 
-    def write_source(label):
+    def write_source(name, label):
+        archive = archives[name]
         data = ('#!/bin/sh\necho ' + label + ' >> "$TASK_GNUTLS_LOG"\n').encode()
-        with tarfile.open(archive, 'w:xz') as t:
-            member = tarfile.TarInfo('gnutls-3.8.13/configure')
+        with tarfile.open(archive, 'w:gz' if name == 'nettle' else 'w:xz') as t:
+            member = tarfile.TarInfo(archive.name.removesuffix('.tar.gz').removesuffix('.tar.xz') + '/configure')
             member.mode = 0o755
             member.size = len(data)
             t.addfile(member, io.BytesIO(data))
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        (src / 'SHA256SUMS').write_text(digest + '  ' + archive.name + '\n')
-        return digest
+        digests[name] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (src / 'SHA256SUMS').write_text(''.join(digests[n] + '  ' + archives[n].name + '\n' for n in digests))
 
     def run():
         subprocess.run(['bash', str(build / 'build.sh')], env=env, check=True, capture_output=True, text=True)
 
-    first = write_source('first')
+    write_source('nettle', 'n1')
+    write_source('gnutls', 'g1')
     run()
     run()
-    assert (root / 'configured').read_text().splitlines() == ['first'], 'unchanged source should be reused'
-    assert (obj / 'gnutls.done').read_text().strip() == first
-    second = write_source('second')
-    assert first != second
+    assert (root / 'configured').read_text().splitlines() == ['n1', 'g1']
+    assert (obj / 'nettle.done').read_text().strip() == digests['nettle']
+    assert (obj / 'gnutls.done').read_text().strip() == digests['gnutls'] + ':' + digests['nettle']
+    write_source('gnutls', 'g2')
     run()
-    assert (root / 'configured').read_text().splitlines() == ['first', 'second'], 'changed source should be extracted and rebuilt'
-    assert (obj / 'gnutls.done').read_text().strip() == second
-    (src / 'SHA256SUMS').write_text('0' * 64 + '  ' + archive.name + '\n')
-    bad = subprocess.run(['bash', str(build / 'build.sh')], env=env, capture_output=True, text=True)
-    assert bad.returncode != 0 and 'sha256 mismatch' in bad.stderr, 'invalid source must fail even with a completed marker'
-print('PASS: GnuTLS source reuse tracks the verified archive')
+    write_source('nettle', 'n2')
+    run()
+    assert (root / 'configured').read_text().splitlines() == ['n1', 'g1', 'g2', 'n2', 'g2']
+    assert (obj / 'gnutls.done').read_text().strip() == digests['gnutls'] + ':' + digests['nettle']
+    for name in archives:
+        sums = ''.join(('0' * 64 if n == name else digests[n]) + '  ' + archives[n].name + '\n' for n in digests)
+        (src / 'SHA256SUMS').write_text(sums)
+        bad = subprocess.run(['bash', str(build / 'build.sh')], env=env, capture_output=True, text=True)
+        assert bad.returncode != 0 and 'sha256 mismatch' in bad.stderr
+print('PASS: crypto source reuse tracks verified archives')
