@@ -1043,9 +1043,12 @@ BOOL winios_pProcessEvents(DWORD mask) {
         fprintf(stderr, "[winios] pProcessEvents called n=%u\n", cnt); fflush(stderr);
     }
     /* Desktop debugging: dump the full window tree every ~5s. Runs on
-     * this wine thread (valid TEB — the dump walks win32u internals). */
+     * this wine thread (valid TEB — the dump walks win32u internals).
+     * Off unless MADEIRA_DESKTOP_TREE_DUMP=1: it walked every window of every desktop session
+     * twelve times a minute and wrote the lot to the log, for a diagnostic nobody asked for. */
     static int desk = -1;
-    if (desk < 0) desk = ({ const char *d = getenv("MADEIRA_DESKTOP"); d && *d == '1'; });
+    if (desk < 0) desk = ({ const char *d = getenv("MADEIRA_DESKTOP"), *t = getenv("MADEIRA_DESKTOP_TREE_DUMP");
+                            d && *d == '1' && t && *t == '1'; });
     if (desk) {
         static double next_tree_dump;
         double now = CACurrentMediaTime();
