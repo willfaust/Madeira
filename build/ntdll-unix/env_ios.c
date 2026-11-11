@@ -1950,6 +1950,10 @@ static void load_global_options( const UNICODE_STRING *image )
 }
 
 
+#ifdef WINE_IOS
+static void ios_fatal_startup_error( const char *err, ... ) __attribute__((noreturn, format(printf,1,2)));
+#endif
+
 /*************************************************************************
  *		build_wow64_parameters
  */
@@ -1975,7 +1979,18 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
 
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, limit_2g - 1, &size,
                                       MEM_COMMIT, PAGE_READWRITE );
+#ifdef WINE_IOS
+    /* #590: the block has to fit below the 32-bit process's 2 GB line. The
+     * assert other builds keep would end the whole app here (pseudo-processes
+     * are threads of one task), and without assertions the NULL block would be
+     * written to. End only this pseudo-process, naming the status, as a 32-bit
+     * main image that cannot be mapped does. */
+    if (status)
+        ios_fatal_startup_error( "the 32-bit process parameters (%lu bytes) could not be allocated "
+                                 "below 2 GB: status %x\n", (unsigned long)size, (unsigned)status );
+#else
     assert( !status );
+#endif
 
     wow64_params->AllocationSize  = size;
     wow64_params->Size            = size;
@@ -2109,8 +2124,8 @@ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module )
  * while pthread_exit() ends only this process's boot thread.  Not a
  * replacement for NtTerminateProcess — that needs a live wineserver process
  * and process parameters, neither of which is guaranteed this early.
+ * Declared above build_wow64_parameters, which uses it too.
  */
-static void ios_fatal_startup_error( const char *err, ... ) __attribute__((noreturn, format(printf,1,2)));
 static void ios_fatal_startup_error( const char *err, ... )
 {
     char buf[512];
