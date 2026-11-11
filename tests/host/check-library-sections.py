@@ -64,19 +64,20 @@ require('entry.desktop != true' in added and 'entry.listedInLibrary' in added an
         'Other games: the games you added (no Steam game, no desktop)')
 
 # ------------------------------------------------------------------ Steam and Not installed
-require('LibrarySectionHeader(title: "Steam", count: installed.count)' in body, 'Steam: installed count in the title')
+require('LibrarySectionHeader(title: "", count: nil)' in body and 'LibrarySectionHeader(title: "Steam"' not in body,
+        'Steam: no title row of its own (the store page names the store); the spinner and Workshop stay')
 require('if steam.refreshing { ProgressView().accessibilityLabel("Refreshing Steam library") }' in body,
         'Steam: a progress indicator while the library refreshes')
 require('@AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true' in section and
         '@AppStorage("madeiraNewLookSteamShowInstalled") private var showInstalled = false' in section,
         'Steam: remembered states (Not installed open by default, installed folded away at first)')
 require('collapsible' not in section, 'Steam: no collapsible title any more')
-order = [body.index('LibrarySectionHeader(title: "Steam"'), body.index('SteamSignInCard { showSignIn = true }'),
+order = [body.index('LibrarySectionHeader(title: "", count: nil)'), body.index('SteamSignInCard { showSignIn = true }'),
          body.index('LibraryCells(items: top, layout: layout, width: width)'),
          body.index('"Pull down to load your Steam library."'), body.index('Text("Not installed").font(.headline)'),
          body.index('LibraryCells(items: groups.notInstalled, layout: layout, width: width)'),
          body.index('NewLookInstalledHeader(id: "steam-installed"')]
-require(order == sorted(order), 'Steam order: title, sign-in, downloading, empty text, Not installed, installed (folded)')
+require(order == sorted(order), 'Steam order: spinner row, sign-in, downloading, empty text, Not installed, installed (folded)')
 require('let fold = part == .all' in body and 'let top = fold ? groups.downloading : groups.downloading + installed' in body,
         'Steam: the store page lists downloading games first and folds the installed ones below')
 require('"No Windows games were found in this Steam library."' in body, 'Steam: empty-library text')

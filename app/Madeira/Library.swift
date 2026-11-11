@@ -2286,7 +2286,7 @@ struct LibrarySectionHeader<Trailing: View>: View {
     @ViewBuilder var trailing: Trailing
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.title2.bold())
+            if !title.isEmpty { Text(title).font(.title2.bold()) }
             if let count, count > 0 { Text("\(count)").font(.subheadline).foregroundStyle(.secondary) }
             Spacer()
             trailing
@@ -5866,12 +5866,10 @@ extension LibraryView {
     @ViewBuilder private func lookRoute(_ route: NewLookRoute) -> some View {
         switch route {
         case .store(let store):
-            NewLookScrollPage { width in
+            NewLookScrollPage(title: store.name) { width in
                 NewLookStorePage(store: store, width: width, open: { selected = $0 }, add: { browser = true },
                                  shown: { lookOpenPending(store) })
             }
-            .navigationTitle(store.name)
-            .navigationBarTitleDisplayMode(.inline)
         case .settings(let page):
             SettingsPageView(page: page, startDock: startDock)
         case .software:

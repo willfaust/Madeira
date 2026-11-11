@@ -74,9 +74,8 @@ struct EAGamesSection: View {
         let top = mine.filter { ea.downloads[$0.id] != nil }
         let folded = mine.filter { ea.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "EA app", count: mine.count) {
-                if ea.refreshing { ProgressView().accessibilityLabel("Refreshing EA library") }
-            }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if ea.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing EA library") } }
             if !ea.signedIn {
                 EASignInCard { sheets.eaSignIn = true }
             }

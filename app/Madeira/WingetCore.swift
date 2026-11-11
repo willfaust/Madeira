@@ -117,7 +117,7 @@ indirect enum WingetYAML {
 // MARK: Manifest
 
 struct WingetInstaller: Equatable {
-    var architecture = "", type = "", url = "", sha256 = ""
+    var architecture = "", type = "", url = "", sha256 = "", locale = "", productCode = ""
     var scope: String?, nestedType: String?, nestedFiles: [String] = []
     /// Silent, SilentWithProgress, Interactive, Custom, Log, InstallLocation.
     var switches: [String: String] = [:]
@@ -126,11 +126,14 @@ struct WingetInstaller: Equatable {
 }
 
 struct WingetAgreement: Equatable { var label: String, text: String, url: String }
+struct WingetLink: Equatable { var label: String, url: String }
 
 struct WingetManifest: Equatable {
     var id = "", name = "", publisher = "", version = ""
     var shortDescription = "", description = "", license = "", licenseURL = "", packageURL = "", iconURL = "", releaseDate = ""
-    var tags: [String] = [], agreements: [WingetAgreement] = []
+    var author = "", publisherURL = "", supportURL = "", privacyURL = "", copyright = "", copyrightURL = "", moniker = ""
+    var releaseNotes = "", releaseNotesURL = ""
+    var tags: [String] = [], commands: [String] = [], documentation: [WingetLink] = [], agreements: [WingetAgreement] = []
     var installers: [WingetInstaller] = []
 
     /// Parses a merged manifest. The top level holds defaults an installer may override.
@@ -142,6 +145,11 @@ struct WingetManifest: Equatable {
         m.shortDescription = s(top, "ShortDescription"); m.description = s(top, "Description")
         m.license = s(top, "License"); m.licenseURL = s(top, "LicenseUrl"); m.packageURL = s(top, "PackageUrl")
         m.releaseDate = s(top, "ReleaseDate")
+        m.author = s(top, "Author"); m.publisherURL = s(top, "PublisherUrl"); m.supportURL = s(top, "PublisherSupportUrl")
+        m.privacyURL = s(top, "PrivacyUrl"); m.copyright = s(top, "Copyright"); m.copyrightURL = s(top, "CopyrightUrl")
+        m.moniker = s(top, "Moniker"); m.releaseNotes = s(top, "ReleaseNotes"); m.releaseNotesURL = s(top, "ReleaseNotesUrl")
+        m.commands = (top["Commands"]?.items ?? []).compactMap(\.string)
+        m.documentation = (top["Documentations"]?.items ?? []).map { WingetLink(label: s($0, "DocumentLabel"), url: s($0, "DocumentUrl")) }
         m.tags = (top["Tags"]?.items ?? []).compactMap(\.string)
         let icons = (top["Icons"]?.items ?? []).filter { $0["IconUrl"]?.string != nil }
         m.iconURL = s(icons.first { $0["IconFileType"]?.string == "png" } ?? icons.first, "IconUrl")
@@ -153,6 +161,7 @@ struct WingetManifest: Equatable {
             var i = WingetInstaller()
             i.architecture = s(item, "Architecture"); i.url = s(item, "InstallerUrl"); i.sha256 = s(item, "InstallerSha256").lowercased()
             i.type = pick("InstallerType")?.string ?? ""
+            i.locale = pick("InstallerLocale")?.string ?? ""; i.productCode = pick("ProductCode")?.string ?? ""
             i.scope = pick("Scope")?.string; i.nestedType = pick("NestedInstallerType")?.string
             i.nestedFiles = (pick("NestedInstallerFiles")?.items ?? []).compactMap { $0["RelativeFilePath"]?.string }
             for source in [top["InstallerSwitches"], item["InstallerSwitches"]] {

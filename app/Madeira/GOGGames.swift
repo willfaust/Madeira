@@ -76,9 +76,8 @@ struct GOGGamesSection: View {
         let top = mine.filter { gog.downloads[$0.id] != nil }
         let folded = mine.filter { gog.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "GOG", count: mine.count) {
-                if gog.refreshing { ProgressView().accessibilityLabel("Refreshing GOG library") }
-            }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if gog.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing GOG library") } }
             if !gog.signedIn {
                 GOGSignInCard { sheets.gogSignIn = true }
             }

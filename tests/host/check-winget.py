@@ -61,6 +61,18 @@ Installers:
   - 3010
   Scope: machine
 License: Microsoft Software License
+Author: The Author
+PublisherUrl: https://example.test/pub
+PublisherSupportUrl: https://example.test/support
+Copyright: Copyright (c) Microsoft
+Moniker: vscode
+ReleaseNotes: |
+  Fixed things.
+  Added things.
+ReleaseNotesUrl: https://example.test/notes
+Documentations:
+- DocumentLabel: Docs
+  DocumentUrl: https://example.test/docs
 ManifestType: merged
 PackageIdentifier: Microsoft.VisualStudioCode
 PackageName: Microsoft Visual Studio Code
@@ -170,6 +182,9 @@ expect(a?.type == "inno" && a?.scope == "user" && a?.architecture == "x64" && a?
 expect(b?.type == "nullsoft" && b?.switches["Silent"] == "/S" && b?.switches["Custom"] == "/mergetasks=!runcode" && b?.successCodes == [3010], "installer overrides and merges switches")
 expect(a?.sha256 == "706ba8b326d87637a923676076eb2936060be6de5c0ae4691b3f76d2cac54f08", "installer hash lower-cased")
 expect(m?.agreements.first?.label == "EULA", "agreements")
+expect(m?.author == "The Author" && m?.supportURL == "https://example.test/support" && m?.moniker == "vscode" && m?.commands == ["code"], "more fields")
+expect(m?.releaseNotes == "Fixed things.\nAdded things." && m?.documentation.first == WingetLink(label: "Docs", url: "https://example.test/docs"), "block scalar and documentation")
+expect(a?.locale == "en-US", "installer locale from the top level")
 expect(wingetSHA256Hex(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "sha256")
 expect(WingetManifest.parse("nonsense") == nil && WingetManifest.parse("") == nil, "not a manifest")
 

@@ -530,7 +530,9 @@ struct SteamGamesSection: View {
             if Self.shown {
                 VStack(alignment: .leading, spacing: 14) {
                     if part != .notInstalled {
-                    LibrarySectionHeader(title: "Steam", count: installed.count) {
+                    // The store page already says "Steam": only the spinner and Workshop are left of the old title row.
+                    if steam.refreshing || (SteamOwnedLibrary.workshopEnabled && signedIn && !installed.isEmpty) {
+                    LibrarySectionHeader(title: "", count: nil) {
                         if steam.refreshing { ProgressView().accessibilityLabel("Refreshing Steam library") }
                         // The Workshop area: every installed game's Workshop items (SteamWorkshop.swift).
                         if SteamOwnedLibrary.workshopEnabled && signedIn && !installed.isEmpty {
@@ -540,6 +542,7 @@ struct SteamGamesSection: View {
                             .accessibilityLabel("Steam Workshop")
                             .padItem("steam-workshop", cornerRadius: 12) { showWorkshop = true }
                         }
+                    }
                     }
                     // Signed out: the account's games need a sign-in; say so here rather
                     // than hiding the section until someone finds Settings › Steam.

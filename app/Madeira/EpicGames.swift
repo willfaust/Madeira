@@ -77,9 +77,8 @@ struct EpicGamesSection: View {
         let top = mine.filter { epic.downloads[$0.id] != nil }
         let folded = mine.filter { epic.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "Epic Games", count: mine.count) {
-                if epic.refreshing { ProgressView().accessibilityLabel("Refreshing Epic Games library") }
-            }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if epic.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing Epic Games library") } }
             if !epic.signedIn {
                 EpicSignInCard { sheets.epicSignIn = true }
             }

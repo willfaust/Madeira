@@ -121,6 +121,9 @@ extension View {
 struct NewLookScrollPage<Content: View>: View {
     var refresh: (() async -> Void)? = nil
     var top = 0
+    /// The page's title in the bar: shown only once the page has scrolled past its own big title.
+    var title: String? = nil
+    @State private var scrolled = false
     @ViewBuilder var content: (CGFloat) -> Content
     var body: some View {
         GeometryReader { geo in
@@ -130,6 +133,7 @@ struct NewLookScrollPage<Content: View>: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         Color.clear.frame(height: 0).id(Self.topID)
+                            .background(GeometryReader { Color.clear.preference(key: NewLookScrollOffsetKey.self, value: $0.frame(in: .named("nl-scroll")).minY) })
                         content(width)
                     }
                     .padding(.horizontal, side)
@@ -138,6 +142,8 @@ struct NewLookScrollPage<Content: View>: View {
                     .frame(maxWidth: 1100, alignment: .leading)
                     .frame(maxWidth: .infinity)
                 }
+                .coordinateSpace(name: "nl-scroll")
+                .modifier(NewLookScrollWatch(scrolled: $scrolled))
                 .scrollIndicators(.hidden)
                 // Search: dragging the page puts the keyboard away.
                 .scrollDismissesKeyboard(.immediately)
@@ -151,8 +157,41 @@ struct NewLookScrollPage<Content: View>: View {
             }
         }
         .background { NewLookBackground().ignoresSafeArea() }
+        .modifier(NewLookScrolledTitle(title: title, scrolled: scrolled))
     }
     private static var topID: String { "page-top" }
+}
+
+/// Whether the page has scrolled past its own big title: the scroll view's own offset on iOS 18 and
+/// later, the content's position in the scroll view's space before that.
+private struct NewLookScrollWatch: ViewModifier {
+    @Binding var scrolled: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content.onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 48 } action: { _, past in
+                if past != scrolled { scrolled = past }
+            }
+        } else {
+            content.onPreferenceChange(NewLookScrollOffsetKey.self) { y in
+                let past = y < -48
+                if past != scrolled { scrolled = past }
+            }
+        }
+    }
+}
+
+private struct NewLookScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// The bar shows a page's title only after the page's own big one has scrolled away.
+private struct NewLookScrolledTitle: ViewModifier {
+    let title: String?
+    let scrolled: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if let title { content.navigationTitle(scrolled ? title : "").navigationBarTitleDisplayMode(.inline) } else { content }
+    }
 }
 
 /// Pull to refresh, only where the page has something to refresh.
@@ -843,6 +882,21 @@ struct NewLookStoreIcon: View {
     }
 }
 
+/// The Software row's icon: the Windows glyph, white on Windows blue, the size of a store's.
+struct NewLookSoftwareIcon: View {
+    var size: CGFloat = 30
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size * 0.27, style: .continuous)
+        Image("StoreWindows").renderingMode(.template).resizable().scaledToFit()
+            .padding(size * 0.2).foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Color(red: 0, green: 0x78 / 255, blue: 0xd4 / 255))
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+            .accessibilityHidden(true)
+    }
+}
+
 /// The Stores tab: every store, whether you are signed in, and how many of its games are here; the
 /// downloads sit under them.
 struct NewLookStoresPage: View {
@@ -892,7 +946,7 @@ struct NewLookStoresPage: View {
             .newLookCard()
             Button(action: software) {
                 HStack(spacing: 16) {
-                    NewLookBadge(symbol: "shippingbox")
+                    NewLookSoftwareIcon(size: 40)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Software").font(.headline).foregroundStyle(.primary)
                         Text("Apps and tools from winget").font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
@@ -1019,7 +1073,6 @@ struct NewLookStorePage: View {
         let ids = games.map { "og-" + $0.id }
         return VStack(alignment: .leading, spacing: 16) {
             NewLookSheetButton(id: "og-add", title: L("Add a game"), symbol: "plus", filled: true, action: add)
-                .frame(maxWidth: 360)
             if games.isEmpty {
                 Text("Import a game's folder, a .zip or .7z, or an .exe, or choose one already on this device.")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -1027,7 +1080,7 @@ struct NewLookStorePage: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: spacing, alignment: .top), count: columns),
                           alignment: .leading, spacing: 16) {
                     ForEach(games) { game in
-                        Button { open(game.entry) } label: { NewLookCover(game: game) }
+                        Button { open(game.entry) } label: { NewLookCover(game: game, note: game.note.components(separatedBy: " · ").dropFirst().joined(separator: " · ")) }
                             .buttonStyle(LibraryCardButtonStyle())
                             .padItem("og-" + game.id, cornerRadius: 16, grid: "other") { open(game.entry) }
                     }
@@ -1414,6 +1467,8 @@ struct NewLookBanner: View {
 
 struct NewLookCover: View {
     let game: LibraryReadyGame
+    /// Replaces the line under the title (a store's own page need not repeat the store's name).
+    var note: String?
     @Environment(\.libraryCardPressed) private var pressed
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1424,7 +1479,7 @@ struct NewLookCover: View {
                 .scaleEffect(pressed ? 0.95 : 1)
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: pressed)
             Text(game.entry.title).font(.subheadline.weight(.semibold)).lineLimit(2).foregroundStyle(.primary)
-            Text(game.note).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+            Text(note ?? game.note).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -1650,8 +1705,8 @@ struct NewLookSearchPage: View {
             if !apps.isEmpty {
                 NewLookSection(title: L("Software")) {
                     ForEach(Array(apps.enumerated()), id: \.element.id) { index, p in
-                        NewLookSearchRow(id: "sw-" + p.id, last: index == apps.count - 1, title: p.name, note: p.id + " · " + p.latest,
-                                         action: { software(p.id) }) { NewLookBadge(symbol: "shippingbox") }
+                        NewLookSearchRow(id: "sw-" + p.id, last: index == apps.count - 1, inset: 16, title: p.name, note: p.id + " · " + p.latest,
+                                         action: { software(p.id) }) { EmptyView() }
                     }
                 }
             }
@@ -1757,6 +1812,8 @@ struct NewLookSearchFocus: ViewModifier {
 struct NewLookSearchRow<Leading: View>: View {
     let id: String
     let last: Bool
+    /// Where the separator starts: under the words, which sit after a 46-wide picture unless there is none.
+    var inset: CGFloat = 16 + 46 + 12
     let title: String
     let note: String
     let action: () -> Void
@@ -1778,7 +1835,7 @@ struct NewLookSearchRow<Leading: View>: View {
         }
         .buttonStyle(.plain)
         .overlay(alignment: .bottom) {
-            if !last { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 0.5).padding(.leading, 16 + 46 + 12) }
+            if !last { Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 0.5).padding(.leading, inset) }
         }
         .padItem(id, cornerRadius: NewLook.cardRadius, inset: 4, press: action)
     }

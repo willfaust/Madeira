@@ -67,9 +67,8 @@ struct ItchGamesSection: View {
         let top = mine.filter { itch.downloads[$0.id] != nil }
         let folded = mine.filter { itch.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "itch.io", count: mine.count) {
-                if itch.refreshing { ProgressView().accessibilityLabel("Refreshing itch.io library") }
-            }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if itch.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing itch.io library") } }
             if !itch.signedIn {
                 Button { sheets.itchSignIn = true } label: {
                     HStack(spacing: 14) {
