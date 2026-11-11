@@ -15,7 +15,7 @@ Statically linked into the main executable (`Madeira` / `Madeira.debug.dylib`):
 | FEXCore and helpers (`FEX/build-ios/*.a`), including the rpmalloc fork under FEX/External | MIT (rpmalloc: 0BSD) | GPL-3.0-or-later + additional permission (Will Faust commits; Ryan Houdek rpmalloc commits stay 0BSD) | statically linked |
 | DXMT unix side + airconv (`libdxmt_combined.a`) | MIT | GPL-3.0-or-later + additional permission | statically linked |
 | LLVM (inside `libdxmt_combined.a`) | Apache-2.0 with LLVM exception | none | statically linked |
-| gnutls 3.8.9, nettle 3.10.1, hogweed 3.10.1, gmp 6.3.0 | LGPL-2.1+ / dual LGPL-3+ or GPL-2+ / dual LGPL-3+ or GPL-2+ | none; Madeira elects LGPL-3.0-or-later for the dual-licensed three | statically linked; LGPL obligations apply; sources tracked in build/gnutls-ios/src |
+| gnutls 3.8.13, nettle 3.10.2, hogweed 3.10.2, gmp 6.3.0 | LGPL-2.1+ / dual LGPL-3+ or GPL-2+ / dual LGPL-3+ or GPL-2+ | none; Madeira elects LGPL-3.0-or-later for the dual-licensed three | statically linked; LGPL obligations apply; sources tracked in build/gnutls-ios/src |
 | FFmpeg 7.1.1 (libavformat, libavcodec, libavutil, libswresample) | LGPL-2.1-or-later (built `--disable-gpl --disable-nonfree --disable-version3`) | none | statically linked, winegstreamer's unix side only; LGPL obligations apply; the unmodified release tarball is tracked in `build/ffmpeg/src` with its SHA-256 and built by `build/ffmpeg/build.sh` |
 | Madeira app (Swift/ObjC), native D3D12 runtime (`madeira_d3d12.dll`, PE) | GPL-3.0-or-later + additional permission | author-owned | |
 | Steam sign-in, owned library and downloads (`app/Madeira/SwiftSteam/`) | derived from Jfishin's Madeira Steam client | GPL-3.0-or-later + additional permission, Copyright 2026 Jfishin, 125hz | Jfishin's permission: Madeira Discord server, 2026-09-22 ("do whatever you want with it"), seen by Will Faust in that server; he also confirmed that he wrote the depot downloader himself; per-file audit in `docs/STEAM_SIGNIN.md` and `docs/STEAM_LIBRARY.md` |
@@ -77,7 +77,7 @@ plugins):
 - Confirm every downstream Wine patch is author-owned (git authorship is
   evidence, not proof); note any patch adapted from third-party code.
 - DONE 2026-09-16: election recorded in `app/Madeira/licenses/THIRD-PARTY-NOTICES.txt`:
-  GnuTLS 3.8.9 LGPL-2.1-or-later; Nettle/Hogweed 3.10.1 and GMP 6.3.0 taken
+  GnuTLS LGPL-2.1-or-later; Nettle/Hogweed and GMP taken
   under LGPL-3.0-or-later. Their source tarballs and SHA-256 sums are
   tracked in `build/gnutls-ios/src`. The licence texts ship in the bundle.
 - Steam sign-in: Jfishin's permission is a chat message, not a written

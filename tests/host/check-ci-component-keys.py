@@ -38,7 +38,7 @@ cases = {
     'rust': ('build/rppairing-ios/src/lib.rs', {'rppairing', 'ipa'}),
     'shaders': ('tools/build/build-shader-headers.sh', {'i386', 'dxmt', 'ipa'}),
     'converter': ('madeira-d3d12/src/unix/madeira_ir_unix.mm', {'dxmt', 'ipa'}),
-    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.9.tar.xz', {'gnutls', 'ipa'}),
+    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.13.tar.xz', {'gnutls', 'ipa'}),
     'font-wrapper': ('tools/build/build-freetype-ios.sh', {'freetype', 'ipa'}),
     'rust-lock': ('build/rppairing-ios/Cargo.lock', {'rppairing', 'ipa'}),
     'rust-notices': ('build/rppairing-ios/notices.py', {'rppairing', 'ipa'}),
