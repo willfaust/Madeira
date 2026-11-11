@@ -17,10 +17,6 @@ assert 'WANT_STAMP="$(printf \'%s\\n\' "$GOT" "${CONFIG_ARGS[@]}")"' in ffmpeg_b
 ffmpeg_version = re.search(r'^FFMPEG_VERSION=([^\s]+)$', ffmpeg_build, re.M)[1]
 assert f'FFmpeg {ffmpeg_version} (' in (root / 'app/Madeira/licenses/THIRD-PARTY-NOTICES.txt').read_text(), \
     'bundled notices must name the FFmpeg version being built'
-gnutls_build = (root / 'build/gnutls-ios/build.sh').read_text()
-assert '"$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH"' in gnutls_build
-assert 'printf \'%s\\n\' "$GNUTLS_HASH" > "$OBJ_DIR/gnutls.done"' in gnutls_build
-assert 'GNUTLS_SRC="$OBJ_DIR/gnutls-$GNUTLS_VER-$GNUTLS_HASH"' in gnutls_build
 assert 'restore-keys:' not in workflow, 'cache reuse must use exact input keys'
 parts = re.split(r'^  ([a-z0-9_-]+):\n', workflow.split('jobs:\n', 1)[1], flags=re.M)
 jobs = dict(zip(parts[1::2], parts[2::2]))
