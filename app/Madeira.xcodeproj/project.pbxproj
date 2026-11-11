@@ -71,6 +71,8 @@
 		A1F00C05 /* WingetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C05 /* WingetViews.swift */; };
 		A1F00C06 /* WingetPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C06 /* WingetPlan.swift */; };
 		A1F00C07 /* WingetInstalls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C07 /* WingetInstalls.swift */; };
+		A1F00C08 /* PEResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C08 /* PEResources.swift */; };
+		A1F00C09 /* InstallerWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C09 /* InstallerWatch.swift */; };
 		A1008B01 /* BackgroundRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2008B01 /* BackgroundRun.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
@@ -363,6 +365,8 @@
 		A2F00C05 /* WingetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetViews.swift; sourceTree = "<group>"; };
 		A2F00C06 /* WingetPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetPlan.swift; sourceTree = "<group>"; };
 		A2F00C07 /* WingetInstalls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetInstalls.swift; sourceTree = "<group>"; };
+		A2F00C08 /* PEResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEResources.swift; sourceTree = "<group>"; };
+		A2F00C09 /* InstallerWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallerWatch.swift; sourceTree = "<group>"; };
 		A2008B01 /* BackgroundRun.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRun.swift; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
@@ -703,6 +707,8 @@
 				A2F00C05 /* WingetViews.swift */,
 				A2F00C06 /* WingetPlan.swift */,
 				A2F00C07 /* WingetInstalls.swift */,
+				A2F00C08 /* PEResources.swift */,
+				A2F00C09 /* InstallerWatch.swift */,
 				A2008B01 /* BackgroundRun.swift */,
 				A2000600 /* SteamInstall.swift */,
 				A2000609 /* ContentDecryptor.swift */,
@@ -1185,6 +1191,8 @@
 				A1F00C05 /* WingetViews.swift in Sources */,
 				A1F00C06 /* WingetPlan.swift in Sources */,
 				A1F00C07 /* WingetInstalls.swift in Sources */,
+				A1F00C08 /* PEResources.swift in Sources */,
+				A1F00C09 /* InstallerWatch.swift in Sources */,
 				A1008B01 /* BackgroundRun.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,

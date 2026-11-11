@@ -30,6 +30,49 @@ enum GameImporter {
     }
 }
 
+/// What a program says about itself, used when it is added: its product name as the title and its
+/// icon, on a poster, as the first cover (a Steam match or a picked image replaces it).
+enum GameMetadata {
+    static func apply(_ entry: LibraryEntry) async -> LibraryEntry {
+        guard let program = try? ExternalDrives.nativeURL(entry.relativePath) else { return entry }
+        var e = entry
+        let found = await Task.detached(priority: .utility) { () -> (String?, Data?) in
+            let r = PEResources(url: program)
+            return (r?.productName, r?.icon)
+        }.value
+        if let name = found.0, !generic(name) { e.title = name }
+        if e.coverFile == nil, let ico = found.1, let jpeg = poster(ico) {
+            let dir = LibraryModel.documents.appendingPathComponent("madeira-art", isDirectory: true)
+            let file = e.id.uuidString + ".jpg"
+            if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
+               (try? jpeg.write(to: dir.appendingPathComponent(file), options: .atomic)) != nil { e.coverFile = file }
+        }
+        return e
+    }
+
+    /// A product name that says nothing about the game (Windows' own, an engine's, an installer's).
+    static func generic(_ name: String) -> Bool {
+        let n = name.lowercased()
+        return n.count < 2 || ["microsoft", "windows", "wine", "unity", "unreal", "setup", "install"].contains { n.hasPrefix($0) }
+    }
+
+    /// The icon centred on a 2:3 poster: a square icon would be cropped by a cover's shape.
+    private static func poster(_ ico: Data) -> Data? {
+        guard let icon = UIImage(data: ico) else { return nil }
+        let size = CGSize(width: 600, height: 900)
+        return UIGraphicsImageRenderer(size: size).jpegData(withCompressionQuality: 0.9) { ctx in
+            let colors = [UIColor(white: 0.20, alpha: 1).cgColor, UIColor(white: 0.11, alpha: 1).cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                ctx.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+            }
+            let side: CGFloat = 340
+            let rect = CGRect(x: (size.width - side) / 2, y: (size.height - side) / 2 - 30, width: side, height: side)
+            ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 14), blur: 28, color: UIColor.black.withAlphaComponent(0.45).cgColor)
+            icon.draw(in: rect)
+        }
+    }
+}
+
 extension LibraryModel {
     /// The library entry that already runs this program, if any.
     func entry(running url: URL) -> LibraryEntry? {
@@ -89,6 +132,8 @@ struct GameCandidateView: View {
     @ObservedObject private var library = LibraryModel.shared
     @State private var programs: [URL]?
     @State private var error: String?
+    /// A setup-looking program picked: run it as an installer, or add it as a game anyway.
+    @State private var installer: URL?
 
     var body: some View {
         List {
@@ -113,6 +158,12 @@ struct GameCandidateView: View {
             if let error { Text(error).foregroundStyle(.red) }
         }
         .navigationTitle(GameCandidate.title(folder.lastPathComponent))
+        .confirmationDialog(L("This looks like an installer"), isPresented: Binding(get: { installer != nil }, set: { if !$0 { installer = nil } }),
+                            titleVisibility: .visible, presenting: installer) { url in
+            Button(L("Run installer")) { runInstaller(url) }
+            Button(L("Add as a game")) { addGame(url) }
+            Button(L("Cancel"), role: .cancel) {}
+        } message: { _ in Text("Run it to install the game. Madeira then looks for what it added.") }
         .task {
             let folder = folder
             programs = await Task.detached(priority: .userInitiated) { GameCandidate.ranked(GameCandidate.programs(in: folder), in: folder) }.value
@@ -121,10 +172,24 @@ struct GameCandidateView: View {
 
     private func add(_ url: URL) {
         if let existing = library.entry(running: url) { select(existing); return }
+        if GameCandidate.isInstaller(url.lastPathComponent) { installer = url; return }
+        addGame(url)
+    }
+
+    private func addGame(_ url: URL) {
         do {
             var entry = try LibraryModel.inspect(url)
             entry.title = GameCandidate.title(folder.lastPathComponent)
             select(entry)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// The setup program as a library entry, watched: when it has been played, the game it added is found.
+    private func runInstaller(_ url: URL) {
+        do {
+            var entry = try LibraryModel.inspect(url)
+            entry.title = String(format: L("Install %@"), GameCandidate.title(folder.lastPathComponent))
+            Task { await InstallerWatch.begin(entry.id); select(entry) }
         } catch { self.error = error.localizedDescription }
     }
 }

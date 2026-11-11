@@ -31,7 +31,7 @@ assert 'case "battle.net launcher.exe", "battle.net.exe":' in recs and 'case "ba
 # Wired into Add a Program (top of drive_c only) and Launch arguments.
 assert ('if BattleNet.enabled, folder.standardizedFileURL == LibraryModel.drive.standardizedFileURL {\n'
         '                BattleNetAddRow(select: select)\n') in library
-assert ('LaunchFlagChips(arguments: $entry.arguments)\n'
+assert ('LaunchFlagChips(arguments: $entry.arguments, graphicsAPI: entry.graphicsAPI)\n'
         '                // [battle-net] Battle.net: one button per Blizzard game.\n'
         '                if BattleNet.enabled, BattleNet.isBattleNet(entry) { BattleNetGameChips(arguments: $entry.arguments) }\n') in library
 # In the app target.

@@ -2404,8 +2404,12 @@ private struct LibrarySheets: ViewModifier {
         content
             .sheet(isPresented: $browser) {
                 AddGameSheet { entry in
-                    // madeira-bcd: the page shows the entry as stored, with its recommended settings.
-                    model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
+                    Task {
+                        // A new entry takes its program's product name and icon; one already in the library stays as it is.
+                        let entry = model.entries.contains { $0.id == entry.id } ? entry : await GameMetadata.apply(entry)
+                        // madeira-bcd: the page shows the entry as stored, with its recommended settings.
+                        model.save(entry); browser = false; selected = model.entries.first { $0.id == entry.id } ?? entry
+                    }
                 }
                 // A sheet is its own hosting view: without this, iOS 18 lets the controller also move
                 // the system's own focus and press buttons on it, besides Madeira's commands.
@@ -2478,6 +2482,7 @@ struct LibraryDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
     @State private var importCover = false
+    @State private var changeProgram = false
     /// madeira-bcd: this game's own switches as the fork stores them (reloadBCD).
     @State private var bcd = BCDGameValues()
     @State private var findCover = false
@@ -2977,7 +2982,7 @@ struct LibraryDetail: View {
                 TextField("Launch arguments", text: $entry.arguments.plainLaunchArguments, axis: .vertical)
                     .font(.body.monospaced()).lineLimit(1...4)
                     .autocorrectionDisabled().textInputAutocapitalization(.never).smartPunctuationOff()
-                LaunchFlagChips(arguments: $entry.arguments)
+                LaunchFlagChips(arguments: $entry.arguments, graphicsAPI: entry.graphicsAPI)
                 // [battle-net] Battle.net: one button per Blizzard game.
                 if BattleNet.enabled, BattleNet.isBattleNet(entry) { BattleNetGameChips(arguments: $entry.arguments) }
                 // What the next start runs (ml1163: in the Wine desktop, a batch file or
@@ -3138,7 +3143,25 @@ struct LibraryDetail: View {
             }
         }
         if entry.steamAppID == nil && entry.desktop != true {
-            Section("Executable") { Text(entry.windowsPath).font(.caption.monospaced()).textSelection(.enabled) }
+            Section {
+                Text(entry.windowsPath).font(.caption.monospaced()).textSelection(.enabled)
+                // Another program of the same game, keeping its settings (a game moved, a launcher chosen instead).
+                if model.entries.contains(where: { $0.id == entry.id }) {
+                    Button("Change executable") { changeProgram = true }
+                        .padItem("gb-change-exe", cornerRadius: 12, inset: -6) { changeProgram = true }
+                        .sheet(isPresented: $changeProgram) {
+                            NavigationStack {
+                                ExecutableBrowser(folder: (try? ExternalDrives.nativeURL(entry.relativePath))?.deletingLastPathComponent() ?? LibraryModel.drive) { chosen in
+                                    entry.relativePath = chosen.relativePath
+                                    entry.bits = chosen.bits
+                                    entry.graphicsAPI = chosen.graphicsAPI ?? entry.graphicsAPI
+                                    changeProgram = false
+                                }
+                            }
+                            .modifier(ClaimGamepadEvents())
+                        }
+                }
+            } header: { Text("Executable") }
             if model.entries.contains(where: { $0.id == entry.id }) { GameMoveSection(entry: $entry) }
             Section { Button("Remove from library", role: .destructive) { remove = true }.padItem("gb-remove", cornerRadius: 12, inset: -6) { remove = true } }
         }
@@ -3674,7 +3697,18 @@ struct ControllerModeChoice: View {
 /// other, as do -windowed and -fullscreen. Quoted arguments are kept whole.
 struct LaunchFlagChips: View {
     @Binding var arguments: String
+    /// What the program's imports say it draws with (LibraryEntry.graphicsAPI); nil when they say nothing.
+    var graphicsAPI: String?
     static let flags = ["-dx11", "-dx12", "-dx10", "-dx9", "-windowed", "-fullscreen", "-nosplash"]
+
+    /// A program that imports Direct3D 9 is offered -dx9, not -dx12; one that imports only OpenGL or
+    /// Vulkan, no -dx flag. With nothing known (a game that loads its renderer later) every flag stays.
+    static func flags(for api: String?) -> [String] {
+        guard let api else { return flags }
+        let levels = ["-dx9": "D3D9", "-dx10": "D3D10", "-dx11": "D3D11", "-dx12": "D3D12"]
+        let has = levels.filter { api.contains($0.value) }
+        return flags.filter { flag in levels[flag] == nil || has[flag] != nil }
+    }
 
     /// The arguments split at unquoted spaces and tabs, quotes kept.
     static func tokens(_ text: String) -> [String] {
@@ -3710,7 +3744,7 @@ struct LaunchFlagChips: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(Self.flags, id: \.self) { flag in
+                ForEach(Self.flags(for: graphicsAPI), id: \.self) { flag in
                     let on = Self.contains(arguments, flag)
                     Button(flag) { arguments = Self.toggled(arguments, flag) }
                         .buttonStyle(.bordered).tint(on ? Color.accentColor : Color.gray)
@@ -5657,8 +5691,8 @@ extension LibraryView {
         lookTabView
         .modifier(LibrarySheets(model: model, browser: $browser, selected: $selected, jit: jit))
         // A winget install or uninstall that was played: what it changed in the registry.
-        .task { WingetInstalls.shared.reconcile() }
-        .onChange(of: model.current) { _, current in if current == nil { WingetInstalls.shared.reconcile() } }
+        .task { WingetInstalls.shared.reconcile(); InstallerWatch.reconcile() }
+        .onChange(of: model.current) { _, current in if current == nil { WingetInstalls.shared.reconcile(); InstallerWatch.reconcile() } }
         // A game's page: every way of opening one (a cover, the banner, Search, a store's game,
         // Add a game) sets `selected`; in the new look it is pushed on the open tab instead.
         .onChange(of: selected?.id) { _, id in

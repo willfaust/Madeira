@@ -15,7 +15,9 @@ enum GameCandidate {
     /// Folders a scan does not enter.
     static let skipFolders: Set<String> = ["steamapps", "_commonredist", "commonredist", "redist",
                                            "redistributables", "directx", "dotnet", "vcredist", "__installer", "windows", "system32",
-                                           "$recycle.bin", "system volume information", "engine", "node_modules"]
+                                           "$recycle.bin", "system volume information", "engine", "node_modules",
+                                           // user profiles and Downloads: installers and app data, not games
+                                           "users"]
     /// What looks like an installer (a subset of `skipNames`): offered as an installer, not a game.
     private static let installerNames = ["setup", "install", "unins"]
 
