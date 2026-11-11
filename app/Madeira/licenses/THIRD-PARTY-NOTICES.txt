@@ -41,7 +41,7 @@ Statically linked into the application binary:
   BSD-3-Clause selected from its BSD / GPL-2.0 dual licence (ZSTD-BSD.txt).
 - liblzma: public domain / 0BSD, the iOS SDK's system library, linked
   dynamically; nothing is bundled.
-- FFmpeg 7.1.1 (libavformat, libavcodec, libavutil, libswresample):
+- FFmpeg 7.1.5 (libavformat, libavcodec, libavutil, libswresample):
   LGPL-2.1-or-later (LGPL-2.1.txt), configured without any GPL, version3 or
   non-free component. Source tarball (the unmodified upstream release from
   ffmpeg.org) and its SHA-256: the Madeira repository, build/ffmpeg/src,
