@@ -10,6 +10,8 @@ import re
 root = Path(__file__).resolve().parents[2]
 workflow = (root / '.github/workflows/build.yml').read_text()
 ffmpeg_build = (root / 'build/ffmpeg/build.sh').read_text()
+assert 'BUILD="$OBJ_DIR/build-$FFMPEG_VERSION"' in ffmpeg_build, \
+    'FFmpeg versions must not share build objects'
 assert 'WANT_STAMP="$(printf \'%s\\n\' "$GOT" "${CONFIG_ARGS[@]}")"' in ffmpeg_build, \
     'FFmpeg configure stamp must change with the verified source archive'
 ffmpeg_version = re.search(r'^FFMPEG_VERSION=([^\s]+)$', ffmpeg_build, re.M)[1]

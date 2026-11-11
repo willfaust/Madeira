@@ -54,7 +54,7 @@ APP_DIR="$REPO_ROOT/app/Madeira"
 FFMPEG_VERSION=7.1.5
 TARBALL="$SRC_DIR/ffmpeg-${FFMPEG_VERSION}.tar.xz"
 SRC="$OBJ_DIR/ffmpeg-${FFMPEG_VERSION}"
-BUILD="$OBJ_DIR/build"
+BUILD="$OBJ_DIR/build-$FFMPEG_VERSION"
 
 RECONFIGURE=0
 for a in "$@"; do
@@ -157,7 +157,7 @@ if [ $RECONFIGURE -eq 1 ] || [ ! -f "$BUILD/config.h" ]; then
     cd "$BUILD"
     # A reconfigure over an old tree keeps stale objects of components that
     # are now disabled; start clean.
-    [ ! -f Makefile ] || make distclean >/dev/null 2>&1 || true
+    [ ! -f Makefile ] || make distclean > /dev/null 2>&1
     "$SRC/configure" "${CONFIG_ARGS[@]}" > "$OBJ_DIR/configure.log" 2>&1 \
         || { echo "configure failed; see $OBJ_DIR/configure.log" >&2; exit 1; }
     printf '%s' "$WANT_STAMP" > "$STAMP"
