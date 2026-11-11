@@ -29,7 +29,7 @@ Statically linked into the application binary:
   LGPL-2.1-or-later (LGPL-2.1.txt), kept under
   LGPL-2.1-or-later as received. Source: the dxmt submodule of the
   Madeira repository; its LICENSE-MADEIRA.md lists the imported files.
-- GnuTLS 3.8.9: LGPL-2.1-or-later (LGPL-2.1.txt).
+- GnuTLS 3.8.13: LGPL-2.1-or-later (LGPL-2.1.txt).
 - Nettle 3.10.1 and Hogweed 3.10.1: dual-licensed LGPL-3.0-or-later /
   GPL-2.0-or-later; Madeira elects LGPL-3.0-or-later (LGPL-3.0.txt).
 - GMP 6.3.0: dual-licensed LGPL-3.0-or-later / GPL-2.0-or-later; Madeira

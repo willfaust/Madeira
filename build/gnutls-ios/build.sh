@@ -13,7 +13,7 @@
 #  - GnuTLS: bundled libtasn1 + unistring, no p11-kit (PKCS#11 is
 #    meaningless on iOS), no tools/tests/docs.
 #  - Stage markers make re-runs skip completed stages; delete
-#    obj/<stage>.done to force a rebuild.
+#    obj/<stage>.done to force a rebuild. The GnuTLS marker tracks its source.
 set -e
 
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,7 +24,7 @@ PREFIX="$REPO_ROOT/toolchains/gnutls-ios"
 
 GMP_VER=6.3.0
 NETTLE_VER=3.10.1
-GNUTLS_VER=3.8.9
+GNUTLS_VER=3.8.13
 
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 CLANG=$(xcrun -f clang)
@@ -85,7 +85,14 @@ fi
 echo "nettle ok"
 
 # ---------------- GnuTLS ----------------
-if [ ! -f "$OBJ_DIR/gnutls.done" ]; then
+GNUTLS_TARBALL="gnutls-$GNUTLS_VER.tar.xz"
+GNUTLS_EXPECTED=$(awk -v f="$GNUTLS_TARBALL" '$2 == f { print $1 }' "$SRC_DIR/SHA256SUMS")
+GNUTLS_HASH=$(shasum -a 256 "$SRC_DIR/$GNUTLS_TARBALL" | cut -d' ' -f1)
+if [ -z "$GNUTLS_EXPECTED" ] || [ "$GNUTLS_HASH" != "$GNUTLS_EXPECTED" ]; then
+    echo "sha256 mismatch for $GNUTLS_TARBALL" >&2
+    exit 1
+fi
+if [ "$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH" ]; then
     extract "gnutls-$GNUTLS_VER.tar.xz" "gnutls-$GNUTLS_VER"
     echo "=== configuring GnuTLS ==="
     cd "$OBJ_DIR/gnutls-$GNUTLS_VER"
@@ -104,7 +111,7 @@ if [ ! -f "$OBJ_DIR/gnutls.done" ]; then
     echo "=== building GnuTLS ==="
     make -j$JOBS > "$OBJ_DIR/gnutls-make.log" 2>&1
     make install >> "$OBJ_DIR/gnutls-make.log" 2>&1
-    touch "$OBJ_DIR/gnutls.done"
+    printf '%s\n' "$GNUTLS_HASH" > "$OBJ_DIR/gnutls.done"
 fi
 echo "GnuTLS ok"
 
