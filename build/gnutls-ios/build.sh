@@ -13,7 +13,7 @@
 #  - GnuTLS: bundled libtasn1 + unistring, no p11-kit (PKCS#11 is
 #    meaningless on iOS), no tools/tests/docs.
 #  - Stage markers make re-runs skip completed stages; delete
-#    obj/<stage>.done to force a rebuild. The GnuTLS marker tracks its source.
+#    obj/<stage>.done to force a rebuild. Nettle and GnuTLS track their sources.
 set -e
 
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,7 +23,7 @@ OBJ_DIR="$BUILD_DIR/obj"
 PREFIX="$REPO_ROOT/toolchains/gnutls-ios"
 
 GMP_VER=6.3.0
-NETTLE_VER=3.10.1
+NETTLE_VER=3.10.2
 GNUTLS_VER=3.8.13
 
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -69,10 +69,22 @@ fi
 echo "GMP ok"
 
 # ---------------- nettle ----------------
-if [ ! -f "$OBJ_DIR/nettle.done" ]; then
-    extract "nettle-$NETTLE_VER.tar.gz" "nettle-$NETTLE_VER"
+NETTLE_TARBALL="nettle-$NETTLE_VER.tar.gz"
+NETTLE_EXPECTED=$(awk -v f="$NETTLE_TARBALL" '$2 == f { print $1 }' "$SRC_DIR/SHA256SUMS")
+NETTLE_HASH=$(shasum -a 256 "$SRC_DIR/$NETTLE_TARBALL" | cut -d' ' -f1)
+if [ -z "$NETTLE_EXPECTED" ] || [ "$NETTLE_HASH" != "$NETTLE_EXPECTED" ]; then
+    echo "sha256 mismatch for $NETTLE_TARBALL" >&2
+    exit 1
+fi
+if [ "$(cat "$OBJ_DIR/nettle.done" 2>/dev/null || true)" != "$NETTLE_HASH" ]; then
+    NETTLE_SRC="$OBJ_DIR/nettle-$NETTLE_VER-$NETTLE_HASH"
+    if [ ! -f "$NETTLE_SRC/.madeira-extracted" ]; then
+        mkdir -p "$NETTLE_SRC"
+        tar -C "$NETTLE_SRC" --strip-components=1 -xf "$SRC_DIR/$NETTLE_TARBALL"
+        touch "$NETTLE_SRC/.madeira-extracted"
+    fi
     echo "=== configuring nettle ==="
-    cd "$OBJ_DIR/nettle-$NETTLE_VER"
+    cd "$NETTLE_SRC"
     ./configure --host=$HOST --prefix="$PREFIX" \
         --enable-static --disable-shared --disable-documentation \
         --with-include-path="$PREFIX/include" --with-lib-path="$PREFIX/lib" \
@@ -80,7 +92,7 @@ if [ ! -f "$OBJ_DIR/nettle.done" ]; then
     echo "=== building nettle ==="
     make -j$JOBS > "$OBJ_DIR/nettle-make.log" 2>&1
     make install >> "$OBJ_DIR/nettle-make.log" 2>&1
-    touch "$OBJ_DIR/nettle.done"
+    printf '%s\n' "$NETTLE_HASH" > "$OBJ_DIR/nettle.done"
 fi
 echo "nettle ok"
 
@@ -92,8 +104,9 @@ if [ -z "$GNUTLS_EXPECTED" ] || [ "$GNUTLS_HASH" != "$GNUTLS_EXPECTED" ]; then
     echo "sha256 mismatch for $GNUTLS_TARBALL" >&2
     exit 1
 fi
-if [ "$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH" ]; then
-    GNUTLS_SRC="$OBJ_DIR/gnutls-$GNUTLS_VER-$GNUTLS_HASH"
+GNUTLS_STAMP="$GNUTLS_HASH:$NETTLE_HASH"
+if [ "$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_STAMP" ]; then
+    GNUTLS_SRC="$OBJ_DIR/gnutls-$GNUTLS_VER-$GNUTLS_HASH-$NETTLE_HASH"
     if [ ! -f "$GNUTLS_SRC/.madeira-extracted" ]; then
         mkdir -p "$GNUTLS_SRC"
         tar -C "$GNUTLS_SRC" --strip-components=1 -xf "$SRC_DIR/$GNUTLS_TARBALL"
@@ -116,7 +129,7 @@ if [ "$(cat "$OBJ_DIR/gnutls.done" 2>/dev/null || true)" != "$GNUTLS_HASH" ]; th
     echo "=== building GnuTLS ==="
     make -j$JOBS > "$OBJ_DIR/gnutls-make.log" 2>&1
     make install >> "$OBJ_DIR/gnutls-make.log" 2>&1
-    printf '%s\n' "$GNUTLS_HASH" > "$OBJ_DIR/gnutls.done"
+    printf '%s\n' "$GNUTLS_STAMP" > "$OBJ_DIR/gnutls.done"
 fi
 echo "GnuTLS ok"
 
