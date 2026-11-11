@@ -181,34 +181,29 @@ extension WingetDetailPage {
         let choice = WingetPlan.choose(m.installers)
         let record = installs.records[m.id]
         let waiting = installs.pending.flatMap { $0.id == m.id ? $0 : nil }
-        NewLookSection(title: nil) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let record {
-                    Label(String(format: L("Installed %@"), record.version), systemImage: "checkmark.circle.fill").font(.headline)
-                    if WingetPlan.isNewer(m.version, than: record.version) {
-                        action(String(format: L("Update to %@"), m.version), primary: true) { await prepare(m) }
-                    }
-                    if let first = installs.programs(for: m.id).first {
-                        action(L("Add to library"), primary: false) { addToLibrary(first, name: m.name) }
-                    }
-                    action(L("Uninstall"), primary: false) { await uninstall(m.id) }
-                } else if let waiting {
-                    Text(waiting.kind == .install ? L("The installer is ready in your library. Open it and tap Play to install.")
-                                                  : L("The uninstaller is ready in your library. Open it and tap Play."))
-                        .font(.subheadline)
-                    action(L("Open it"), primary: true) { library.showDetail = waiting.entry }
-                } else {
-                    switch choice {
-                    case .success: action(L("Install"), primary: true) { await prepare(m) }
-                    case .failure(let why): Text(Self.reason(why)).font(.subheadline).foregroundStyle(.secondary)
-                    }
-                    Text("Runs the publisher's installer inside Madeira's Windows. Nothing is installed on your iPhone.")
-                        .font(.footnote).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            if let record {
+                Label(String(format: L("Installed %@"), record.version), systemImage: "checkmark.circle.fill").font(.headline)
+                if WingetPlan.isNewer(m.version, than: record.version) {
+                    action(String(format: L("Update to %@"), m.version), primary: true) { await prepare(m) }
                 }
-                if let note = installs.messages[m.id] { Text(note).font(.footnote).foregroundStyle(.orange) }
-                if let actionError { Text(actionError).font(.footnote).foregroundStyle(.red) }
+                if let first = installs.programs(for: m.id).first {
+                    action(L("Add to library"), primary: false) { addToLibrary(first, name: m.name) }
+                }
+                action(L("Uninstall"), primary: false) { await uninstall(m.id) }
+            } else if let waiting {
+                Text(waiting.kind == .install ? L("The installer is ready in your library. Open it and tap Play to install.")
+                                              : L("The uninstaller is ready in your library. Open it and tap Play."))
+                    .font(.subheadline)
+                action(L("Open it"), primary: true) { library.showDetail = waiting.entry }
+            } else {
+                switch choice {
+                case .success: action(L("Install"), primary: true) { await prepare(m) }
+                case .failure(let why): Text(Self.reason(why)).font(.subheadline).foregroundStyle(.secondary)
+                }
             }
-            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            if let note = installs.messages[m.id] { Text(note).font(.footnote).foregroundStyle(.orange) }
+            if let actionError { Text(actionError).font(.footnote).foregroundStyle(.red) }
         }
     }
 

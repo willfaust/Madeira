@@ -45041,46 +45041,6 @@
         }
       }
     },
-    "Runs the publisher's installer inside Madeira's Windows. Nothing is installed on your iPhone.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Führt das Installationsprogramm des Herausgebers in Madeiras Windows aus. Auf deinem iPhone wird nichts installiert."
-          }
-        },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ejecuta el instalador del editor dentro del Windows de Madeira. No se instala nada en tu iPhone."
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "게시자의 설치 프로그램을 Madeira의 Windows 안에서 실행합니다. iPhone에는 아무것도 설치되지 않습니다."
-          }
-        },
-        "pt-BR": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Executa o instalador do editor dentro do Windows do Madeira. Nada é instalado no seu iPhone."
-          }
-        },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Запускает установщик издателя внутри Windows в Madeira. На iPhone ничего не устанавливается."
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在 Madeira 的 Windows 中运行发布者的安装程序。不会在你的 iPhone 上安装任何内容。"
-          }
-        }
-      }
-    },
     "This app has no installer Madeira can use.": {
       "localizations": {
         "de": {
