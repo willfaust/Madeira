@@ -47,6 +47,8 @@ extern void wineserver_log_set_file(const char *path);
 // Set NLS directory for wineserver (defined in unicode_ios.c)
 extern void wineserver_set_nls_dir(const char *path);
 
+static volatile int g_wineserver_running = 0;
+
 // Override wineserver's fatal_error to use logging and pthread_exit instead of exit(1)
 void fatal_error( const char *err, ... ) {
     va_list args;
@@ -55,6 +57,9 @@ void fatal_error( const char *err, ... ) {
     vsnprintf(buf, sizeof(buf), err, args);
     va_end(args);
     wine_log_msg_impl("[Wine] FATAL: %s", buf);
+    // pthread_exit skips the end of wineserver_thread_func, so clear the flag here. The launch
+    // waits on it and startWineProcess refuses to start Wine without a server (#562).
+    g_wineserver_running = 0;
     // Don't call exit(1) — that kills the whole app.
     // Instead, terminate just this thread.
     pthread_exit(NULL);
@@ -68,7 +73,6 @@ extern int debug_level;
 volatile int g_wineserver_should_stop = 0;
 
 static pthread_t g_wineserver_thread;
-static volatile int g_wineserver_running = 0;
 static char *g_prefix_path = NULL;
 
 static void *wineserver_thread_func(void *arg) {
