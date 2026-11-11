@@ -27412,6 +27412,79 @@ done:
 static unsigned int ios_fd_reuse( const void *addr, SIZE_T size, ULONG type );   /* defined below */
 #endif
 
+#ifdef WINE_IOS
+/* madeira-duo SECTION VIEWS LARGER THAN THEIR FILE (env.MADEIRA_SECTION_VIEW_GROW,
+ * default 1; 0 = Wine's plain refusal). LMDB (mdb.master, as Path of Exile 2
+ * links it) opens a database on Windows with NtCreateSection(SEC_RESERVE, the
+ * data file, no size) and maps a MEM_RESERVE view of its whole map size over a
+ * file of two pages, then commits pages as the database grows: Windows accepts a
+ * reserve view past the end of a growable file section. Wine refuses it
+ * (STATUS_INVALID_VIEW_SIZE, which Win32 reports as ERROR_ACCESS_DENIED), so
+ * PoE2's Shaders and Pipelines caches have failed to open in every session (on
+ * the phone and under Proton alike) and the game rebuilt both each time.
+ * For a MEM_RESERVE view of a regular file, the file is extended to the end of
+ * the view right before it is mapped (sparse: no blocks until written), which is
+ * what LMDB's own MDB_FIXEDSIZE build asks Windows for, so no page of the view
+ * lies past the end of the file and none can fault. The descriptor is checked
+ * against the section first -- a linked regular file of exactly the section's
+ * size -- since a file that is not this section's must never be touched (see
+ * ml570 in map_file_into_view_ex). A view over 64 GB, a file that does not match
+ * or a failed extension keeps Wine's refusal. [section-grow] logs each case
+ * (first 16) with the file's path. LMDB then commits the pages it uses with
+ * VirtualAlloc(MEM_COMMIT), as Windows wants for a reserve view; a file view's
+ * pages are committed from the start here, so a commit inside a grown view
+ * succeeds (Wine answers STATUS_ALREADY_COMMITTED for other file views, and
+ * LMDB would fail its first page). The grown views are kept by address
+ * (ios_grown_views, under virtual_mutex like both callers). */
+static struct { void *base; SIZE_T size; } ios_grown_views[16];
+static int ios_section_view_grown( const struct file_view *view )
+{
+    int i;
+    for (i = 0; i < 16; i++)
+        if (ios_grown_views[i].base == view->base && ios_grown_views[i].size == view->size) return 1;
+    return 0;
+}
+static int ios_section_view_grow_ok( ULONG alloc_type, ULONGLONG end )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SECTION_VIEW_GROW" );
+        on = !(e && e[0] == '0');
+    }
+    return on && (alloc_type & MEM_RESERVE) && end <= (64ull << 30);
+}
+static unsigned int ios_section_view_grow( int fd, mem_size_t full_size, ULONGLONG end, void *base, SIZE_T size )
+{
+    static LONG said;
+    struct stat st;
+    char path[PATH_MAX];
+    const char *why = NULL;
+    strcpy( path, "?" );
+    if (fd < 0 || fstat( fd, &st )) why = "no file behind the section";
+    else
+    {
+        fcntl( fd, F_GETPATH, path );
+        if (!S_ISREG( st.st_mode ) || st.st_nlink < 1) why = "not a linked regular file";
+        else if ((mem_size_t)st.st_size != full_size) why = "the file's size is not the section's (not this section's file?)";
+        else if (ftruncate( fd, (off_t)end )) why = strerror( errno );
+    }
+    if (!why)
+    {
+        int i, slot = 0;
+        for (i = 0; i < 16; i++) if (!ios_grown_views[i].base || ios_grown_views[i].base == base) { slot = i; break; }
+        ios_grown_views[slot].base = base;
+        ios_grown_views[slot].size = size;
+    }
+    if (InterlockedIncrement( &said ) <= 16)
+        dprintf( 2, "[section-grow] %s: reserve view %p+0x%lx over %s (0x%llx bytes)%s%s "
+                    "(env.MADEIRA_SECTION_VIEW_GROW = 0 turns it off)\n",
+                 why ? "REFUSED" : "file extended to cover the view", base, (unsigned long)size, path,
+                 (unsigned long long)full_size, why ? ": " : "", why ? why : "" );
+    return why ? STATUS_INVALID_VIEW_SIZE : STATUS_SUCCESS;
+}
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -27436,6 +27509,9 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     HANDLE shared_file;
     LARGE_INTEGER offset;
     sigset_t sigset;
+#ifdef WINE_IOS
+    ULONGLONG ios_grow_to = 0;   /* madeira-duo section-view-grow: extend the file to this before mapping */
+#endif
 
 #ifdef WINE_IOS
     /* WoW64 guest window: same rule as allocate_virtual_memory — a ceiling
@@ -27518,7 +27594,16 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     if (*size_ptr)
     {
         size = *size_ptr;
-        if (size > full_size - offset.QuadPart) return STATUS_INVALID_VIEW_SIZE;
+        if (size > full_size - offset.QuadPart)
+        {
+#ifdef WINE_IOS
+            /* madeira-duo section-view-grow: a reserve view past the end of its file */
+            if (!image_info && ios_section_view_grow_ok( alloc_type, (ULONGLONG)offset.QuadPart + size ))
+                ios_grow_to = (ULONGLONG)offset.QuadPart + size;
+            else
+#endif
+            return STATUS_INVALID_VIEW_SIZE;
+        }
     }
     else
     {
@@ -27557,6 +27642,15 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
 #endif
     res = map_view( &view, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
     if (res) goto done;
+#ifdef WINE_IOS
+    /* madeira-duo section-view-grow: only once the address range is ours */
+    if (ios_grow_to && (res = ios_section_view_grow( unix_handle, full_size, (ULONGLONG)offset.QuadPart + size,
+                                                      view->base, view->size )))
+    {
+        delete_view( view );
+        goto done;
+    }
+#endif
 
     TRACE( "handle=%p size=%lx offset=%s\n", handle, size, wine_dbgstr_longlong(offset.QuadPart) );
     /* iOS: SEC_COMMIT shared sections (e.g. \KernelObjects\__wine_session) need
@@ -31621,7 +31715,8 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         int any_committed = 0;   /* ml1077: only FRESH commits may be file-backed (a hole reads as zero) */
         { const char *pg; for (pg = base; pg < (const char *)base + size; pg += page_size) if (get_page_vprot( pg ) & VPROT_COMMITTED) { any_committed = 1; break; } }
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
-        else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
+        else if (view->protect & SEC_FILE)   /* madeira-duo section-view-grow: a grown view's pages are committed already */
+            status = ios_section_view_grown( view ) ? STATUS_SUCCESS : STATUS_ALREADY_COMMITTED;
         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
         else if (!(status = set_protection( view, base, size, protect )))
         {
