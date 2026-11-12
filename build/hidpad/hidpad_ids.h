@@ -7,10 +7,12 @@
  * With `env.MADEIRA_PAD_MODE = hid` in madeira.cfg, player 1's controller
  * reaches Windows as a HID game controller instead of an XInput pad: a
  * DualSense (Sony 054C:0CE6, so Sony's libScePad and anything matching Sony's
- * IDs sees a PlayStation pad) or a generic HID gamepad. The app decides
+ * IDs sees a PlayStation pad) or a generic HID gamepad. With
+ * `env.MADEIRA_PAD_MODE = xbox360` it stays an XInput pad and is also the HID
+ * device Windows lists beside a wired Xbox 360 controller. The app decides
  * which at session start (GamepadInput.swift) and exports it as
- * MADEIRA_HIDPAD=dualsense|generic before the wineserver starts. Two places
- * read it:
+ * MADEIRA_HIDPAD=dualsense|generic|xbox360 before the wineserver starts. Two
+ * places read it:
  *
  *   build/wineserver/hidpad_ios.c   the device object, its reads and IOCTLs
  *   build/ntdll-unix/server_ios.c   the registry entries setupapi enumerates
@@ -31,6 +33,7 @@
 #define HIDPAD_KIND_NONE      0
 #define HIDPAD_KIND_DUALSENSE 1
 #define HIDPAD_KIND_GENERIC   2
+#define HIDPAD_KIND_XBOX360   3
 
 /* GUID_DEVINTERFACE_HID, lower case as setupapi writes it. */
 #define HIDPAD_HID_INTERFACE_GUID "{4d1e55b2-f16f-11cf-88cb-001111000030}"
@@ -86,6 +89,23 @@ static const struct hidpad_identity hidpad_identities[] =
           "HID_DEVICE" },
         "{4d616465-6972-6148-4944-47454e000001}",
         "Madeira", "Madeira Gamepad", "",
+    },
+    {
+        /* The device Windows lists beside a wired Xbox 360 controller's XInput
+         * pad (xusb22's HID view, rev 0114), with the name DirectInput gives
+         * it. Microsoft's own IDs, for games that look for an Xbox controller
+         * among the devices (by vendor and product, or "IG_" in the path, as
+         * Microsoft's IsXInputDevice) before they read XInput (Far Cry 4).
+         * Player 1 stays an XInput pad (GamepadInput.beginPadSession); Wine's
+         * xinput lists only its WINEXINPUT interface and Windows.Gaming.Input
+         * skips "&IG_" devices, so neither sees a second pad. */
+        HIDPAD_KIND_XBOX360, "xbox360", 0x045e, 0x028e, 0x0114,
+        "HID\\VID_045E&PID_028E&IG_00", "9&4d616465&0&0000",
+        { "HID\\VID_045E&PID_028E&REV_0114&IG_00", "HID\\VID_045E&PID_028E&IG_00",
+          "HID\\VID_045E&UP:0001_U:0005", "HID_DEVICE_SYSTEM_GAME", "HID_DEVICE_UP:0001_U:0005",
+          "HID_DEVICE" },
+        "{4d616465-6972-6148-4944-583336300001}",
+        "Microsoft", "Controller (XBOX 360 For Windows)", "",
     },
 };
 

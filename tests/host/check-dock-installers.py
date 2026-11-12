@@ -51,16 +51,33 @@ madsync = (root / 'build/madsync/madsync.c').read_text(encoding='utf-8')
 
 # ------------------------------------------------------------------ static rules
 lower = installers.lower()
-# One documented exception: .NET Framework setups (isDotNetFramework, env.MADEIRA_INSTALL_SKIP_DOTNET),
-# which do not finish under Wine's own .NET. Outside that function no name decides anything.
+# Two documented exceptions: .NET Framework setups (isDotNetFramework, env.MADEIRA_INSTALL_SKIP_DOTNET),
+# which do not finish under Wine's own .NET, and the installers of a launcher several games share
+# (sharedLauncherInstallers, env.MADEIRA_INSTALL_SKIP_LAUNCHER). Outside those no name decides anything.
 named = re.sub(r'nonisolated static func isdotnetframework.*?\n    \}\n', '', lower, flags=re.S)
-require('func isdotnetframework' in lower and 'dotnetfx' not in named and
+named = re.sub(r'    /// the installers of a launcher that several games share.*?\n    \]\n', '', named, flags=re.S)
+require('func isdotnetframework' in lower and 'dotnetfx' not in named and 'ubisoft' not in named and
+        'static let sharedlauncherinstallers' in lower and
         not any(n in lower for n in ('dxsetup', 'vcredist', 'vc_redist', 'dxwebsetup', 'physx', 'ndp4')),
-        'no redistributable names: nothing is decided by program name, except the .NET Framework setups')
+        'no redistributable names: nothing is decided by program name, except the .NET Framework setups and the shared launcher table')
+require('provided: { skipLauncher && installsPresentLauncher($0, drive: drive) })' in installers and
+        'try SteamInstallScripts.mark(provided, prefix: prefix)' in installers and
+        '[.done, .provided, .pending, .limit].contains($0.status)' in installers,
+        'prepare plans a present launcher\'s installer as provided, records it done and counts it as a third-party install')
+require('let values = launcherValues(found, drive: drive)' in installers and
+        installers.index('let values = launcherValues(found, drive: drive)') < installers.index('guard !found.isEmpty else {', installers.index('static func prepare(')),
+        'prepare writes a present shared launcher\'s values before planning, for every start that finds its installer')
+bridge = (app / 'WineProcessBridge.m').read_text(encoding='utf-8')
+require('sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"]' in installers and 'launcherSessionEnv = launcherLines(found)' in installers and
+        re.search(r'unsetenv\("MADEIRA_MADSYNC_SESSION"\)\n\s+\}\n(?:\s*//[^\n]*\n)+\s+for name in DockInstallers\.sharedLauncherSessionNames '
+                  r'where DockInstallers\.launcherSessionEnv\[name\] == nil \{ unsetenv\(name\) \}', content) and
+        'unsetenv("MADEIRA_APC_BUSY_QUEUE");' in bridge,
+        'a game whose script runs a shared launcher gets its session lines (Ubisoft Connect: MADEIRA_APC_BUSY_QUEUE=1), set after the madsync choice and cleared at the end')
 require('SteamSignIn.flag(name, default: true)' in installers, 'every installer switch defaults on and reads env.NAME')
 for switch in ('MADEIRA_DOCK_INSTALLERS', 'MADEIRA_INSTALL_DEFAULT_KEY', 'MADEIRA_DOCK_INSTALL_CHOICE',
                'MADEIRA_DOCK_INSTALL_SCM', 'MADEIRA_DOCK_INSTALL_SERVER_SYNC', 'MADEIRA_DOTNET_FUSION',
-               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_DOCK_INSTALL_REGISTRY'):
+               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_INSTALL_SKIP_LAUNCHER', 'MADEIRA_DOCK_INSTALL_REGISTRY',
+               'MADEIRA_INSTALL_LAUNCHER_REGISTRY'):
     require(f'flag("{switch}")' in installers, f'switch {switch} is read')
 require('reg.exe' not in installers, 'the batch never writes the registry (no reg.exe in the bundle)')
 require(content.count('setenv("MADEIRA_MADSYNC_SESSION", "0", 1)') == 1 and
@@ -118,6 +135,8 @@ struct LogEntry { enum Level { case info, success, error, debug } }
     func log(_ message: String, level: LogEntry.Level = .info) { lines.append(message) }
 }
 enum MadeiraDock { static let executable = "C:\\windows\\system32\\dockhost.exe" }
+// ExternalDrives.swift: the folders opened this launch (Settings › External drives).
+enum ExternalDrives { nonisolated(unsafe) static var openedRoots: [URL] = [] }
 ''' + game_src
 
 checks = r'''
@@ -366,6 +385,42 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(!DockInstallers.isDotNetFramework(setup("C:\\x\\windowsdesktop-runtime-8.0.11-win-x64.exe")) &&
                 !DockInstallers.isDotNetFramework(setup("C:\\x\\DXSETUP.exe", key: "Software\\Valve\\Steam\\Apps\\CommonRedist\\DirectX\\Jun2010")) &&
                 !DockInstallers.isDotNetFramework(tool), "  newer .NET, DirectX and other programs still run")
+        // A shared launcher's installer (Ubisoft Connect's, in every Ubisoft game's script): provided
+        // once the launcher is a file in the prefix, any case of its names; a folder does not count.
+        let ubi = SteamInstallProcess(run: SteamInstallRun(name: "uplaylauncher", hive: .machine, key: "Software\\Valve\\Steam\\Apps\\298110", value: 1),
+                                      executable: "C:\\Games\\FC4\\Support\\Ubisoft\\UbisoftConnectInstaller.exe", arguments: "/S")
+        let launcher = drive.appendingPathComponent("Program Files (x86)/Ubisoft/Ubisoft Game Launcher")
+        require(!DockInstallers.installsPresentLauncher(ubi, drive: drive), "a shared launcher's installer runs while the launcher is absent")
+        try? FileManager.default.createDirectory(at: launcher.appendingPathComponent("upc.exe"), withIntermediateDirectories: true)
+        require(!DockInstallers.installsPresentLauncher(ubi, drive: drive), "  a folder named upc.exe does not count")
+        try? FileManager.default.removeItem(at: launcher.appendingPathComponent("upc.exe"))
+        _ = FileManager.default.createFile(atPath: launcher.appendingPathComponent("UPC.EXE").path, contents: Data())
+        require(DockInstallers.installsPresentLauncher(ubi, drive: drive) && !DockInstallers.installsPresentLauncher(tool, drive: drive),
+                "  provided once the launcher is in the prefix (any case), and only for a listed installer")
+        let shared = DockInstallScripts.plan([ubi, tool], done: { _ in false }, exists: { _ in true },
+                                             provided: { DockInstallers.installsPresentLauncher($0, drive: drive) })
+        require(shared.map(\.status) == [.provided, .pending] &&
+                DockInstallScripts.note(shared)?.contains("Provided by the installed launcher, not run: uplaylauncher") == true,
+                "  planned as provided (not run), named in the note; the other program still runs")
+        require(DockInstallers.launcherLines([tool, ubi]) == ["MADEIRA_APC_BUSY_QUEUE": "1"] && DockInstallers.launcherLines([tool]).isEmpty &&
+                DockInstallers.sharedLauncherSessionNames == ["MADEIRA_APC_BUSY_QUEUE"],
+                "  a game that runs the launcher gets its session line, another game none")
+        let ubiValues = DockInstallers.launcherValues([tool, ubi], drive: drive)
+        require(ubiValues.map(\.name) == ["InstallDir"] && ubiValues.first?.key == "Software\\Ubisoft\\Launcher" &&
+                DockInstallers.launcherValues([tool], drive: drive).isEmpty,
+                "  a game whose script runs the launcher's installer, the launcher present, gets the value its loader finds the launcher by")
+        // A prefix whose launcher key holds only the installer's language.
+        let device = "WINE REGISTRY Version 2\n\n[Software\\\\Wow6432Node\\\\Ubisoft\\\\Launcher] 1794273595\n#time=1dd70b1982a76ac\n\"Installer Language\"=\"1033\"\n\n[Software\\\\Wow6432Node\\\\Ubisoft\\\\Launcher\\\\Installs\\\\856] 1794273934\n\"installdir\"=\"C:\\\\Games\\\\FC4\"\n"
+        let installDir = "\"InstallDir\"=\"C:\\\\Program Files (x86)\\\\Ubisoft\\\\Ubisoft Game Launcher\\\\\""
+        let fixed = SteamInstallRegistry.write(ubiValues, in: device, now: 1)
+        require(fixed.changed == 2 && fixed.text.components(separatedBy: installDir).count == 3 &&
+                fixed.text.contains("\"Installer Language\"=\"1033\"\n" + installDir) && fixed.text.contains("[Software\\\\Ubisoft\\\\Launcher] 1\n" + installDir) &&
+                fixed.text.contains("\"installdir\"=\"C:\\\\Games\\\\FC4\""),
+                "  InstallDir goes beside the installer's value in the 32-bit view and into a new key in the plain view")
+        let kept = SteamInstallRegistry.write(ubiValues, in: device.replacingOccurrences(of: "\"Installer Language\"=\"1033\"", with: "\"InstallDir\"=\"D:\\\\UC\\\\\""), now: 1)
+        require(kept.changed == 1 && kept.text.contains("\"InstallDir\"=\"D:\\\\UC\\\\\"") && kept.text.components(separatedBy: installDir).count == 2,
+                "  an InstallDir the prefix has stays; only the view without one gets it")
+        try? FileManager.default.removeItem(at: drive.appendingPathComponent("Program Files (x86)/Ubisoft"))
         let (found, scripts) = DockInstallers.found(game, drive: drive, defaultKey: true)
         require(scripts == 2 && found.map(\.run.name) == ["runtime a", "tool", "package", "gone", "shared runtime"], "game and shared scripts (\(found.map(\.run.name)))")
         require(found[4].executable == "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Steamworks Shared\\_CommonRedist\\Shared\\2015\\setup.exe",
@@ -373,6 +428,28 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(DockInstallers.found(game, drive: drive, defaultKey: false).processes.map(\.run.name) == ["tool", "shared runtime"],
                 "MADEIRA_INSTALL_DEFAULT_KEY=0: entries without a key are ignored")
         require(DockInstallers.programCount(game, drive: drive) == 5, "the sheet's program count")
+
+        // A game in a Steam library on a folder added under External drives: C:\External\<name>
+        // is a link out of drive_c to the picked folder, so only an opened folder counts.
+        let picked = base.appendingPathComponent("picked folder")
+        try write(picked.appendingPathComponent("steamapps/common/Away Game/installscript.vdf"), script)
+        try pe(picked.appendingPathComponent("steamapps/common/Away Game/Redist/Tool.EXE"), machine: 0x8664)
+        try FileManager.default.createDirectory(at: drive.appendingPathComponent("External"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: drive.appendingPathComponent("External/SSD"), withDestinationURL: picked)
+        let away = DockGame(id: 7009, name: "Away", installDir: "Away Game", library: "External/SSD/steamapps", installed: true, customExecutables: false)
+        let awayTool = "C:\\External\\SSD\\steamapps\\common\\Away Game\\redist\\tool.exe"
+        require(DockInstallers.found(away, drive: drive).scripts == 0 && DockInstallers.resolve(awayTool, drive: drive) == nil &&
+                DockInstallers.registryValues(away, drive: drive).isEmpty, "a folder not opened this launch: nothing behind its link is read")
+        ExternalDrives.openedRoots = [picked]
+        let awayFound = DockInstallers.found(away, drive: drive, defaultKey: true)
+        require(awayFound.scripts == 1 && awayFound.processes.map(\.run.name) == ["runtime a", "tool", "package", "gone"] &&
+                awayFound.processes[1].executable == awayTool &&
+                DockInstallers.resolve(awayTool, drive: drive)?.lastPathComponent == "Tool.EXE" &&
+                DockInstallers.registryValues(away, drive: drive).count == 1,
+                "an opened external folder: the game's install scripts, their programs and its Registry values (\(awayFound.processes.map(\.run.name)))")
+        require(DockInstallers.resolve(dir + "\\link\\wine", drive: drive) == nil, "  a link to anywhere else still does not resolve")
+        ExternalDrives.openedRoots = []
+        try FileManager.default.removeItem(at: drive.appendingPathComponent("External"))
 
         // ---- prepare(): a first start on a bundle without 32-bit support or msiexec
         MadeiraConfig.values["inproc-sync"] = "1"   // madsync chosen: the per-session request applies

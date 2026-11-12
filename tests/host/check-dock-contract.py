@@ -39,8 +39,10 @@ for name, text in [('MadeiraDock.swift', dock), ('MadeiraDockView.swift', view),
     literals = set(re.findall(r'"([^"\n]*?\.exe)\\?"', text)) | set(re.findall(r'\\"([^"\n]*?\.exe)\\"', text))
     names = {l.replace('/', '\\').split('\\')[-1].lower() for l in literals}
     # DockInstallers.swift checks the ".exe" suffix of install-script programs and whether the
-    # bundle has Windows Installer (msiexec.exe); it keys nothing on a program's name.
-    require(names <= {'dockhost.exe', 'explorer.exe', 'steam.exe', '.exe', 'msiexec.exe'}, f'{name}: no program-name list ({sorted(names)})')
+    # bundle has Windows Installer (msiexec.exe); it keys nothing on a program's name, except its
+    # table of shared launchers' installers (sharedLauncherInstallers: Ubisoft Connect's).
+    launcher = {'ubisoftconnectinstaller.exe', 'ubisoftconnect.exe', 'upc.exe'} if name == 'DockInstallers.swift' else set()
+    require(names <= {'dockhost.exe', 'explorer.exe', 'steam.exe', '.exe', 'msiexec.exe'} | launcher, f'{name}: no program-name list ({sorted(names)})')
     for line in text.splitlines():
         if re.search(r'SteamLog\.(event|trace)|LogStore|print\(|NSLog', line):
             require(re.search(r'\\\((account|token|signIn|secret|data|url|name)\b', line) is None,

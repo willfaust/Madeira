@@ -1,0 +1,218 @@
+iOS: an atomic whose operand crosses a 16-byte boundary is done inline
+
+An x86 `xchg [mem], reg` or `lock xadd/add/sub/and/or/xor` on a
+misaligned operand is legal and atomic on x86 (a split lock). FEX lowers
+each to one LSE instruction (SWPAL, LDADDAL, LDCLRAL, LDSETAL, LDEORAL).
+Apple's cores (LSE2) run those on any operand inside one 16-byte block
+and raise an alignment fault for one that crosses a 16-byte boundary;
+Madeira's exception thread then does the operation ([mach_exc]
+UNALIGNED-LSE, signal_arm64_ios.c), 25-30 us each with the faulting
+thread waiting.
+
+- Far Cry 4 (FC64.dll, ARM64EC module): about 450,000 at each start of
+  FarCry4.exe (three per launch), about 54 s of the 93 s from launch to
+  the splash screen, then about 5,000 a second in game.
+- Ubisoft Connect (32-bit upc.exe, WOW64 module): about 200,000 at its
+  start.
+
+With FEX_IOS_HOST, AtomicSwap and AtomicFetch{Add,Sub,And,CLR,Or,Xor}
+go through one emitter helper. For an operand of 2, 4 or 8 bytes it
+first tests bit 4 of the first ^ last byte's address (add, eor, tbnz;
+NZCV, which holds the guest flags, is not touched). Not crossing: the
+original instruction, as before. Crossing: the first and the last byte
+are probed with an atomic byte add of zero, so a fault (unmapped,
+read-only or guard page) is raised at the access's own pages before
+anything is held; a per-process spin lock is taken (full barrier after
+it), the operand is loaded, computed and stored with plain accesses, the
+lock is released (stlr, then a full barrier) and the old value goes to
+the destination zero-extended, as the LSE instruction does. A lock not
+had within 65,536 tries leaves the operation to the original instruction
+and its trap. Crossing atomics stay serialised with each other, as the
+exception thread serialised them, and are not atomic against other
+threads' plain accesses, as before. A byte operand cannot cross and is
+emitted as before, as are CAS, CASPair, AtomicFetchNeg and the LL/SC
+paths (a crossing lock cmpxchg still traps). The lock's address is a
+constant in the generated code, which is fine while FEX's code cache
+(EnableCodeCachingWIP) stays off, as in Madeira.
+
+On by default; MADEIRA_FEX_SPLIT_LOCK=0 when a program starts emits the
+original instruction alone, byte for byte.
+
+Applies on willfaust/FEX 1dc6ed4 (Madeira's FEX pin), both modules
+(xtajit64.dll and xtajit.dll). Madeira-only: not for FEX-Emu.
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp b/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
+index 094e6f4..8b02d9e 100644
+--- a/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/AtomicOps.cpp
+@@ -8,8 +8,107 @@ $end_info$
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/Dispatcher/Dispatcher.h"
+ #include "Interface/Core/JIT/JITClass.h"
++#include <cstdlib>
+ 
+ namespace FEXCore::CPU {
++// split-lock-test:begin
++/* MADEIRA split locks: an LSE atomic whose operand crosses a 16-byte boundary raises an alignment fault on Apple's
++ * cores (LSE2), and Madeira's exception thread does the operation ([mach_exc] UNALIGNED-LSE, 25-30 us each). On iOS such
++ * an operation is done inline under a lock instead (EmitAtomicRMW); MADEIRA_FEX_SPLIT_LOCK=0 keeps the trap. */
++enum class SplitLockOp { Swap, Add, Clr, Set, Eor };
++
++static void EmitLSE(Arm64Emitter& E, SplitLockOp Op, ARMEmitter::SubRegSize Size, ARMEmitter::Register Value, ARMEmitter::Register Dst,
++                    ARMEmitter::Register Mem) {
++  switch (Op) {
++  case SplitLockOp::Swap: E.ldswpal(Size, Value, Dst, Mem); break;
++  case SplitLockOp::Add: E.ldaddal(Size, Value, Dst, Mem); break;
++  case SplitLockOp::Clr: E.ldclral(Size, Value, Dst, Mem); break;
++  case SplitLockOp::Set: E.ldsetal(Size, Value, Dst, Mem); break;
++  case SplitLockOp::Eor: E.ldeoral(Size, Value, Dst, Mem); break;
++  }
++}
++
++#ifdef FEX_IOS_HOST
++// Unset or anything but "0": on. Read once, when the process's emulator first emits an atomic.
++static bool SplitLockEnabled() {
++  static const bool On = [] {
++    const char* Env = getenv("MADEIRA_FEX_SPLIT_LOCK");
++    return !(Env && Env[0] == '0' && !Env[1]);
++  }();
++  return On;
++}
++
++// The lock of this process's crossing atomics, and how many times a waiter tries it before it leaves the operation to the trap.
++alignas(64) static uint32_t SplitLockWord;
++constexpr uint64_t SplitLockTries = 0x10000;
++#endif
++
++// The LSE read-modify-write `Op` of `Size` bytes at [Mem] with `Value`, the old value to `Dst`; on iOS a crossing operand is done
++// inline under the process's split lock instead of faulting.
++static void EmitAtomicRMW(Arm64Emitter& E, SplitLockOp Op, ARMEmitter::SubRegSize Size, ARMEmitter::Register Value,
++                          ARMEmitter::Register Dst, ARMEmitter::Register Mem) {
++#ifdef FEX_IOS_HOST
++  const uint32_t Bytes = 1u << FEXCore::ToUnderlying(Size);
++  if (Bytes > 1 && SplitLockEnabled()) {
++    ARMEmitter::ForwardLabel Crossing, Locked, Done;
++    ARMEmitter::BackwardLabel Spin;
++
++    // Bit 4 of first ^ last byte's address: set exactly when the operand (at most 8 bytes) crosses a 16-byte boundary.
++    E.add(ARMEmitter::Size::i64Bit, TMP1, Mem, Bytes - 1);
++    E.eor(ARMEmitter::Size::i64Bit, TMP1, TMP1, Mem);
++    (void)E.tbnz(TMP1, 4, &Crossing);
++    EmitLSE(E, Op, Size, Value, Dst, Mem);
++    (void)E.b(&Done);
++
++    (void)E.Bind(&Crossing);
++    E.stadd(ARMEmitter::SubRegSize::i8Bit, ARMEmitter::Reg::zr, Mem);
++    E.add(ARMEmitter::Size::i64Bit, TMP1, Mem, Bytes - 1);
++    E.stadd(ARMEmitter::SubRegSize::i8Bit, ARMEmitter::Reg::zr, TMP1);
++    E.LoadConstant(ARMEmitter::Size::i64Bit, TMP1, reinterpret_cast<uintptr_t>(&SplitLockWord));
++    E.LoadConstant(ARMEmitter::Size::i64Bit, TMP3, SplitLockTries);
++    (void)E.Bind(&Spin);
++    E.movz(ARMEmitter::Size::i32Bit, TMP4, 1);
++    E.ldswpa(ARMEmitter::SubRegSize::i32Bit, TMP4, TMP4, TMP1);
++    (void)E.cbz(ARMEmitter::Size::i32Bit, TMP4, &Locked);
++    E.yield();
++    E.sub(ARMEmitter::Size::i64Bit, TMP3, TMP3, 1);
++    (void)E.cbnz(ARMEmitter::Size::i64Bit, TMP3, &Spin);
++    EmitLSE(E, Op, Size, Value, Dst, Mem);
++    (void)E.b(&Done);
++
++    (void)E.Bind(&Locked);
++    E.dmb(ARMEmitter::BarrierScope::ISH);
++    E.ldr(Size, TMP3, Mem);
++    switch (Op) {
++    case SplitLockOp::Swap: E.str(Size, Value, Mem); break;
++    case SplitLockOp::Add:
++      E.add(ARMEmitter::Size::i64Bit, TMP4, TMP3, Value);
++      E.str(Size, TMP4, Mem);
++      break;
++    case SplitLockOp::Clr:
++      E.bic(ARMEmitter::Size::i64Bit, TMP4, TMP3, Value);
++      E.str(Size, TMP4, Mem);
++      break;
++    case SplitLockOp::Set:
++      E.orr(ARMEmitter::Size::i64Bit, TMP4, TMP3, Value);
++      E.str(Size, TMP4, Mem);
++      break;
++    case SplitLockOp::Eor:
++      E.eor(ARMEmitter::Size::i64Bit, TMP4, TMP3, Value);
++      E.str(Size, TMP4, Mem);
++      break;
++    }
++    E.stlr(ARMEmitter::WReg::zr, TMP1);
++    E.dmb(ARMEmitter::BarrierScope::ISH);
++    E.mov(ARMEmitter::Size::i64Bit, Dst, TMP3.R());
++    (void)E.Bind(&Done);
++    return;
++  }
++#endif
++  EmitLSE(E, Op, Size, Value, Dst, Mem);
++}
++// split-lock-test:end
++
+ // Guest window: every address here is a guest address and is converted once, up front, into the reserved
+ // REG_GUEST_ADDR_TMP (see Arm64Emitter.h). Using a reserved register rather than one of TMP1-TMP4 is
+ // deliberate and load-bearing for exactly this file: CASPair and the LL/SC loops below park values
+@@ -164,7 +263,7 @@ DEF_OP(AtomicSwap) {
+                                                           ARMEmitter::SubRegSize::i8Bit;
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+-    ldswpal(SubEmitSize, Src, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Swap, SubEmitSize, Src, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -184,7 +283,7 @@ DEF_OP(AtomicFetchAdd) {
+   auto Src = GetReg(Op->Value);
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+-    ldaddal(SubEmitSize, Src, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Add, SubEmitSize, Src, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -206,7 +305,7 @@ DEF_OP(AtomicFetchSub) {
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+     neg(EmitSize, TMP2, Src);
+-    ldaddal(SubEmitSize, TMP2, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Add, SubEmitSize, TMP2, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -228,7 +327,7 @@ DEF_OP(AtomicFetchAnd) {
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+     mvn(EmitSize, TMP2, Src);
+-    ldclral(SubEmitSize, TMP2, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Clr, SubEmitSize, TMP2, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -249,7 +348,7 @@ DEF_OP(AtomicFetchCLR) {
+   auto Src = GetReg(Op->Value);
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+-    ldclral(SubEmitSize, Src, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Clr, SubEmitSize, Src, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -270,7 +369,7 @@ DEF_OP(AtomicFetchOr) {
+   auto Src = GetReg(Op->Value);
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+-    ldsetal(SubEmitSize, Src, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Set, SubEmitSize, Src, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);
+@@ -291,7 +390,7 @@ DEF_OP(AtomicFetchXor) {
+   auto Src = GetReg(Op->Value);
+ 
+   if (CTX->HostFeatures.SupportsAtomics) {
+-    ldeoral(SubEmitSize, Src, GetReg(Node), MemSrc);
++    EmitAtomicRMW(*this, SplitLockOp::Eor, SubEmitSize, Src, GetReg(Node), MemSrc);
+   } else {
+     ARMEmitter::BackwardLabel LoopTop;
+     (void)Bind(&LoopTop);

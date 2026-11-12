@@ -1,8 +1,8 @@
 diff --git a/LICENSE-MADEIRA.md b/LICENSE-MADEIRA.md
-index fd2bc64a9a2..60ee828d969 100644
+index fd2bc64a9a2..57862c77a9d 100644
 --- a/LICENSE-MADEIRA.md
 +++ b/LICENSE-MADEIRA.md
-@@ -58,6 +58,18 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
+@@ -58,6 +58,24 @@ distributes under **LGPL-2.1-or-later**. This branch keeps that licence.
    - Author spitefulowl, merged on 2026-10-06: `000cac48452` (mscoree iOS:
      cooperative thread suspend and keep-delegates for Wine Mono, pull request
      #26).
@@ -18,6 +18,12 @@ index fd2bc64a9a2..60ee828d969 100644
 +    regenerated `unix_thunks.c`, `unix_private.h`, `unix_wgl.c`). Author:
 +    Connor Gow, written with AI assistance, 2026-09-27. Carried in
 +    `patches/wine-opengl-winios.patch`.
++  - opengl32: a 32-bit (WoW64) program's GL strings stay in its own process
++    on iOS, where every process shares the unix side: `return_wow64_string`
++    copies into the caller's buffer each time and `opengl32.dll` keeps one
++    copy per distinct string (`dlls/opengl32/unix_wgl.c`,
++    `dlls/opengl32/wgl.c`). Author: Russell Barton, written with AI
++    assistance, 2026-11-11. Carried in `patches/wine-opengl-winios.patch`.
  
  The LGPL permits combining this library with proprietary components (such
  as Apple's Metal Shader Converter) subject to LGPL-2.1 section 6; see the
@@ -15121,7 +15127,7 @@ index 75a8baf0e55..5c504f3ca3f 100644
  }
  
 diff --git a/dlls/opengl32/unix_wgl.c b/dlls/opengl32/unix_wgl.c
-index 00dfd96a551..fac9d198e2a 100644
+index 00dfd96a551..e097935f2c4 100644
 --- a/dlls/opengl32/unix_wgl.c
 +++ b/dlls/opengl32/unix_wgl.c
 @@ -140,6 +140,9 @@ struct context
@@ -15309,7 +15315,28 @@ index 00dfd96a551..fac9d198e2a 100644
  
      if (TRACE_ON(opengl)) for (i = 0; i < count; i++) TRACE( "++ %s\n", extensions[i] );
  }
-@@ -2127,7 +2246,7 @@ NTSTATUS return_wow64_string( const void *str, PTR32 *wow64_str )
+@@ -2112,6 +2231,20 @@ NTSTATUS return_wow64_string( const void *str, PTR32 *wow64_str )
+         return STATUS_SUCCESS;
+     }
+ 
++#ifdef WINE_IOS
++    /* Madeira: every pseudo-process shares this unix side, so a cached 32-bit pointer belongs to the process that
++     * asked first; a later process got an address in its own window that held something else, or nothing (Far Cry 3's
++     * hardware detection read a dead updater's copy of GL_EXTENSIONS). Copy into the caller's buffer every time;
++     * opengl32.dll keeps one copy per distinct string in its own process (intern_wow64_string). */
++    if (*wow64_str)
++    {
++        strcpy( ios_wow_host_ptr(*wow64_str), str );
++        return STATUS_SUCCESS;
++    }
++    *wow64_str = strlen( str ) + 1;
++    return STATUS_BUFFER_TOO_SMALL;
++#endif
++
+     pthread_mutex_lock( &wgl_lock );
+ 
+     for (i = 0; i < wow64_strings_count; i++) if (wow64_strings[i].str == str) break;
+@@ -2127,7 +2260,7 @@ NTSTATUS return_wow64_string( const void *str, PTR32 *wow64_str )
      else if (wow64_strings[i].wow64_str) *wow64_str = wow64_strings[i].wow64_str;
      else if (*wow64_str)
      {
@@ -15318,7 +15345,7 @@ index 00dfd96a551..fac9d198e2a 100644
          wow64_strings[i].wow64_str = *wow64_str;
      }
  
-@@ -2412,6 +2531,58 @@ static struct buffer *create_buffer_storage( TEB *teb, GLenum target, GLuint nam
+@@ -2412,6 +2545,58 @@ static struct buffer *create_buffer_storage( TEB *teb, GLenum target, GLuint nam
      return buffer;
  }
  
@@ -15377,7 +15404,7 @@ index 00dfd96a551..fac9d198e2a 100644
  static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, GLuint name, GLintptr offset,
                                 size_t length, GLbitfield access, void *ptr )
  {
-@@ -2449,6 +2620,7 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
+@@ -2449,6 +2634,7 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
          }
          assert( buffer->host_ptr == buffer->vm_ptr );
          buffer->map_ptr = (char *)buffer->vm_ptr + offset;
@@ -15385,7 +15412,7 @@ index 00dfd96a551..fac9d198e2a 100644
          TRACE( "returning vk mapping %p\n", buffer->map_ptr );
          return buffer->map_ptr;
      }
-@@ -2456,11 +2628,16 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
+@@ -2456,11 +2642,16 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
      if (buffer && buffer->pinned)
      {
          buffer->map_ptr = (char *)buffer->vm_ptr + offset;
@@ -15403,7 +15430,7 @@ index 00dfd96a551..fac9d198e2a 100644
  
      if (!buffer)
      {
-@@ -2475,8 +2652,9 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
+@@ -2475,8 +2666,9 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
  
      buffer->host_ptr = ptr;
      if (!offset && !length) length = buffer->size;
@@ -15414,7 +15441,7 @@ index 00dfd96a551..fac9d198e2a 100644
          buffer->map_ptr = ptr;
          TRACE( "returning %p\n", buffer->map_ptr );
          return buffer->map_ptr;
-@@ -2484,6 +2662,8 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
+@@ -2484,6 +2676,8 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
  
      if (access & GL_MAP_PERSISTENT_BIT)
      {
@@ -15423,7 +15450,7 @@ index 00dfd96a551..fac9d198e2a 100644
          FIXME( "GL_MAP_PERSISTENT_BIT not supported!\n" );
          goto unmap;
      }
-@@ -2859,7 +3039,7 @@ NTSTATUS wow64_get_pixel_formats( void *args )
+@@ -2859,7 +3053,7 @@ NTSTATUS wow64_get_pixel_formats( void *args )
      {
          .teb = get_teb64(params32->teb),
          .hdc = ULongToPtr(params32->hdc),
@@ -15432,3 +15459,94 @@ index 00dfd96a551..fac9d198e2a 100644
          .max_formats = params32->max_formats,
      };
      NTSTATUS status;
+diff --git a/dlls/opengl32/wgl.c b/dlls/opengl32/wgl.c
+index ce98e049a77..59480851f73 100644
+--- a/dlls/opengl32/wgl.c
++++ b/dlls/opengl32/wgl.c
+@@ -71,13 +71,22 @@ static CRITICAL_SECTION_DEBUG wow64_cs_debug =
+ };
+ static CRITICAL_SECTION wow64_cs = { &wow64_cs_debug, -1, 0, 0, 0, 0 };
+ 
+-static void append_wow64_string( char *str )
++/* Keeps one copy of each distinct string for this process and returns it; str is freed when an equal copy is
++ * already kept, so a string asked for again is the same pointer and memory does not grow. */
++static void *intern_wow64_string( char *str )
+ {
+     char **tmp;
++    SIZE_T i;
+ 
+     EnterCriticalSection( &wow64_cs );
+ 
+-    if (!(tmp = realloc( wow64_strings, (wow64_strings_count + 1) * sizeof(*wow64_strings) )))
++    for (i = 0; i < wow64_strings_count; i++) if (!strcmp( wow64_strings[i], str )) break;
++    if (i < wow64_strings_count)
++    {
++        free( str );
++        str = wow64_strings[i];
++    }
++    else if (!(tmp = realloc( wow64_strings, (wow64_strings_count + 1) * sizeof(*wow64_strings) )))
+         ERR( "Failed to allocate memory for wow64 strings\n" );
+     else
+     {
+@@ -87,6 +96,7 @@ static void append_wow64_string( char *str )
+     }
+ 
+     LeaveCriticalSection( &wow64_cs );
++    return str;
+ }
+ 
+ static void cleanup_wow64_strings(void)
+@@ -2011,7 +2021,7 @@ const GLubyte * WINAPI glGetStringi( GLenum name, GLuint index )
+     if ((status = UNIX_CALL( glGetStringi, &args ))) WARN( "glGetStringi returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( (char *)args.ret );
++    else if (args.ret) args.ret = intern_wow64_string( (char *)args.ret );
+ #endif
+     return args.ret;
+ }
+@@ -2035,7 +2045,7 @@ const GLubyte * WINAPI glGetString( GLenum name )
+     if ((status = UNIX_CALL( glGetString, &args ))) WARN( "glGetString returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( (char *)args.ret );
++    else if (args.ret) args.ret = intern_wow64_string( (char *)args.ret );
+ #endif
+     return args.ret;
+ }
+@@ -2056,7 +2066,7 @@ const char * WINAPI wglGetExtensionsStringARB( HDC hdc )
+     if ((status = UNIX_CALL( wglGetExtensionsStringARB, &args ))) WARN( "wglGetExtensionsStringARB returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( wow64_str );
++    else if (args.ret) args.ret = intern_wow64_string( wow64_str );
+ #endif
+     return args.ret;
+ }
+@@ -2077,7 +2087,7 @@ const char * WINAPI wglGetExtensionsStringEXT(void)
+     if ((status = UNIX_CALL( wglGetExtensionsStringEXT, &args ))) WARN( "wglGetExtensionsStringEXT returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( wow64_str );
++    else if (args.ret) args.ret = intern_wow64_string( wow64_str );
+ #endif
+     return args.ret;
+ }
+@@ -2098,7 +2108,7 @@ const GLchar * WINAPI wglQueryCurrentRendererStringWINE( GLenum attribute )
+     if ((status = UNIX_CALL( wglQueryCurrentRendererStringWINE, &args ))) WARN( "wglQueryCurrentRendererStringWINE returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( wow64_str );
++    else if (args.ret) args.ret = intern_wow64_string( wow64_str );
+ #endif
+     return args.ret;
+ }
+@@ -2125,7 +2135,7 @@ const GLchar * WINAPI wglQueryRendererStringWINE( HDC dc, GLint renderer, GLenum
+     if ((status = UNIX_CALL( wglQueryRendererStringWINE, &args ))) WARN( "wglQueryRendererStringWINE returned %#lx\n", status );
+ #ifndef _WIN64
+     if (args.ret != wow64_str) free( wow64_str );
+-    else if (args.ret) append_wow64_string( wow64_str );
++    else if (args.ret) args.ret = intern_wow64_string( wow64_str );
+ #endif
+     return args.ret;
+ }

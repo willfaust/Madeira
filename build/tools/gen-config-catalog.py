@@ -143,6 +143,11 @@ OVERLAY = {
                         "image, as 32-bit programs already do, and its executable protections are applied without "
                         "EXEC. Frees the pool for hybrid DLL copies and code buffers. Hybrid images keep their "
                         "copy. Set it in the game's own file; restart the session after changing it."},
+    "env.MADEIRA_X64_NOCOPY_DATAIMP": {"category": "Memory & JIT pool", "title": "Data imports of images without a pool copy",
+                "kind": "bool", "default": "1",
+                "note": "On (default): an image MADEIRA_X64_IMAGE_NOCOPY maps without a pool copy has its imports of "
+                        "an ARM64EC DLL's variables (msvcr100's _acmdln) pointed at the copy the DLL writes, as a "
+                        "pool-copied x64 image already has ([x64-data-imp]). 0: they keep the PE address."},
     "env.MADEIRA_FIXED_BASE_GUARD": {"category": "Memory & JIT pool", "title": "Keep 0x140000000 for a fixed-base game",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: a resource-only image view (a version or resource query, e.g. the Rockstar "
@@ -528,6 +533,14 @@ OVERLAY = {
                 "note": "set by the library for one launch of a game from another store; not a setting"},
     "env.MADEIRA_THREAD_REAP_CHECKED": {"category": "Exceptions & threads", "title": "Check the previous exited thread before freeing it", "kind": "bool", "default": "1",
                 "note": "ml2290: on (default): a thread that exits frees the previous exited thread's stacks only after finding that thread, by its process, thread id and pthread, in the live TEB list (the hand-off env.MADEIRA_EA_CEF = 1 already used). 32-bit processes started one after another can get the same window and TEB addresses; the unchecked hand-off then made a new thread free its own kernel stack at exit and hang there holding the memory lock (testers' log, 2026-10-31: a launcher installer's second VC++ redistributable, the installer waiting on that thread forever). 0: the upstream hand-off, unless MADEIRA_EA_CEF = 1."},
+    # A process ended by another one (build/ntdll-unix/process_ios.c NtTerminateProcess; Ubisoft Connect's game starter).
+    "env.MADEIRA_KILL_REAP": {"category": "Wine core (ntdll)", "title": "A killed program's resources are released as an exit's",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: a program another one ends with TerminateProcess releases its FEX code buffers, "
+                        "window and handles as its own exit would, instead of holding them until the session ends "
+                        "(Ubisoft Connect's game starter ends a suspended copy of the game this way). Set it in the game's "
+                        "own file; read at each such call; logged as [kill-reap].",
+                "sources": ["build/ntdll-unix/process_ios.c"]},
     "env.MADEIRA_EC_NATIVE_CHILD": {"category": "Wine core (ntdll)", "title": "Start aarch64 programs in a 64-bit x86 session", "kind": "bool", "default": "0",
                 "note": "ml2280: off (default): an aarch64 program (services.exe, cmd.exe, conhost.exe) started in a session whose first program is 64-bit x86 (ARM64EC) is refused and CreateProcess fails at once. The session's ntdll loads the emulator into it and its threads have no CPU area, so it crashed at its first executable allocation and its exception path faulted until the storm handler ended it (testers' log, 2026-10-28: services.exe started on demand for a launcher installer, twice, 20 s each). A game that needs one starts in the Wine desktop. 1: starts them anyway; MADEIRA_EC_CONHOST=1 still lets conhost.exe through."},
     "env.MADEIRA_SCM_ON_DEMAND": {"category": "Wine libraries", "title": "Start the service manager when a program needs it", "kind": "bool", "default": "1",
@@ -712,19 +725,23 @@ OVERLAY = {
     "env.MADEIRA_PAD_MODE": {"category": "Controllers", "title": "Controller API (player 1)", "kind": "choice",
                 "note": "XInput (default): every controller is an Xbox pad. hid: player 1 becomes a HID game controller, "
                         "a DualSense (054C:0CE6) when it is a PlayStation pad, and leaves XInput; any other pad stays "
-                        "on XInput. dualsense/generic force the identity. Read at session start; the game's own file wins.",
-                "choices": [("", "XInput (default)"), ("hid", "DirectInput / HID"), ("dualsense", "HID, always a DualSense"),
-                            ("generic", "HID, always a generic gamepad")],
+                        "on XInput. dualsense/generic force the identity. xbox360: player 1 stays on XInput and is also "
+                        "the HID device Windows lists beside a wired Xbox 360 controller (045E:028E, IG_00), for games "
+                        "that look for one among the devices before they read XInput (Far Cry 4). Read at session "
+                        "start; the game's own file wins.",
+                "choices": [("", "XInput (default)"), ("xbox360", "XInput + Xbox 360 device"), ("hid", "DirectInput / HID"),
+                            ("dualsense", "HID, always a DualSense"), ("generic", "HID, always a generic gamepad")],
                 "sources": ["app/Madeira/GamepadInput.swift"]},
     "env.MADEIRA_HIDPAD": {"category": "Controllers",
-                "note": "Set by the app at session start from env.MADEIRA_PAD_MODE (dualsense or generic) for the "
+                "note": "Set by the app at session start from env.MADEIRA_PAD_MODE (dualsense, generic or xbox360) for the "
                         "wineserver and ntdll; not meant to be set by hand."},
     "env.MADEIRA_HIDPAD_NAME": {"category": "Controllers",
                 "note": "Set by the app: the product string a generic HID gamepad reports (the physical pad's name)."},
     "env.MADEIRA_HIDPAD_XINPUT": {"category": "Controllers", "title": "HID mode: keep player 1 on XInput too", "kind": "bool",
                 "default": "0",
                 "note": "1: with the HID controller on, player 1 also stays an XInput pad. Off by default, so a game "
-                        "that reads both APIs does not see the same pad twice.",
+                        "that reads both APIs does not see the same pad twice. Read from the game's own file, "
+                        "madeira.cfg or the environment when the session starts.",
                 "sources": ["app/Madeira/GamepadInput.swift"]},
     "env.MADEIRA_HIDPAD_AUTO_GENERIC": {"category": "Controllers", "title": "HID mode: other pads as a generic HID gamepad",
                 "kind": "bool", "default": "0",
@@ -787,6 +804,70 @@ OVERLAY = {
                         "32- and 64-bit games alike."},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
     # madeira-bcd: GTA V Enhanced's Social Club (StikJITHelper.swift, process_ios.c, virtual_ios.c).
+    # The 64-bit hook zone (build/ntdll-unix/virtual_ios.c and loader_ios.c; Far Cry 4).
+    "env.MADEIRA_X64_HOOK_ZONE": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Free room above a 64-bit program's ntdll for hook code",
+                "note": "Default off. 1: each 64-bit program keeps 16 MB of address space directly above its ntdll free "
+                        "for requests at a fixed address, and its other DLLs load below, so a hook that needs its target "
+                        "within 2 GB of the function finds room there, as on Windows (Far Cry 4's FC64.dll otherwise quits "
+                        "with 'Error at hooking'). Set it in the game's own file; read when each 64-bit program starts; "
+                        "logged as [hook-zone].",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    # In-process WriteProcessMemory (build/ntdll-unix/virtual_ios.c ios_self_write; Ubisoft Connect, Far Cry 4).
+    "env.MADEIRA_SELF_WRITE": {"category": "Memory & JIT pool", "kind": "bool", "default": "1",
+                "title": "A program writes its own memory",
+                "note": "On by default. A program's WriteProcessMemory into itself (the hooks Ubisoft Connect and Far Cry "
+                        "4's FC64.dll install) is done in ntdll, page by page as on Windows: a 32-bit program inside its "
+                        "own window, a 64-bit program inside its DLLs and EXE or its hook zone (env.MADEIRA_X64_HOOK_ZONE). "
+                        "0: the write goes to the server, which has no task port for the process and refuses it. Read at "
+                        "each such write; a process's first one is logged as [self-write].",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    # JIT pool code buffers (build/ntdll-unix/virtual_ios.c tail carves; Ubisoft Connect with Far Cry 3 and Far Cry 4).
+    "env.MADEIRA_POOL_CARVE_MERGE": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Free code buffers merge and are cut to the size asked",
+                "note": "Default off. 1: a code buffer FEX releases merges with the free buffers next to it, and a free "
+                        "buffer 1 MB or more larger than a request is cut to the size asked, so adjacent free buffers can "
+                        "serve one large request and a small one does not take a whole large buffer. "
+                        "env.MADEIRA_POOL_CODE_FOREGROUND = 1 turns it on too. Set it in the game's own file; read at each "
+                        "request.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    "env.MADEIRA_POOL_CODE_FOREGROUND": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Code buffers for the program you launched",
+                "note": "Default off. 1: programs outside the launched program's folder (env.MADEIRA_GAME_FOLDER: a "
+                        "launcher, its helpers, Steam's client) get FEX code buffers of at most 16 MB, also from free ones; "
+                        "a buffer the launched program freed or left at exit is kept for it for 120 s; and "
+                        "env.MADEIRA_POOL_CARVE_MERGE is on. For a game behind a launcher whose helpers would otherwise fill "
+                        "the pool first (Far Cry 3 and Far Cry 4 behind Ubisoft Connect). Set it in the game's own file; "
+                        "read at each new buffer; [pool-fg] logs each program's class.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    "env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM": {"category": "Memory & JIT pool", "kind": "text", "default": "",
+                "title": "The launched folder's one program that keeps its code buffers",
+                "note": "Unset: every program in the launched folder keeps its code buffers (env.MADEIRA_POOL_CODE_FOREGROUND). "
+                        "An image file name, such as upc.exe: only that program does, and the folder's other programs are held "
+                        "to 16 MB as well, for a launcher started on its own whose helpers share its folder (Ubisoft Connect). "
+                        "Set it in the program's own file; read at each new buffer; cleared when the session ends.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    "env.MADEIRA_GAME_FOLDER": {"category": "Memory & JIT pool",
+                "note": "Set by the app at each launch: the folder of the program the player launched (a Steam game's "
+                        "install folder, else the folder of the library entry's program), for "
+                        "env.MADEIRA_POOL_CODE_FOREGROUND; cleared when the session ends. Not meant to be set by hand."},
+    # wine dlls/ntdll/unix/sync.c and dlls/ntdll/sync.c (Far Cry 3, Ubisoft Connect).
+    "env.MADEIRA_SLEEP_KERNEL_APC": {"category": "Synchronisation", "title": "Non-alertable sleeps run I/O completions",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: a non-alertable Sleep waits in the Windows server, so an I/O completion queued "
+                        "for the sleeping thread (an overlapped pipe or socket read) runs during the sleep, as on "
+                        "Windows, instead of when the thread next enters the server, which a thread that only sleeps "
+                        "never does (Far Cry 3's launcher-pipe read). Sleep(0) is unchanged; each other non-alertable "
+                        "sleep costs one server round trip. Set it in the game's own file; read at each sleep.",
+                "sources": ["wine/dlls/ntdll/unix/sync.c"]},
+    "env.MADEIRA_WOA_RECHECK": {"category": "Synchronisation", "title": "A 32-bit wait on an address re-checks every second",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: an infinite wait on an address in a 32-bit program (SRW locks, condition "
+                        "variables, WaitOnAddress) waits in one-second slices and returns when a waker already removed it "
+                        "but its wake-up never arrived, a spurious wake-up its caller handles (Ubisoft Connect's browser "
+                        "can otherwise stop for good on a free lock); logged as [woa-rescue]. Set it in the game's own "
+                        "file; read at each slice.",
+                "sources": ["wine/dlls/ntdll/unix/sync.c", "wine/dlls/ntdll/sync.c"]},
     "pool-split": {"category": "Memory & JIT pool", "title": "Split JIT pool around the main thread's stack",
                 "kind": "bool", "default": "0",
                 "note": "1: when the pool would shrink below its size (pool, 896 MB by default) because the main "
@@ -832,6 +913,17 @@ OVERLAY = {
                 "note": "With pool-low on: how much of the free run below the executable window stays free for "
                         "programs that load there (child processes' main executables). A run with a free run at "
                         "least this large below it keeps none. 128 by default."},
+    # Ubisoft Connect's Chromium (CEF 135, 32-bit): process-count switches for upc.exe, and the libcef.dll change that keeps them.
+    "env.MADEIRA_UBI_CEF": {"category": "Wine core (ntdll)", "title": "Ubisoft Connect's Chromium: fewer processes",
+                "kind": "bool", "default": "1",
+                "note": "On by default: Ubisoft Connect's browser process (upc.exe) gets --in-process-gpu "
+                        "--disable-site-isolation-trials --renderer-process-limit=1 --disable-component-update and V8 "
+                        "--jitless (MADEIRA_JITLESS = 0 keeps V8's JIT) where its command line lacks them, and its "
+                        "libcef.dll is changed in memory (two bytes, known builds only; any other is left alone and logged) "
+                        "so it keeps them instead of discarding its command line; with Chromium's defaults the launcher "
+                        "needs more 32-bit windows than the session has. Its helper processes are not refused. 0 turns "
+                        "both off; logged as [ubi-cef].",
+                "sources": ["build/ntdll-unix/process_ios.c", "build/ntdll-unix/virtual_ios.c"]},
     "env.MADEIRA_SC_CEF": {"category": "Wine core (ntdll)", "title": "Social Club's Chromium in one process",
                 "kind": "bool", "default": "1",
                 "note": "On by default; 0 turns it off. SocialClubHelper.exe runs --single-process with "
@@ -1137,6 +1229,14 @@ OVERLAY = {
                         "the 64-bit JIT at once instead of testing the native-code bitmap first; the JIT's dispatcher "
                         "already tests every address it has no translation for. 11 instructions less per return from a "
                         "system DLL. 0: the test as before. Read when a program starts."},
+    # FEX's split-lock atomics (build/fex-patches/0002-ios-split-lock-atomics-inline.patch, both modules).
+    "env.MADEIRA_FEX_SPLIT_LOCK": {"category": "x86 emulation (FEX)", "title": "Atomics across a 16-byte boundary done inline",
+                "kind": "bool", "default": "1", "sources": ["build/fex-patches/0002-ios-split-lock-atomics-inline.patch"],
+                "note": "On by default. An x86 atomic (xchg with memory, lock xadd/add/sub/and/or/xor) whose operand "
+                        "crosses a 16-byte boundary faults on Apple's processors, and the exception thread then does it "
+                        "([mach_exc] UNALIGNED-LSE, 25-30 microseconds each). With this the emulator tests the operand "
+                        "first and does such an operation inline under a lock, with the same result; other atomics are "
+                        "unchanged. 0 keeps the trap. Read when each program starts."},
     "env.MADEIRA_FEX_EC_RET": {"category": "x86 emulation (FEX)", "title": "Returns from native code through the return predictor",
                 "kind": "bool", "default": "1",
                 "note": "Default on. A guest call into native (ARM64EC) code leaves the JIT with BLR and its return "

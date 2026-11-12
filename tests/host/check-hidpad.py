@@ -106,6 +106,20 @@ static void check_ids( void )
     assert( !strcmp( link, "HID#VID_054C&PID_0CE6&MI_03#9&4d616465&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}" ) );
     hidpad_interface_link( ds, link, 8 );
     assert( strlen( link ) == 7 );
+    {
+        /* Xbox 360: Microsoft's own wired-pad IDs, IG_00 where games look for it
+         * (the device path, the instance ID, the hardware IDs), and the name
+         * DirectInput gives the pad on Windows. */
+        const struct hidpad_identity *x = hidpad_identity_from_env( "xbox360" );
+        unsigned int i;
+        assert( x && x->kind == HIDPAD_KIND_XBOX360 && x->vid == 0x045e && x->pid == 0x028e && x->version == 0x0114 );
+        assert( !strcmp( x->product, "Controller (XBOX 360 For Windows)" ) && !strcmp( x->manufacturer, "Microsoft" ) );
+        hidpad_interface_link( x, link, sizeof(link) );
+        assert( !strcmp( link, "HID#VID_045E&PID_028E&IG_00#9&4d616465&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}" ) );
+        for (i = 0; i < 2; i++) assert( strstr( x->hardware_ids[i], "VID_045E&PID_028E" ) && strstr( x->hardware_ids[i], "&IG_00" ) );
+        assert( strcmp( x->container_id, ds->container_id ) && strcmp( x->container_id, gen->container_id ) );
+        assert( !hidpad_identity_from_env( "Xbox360" ) && !hidpad_identity_from_env( "xbox" ) );
+    }
 }
 
 static void check_dualsense( void )
@@ -340,6 +354,69 @@ static void check_generic( void )
     free( p.pre );
 }
 
+/* Xbox 360: the generic report with ten buttons, as xusb22's HID view of the
+ * pad (X Y Rx Ry, Z = left - right trigger, a hat, A..R3) -- what DirectInput
+ * shows of "Controller (XBOX 360 For Windows)": 5 axes, 1 POV, 10 buttons. */
+static void check_xbox360( void )
+{
+    const struct hidpad_identity *id = hidpad_identity_from_env( "xbox360" );
+    struct hidpad_report_state st = {0};
+    struct winios_hidpad pad = {0};
+    struct parsed p;
+    HIDP_CAPS caps;
+    HIDP_BUTTON_CAPS bcaps;
+    USHORT n = 1;
+    unsigned char r[64];
+    unsigned int len, i;
+    static const uint32_t order[] =
+    {
+        HIDPAD_XI_A, HIDPAD_XI_B, HIDPAD_XI_X, HIDPAD_XI_Y, HIDPAD_XI_LSHOULDER, HIDPAD_XI_RSHOULDER,
+        HIDPAD_XI_BACK, HIDPAD_XI_START, HIDPAD_XI_LTHUMB, HIDPAD_XI_RTHUMB,
+    };
+
+    parse( id, &p );
+    assert( HidP_GetCaps( p.pre, &caps ) == HIDP_STATUS_SUCCESS );
+    assert( caps.UsagePage == HID_USAGE_PAGE_GENERIC && caps.Usage == HID_USAGE_GENERIC_GAMEPAD );
+    assert( caps.InputReportByteLength == HIDPAD_GENERIC_INPUT_LEN && p.in[1] == HIDPAD_GENERIC_INPUT_LEN );
+    assert( !caps.OutputReportByteLength && !caps.FeatureReportByteLength );
+    assert( caps.NumberInputButtonCaps == 1 && caps.NumberInputValueCaps == 6 );
+    assert( HidP_GetButtonCaps( HidP_Input, &bcaps, &n, p.pre ) == HIDP_STATUS_SUCCESS && n == 1 );
+    assert( bcaps.IsRange && bcaps.Range.UsageMin == 1 && bcaps.Range.UsageMax == 10 );
+
+    pad.connected = 1;
+    pad.lx = -32768; pad.ly = 32767; pad.rx = 1234; pad.ry = -32768; pad.left_trigger = 255;
+    len = hidpad_input_report( id, &pad, &st, 0, r );
+    assert( len == HIDPAD_GENERIC_INPUT_LEN );
+    assert( scaled( &p, HID_USAGE_GENERIC_X, r, len ) == -32768 && scaled( &p, HID_USAGE_GENERIC_Y, r, len ) == -32767 );
+    assert( scaled( &p, HID_USAGE_GENERIC_RX, r, len ) == 1234 && scaled( &p, HID_USAGE_GENERIC_RY, r, len ) == 32767 );
+    assert( scaled( &p, HID_USAGE_GENERIC_Z, r, len ) == 255 * 128 );
+    for (i = 0; i < sizeof(order) / sizeof(order[0]); i++)
+    {
+        pad.buttons = order[i];
+        len = hidpad_input_report( id, &pad, &st, 0, r );
+        assert( buttons( &p, r, len ) == 1u << i );
+    }
+    /* Guide is not a button of this pad: nothing pressed, and its bit is the
+     * padding it is in the descriptor (zero), as every other byte agrees. */
+    pad.buttons = HIDPAD_XI_GUIDE;
+    len = hidpad_input_report( id, &pad, &st, 0, r );
+    assert( buttons( &p, r, len ) == 0 && !r[12] && !r[13] );
+    pad.buttons = HIDPAD_XI_DPAD_UP | HIDPAD_XI_DPAD_RIGHT;
+    len = hidpad_input_report( id, &pad, &st, 0, r );
+    assert( value( &p, HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_HATSWITCH, r, len ) == 2 );   /* NE, 1-based */
+    /* The generic pad still reports Guide as its eleventh button. */
+    {
+        const struct hidpad_identity *gen = hidpad_identity_from_env( "generic" );
+        struct parsed g;
+        parse( gen, &g );
+        pad.buttons = HIDPAD_XI_GUIDE;
+        len = hidpad_input_report( gen, &pad, &st, 0, r );
+        assert( buttons( &g, r, len ) == 1u << 10 );
+        free( g.pre );
+    }
+    free( p.pre );
+}
+
 static void check_transport( void )
 {
     struct winios_hidpad pad = {0}, got;
@@ -374,6 +451,7 @@ int main( void )
     check_ids();
     check_dualsense();
     check_generic();
+    check_xbox360();
     check_transport();
     return 0;
 }
@@ -626,6 +704,20 @@ int main( void )
     assert( n && strstr( n->values, "Mfg=sz:Madeira;" ) );
     assert( find( CCS "\\Control\\DeviceClasses\\{4d1e55b2-f16f-11cf-88cb-001111000030}\\##?#HID#VID_1209&PID_4D47"
                   "#9&4d616465&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}\\#\\Control" ) );
+
+    /* Xbox 360: the instance and the interface carry IG_00, where setupapi,
+     * raw input and WMI's Win32_PnPEntity read it. */
+    reset();
+    setenv( "MADEIRA_HIDPAD", "xbox360", 1 );
+    strcpy( live_link, "\\??\\HID#VID_045E&PID_028E&IG_00#9&4d616465&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}" );
+    ios_hidpad_publish();
+    assert( log_lines == 1 && strstr( last_log, "(4/4 keys)" ) && strstr( last_log, "xbox360 045E:028E" ) );
+    n = find( CCS "\\Enum\\HID\\VID_045E&PID_028E&IG_00\\9&4d616465&0&0000" );
+    assert( n && strstr( n->values, "Mfg=sz:Microsoft;" ) && strstr( n->values, "DeviceDesc=sz:HID-compliant game controller;" ) );
+    assert( strstr( n->values, "HardwareID=multi:HID\\VID_045E&PID_028E&REV_0114&IG_00|HID\\VID_045E&PID_028E&IG_00|" ) );
+    n = find( CCS "\\Control\\DeviceClasses\\{4D1E55B2-F16F-11CF-88CB-001111000030}\\##?#HID#VID_045E&PID_028E&IG_00"
+              "#9&4d616465&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}" );
+    assert( n && !strcmp( n->values, "DeviceInstance=sz:HID\\VID_045E&PID_028E&IG_00\\9&4d616465&0&0000;" ) );
     return 0;
 }
 '''
@@ -657,6 +749,6 @@ with tempfile.TemporaryDirectory(prefix='madeira-hidpad-') as tmp:
         objs.append(str(obj))
     subprocess.run([cc, *objs, '-pthread', '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
-print('PASS: DualSense and generic descriptors through Wine hidparse + hid.dll, '
+print('PASS: DualSense, generic and Xbox 360 descriptors through Wine hidparse + hid.dll, '
       'sticks/triggers/buttons/hat/touch/motion/battery, feature and output reports, transport, '
       'registry entries (level by level, volatile, only for the device that exists)')

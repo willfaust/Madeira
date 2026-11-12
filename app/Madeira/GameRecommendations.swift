@@ -1426,6 +1426,12 @@ extension GameRecommendations {
                    programs: ["gmod.exe"], steamPrograms: [], list: garrysMod),
         SteamTitle(appIDs: [2161700], folders: ["p3r"],
                    programs: ["p3r.exe"], steamPrograms: [], list: persona3Reload),
+        SteamTitle(appIDs: [], folders: [],
+                   programs: ["ubisoftconnect.exe", "upc.exe"], steamPrograms: [], list: ubisoftConnect),
+        SteamTitle(appIDs: [220240], folders: ["far cry 3"],
+                   programs: [], steamPrograms: ["fc3updatersteam.exe"], list: farCry3),
+        SteamTitle(appIDs: [298110], folders: ["far cry 4"],
+                   programs: [], steamPrograms: ["farcry4.exe"], list: farCry4),
         SteamTitle(appIDs: [980610], folders: ["quaver"],
                    programs: ["quaver.exe"], steamPrograms: [], list: quaver),
         SteamTitle(appIDs: [239140], folders: ["dying light"],
@@ -1574,6 +1580,92 @@ extension GameRecommendations {
         env.MADEIRA_EC_HOOK_TRACE = 0
         """,
         avx: true, nvidia: false, wineVCRT: false)
+
+    /// Ubisoft Connect (UbisoftConnect.exe, which starts the 32-bit upc.exe), on its own or as the launcher a Ubisoft
+    /// game's Steam install script installs (docs/UBISOFT.md). Device-tested on an iPhone18,2 (2026-11-11): it signs in
+    /// and starts Far Cry 3 and Far Cry 4. It opens only in the Wine desktop with Windows services started first
+    /// (launchMode, startServices). With no game in front, its UplayService.exe and UplayWebCore.exe helpers would take
+    /// full-size code buffers until upc.exe runs out ("JIT pool exhausted"): POOL_CODE_FOREGROUND with
+    /// POOL_CODE_FOREGROUND_PROGRAM = upc.exe keeps the client's budget and holds the others to 16 MB, as behind a game.
+    /// WOA_RECHECK keeps a wake-up the 32-bit client misses from stopping it. env.MADEIRA_SELF_WRITE and
+    /// env.MADEIRA_UBI_CEF, which it needs, are on by default. A game started from its window runs with this list, its
+    /// code buffers held to 16 MB as well.
+    static let ubisoftConnect = GameRecommendation(
+        id: "ubisoft-connect", title: "Ubisoft Connect", version: 1,
+        config: """
+        # Madeira's recommended settings for Ubisoft Connect.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-split = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_WOA_RECHECK = 1
+        env.MADEIRA_POOL_CODE_FOREGROUND = 1
+        env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM = upc.exe
+        # The defaults this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """,
+        launchMode: "desktop", startServices: true)
+
+    /// Far Cry 3 (Steam App ID 220240, 32-bit), started through Madeira Dock and Ubisoft Connect (docs/UBISOFT.md).
+    /// Device-tested on an iPhone18,2 (2026-11-11): it signs in and plays. The dxmt line reports an AMD adapter to its
+    /// Direct3D 11 renderer, which with Apple's id draws dark rectangles over the scene (a vendor-dependent clear, DXVK
+    /// issue 3758); set Overall Quality to Custom first, since the Optimal preset reads the detected GPU. pool-split:
+    /// the game and Ubisoft Connect need more code buffers than one pool region holds. No audio lead: its FAudio voices
+    /// break up with it. The rest is for Ubisoft Connect in front: the game keeps its code buffers
+    /// (POOL_CODE_FOREGROUND), its launcher-pipe read completes during a sleep (SLEEP_KERNEL_APC), the client's waits
+    /// are re-checked (WOA_RECHECK), and the copy the game starter ends releases what it held (KILL_REAP).
+    static let farCry3 = GameRecommendation(
+        id: "far-cry-3", title: "Far Cry 3", version: 1,
+        config: """
+        # Madeira's recommended settings for Far Cry 3.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        dxmt = dxgi.customVendorId=1002;dxgi.customDeviceId=7340
+        pool-split = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_AUDIO_LEAD_MS = 0
+        env.MADEIRA_POOL_CODE_FOREGROUND = 1
+        env.MADEIRA_SLEEP_KERNEL_APC = 1
+        env.MADEIRA_WOA_RECHECK = 1
+        env.MADEIRA_KILL_REAP = 1
+        # The defaults this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """)
+
+    /// Far Cry 4 (Steam App ID 298110, 64-bit), started through Madeira Dock and Ubisoft Connect (docs/UBISOFT.md).
+    /// Device-tested on an iPhone18,2 (2026-11-11): it signs in and plays at its 40 fps cap. FC64.dll hooks ntdll and
+    /// needs free address space right above it (X64_HOOK_ZONE). The game reads XInput only after it finds an Xbox
+    /// controller among the devices: PAD_MODE = xbox360 adds the device Windows lists beside a wired Xbox 360 pad.
+    /// WOW_HOLD_WINDOWS = 0: the game's folder holds a 32-bit program that never runs, and the 4 GB guest window the
+    /// Dock would hold for it is room the session's 64-bit processes need (with it held, xaudio2_7.dll can fail to
+    /// map and the game crashes opening its first window). pool-split, no audio lead and Ubisoft Connect's lines as
+    /// for Far Cry 3.
+    static let farCry4 = GameRecommendation(
+        id: "far-cry-4", title: "Far Cry 4", version: 1,
+        config: """
+        # Madeira's recommended settings for Far Cry 4.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        pool-split = 1
+        env.MADEIRA_EC_HOOK_TRACE = 0
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_X64_HOOK_ZONE = 1
+        env.MADEIRA_POOL_CODE_FOREGROUND = 1
+        env.MADEIRA_SLEEP_KERNEL_APC = 1
+        env.MADEIRA_WOA_RECHECK = 1
+        env.MADEIRA_KILL_REAP = 1
+        env.MADEIRA_PAD_MODE = xbox360
+        env.MADEIRA_AUDIO_LEAD_MS = 0
+        env.MADEIRA_WOW_HOLD_WINDOWS = 0
+        # The defaults this list was tested with (upstream's differ).
+        env.MADEIRA_FREE_DELAY_MS = 2000
+        env.MADEIRA_CTX_CPU_AREA = 2
+        env.MADEIRA_WAIT_CHILDREN = 1
+        env.MADEIRA_JIT_DUMP = 0
+        """)
 
     /// Garry's Mod (Steam App ID 4000). Device-tested on an iPhone 17 Pro Max (2026-10-31): multiplayer works on Steam's
     /// x86-64 branch (64-bit gmod.exe, 60 FPS against 17-53 on the 32-bit default branch) with the launch option

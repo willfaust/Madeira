@@ -424,6 +424,7 @@ enum DockInstallStatus: String, Sendable {
     case missing       // the program is not on disk
     case unsupported   // this build cannot run it (see DockInstallers.runnable)
     case pending       // runs in the session before the host
+    case provided      // what it installs is already in the prefix (a shared launcher): recorded done, not run
     case limit         // over the per-start limit; runs at a later start
 }
 
@@ -513,11 +514,13 @@ enum DockInstallScripts {
     /// at most `limit` programs run per start.
     static func plan(_ found: [SteamInstallProcess], limit: Int = 8,
                      done: (SteamInstallRun) -> Bool, exists: (String) -> Bool,
-                     runnable: (SteamInstallProcess) -> String? = { _ in nil }) -> [DockInstallPlanItem] {
+                     runnable: (SteamInstallProcess) -> String? = { _ in nil },
+                     provided: (SteamInstallProcess) -> Bool = { _ in false }) -> [DockInstallPlanItem] {
         var result: [DockInstallPlanItem] = []
         var queued = 0
         for process in found {
             if done(process.run) { result.append(DockInstallPlanItem(process: process, status: .done)); continue }
+            if provided(process) { result.append(DockInstallPlanItem(process: process, status: .provided)); continue }
             if !exists(process.executable) { result.append(DockInstallPlanItem(process: process, status: .missing)); continue }
             if let reason = runnable(process) {
                 result.append(DockInstallPlanItem(process: process, status: .unsupported, reason: reason)); continue
@@ -543,6 +546,7 @@ enum DockInstallScripts {
         var parts: [String] = []
         if !names(.pending).isEmpty { parts.append("Runs first: " + names(.pending)) }
         if !names(.done).isEmpty { parts.append("Already done: " + names(.done)) }
+        if !names(.provided).isEmpty { parts.append("Provided by the installed launcher, not run: " + names(.provided)) }
         if !names(.missing).isEmpty { parts.append("Installer file missing: " + names(.missing)) }
         if !names(.unsupported).isEmpty { parts.append("Cannot run in this build: " + names(.unsupported)) }
         if !names(.limit).isEmpty { parts.append("Next start: " + names(.limit)) }
@@ -715,6 +719,11 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
 /// - `MADEIRA_DOTNET_FUSION`: place Wine's fusion.dll in the .NET 2.0 folder when missing.
 /// - `MADEIRA_INSTALL_SKIP_DOTNET`: .NET Framework 2.0-4.x setups are left out (Wine's own
 ///   .NET answers for them; off: they run like any other program).
+/// - `MADEIRA_INSTALL_SKIP_LAUNCHER`: a shared launcher's installer (sharedLauncherInstallers)
+///   is recorded done instead of run when the launcher is already in the prefix (off: it runs
+///   for every game that lists it).
+/// - `MADEIRA_INSTALL_LAUNCHER_REGISTRY`: a shared launcher in the prefix gets the values its
+///   games find it by (SharedLauncher.values) where the prefix has none (off: none are written).
 /// - `MADEIRA_DOCK_INSTALL_SEPARATE` (madeira-bcd): a start that runs installers runs only
 ///   them; the game starts after Madeira is restarted (off: the host follows in the same session).
 /// - `MADEIRA_DOCK_RESET_CLEAN` (madeira-bcd): Reset also moves what the installers put into
@@ -778,6 +787,10 @@ enum DockInstallers {
     }
     /// This start runs installers and turns madsync off for its session.
     private(set) static var serverSync = false
+    /// The lines this start's session gets for a shared launcher its game's install script runs,
+    /// whether its installer runs now or the launcher is installed (sharedLauncherInstallers).
+    /// Empty for other games, and when MADEIRA_DOCK_INSTALLERS=0.
+    private(set) static var launcherSessionEnv: [String: String] = [:]
     /// This start's plan in words (the Dock sheet's status), nil when there is nothing to say.
     private(set) static var note: String?
     /// When poll first read the batch's end: the host starts next. nil before, and
@@ -859,12 +872,22 @@ enum DockInstallers {
         enabled ? found(game, drive: drive).processes.count : 0
     }
 
+    /// Whether a path, links resolved, stays inside drive_c or inside a folder added under
+    /// Settings › External drives and opened this launch. Such a folder is linked as
+    /// C:\External\<name>, a link out of drive_c: a game in a Steam library there has its
+    /// install scripts, their programs and Steam's shared redistributables behind it.
     nonisolated static func inside(_ url: URL, drive: URL) -> Bool {
-        url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(drive.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+        func real(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+        let path = real(url)
+        if path.hasPrefix(real(drive) + "/") { return true }
+        return ExternalDrives.openedRoots.contains { root in
+            let folder = real(root)
+            return path == folder || path.hasPrefix(folder + "/")
+        }
     }
 
     /// A C:\ path resolved on disk the way Wine resolves it (case-insensitive), staying
-    /// inside drive_c; nil when it does not exist.
+    /// inside drive_c or an opened external folder (inside); nil when it does not exist.
     nonisolated static func resolve(_ windowsPath: String, drive: URL) -> URL? {
         guard windowsPath.uppercased().hasPrefix("C:\\"), windowsPath.utf8.count < 1024 else { return nil }
         let parts = windowsPath.dropFirst(3).split(separator: "\\", omittingEmptySubsequences: false).map(String.init)
@@ -909,6 +932,77 @@ enum DockInstallers {
         if process.executable.lowercased().hasSuffix(".msi") { return hasMsiexec ? nil : "Windows Installer package" }
         guard let file = resolve(process.executable, drive: drive), let machine = machine(file) else { return nil }
         return machine == 0x14c && !has32Bit ? "32-bit installer" : nil
+    }
+
+    /// The installers of a launcher that several games share: the installer's file name (lower
+    /// case), the programs any one of which says the launcher is already in the prefix, and the
+    /// lines the launcher needs in the session of a game that runs it. Every Ubisoft game's Steam
+    /// install script runs Ubisoft Connect's installer, and the record of a run is per game, so
+    /// each game would otherwise run it again although the prefix is shared. The game then
+    /// starts Ubisoft Connect in its Dock session, whose game starter needs
+    /// env.MADEIRA_APC_BUSY_QUEUE = 1: otherwise an I/O completion for a busy thread can go to
+    /// another waiting thread or be dropped, and the game starter never starts the play session.
+    ///
+    /// `values` are what the launcher's games read to find it, written at a start while the
+    /// launcher is in the prefix and only where the prefix has no such value. Ubisoft Connect's
+    /// installer leaves out InstallDir under HKLM\Software\Ubisoft\Launcher, and without it the
+    /// launcher's service and the games' Ubisoft loaders report the launcher as not installed.
+    struct SharedLauncher: Sendable {
+        let installer: String
+        let programs: [String]
+        let sessionEnv: [String: String]
+        let values: [SteamInstallValue]
+    }
+    nonisolated static let sharedLauncherInstallers: [SharedLauncher] = [
+        SharedLauncher(installer: "ubisoftconnectinstaller.exe",
+                       programs: ["C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\UbisoftConnect.exe",
+                                  "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\upc.exe"],
+                       sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"],
+                       values: [SteamInstallValue(hive: .machine, key: "Software\\Ubisoft\\Launcher", name: "InstallDir",
+                                                  data: .string("C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\"),
+                                                  followsInstall: false)]),
+    ]
+
+    /// The shared launcher a program installs, by its file name.
+    nonisolated static func sharedLauncher(_ process: SteamInstallProcess) -> SharedLauncher? {
+        let file = process.executable.split(separator: "\\").last.map { $0.lowercased() } ?? ""
+        return sharedLauncherInstallers.first { $0.installer == file }
+    }
+
+    /// Whether the program is a shared launcher's installer and the launcher is a file in the
+    /// prefix (any case of the names; a folder of that name does not count).
+    nonisolated static func installsPresentLauncher(_ process: SteamInstallProcess, drive: URL) -> Bool {
+        guard let launcher = sharedLauncher(process) else { return false }
+        return launcher.programs.contains { path in
+            var folder: ObjCBool = false
+            guard let url = resolve(path, drive: drive) else { return false }
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &folder) && !folder.boolValue
+        }
+    }
+
+    /// The values of the shared launchers among a game's install-script programs that are in the
+    /// prefix (SharedLauncher.values).
+    nonisolated static func launcherValues(_ processes: [SteamInstallProcess], drive: URL) -> [SteamInstallValue] {
+        var values: [SteamInstallValue] = []
+        for process in processes where installsPresentLauncher(process, drive: drive) {
+            for value in sharedLauncher(process)?.values ?? [] where !values.contains(value) { values.append(value) }
+        }
+        return values
+    }
+
+    /// The session lines of the shared launchers among a game's install-script programs, whether
+    /// their installers run at this start or the launchers are already installed.
+    nonisolated static func launcherLines(_ processes: [SteamInstallProcess]) -> [String: String] {
+        var env: [String: String] = [:]
+        for process in processes {
+            for (name, value) in sharedLauncher(process)?.sessionEnv ?? [:] where env[name] == nil { env[name] = value }
+        }
+        return env
+    }
+
+    /// Every name a shared launcher's session lines set (a start without such a launcher clears them).
+    nonisolated static var sharedLauncherSessionNames: [String] {
+        Array(Set(sharedLauncherInstallers.flatMap { $0.sessionEnv.keys })).sorted()
     }
 
     /// A .NET Framework 2.0-4.x setup: its file name (as Microsoft and
@@ -1075,6 +1169,7 @@ enum DockInstallers {
                         has32Bit: Bool = DockInstallers.bundleHas32Bit, hasMsiexec: Bool = DockInstallers.bundleHasMsiexec,
                         fusionSource: URL? = Bundle.main.resourceURL?.appendingPathComponent("i386-windows/fusion.dll")) {
         script = nil; serverSync = false; note = nil; finishedAt = nil; logged = []; runningSince = nil; installsOnly = false
+        launcherSessionEnv = [:]
         allSucceeded = false; thirdPartyInstalls = 0
         let app = game.id
         let batchFile = drive.appendingPathComponent(scriptName)
@@ -1094,7 +1189,9 @@ enum DockInstallers {
         }
         let defaultKey = flag("MADEIRA_INSTALL_DEFAULT_KEY")
         let skipDotNet = flag("MADEIRA_INSTALL_SKIP_DOTNET")   // 0: .NET Framework setups run too
+        let skipLauncher = flag("MADEIRA_INSTALL_SKIP_LAUNCHER")   // 0: a shared launcher's installer runs again when the launcher is in the prefix
         let (found, scripts) = Self.found(game, drive: drive, defaultKey: defaultKey)
+        launcherSessionEnv = launcherLines(found)
         // A Record as done / Reset request saved since the last start, before the plan reads
         // the registry.
         applyRequest(game, found: found, prefix: prefix, drive: drive, others: others)
@@ -1112,6 +1209,18 @@ enum DockInstallers {
                 }
             }
         }
+        // A shared launcher in the prefix: the values its games find it by, where missing.
+        if flag("MADEIRA_INSTALL_LAUNCHER_REGISTRY") {   // 0: a shared launcher's values (SharedLauncher.values) are not written
+            let values = launcherValues(found, drive: drive)
+            if !values.isEmpty {
+                do {
+                    let written = try SteamInstallRegistry.write(values, prefix: prefix)
+                    LogStore.shared.log("[dock-installers] app=\(app) launcher registry values=\(values.count) written=\(written)")
+                } catch {
+                    LogStore.shared.log("[dock-installers] app=\(app) launcher registry values not written: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
         guard !found.isEmpty else {
             LogStore.shared.log("[dock-installers] app=\(app) scripts=\(scripts) programs=0"); return
         }
@@ -1122,10 +1231,23 @@ enum DockInstallers {
                                             done: { DockInstallScripts.marked($0, in: registry[$0.hive] ?? "") },
                                             exists: { resolve($0, drive: drive) != nil },
                                             runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec,
-                                                                 skipDotNet: skipDotNet) })
+                                                                 skipDotNet: skipDotNet) },
+                                            provided: { skipLauncher && installsPresentLauncher($0, drive: drive) })
+        // A shared launcher already in the prefix: its installer's run is recorded done for this
+        // game, as Valve's client would after running it, so later starts see it done.
+        let provided = items.filter { $0.status == .provided }.map(\.process.run)
+        if !provided.isEmpty {
+            do {
+                let written = try SteamInstallScripts.mark(provided, prefix: prefix)
+                LogStore.shared.log("[dock-installers] app=\(app) programs=\(provided.map { DockInstallScripts.label($0) }.joined(separator: ",")) " +
+                                    "skipped: the launcher it installs is already in the prefix (recorded as done, values=\(written))")
+            } catch {
+                LogStore.shared.log("[dock-installers] app=\(app) a provided program not recorded: \(error.localizedDescription)", level: .error)
+            }
+        }
         // ml2020: a publisher's program the script installed (or installs now), by its record's
         // key: the game session's service-manager decision (DockGameSession) reads the count.
-        thirdPartyInstalls = items.filter { [.done, .pending, .limit].contains($0.status)
+        thirdPartyInstalls = items.filter { [.done, .provided, .pending, .limit].contains($0.status)
                                             && !DockGameSession.isMicrosoftKey($0.process.run.key) }.count
         var pending = items.filter { $0.status == .pending }.map(\.process)
         var ledger = DockInstallLedger.load(prefix: prefix)

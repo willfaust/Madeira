@@ -729,6 +729,14 @@ struct LibraryEntry: Codable, Identifiable {
     }
 
     var windowsPath: String { "C:\\" + relativePath.replacingOccurrences(of: "/", with: "\\") }
+    /// The folder of the program the player plays, published for the session as MADEIRA_GAME_FOLDER: a
+    /// Steam game's install folder, else the folder of the entry's program; nil for the Desktop entry.
+    /// With env.MADEIRA_POOL_CODE_FOREGROUND = 1 programs outside it get smaller FEX code buffers
+    /// (virtual_ios.c ios_pool_fg_class).
+    var gameFolder: String? {
+        if desktop == true { return nil }
+        return steamAppID != nil ? windowsPath : Self.folder(of: launchWindowsPath)
+    }
 
     /// The vsync mode to apply: a saved 30 or 40 FPS limit runs as 60 when it is
     /// not offered (DXMT without that cap would present uncapped).
@@ -874,6 +882,9 @@ struct LibraryEntry: Codable, Identifiable {
         // Export both choices: unsetting Directly lets a global env.MADEIRA_DESKTOP=1
         // turn the desktop back on when the bridge applies madeira.cfg.
         setenv("MADEIRA_DESKTOP", desktop == true || runsInDesktop ? "1" : "0", 1)
+        // The folder of the program the player plays, for the session's code-buffer budget
+        // (virtual_ios.c ios_pool_fg_class); a Dock start publishes its game's in MadeiraDock.configure.
+        if let gameFolder { setenv("MADEIRA_GAME_FOLDER", gameFolder, 1) } else { unsetenv("MADEIRA_GAME_FOLDER") }
         if startsSteamGameDirectly, let steamAppID {
             // The game's own Steam identity (SteamAppId, SteamGameId, SteamAppPath = its install
             // folder) instead of the bridge's fixed one.

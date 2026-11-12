@@ -266,6 +266,18 @@ stay XInput. Wine's xinput only adopts WINEXINPUT devices, never this one.
 one pad). In XInput mode there is no HID device at all: no device object, no
 registry entry.
 
+`env.MADEIRA_PAD_MODE = xbox360` is for the games that look for an Xbox
+controller among the devices and read XInput only for one they found (Far
+Cry 4 ignores every input without one). On Windows a wired Xbox 360 controller
+is both an XInput pad and the HID device xusb22 lists beside it; with this
+mode player 1 is both too: it stays on XInput, and the wineserver adds that
+device, Microsoft 045E:028E rev 0114, `HID\VID_045E&PID_028E&IG_00`,
+"Controller (XBOX 360 For Windows)", with ten buttons (A to R3, no Guide), two
+sticks, the triggers and a hat, as DirectInput shows a 360 pad. Wine's xinput
+lists only its own WINEXINPUT interface and Windows.Gaming.Input skips `&IG_`
+devices, so neither sees a second pad. No output reports: rumble stays
+XInput's.
+
 With the per-game **Controller** choice (Game details and the Session menu,
 above), HID mode is the madeira.cfg setting the picker builds on, for every
 game:
@@ -383,8 +395,8 @@ user sees are opt-in (only `1` enables); the others are on unless set to `0`:
 | `MADEIRA_CONTROLS_EDITOR_DONE` | on | `0`: the checkmark and show/hide glyph while editing |
 | `MADEIRA_CONTROLS_XBOX_DEFAULT` | **off** | `1`: a user with no controls file gets the built-in once |
 | `MADEIRA_PAD_EARLY_SLOT` | **off** | `1`: player 1 is reserved at session start (see above) |
-| `MADEIRA_PAD_MODE` | XInput | `hid` / `dualsense` / `generic`: player 1 as a HID controller (see above) |
-| `MADEIRA_HIDPAD_XINPUT` | **off** | `1`: in HID mode, player 1 stays an XInput pad as well |
+| `MADEIRA_PAD_MODE` | XInput | `hid` / `dualsense` / `generic`: player 1 as a HID controller; `xbox360`: XInput plus the Xbox 360 device (see above) |
+| `MADEIRA_HIDPAD_XINPUT` | **off** | `1`: in HID mode, player 1 stays an XInput pad as well (also from the game's own file) |
 | `MADEIRA_PAD_OUTPUT` | on | `0`: no rumble/trigger/lightbar output to the pad; `hid` / `xinput`: only that half |
 | `MADEIRA_XINPUT_BATTERY` | on | `0`: XInput reports an unknown battery and no wireless flag (ml2170) |
 | `MADEIRA_WGI_HOST_PADS` | on | `0`: Windows.Gaming.Input lists no controllers (ml2171) |

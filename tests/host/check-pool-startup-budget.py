@@ -35,7 +35,8 @@ assert ec.count('ios_tail_carve_ready( &ios_tail_carves[') == 2, 'cap lift and r
 assert 'if (kept_large_carve && !reuse_all_carves)' in ec
 assert 'reuse_all_carves = 1;\n                low_fits = 0;' in ec
 assert ec.count('(low_ok || !ios_tail_carve_in_low( ios_tail_carves[') == 2
-helpers = ''.join(function(native, signature) for signature in (
+fg_policy = '\n'.join(line for line in native.splitlines() if line.startswith(('#define IOS_POOL_OTHER_MAX ', '#define IOS_POOL_FG_HOLD_SEC '))) + '\n' + function(native, 'static int ios_pool_fg_held(')
+helpers = next(line for line in native.splitlines() if line.startswith('#define IOS_POOL_CUT_MIN ')) + '\n' + ''.join(function(native, signature) for signature in (
     'static size_t ios_pool_hole_between(',
     'static size_t ios_pool_code_cap(',
     'int ios_jit_low_contains(',
@@ -44,6 +45,8 @@ helpers = ''.join(function(native, signature) for signature in (
     'static int ios_pool_preserve_code_carve(',
     'static int ios_pool_preserve_big_carve(',
     'static int ios_tail_carve_ready(',
+    'static unsigned ios_tail_carve_cut(',
+    'static int ios_pool_carve_merge_enabled(',
 ))
 carve_start = native.index('#define IOS_TAIL_CARVE_MAX ')
 carve_table = native[carve_start:native.index('\n\n', carve_start)]
@@ -76,6 +79,10 @@ static pthread_mutex_t ios_tail_carve_lock = PTHREAD_MUTEX_INITIALIZER;
 ''' + carve_table + r'''
 static uintptr_t ios_wow_base(void) { return wow; }
 static void *ios_jit_current_peb(void) { return (void *)(uintptr_t)1; }
+/* pool-fg: the policy is off in this fixture (tests/host/check-pool-code-policy.py covers it) */
+enum { IOS_POOL_FG_OFF = 0, IOS_POOL_FG_OTHER = 1, IOS_POOL_FG_GAME = 2 };
+static int ios_pool_fg_class(void) { return IOS_POOL_FG_OFF; }
+''' + fg_policy + r'''
 static int ios_tail_carve_scan(const void *base, size_t size, int strict)
 { (void)base; (void)size; (void)strict; return 0; }
 ''' + helpers + r'''
