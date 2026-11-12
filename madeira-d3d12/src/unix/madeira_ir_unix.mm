@@ -976,7 +976,7 @@ static int mad_airconv_convert_tess(struct madeira_ir_convert_args *a,
         if (object) {
             memset(&ia, 0, sizeof ia);
             ia.type = SM50_SHADER_IA_INPUT_LAYOUT; ia.next = &tess;
-            ia.index_buffer_format = (enum SM50_INDEX_BUFFER_FORAMT)a->tess_index_format;
+            ia.index_buffer_format = static_cast<decltype(ia.index_buffer_format)>(a->tess_index_format);
             ia.slot_mask = slot_mask; ia.num_elements = ia_nel; ia.elements = ia_el;
             rc = SM50CompileTessellationPipelineHull(sh_main, sh_hs, (struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&ia, name, &bits, &err);
         } else {
@@ -1119,7 +1119,7 @@ static int mad_airconv_convert_gs(struct madeira_ir_convert_args *a,
         if (object) {
             memset(&ia, 0, sizeof ia);
             ia.type = SM50_SHADER_IA_INPUT_LAYOUT; ia.next = &common;
-            ia.index_buffer_format = (enum SM50_INDEX_BUFFER_FORAMT)a->tess_index_format;
+            ia.index_buffer_format = static_cast<decltype(ia.index_buffer_format)>(a->tess_index_format);
             ia.slot_mask = slot_mask; ia.num_elements = ia_nel; ia.elements = ia_el;
             geom.next = &ia;
             rc = SM50CompileGeometryPipelineVertex(sh_main, sh_other, (struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&geom, name, &bits, &err);
