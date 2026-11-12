@@ -1637,13 +1637,13 @@ extension GameRecommendations {
         """)
 
     /// Far Cry 4 (Steam App ID 298110, 64-bit), started through Madeira Dock and Ubisoft Connect (docs/UBISOFT.md).
-    /// Device-tested on an iPhone18,2 (2026-11-10): it signs in and plays, about 53 minutes at its 40 fps cap. FC64.dll
-    /// hooks ntdll and needs free address space right above it (X64_HOOK_ZONE). The game starter ends a suspended copy
-    /// of the game (KILL_REAP releases what it held), and the game keeps its code buffers while Ubisoft Connect's
-    /// processes get at most 16 MB each (POOL_CODE_FOREGROUND); pool-split, as for Far Cry 3. The game reads a controller
-    /// through XInput only after it finds an Xbox controller among the devices: PAD_MODE = xbox360 adds the device
-    /// Windows lists beside a wired Xbox 360 pad. Its audio breaks up with the audio lead, as Far Cry 3's. Ubisoft
-    /// Connect's lines are as Far Cry 3's.
+    /// Device-tested on an iPhone18,2 (2026-11-11): it signs in and plays at its 40 fps cap. FC64.dll hooks ntdll and
+    /// needs free address space right above it (X64_HOOK_ZONE). The game reads XInput only after it finds an Xbox
+    /// controller among the devices: PAD_MODE = xbox360 adds the device Windows lists beside a wired Xbox 360 pad.
+    /// WOW_HOLD_WINDOWS = 0: the game's folder holds a 32-bit program that never runs, and the 4 GB guest window the
+    /// Dock would hold for it is room the session's 64-bit processes need (with it held, xaudio2_7.dll can fail to
+    /// map and the game crashes opening its first window). pool-split, no audio lead and Ubisoft Connect's lines as
+    /// for Far Cry 3.
     static let farCry4 = GameRecommendation(
         id: "far-cry-4", title: "Far Cry 4", version: 1,
         config: """
@@ -1659,6 +1659,7 @@ extension GameRecommendations {
         env.MADEIRA_KILL_REAP = 1
         env.MADEIRA_PAD_MODE = xbox360
         env.MADEIRA_AUDIO_LEAD_MS = 0
+        env.MADEIRA_WOW_HOLD_WINDOWS = 0
         # The defaults this list was tested with (upstream's differ).
         env.MADEIRA_FREE_DELAY_MS = 2000
         env.MADEIRA_CTX_CPU_AREA = 2
