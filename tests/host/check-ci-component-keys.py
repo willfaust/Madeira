@@ -9,6 +9,14 @@ import re
 
 root = Path(__file__).resolve().parents[2]
 workflow = (root / '.github/workflows/build.yml').read_text()
+ffmpeg_build = (root / 'build/ffmpeg/build.sh').read_text()
+assert 'BUILD="$OBJ_DIR/build-$FFMPEG_VERSION"' in ffmpeg_build, \
+    'FFmpeg versions must not share build objects'
+assert 'WANT_STAMP="$(printf \'%s\\n\' "$GOT" "${CONFIG_ARGS[@]}")"' in ffmpeg_build, \
+    'FFmpeg configure stamp must change with the verified source archive'
+ffmpeg_version = re.search(r'^FFMPEG_VERSION=([^\s]+)$', ffmpeg_build, re.M)[1]
+assert f'FFmpeg {ffmpeg_version} (' in (root / 'app/Madeira/licenses/THIRD-PARTY-NOTICES.txt').read_text(), \
+    'bundled notices must name the FFmpeg version being built'
 assert 'restore-keys:' not in workflow, 'cache reuse must use exact input keys'
 parts = re.split(r'^  ([a-z0-9_-]+):\n', workflow.split('jobs:\n', 1)[1], flags=re.M)
 jobs = dict(zip(parts[1::2], parts[2::2]))
@@ -33,12 +41,12 @@ cases = {
     'llvm': ('tools/build/build-llvm-ios.sh', {'llvm', 'dxmt', 'ipa'}),
     'mingw': ('tools/build/setup-llvm-mingw.sh', {'mingw', 'wine-host', 'i386', 'ipa'}),
     'crypto': ('build/gnutls-ios/build.sh', {'gnutls', 'ipa'}),
-    'media': ('build/ffmpeg/src/ffmpeg-7.1.1.tar.xz', {'ffmpeg', 'ipa'}),
+    'media': ('build/ffmpeg/src/ffmpeg-7.1.5.tar.xz', {'ffmpeg', 'ipa'}),
     'fonts': ('build/freetype-ios/build.sh', {'freetype', 'ipa'}),
     'rust': ('build/rppairing-ios/src/lib.rs', {'rppairing', 'ipa'}),
     'shaders': ('tools/build/build-shader-headers.sh', {'i386', 'dxmt', 'ipa'}),
     'converter': ('madeira-d3d12/src/unix/madeira_ir_unix.mm', {'dxmt', 'ipa'}),
-    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.9.tar.xz', {'gnutls', 'ipa'}),
+    'crypto-source': ('build/gnutls-ios/src/gnutls-3.8.13.tar.xz', {'gnutls', 'ipa'}),
     'font-wrapper': ('tools/build/build-freetype-ios.sh', {'freetype', 'ipa'}),
     'rust-lock': ('build/rppairing-ios/Cargo.lock', {'rppairing', 'ipa'}),
     'rust-notices': ('build/rppairing-ios/notices.py', {'rppairing', 'ipa'}),

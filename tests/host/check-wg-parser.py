@@ -8,7 +8,7 @@
    wired, the round tag is logged, the Apple backend TU is built and archived, and the iOS FFmpeg
    configuration (build/ffmpeg/build.sh) has the mov demuxer and NO H.264/HEVC/AAC decoder, and the
    app target links the FFmpeg archives and the Apple media frameworks.
-2. Builds a host (Linux) FFmpeg 7.1.1 from the same pinned tarball with the same component set as
+2. Builds a host (Linux) FFmpeg 7.1.5 from the same pinned tarball with the same component set as
    build/ffmpeg/build.sh (mp3/wav/mov demuxers, mpegaudio parser, mp1/mp2/mp3 + PCM decoders), plus
    TEST-ONLY pieces used to synthesise inputs and to stand in for AudioToolbox: the mp2 and aac
    encoders, the mp4 muxer, and the aac decoder (inside the stub AAC backend only).  Cached.
@@ -24,7 +24,7 @@
    MADEIRA_WG_VIDEO=0 path, unsupported video / audio codecs, compressed-output refusal, a backend
    that refuses to open, and the deduplicated, bounded log.
 
-Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.1.tar.xz, the tracked
+Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.5.tar.xz, the tracked
 source tarball),
 MADEIRA_HOST_FFMPEG (prefix of an existing host build), MADEIRA_TEST_MP3 (an .mp3 to decode;
 default: a Windows system MP3 under /mnt/c when present, otherwise the real-MP3 case is skipped).
@@ -115,7 +115,7 @@ print("PASS: call tables match enum unix_funcs; wow64 thunks; kill switches (MAD
       "Apple backend built/archived/linked; FFmpeg has mov and no H.264/HEVC/AAC decoder")
 
 # ------------------------------------------------------------------ 2. host FFmpeg
-tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.1.tar.xz")
+tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.5.tar.xz")
 FLAGS = [
     "--disable-everything", "--disable-autodetect", "--disable-gpl", "--disable-nonfree", "--disable-version3",
     "--enable-decoder=mp1,mp2,mp3", "--enable-decoder=pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le",
@@ -129,17 +129,17 @@ FLAGS = [
 prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
 if not prefix:
     key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.1-" + key))
+    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
     if not (Path(prefix) / "lib/libavformat.a").exists():
         assert tarball and Path(tarball).exists(), "no FFmpeg tarball at build/ffmpeg/src (tracked) and no MADEIRA_FFMPEG_TARBALL"
         src = Path(prefix + "-src")
         src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.1/configure").exists():
+        if not (src / "ffmpeg-7.1.5/configure").exists():
             subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
         bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
         print("building host FFmpeg into", prefix, flush=True)
         log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.1/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
+        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
                        cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
         subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)

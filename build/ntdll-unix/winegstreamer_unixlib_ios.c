@@ -67,7 +67,7 @@
  *
  * DECODING
  * --------
- * libavcodec, from build/ffmpeg/build.sh (FFmpeg 7.1.1, LGPL configuration:
+ * libavcodec, from build/ffmpeg/build.sh (FFmpeg 7.1.5, LGPL configuration:
  * --disable-gpl --disable-nonfree, wmav1/wmav2/wmapro/wmalossless/xma1/xma2
  * only).  The input media type is a WAVEFORMATEX -- wg_media_type_from_mf()
  * produces it with MFCreateWaveFormatExFromMFMediaType -- so the codec id,

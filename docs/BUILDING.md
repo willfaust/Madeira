@@ -34,12 +34,12 @@ there, for 64-bit and 32-bit games (`app/Madeira/VCRedist.swift`, docs/LIBRARY.m
 Run in this order after the inputs above are in place. Outputs are
 git-ignored and consumed by the app project.
 
-1. `build/gnutls-ios/build.sh`: GMP 6.3.0, Nettle 3.10.1, GnuTLS 3.8.9 from
+1. `build/gnutls-ios/build.sh`: GMP 6.3.0, Nettle 3.10.2, GnuTLS 3.8.13 from
    the tracked tarballs in `build/gnutls-ios/src` (SHA256SUMS there) ->
    `app/Madeira/lib{gmp,nettle,hogweed,gnutls}.a` (these four outputs are
-   also tracked). Verified: built on the development machine; not re-run
+   also tracked). The updated versions have not yet been built; not re-run
    from a clean checkout.
-   `build/ffmpeg/build.sh`: FFmpeg 7.1.1 in an LGPL-only configuration (WMA,
+   `build/ffmpeg/build.sh`: FFmpeg 7.1.5 in an LGPL-only configuration (WMA,
    MPEG audio and PCM decoders; mp3/wav/mov demuxers; no H.264/HEVC/AAC),
    built from the tracked, unmodified release tarball in `build/ffmpeg/src`
    after verifying it against `build/ffmpeg/src/SHA256SUMS` -> headers in `toolchains/ffmpeg-ios/include`
