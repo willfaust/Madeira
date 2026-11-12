@@ -712,19 +712,23 @@ OVERLAY = {
     "env.MADEIRA_PAD_MODE": {"category": "Controllers", "title": "Controller API (player 1)", "kind": "choice",
                 "note": "XInput (default): every controller is an Xbox pad. hid: player 1 becomes a HID game controller, "
                         "a DualSense (054C:0CE6) when it is a PlayStation pad, and leaves XInput; any other pad stays "
-                        "on XInput. dualsense/generic force the identity. Read at session start; the game's own file wins.",
-                "choices": [("", "XInput (default)"), ("hid", "DirectInput / HID"), ("dualsense", "HID, always a DualSense"),
-                            ("generic", "HID, always a generic gamepad")],
+                        "on XInput. dualsense/generic force the identity. xbox360: player 1 stays on XInput and is also "
+                        "the HID device Windows lists beside a wired Xbox 360 controller (045E:028E, IG_00), for games "
+                        "that look for one among the devices before they read XInput (Far Cry 4). Read at session "
+                        "start; the game's own file wins.",
+                "choices": [("", "XInput (default)"), ("xbox360", "XInput + Xbox 360 device"), ("hid", "DirectInput / HID"),
+                            ("dualsense", "HID, always a DualSense"), ("generic", "HID, always a generic gamepad")],
                 "sources": ["app/Madeira/GamepadInput.swift"]},
     "env.MADEIRA_HIDPAD": {"category": "Controllers",
-                "note": "Set by the app at session start from env.MADEIRA_PAD_MODE (dualsense or generic) for the "
+                "note": "Set by the app at session start from env.MADEIRA_PAD_MODE (dualsense, generic or xbox360) for the "
                         "wineserver and ntdll; not meant to be set by hand."},
     "env.MADEIRA_HIDPAD_NAME": {"category": "Controllers",
                 "note": "Set by the app: the product string a generic HID gamepad reports (the physical pad's name)."},
     "env.MADEIRA_HIDPAD_XINPUT": {"category": "Controllers", "title": "HID mode: keep player 1 on XInput too", "kind": "bool",
                 "default": "0",
                 "note": "1: with the HID controller on, player 1 also stays an XInput pad. Off by default, so a game "
-                        "that reads both APIs does not see the same pad twice.",
+                        "that reads both APIs does not see the same pad twice. Read from the game's own file, "
+                        "madeira.cfg or the environment when the session starts.",
                 "sources": ["app/Madeira/GamepadInput.swift"]},
     "env.MADEIRA_HIDPAD_AUTO_GENERIC": {"category": "Controllers", "title": "HID mode: other pads as a generic HID gamepad",
                 "kind": "bool", "default": "0",
