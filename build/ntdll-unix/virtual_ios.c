@@ -9465,6 +9465,14 @@ static void mmap_add_reserved_area( void *addr, SIZE_T size )
             void *next_end = (char *)area_next->base + area_next->size;
 
             if (area_next->base > end) break;
+            /* nor swallow a FEX or thin area that follows (ml799's rule one step on): the generic area stops
+             * at it, and any part of the new range above it is added on its own */
+            if (area_next->fex_only || area_next->thin_only)
+            {
+                area->size = (char *)area_next->base - (char *)area->base;
+                if ((char *)end > (char *)next_end) mmap_add_reserved_area( next_end, (char *)end - (char *)next_end );
+                return;
+            }
             list_remove( next );
             free( area_next );
             if (next_end >= end)
