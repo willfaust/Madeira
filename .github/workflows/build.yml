@@ -442,7 +442,7 @@ jobs:
           CC: clang
           CXX: clang++
         run: |
-          cmake -S FEX -B "$RUNNER_TEMP/fex-x87" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=ON -DBUILD_FEXCONFIG=OFF
+          cmake -S FEX -B "$RUNNER_TEMP/fex-x87" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=ON -DBUILD_FEXCONFIG=OFF -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF
           targets=(TestHarnessRunner)
           for fixture in FEX/unittests/ASM/X87_F64/FILD_FISTP_I64_*F64.asm; do
             name="${fixture#FEX/}"
