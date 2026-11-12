@@ -2031,6 +2031,20 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_HEAP_BUFFER_SIZE: {
+            if (h.payload_len != sizeof(struct rm_heap_buffer_size)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_buffer_size *a = (const void *)payload;
+            id device = rm_resolve(a->device, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            MTLSizeAndAlign value = [(id<MTLDevice>)device heapBufferSizeAndAlignWithLength:(NSUInteger)a->length
+                                                                                  options:(MTLResourceOptions)a->options];
+            struct rm_size_and_align result = {value.size, value.align};
+            reply(fd, &h, RM_OK, &result, sizeof(result)); break;
+        }
         case RM_OP_COMMAND_BUFFER_PROPERTY: {
             if (h.payload_len != sizeof(struct rm_arg_handle_u64)) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;

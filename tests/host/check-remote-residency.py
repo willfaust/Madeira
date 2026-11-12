@@ -283,3 +283,85 @@ with tempfile.TemporaryDirectory(prefix='madeira-remote-property-guest-') as tmp
                    input=guest_property + property_handler + guest_end, text=True, check=True)
     subprocess.run([str(exe)], check=True)
 print('remote command-buffer guest handler passes')
+
+# Run the heap-size handler with real Metal and reject malformed/invalid requests.
+start = host.index('        case RM_OP_HEAP_BUFFER_SIZE: {')
+end = host.index('        case RM_OP_COMMAND_BUFFER_PROPERTY: {', start)
+heap_case = host[start:end]
+heap_host = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+static id<MTLDevice> device; static uint32_t result; static struct rm_size_and_align answer;
+static id rm_resolve(uint64_t handle, uint32_t *err) {
+  *err = handle == 1 ? RM_OK : RM_ERR_BAD_HANDLE; return handle == 1 ? device : nil;
+}
+static void reply(int fd, const struct rm_hdr *h, uint32_t code, const void *data, uint32_t length) {
+  (void)fd; (void)h; result=code;
+  if (length == sizeof(answer)) answer=*(const struct rm_size_and_align *)data;
+}
+static void invoke(void *payload, uint32_t length) {
+  struct rm_hdr h = {.payload_len=length}; uint32_t err=RM_OK; int fd=0;
+  switch (RM_OP_HEAP_BUFFER_SIZE) {
+'''
+heap_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  device=MTLCreateSystemDefaultDevice(); if (!device) return 77;
+  struct rm_heap_buffer_size a={1,4096,MTLResourceStorageModePrivate};
+  invoke(&a,sizeof(a)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
+  a.device=2; invoke(&a,sizeof(a)); assert(result==RM_ERR_BAD_HANDLE);
+  a.device=1; invoke(&a,sizeof(a)); MTLSizeAndAlign expected=[device heapBufferSizeAndAlignWithLength:4096 options:MTLResourceStorageModePrivate];
+  assert(result==RM_OK && answer.size==expected.size && answer.align==expected.align);
+} return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-host-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-fobjc-arc','-I',str(root/'research/remote-metal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],
+                   input=heap_host+heap_case+heap_end,text=True,check=True)
+    result=subprocess.run([str(exe)],check=False)
+    if result.returncode == 77:
+        print('real Metal heap-size test skipped: no compatible device')
+    else:
+        result.check_returncode(); print('remote Metal heap-size handler passes')
+
+start = source.index('static NTSTATUS\n_MTLDevice_heapBufferSizeAndAlign(')
+end = source.index('\n\nstatic NTSTATUS\n_MTLDevice_heapTextureSizeAndAlign', start)
+heap_client = source[start:end]
+client_pre = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+typedef uint32_t NTSTATUS;
+#define STATUS_SUCCESS 0u
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+#define STATUS_INVALID_PARAMETER 0xc000000du
+struct unixcall_mtldevice_heapbuffersizeandalign { uint64_t device,length; uint32_t options,ret_size,ret_align; };
+static uint32_t status; static uint64_t size_result=8192, align_result=256;
+static int wmtr_enabled(void) { return 1; }
+static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t outlen,uint32_t *got) {
+  (void)got; assert(op==RM_OP_HEAP_BUFFER_SIZE && len==sizeof(struct rm_heap_buffer_size));
+  assert(outlen==sizeof(struct rm_size_and_align));
+  const struct rm_heap_buffer_size *a=arg; assert(a->device==3 && a->length==4096 && a->options==32);
+  *(struct rm_size_and_align *)out=(struct rm_size_and_align){size_result,align_result}; return status;
+}
+'''
+client_end = r'''
+int main(void) { @autoreleasepool {
+  struct unixcall_mtldevice_heapbuffersizeandalign p={3,4096,32,0,0};
+  assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_SUCCESS && p.ret_size==8192 && p.ret_align==256);
+  status=RM_ERR_BAD_OPCODE; assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_UNSUCCESSFUL && !p.ret_size && !p.ret_align);
+  status=RM_OK; size_result=(uint64_t)UINT32_MAX+1; assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_INVALID_PARAMETER && !p.ret_size && !p.ret_align);
+} return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-client-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],
+                   input=client_pre+heap_client+client_end,text=True,check=True)
+    subprocess.run([str(exe)],check=True)
+print('remote Metal heap-size client passes')
