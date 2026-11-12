@@ -282,7 +282,9 @@ jobs:
       - name: Check remote residency protocol
         run: python3 tests/host/check-remote-residency.py
       - name: Check x87 provenance handling
-        run: python3 FEX/unittests/host/check-x87-provenance.py
+        run: |
+          python3 FEX/unittests/host/check-x87-provenance.py
+          python3 FEX/unittests/host/check-x87-state-save.py
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache-llvm
@@ -441,6 +443,11 @@ jobs:
           CXX: clang++
         run: |
           cmake -S FEX -B "$RUNNER_TEMP/fex-x87" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=ON -DBUILD_FEXCONFIG=OFF
-          cmake --build "$RUNNER_TEMP/fex-x87" --target TestHarnessRunner asm_files --parallel 4
+          targets=(TestHarnessRunner)
+          for fixture in FEX/unittests/ASM/X87_F64/FILD_FISTP_I64_*F64.asm; do
+            name="${fixture#FEX/}"
+            targets+=("${name}.bin" "${name}.config.bin")
+          done
+          cmake --build "$RUNNER_TEMP/fex-x87" --target "${targets[@]}" --parallel 4
       - name: Run x87 integer transfer tests
-        run: ctest --test-dir "$RUNNER_TEMP/fex-x87" --output-on-failure -R 'FILD_FISTP_I64_.*F64.asm'
+        run: ctest --test-dir "$RUNNER_TEMP/fex-x87" --no-tests=error --output-on-failure -R 'FILD_FISTP_I64_.*F64.asm'
