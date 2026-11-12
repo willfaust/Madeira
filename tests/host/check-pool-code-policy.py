@@ -10,25 +10,23 @@ are at most 16 MB, and a buffer the game freed or left behind is held for it for
 buffer a relaunched Far Cry 4 needs.
 
 Checks:
-  1. the pool-code-policy-test region and ios_pool_fg_class, with a scripted TEB/PEB per process: OFF unless
-     env.MADEIRA_POOL_CODE_FOREGROUND is exactly "1" and MADEIRA_GAME_FOLDER is usable (not unset, empty, a drive root, non-ASCII
-     or too long); GAME for an image inside the folder (ASCII case ignored, '/' and '\\' alike, a separator must follow:
-     "Far Cry 3" does not hold "Far Cry 3 Blood Dragon"), else OTHER (also with no TEB or no process parameters); both
-     variables read at each call; one [pool-fg] line per process; the hold ends at exactly 120 s;
-  2. the real EC_CODE allocation prefix, MEM_RELEASE carve block, merge, cut and exit retire with the real class, on a model of
-     the pool (-Wall -Wextra -Werror, and ASan + UBSan): another program is clamped to 16 MB before the budget, gets no cap
-     lift for a ready free 128 MB carve but a 16 MB piece cut from it, while the game gets the lift (and so does everyone with
-     the switch unset or no game folder); region C's room is no way past the 16 MB either; a carve the game freed is not
-     another program's for 120 s, the game takes it back at once; a run merged from the game's carve and another program's
-     keeps the hold until the game's carve's own 120 s end, and a spent hold is not renewed by such a merge; a new or reused carve takes its
-     holder's class; Far Cry 4 relaunched through Ubisoft Connect: FarCry4.exe #1 exits leaving 128 MB, upc.exe asks 22 s
-     later and gets 16 MB elsewhere, FarCry4.exe #2 gets the 128 MB back (with the switch unset upc.exe takes it, the game
-     starts on 16 MB);
-  3. wiring: every new carve of the tail and region C paths takes the caller's class (the model's tail stands in for the
-     production one); the catalog documents the key (off by default), a list may set it, the session end clears it and
-     MADEIRA_GAME_FOLDER.
-NOT covered: the app's launch paths beyond the lines that publish the folder; reading a live PEB; fresh tail placement (a model: bump down
-from the pool's end, no holes); thread scans (stubs); the log text beyond the [pool-fg] count; a device run.
+  1. ios_pool_fg_class and the pool-code-policy-test region, with a scripted TEB/PEB per process: OFF unless the switch is
+     exactly "1" and MADEIRA_GAME_FOLDER is usable (set, not a drive root, ASCII, not too long); GAME for an image inside the
+     folder (ASCII case ignored, '/' and '\\' alike, a separator must follow: "Far Cry 3" does not hold "Far Cry 3 Blood
+     Dragon"), else OTHER (also with no TEB or no process parameters); with env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM only that
+     file name inside the folder is GAME, and a name with a separator or outside ASCII matches nothing; both variables read at
+     each call; one [pool-fg] line per process; the hold ends at exactly 120 s;
+  2. the real EC_CODE allocation prefix, MEM_RELEASE carve block, merge, cut and exit retire on a model of the pool
+     (-Wall -Wextra -Werror, and ASan + UBSan): another program is clamped to 16 MB before the budget (no cap lift, and region
+     C's room does not lift it) and gets a 16 MB piece of a free 128 MB carve, while the game, and everyone with the policy
+     off, gets the lift; a carve the game freed is held from other programs for 120 s, also across a merge, and a spent hold
+     is not renewed; a new or reused carve takes its holder's class; Far Cry 4 relaunched through Ubisoft Connect gets its
+     128 MB back (with the switch unset upc.exe takes it and the game starts on 16 MB);
+  3. wiring: every new carve of the tail and region C paths takes the caller's class; both keys in the catalog and cleared at
+     the session end with MADEIRA_GAME_FOLDER; the app publishes the game folder; Ubisoft Connect's list sets the program key.
+Not covered: the app's launch paths beyond the lines that publish the folder; reading a live PEB; fresh tail placement (a
+model: bump down from the pool's end, no holes); thread scans (stubs); the log text beyond the [pool-fg] count.
+Needs python3 and a C compiler.
 """
 from pathlib import Path
 import os, re, shutil, subprocess, sys, tempfile
@@ -88,7 +86,8 @@ enum { STATUS_NO_MEMORY = -1, STATUS_SUCCESS = 0, FALLBACK_TAIL = 2, FALL_THROUG
 #define LOW (64 * MB)
 #define FC4_DIR "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Far Cry 4"
 #define FC4_EXE FC4_DIR "\\bin\\FarCry4.exe"
-#define UPC_EXE "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\upc.exe"
+#define UC_DIR "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher"
+#define UPC_EXE UC_DIR "\\upc.exe"
 ''' + define("IOS_POOL_LOW_CARVE_MAX") + define("IOS_POOL_REUSE_GRACE_SEC") + r'''
 static time_t fake_now;
 static time_t fake_time(time_t *t) { if (t) *t = fake_now; return fake_now; }
@@ -232,6 +231,42 @@ static void free_128_at_floor(void)   /* a ready free 128 MB carve; the budget a
 static struct proc game, upc, fc4b;
 static int class_of(TEB *teb) { cur = teb; return ios_pool_fg_class(); }
 
+/* env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM: Ubisoft Connect from the library, whose helpers live in its own folder. */
+static void program_rule(void)
+{
+    static const char *const nothing[] = { "x\\upc.exe", "u/pc.exe", "upc.ex", "pc.exe", "\xc3\xbcpc.exe" };
+    static struct proc client, service, renderer, other_upc, longer;
+    unsigned k;
+
+    make(&client, 0x3b0, UPC_EXE);
+    make(&service, 0x3b4, UC_DIR "\\UplayService.exe");
+    make(&renderer, 0x3b8, UC_DIR "\\UplayWebCore.exe");
+    make(&other_upc, 0x3bc, "C:\\Other\\upc.exe");
+    make(&longer, 0x3c0, UC_DIR "\\xupc.exe");
+    setenv("MADEIRA_GAME_FOLDER", UC_DIR, 1);
+    unsetenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM");
+    CHECK(class_of(&client.teb) == IOS_POOL_FG_GAME && class_of(&service.teb) == IOS_POOL_FG_GAME);
+    setenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM", "", 1);
+    CHECK(class_of(&service.teb) == IOS_POOL_FG_GAME && class_of(&renderer.teb) == IOS_POOL_FG_GAME);
+    setenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM", "upc.exe", 1);
+    CHECK(class_of(&client.teb) == IOS_POOL_FG_GAME);
+    CHECK(class_of(&service.teb) == IOS_POOL_FG_OTHER && class_of(&renderer.teb) == IOS_POOL_FG_OTHER);
+    CHECK(class_of(&other_upc.teb) == IOS_POOL_FG_OTHER && class_of(&longer.teb) == IOS_POOL_FG_OTHER);
+    CHECK(class_of(NULL) == IOS_POOL_FG_OTHER);
+    setenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM", "UPC.EXE", 1);
+    CHECK(class_of(&client.teb) == IOS_POOL_FG_GAME && class_of(&service.teb) == IOS_POOL_FG_OTHER);
+    for (k = 0; k < sizeof(nothing) / sizeof(nothing[0]); k++)
+    {
+        setenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM", nothing[k], 1);
+        CHECK(class_of(&client.teb) == IOS_POOL_FG_OTHER && class_of(&service.teb) == IOS_POOL_FG_OTHER);
+    }
+    CHECK(ios_pool_path_is_program(client.path, client.pp.ImagePathName.Length / sizeof(WCHAR), "upc.exe") && !ios_pool_path_is_program(NULL, 0, "upc.exe"));
+    unsetenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM");
+    puts("PASS: with a program named, only that program of the folder is the game (its file name, ASCII case ignored); the "
+         "folder's other programs, the same name elsewhere and a name with a separator or outside ASCII are not; unset or "
+         "empty keeps the folder rule");
+}
+
 static void classes(void)
 {
     static const char *const off[] = { "", "0", "11", "1 ", " 1", "true" };
@@ -285,6 +320,7 @@ static void classes(void)
         CHECK(class_of(NULL) == IOS_POOL_FG_OTHER);
     }
     CHECK(fg_lines - lines == 7);                             /* one line per process, however often asked */
+    program_rule();
     unsetenv("MADEIRA_POOL_CODE_FOREGROUND");
     CHECK(class_of(&fc3.teb) == IOS_POOL_FG_OFF);
     puts("PASS: the class: only \"1\" with a usable game folder; inside it (case, '/' and '\\' alike, a separator after) "
@@ -472,6 +508,10 @@ check("the catalog documents the key, off by default; the session end clears it 
       re.search(r'"env\.MADEIRA_POOL_CODE_FOREGROUND": \{[^}]*"default": "0"', gen) is not None
       and re.search(r'key: "env\.MADEIRA_POOL_CODE_FOREGROUND"[^\n]*defaultValue: "0"', cat) is not None
       and 'unsetenv("MADEIRA_POOL_CODE_FOREGROUND");' in bridge and 'unsetenv("MADEIRA_GAME_FOLDER");' in bridge)
+check("the program key: in the catalog (unset by default), cleared at the session end, set by Ubisoft Connect's list",
+      re.search(r'key: "env\.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM"[^\n]*defaultValue: ""', cat) is not None
+      and 'unsetenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM");' in bridge
+      and "env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM = upc.exe" in (root / "app/Madeira/GameRecommendations.swift").read_text())
 check("the app publishes the game folder: a library launch (set or cleared), a Dock start (the game's install folder)",
       'if let gameFolder { setenv("MADEIRA_GAME_FOLDER", gameFolder, 1) } else { unsetenv("MADEIRA_GAME_FOLDER") }' in lib
       and 'return steamAppID != nil ? windowsPath : Self.folder(of: launchWindowsPath)' in lib

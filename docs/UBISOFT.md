@@ -30,7 +30,14 @@ Ubisoft Connect can also be added to the library on its own
 (`C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe`),
 for example to sign in before a game. Its list starts it in the Wine desktop
 with Windows services first; without them it did not open. It is slow, and
-the first sign-in can take a while.
+the first sign-in can take a while. With no game in front, its client
+(`upc.exe`), the two UplayService.exe processes and the browser's
+UplayWebCore.exe processes all took full-size code buffers, and the client ran
+out of them while loading its main window. So the list keeps the client's
+budget and holds the launcher's other programs to 16 MB, as in a game session
+(`env.MADEIRA_POOL_CODE_FOREGROUND_PROGRAM = upc.exe`). Start games from their
+own entry: a game started from this window runs with Ubisoft Connect's
+settings, its code buffers held to 16 MB as well.
 
 The games and Ubisoft Connect's processes together need more code buffers than
 one JIT pool region holds, so the three lists turn on the split pool

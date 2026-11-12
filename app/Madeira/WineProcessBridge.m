@@ -2768,9 +2768,10 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_X64_HOOK_ZONE"); unsetenv("MADEIRA_SELF_WRITE");   /* a game's hook-zone and self-write choices end with its session */
         /* the code-buffer policy and the launched program's folder are per launch */
         unsetenv("MADEIRA_POOL_CARVE_MERGE"); unsetenv("MADEIRA_POOL_CODE_FOREGROUND"); unsetenv("MADEIRA_GAME_FOLDER");
-        unsetenv("MADEIRA_APC_BUSY_QUEUE");    /* the Dock sets it for a Ubisoft game's session (ContentView.startDock) */
-        unsetenv("MADEIRA_KILL_REAP"); unsetenv("MADEIRA_UBI_CEF");   /* a game's teardown rule, and its 0, are its own */
-        unsetenv("MADEIRA_SLEEP_KERNEL_APC"); unsetenv("MADEIRA_WOA_RECHECK");   /* a game's sleep and wait rules are its own */
+        unsetenv("MADEIRA_POOL_CODE_FOREGROUND_PROGRAM");   /* set by a launcher's own list (Ubisoft Connect) */
+        unsetenv("MADEIRA_APC_BUSY_QUEUE");    /* the Dock sets it for a shared launcher's session (ContentView.startDock) */
+        unsetenv("MADEIRA_KILL_REAP"); unsetenv("MADEIRA_UBI_CEF");   /* a game's kill-reap and ubi-cef choices end with its session */
+        unsetenv("MADEIRA_SLEEP_KERNEL_APC"); unsetenv("MADEIRA_WOA_RECHECK");   /* a game's sleep and wait rules end with its session */
         unsetenv("DXMT_ENABLE_NVEXT"); unsetenv("DXMT_WSI_MONITOR_IDENTITY"); unsetenv("DXMT_WSI_MODE_TABLE");
         unsetenv("MADEIRA_GPU_VENDOR"); unsetenv("MADEIRA_GPU_DEVICE"); unsetenv("MADEIRA_GPU_NAME");
         /* madeira-bcd: the server's per-launch switches end with the session */
