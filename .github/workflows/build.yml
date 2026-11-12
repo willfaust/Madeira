@@ -273,6 +273,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Check remote residency protocol
+        run: python3 tests/host/check-remote-residency.py
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache-llvm
