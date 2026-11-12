@@ -2031,6 +2031,25 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_COMMAND_BUFFER_PROPERTY: {
+            if (h.payload_len != sizeof(struct rm_arg_handle_u64)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_arg_handle_u64 *a = (const void *)payload;
+            id cb = rm_resolve(a->handle, &err);
+            if (err != RM_OK || ![cb conformsToProtocol:@protocol(MTLCommandBuffer)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            double seconds = 0;
+            switch (a->arg) {
+            case WMTCommandBufferPropertyKernelStartTime: seconds = [(id<MTLCommandBuffer>)cb kernelStartTime]; break;
+            case WMTCommandBufferPropertyKernelEndTime: seconds = [(id<MTLCommandBuffer>)cb kernelEndTime]; break;
+            case WMTCommandBufferPropertyGPUStartTime: seconds = [(id<MTLCommandBuffer>)cb GPUStartTime]; break;
+            case WMTCommandBufferPropertyGPUEndTime: seconds = [(id<MTLCommandBuffer>)cb GPUEndTime]; break;
+            }
+            struct rm_ret_u64 r = {(uint64_t)(seconds * 1000000000.0)};
+            reply(fd, &h, RM_OK, &r, sizeof(r)); break;
+        }
         case RM_OP_CMDBUF_STATUS: {
             id o = rm_resolve(((struct rm_arg_handle *)payload)->handle, &err);
             if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
