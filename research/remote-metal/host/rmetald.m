@@ -2031,6 +2031,76 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_COUNTER_NEW_TIMESTAMP: {
+            if (h.payload_len != sizeof(struct rm_counter_new)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_counter_new *a=(const void *)payload;
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLDevice> device=object; id<MTLCounterSet> timestamp=nil;
+            for (id<MTLCounterSet> set in device.counterSets) {
+                if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) { timestamp=set; break; }
+            }
+            if (!timestamp) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+            MTLCounterSampleBufferDescriptor *desc=[MTLCounterSampleBufferDescriptor new];
+            desc.counterSet=timestamp; desc.sampleCount=a->count;
+            desc.storageMode=a->shared ? MTLStorageModeShared : MTLStorageModePrivate;
+            NSError *error=nil; id<MTLCounterSampleBuffer> buffer=[device newCounterSampleBufferWithDescriptor:desc error:&error];
+            struct rm_ret_handle result={rm_intern(buffer)};
+            reply(fd,&h,buffer ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
+        case RM_OP_COUNTER_RESOLVE: {
+            if (h.payload_len != sizeof(struct rm_counter_resolve)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_counter_resolve *a=(const void *)payload;
+            if (a->data_length > RM_CHUNK_BYTES) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            id object=rm_resolve(a->buffer,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLCounterSampleBuffer)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLCounterSampleBuffer> buffer=object;
+            if (a->start > buffer.sampleCount || a->count > buffer.sampleCount - a->start) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            NSData *data=[buffer resolveCounterRange:NSMakeRange(a->start,a->count)];
+            if (!data || a->data_length > data.length) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            reply(fd,&h,RM_OK,data.bytes,(uint32_t)a->data_length); break;
+        }
+        case RM_OP_BLIT_WITH_SAMPLES: {
+            if (h.payload_len < sizeof(struct rm_blit_samples)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_blit_samples *a=(const void *)payload;
+            if (a->reserved || a->count > RM_MAX_BLIT_SAMPLES ||
+                h.payload_len != sizeof(*a) + (uint64_t)a->count * sizeof(struct rm_sample_attachment)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id object=rm_resolve(a->cmdbuf,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLCommandBuffer)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            const struct rm_sample_attachment *attachments=(const void *)(a+1);
+            id<MTLCounterSampleBuffer> buffers[RM_MAX_BLIT_SAMPLES]={0};
+            for (uint32_t i=0; i<a->count; ++i) {
+                if (!attachments[i].buffer) continue;
+                id candidate=rm_resolve(attachments[i].buffer,&err);
+                if (err != RM_OK || ![candidate conformsToProtocol:@protocol(MTLCounterSampleBuffer)]) {
+                    if (err == RM_OK) err=RM_ERR_WRONG_CLASS; break;
+                }
+                buffers[i]=candidate;
+            }
+            if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            MTLBlitPassDescriptor *desc=[MTLBlitPassDescriptor new];
+            for (uint32_t i=0; i<a->count; ++i) {
+                desc.sampleBufferAttachments[i].sampleBuffer=buffers[i];
+                desc.sampleBufferAttachments[i].startOfEncoderSampleIndex=attachments[i].start;
+                desc.sampleBufferAttachments[i].endOfEncoderSampleIndex=attachments[i].end;
+            }
+            rm_enc_end_open_on_cb(object, "blit");
+            id<MTLBlitCommandEncoder> encoder=[(id<MTLCommandBuffer>)object blitCommandEncoderWithDescriptor:desc];
+            if (encoder) encoder.label=[NSString stringWithFormat:@"enc#%lu blit",(unsigned long)++g_enc_seq];
+            rm_enc_opened(encoder,object);
+            struct rm_ret_handle result={rm_intern(encoder)};
+            reply(fd,&h,encoder ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
         case RM_OP_HEAP_NEW_TEXTURE: {
             if (h.payload_len != sizeof(struct rm_heap_new_texture) + sizeof(struct WMTTextureInfo)) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;

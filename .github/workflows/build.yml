@@ -283,6 +283,7 @@ jobs:
         run: |
           python3 tests/host/check-remote-residency.py
           python3 tests/host/check-remote-heaps.py
+          python3 tests/host/check-remote-counters.py
       - name: Check x87 provenance handling
         run: |
           python3 FEX/unittests/host/check-x87-provenance.py

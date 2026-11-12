@@ -222,11 +222,19 @@ enum rm_op {
     RM_OP_HEAP_CREATE,             /* device, heap descriptor -> heap handle */
     RM_OP_HEAP_NEW_PRIVATE_BUFFER, /* heap, offset, buffer descriptor -> buffer */
     RM_OP_HEAP_NEW_TEXTURE,       /* heap, offset, texture descriptor -> texture */
+    RM_OP_COUNTER_NEW_TIMESTAMP,
+    RM_OP_COUNTER_RESOLVE,
+    RM_OP_BLIT_WITH_SAMPLES,
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
 struct rm_heap_new_buffer { uint64_t heap, offset, length, options; };
 struct rm_heap_new_texture { uint64_t heap, offset; };
+struct rm_counter_new { uint64_t device; uint32_t count, shared; };
+struct rm_counter_resolve { uint64_t buffer; uint32_t start, count; uint64_t data_length; };
+struct rm_blit_samples { uint64_t cmdbuf; uint32_t count, reserved; };
+struct rm_sample_attachment { uint64_t buffer, start, end; };
+#define RM_MAX_BLIT_SAMPLES 4u
 struct rm_size_and_align { uint64_t size, align; };
 
 struct rm_buf_texture { uint64_t buffer; uint64_t offset; uint64_t bytes_per_row; };
