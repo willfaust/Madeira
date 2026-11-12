@@ -365,3 +365,95 @@ with tempfile.TemporaryDirectory(prefix='madeira-heap-client-') as tmp:
                    input=client_pre+heap_client+client_end,text=True,check=True)
     subprocess.run([str(exe)],check=True)
 print('remote Metal heap-size client passes')
+
+# Check descriptor transport and the 32-bit wrapper for remote texture heap sizes.
+start = host.index('        case RM_OP_HEAP_TEXTURE_SIZE: {')
+end = host.index('        case RM_OP_HEAP_BUFFER_SIZE: {', start)
+texture_case = host[start:end]
+texture_host = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+#include "winemetal.h"
+static id<MTLDevice> device; static uint32_t result; static struct rm_size_and_align answer;
+static MTLPixelFormat rm_fmt(enum WMTPixelFormat value) { return (MTLPixelFormat)value; }
+static id rm_resolve(uint64_t handle,uint32_t *err) { *err=handle==1?RM_OK:RM_ERR_BAD_HANDLE; return handle==1?device:nil; }
+static void reply(int fd,const struct rm_hdr *h,uint32_t code,const void *data,uint32_t length) {
+  (void)fd; (void)h; result=code; if(length==sizeof(answer)) answer=*(const struct rm_size_and_align *)data;
+}
+static void invoke(void *payload,uint32_t length) { struct rm_hdr h={.payload_len=length}; uint32_t err=RM_OK; int fd=0;
+ switch(RM_OP_HEAP_TEXTURE_SIZE) {
+'''
+texture_end = r'''
+ } }
+int main(void) { @autoreleasepool {
+  device=MTLCreateSystemDefaultDevice(); if(!device) return 77;
+  struct { struct rm_wmt_info header; struct WMTTextureInfo info; } p={0};
+  p.header=(struct rm_wmt_info){1,sizeof(p.info),0};
+  p.info.pixel_format=(enum WMTPixelFormat)MTLPixelFormatRGBA8Unorm; p.info.width=64; p.info.height=32;
+  p.info.depth=1; p.info.array_length=1; p.info.type=(enum WMTTextureType)MTLTextureType2D;
+  p.info.mipmap_level_count=1; p.info.sample_count=1; p.info.usage=(enum WMTTextureUsage)MTLTextureUsageShaderRead;
+  p.info.options=(enum WMTResourceOptions)MTLResourceStorageModePrivate;
+  invoke(&p,sizeof(p)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
+  p.header.info_len=0; invoke(&p,sizeof(p)); assert(result==RM_ERR_SHORT_PAYLOAD);
+  p.header.info_len=sizeof(p.info); p.header.owner=2; invoke(&p,sizeof(p)); assert(result==RM_ERR_BAD_HANDLE);
+  p.header.owner=1; invoke(&p,sizeof(p));
+  MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:32 mipmapped:NO];
+  d.usage=MTLTextureUsageShaderRead; d.resourceOptions=MTLResourceStorageModePrivate;
+  MTLSizeAndAlign expected=[device heapTextureSizeAndAlignWithDescriptor:d];
+  assert(result==RM_OK && answer.size==expected.size && answer.align==expected.align);
+ } return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-texture-') as tmp:
+    exe=Path(tmp)/'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-fobjc-arc','-I',str(root/'research/remote-metal'),
+                    '-I',str(dxmt/'src/winemetal'),'-x','objective-c','-','-framework','Foundation',
+                    '-framework','Metal','-o',str(exe)],input=texture_host+texture_case+texture_end,text=True,check=True)
+    result=subprocess.run([str(exe)],check=False)
+    if result.returncode == 77: print('real Metal texture heap-size test skipped: no compatible device')
+    else: result.check_returncode(); print('remote Metal texture heap-size handler passes')
+start=source.index('static NTSTATUS\n_MTLDevice_heapTextureSizeAndAlign(')
+end=source.index('\n\nstatic NTSTATUS\n_MTLHeap_newBuffer',start)
+texture_client=source[start:end]
+texture_client_pre=r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include <string.h>
+#include "protocol.h"
+#include "winemetal.h"
+typedef uint32_t NTSTATUS;
+#define STATUS_SUCCESS 0u
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+#define STATUS_INVALID_PARAMETER 0xc000000du
+struct unixcall_mtldevice_heaptexturesizeandalign { uint64_t device; struct WMTMemoryPointer info; uint32_t ret_size,ret_align; };
+static unsigned char guest[1024];
+static void *UInt32ToPtr(uint32_t p) { return p ? guest+p : NULL; }
+static int wmtr_enabled(void) { return 1; }
+static uint32_t response;
+static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t outlen,uint32_t *got) {
+  (void)got; assert(op==RM_OP_HEAP_TEXTURE_SIZE && len==sizeof(struct rm_wmt_info)+sizeof(struct WMTTextureInfo));
+  assert(outlen==sizeof(struct rm_size_and_align));
+  const struct rm_wmt_info *h=arg; const struct WMTTextureInfo *i=(const void *)(h+1);
+  assert(h->owner==3 && h->info_len==sizeof(*i) && i->width==64);
+  *(struct rm_size_and_align *)out=(struct rm_size_and_align){4096,256}; return response;
+}
+static void fill_texture_descriptor(MTLTextureDescriptor *d,struct WMTTextureInfo *i) { (void)d; (void)i; }
+'''
+texture_client_end=r'''
+int main(void) { @autoreleasepool {
+  struct WMTTextureInfo *i=(void *)(guest+16); i->width=64;
+  struct unixcall_mtldevice_heaptexturesizeandalign p={0}; p.device=3; p.info.ptr=(void *)(uintptr_t)16;
+  assert(_MTLDevice_heapTextureSizeAndAlign_wow64(&p)==STATUS_SUCCESS);
+  assert(p.ret_size==4096 && p.ret_align==256 && p.info.ptr==(void *)(uintptr_t)16);
+  response=RM_ERR_BAD_OPCODE; assert(_MTLDevice_heapTextureSizeAndAlign_wow64(&p)==STATUS_UNSUCCESSFUL && !p.ret_size && !p.ret_align);
+ } return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-texture-client-') as tmp:
+    exe=Path(tmp)/'test'
+    text=texture_client_pre+texture_client+'\n'+wrapper+'\nWMT_WOW64_POINTER_WRAPPER(_MTLDevice_heapTextureSizeAndAlign, unixcall_mtldevice_heaptexturesizeandalign, info)\n'+texture_client_end
+    subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],input=text,text=True,check=True)
+    subprocess.run([str(exe)],check=True)
+print('remote Metal texture heap-size client and 32-bit wrapper pass')

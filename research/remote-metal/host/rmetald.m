@@ -2031,6 +2031,29 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_HEAP_TEXTURE_SIZE: {
+            if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTTextureInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_wmt_info *a = (const void *)payload;
+            if (a->info_len != sizeof(struct WMTTextureInfo) || a->extra_count) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            id device = rm_resolve(a->owner, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTTextureInfo *i = (const void *)(a + 1);
+            MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+            d.pixelFormat = rm_fmt(i->pixel_format);
+            d.width = i->width; d.height = i->height; d.depth = i->depth;
+            d.arrayLength = i->array_length; d.textureType = (MTLTextureType)i->type;
+            d.mipmapLevelCount = i->mipmap_level_count; d.sampleCount = i->sample_count;
+            d.usage = (MTLTextureUsage)i->usage; d.resourceOptions = (MTLResourceOptions)i->options;
+            MTLSizeAndAlign value = [(id<MTLDevice>)device heapTextureSizeAndAlignWithDescriptor:d];
+            struct rm_size_and_align result = {value.size, value.align};
+            reply(fd, &h, RM_OK, &result, sizeof(result)); break;
+        }
         case RM_OP_HEAP_BUFFER_SIZE: {
             if (h.payload_len != sizeof(struct rm_heap_buffer_size)) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;

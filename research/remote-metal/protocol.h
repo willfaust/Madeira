@@ -218,6 +218,7 @@ enum rm_op {
     RM_OP_RESIDENCY_BATCH,       /* validated add/remove/all; action 0 probes support */
     RM_OP_COMMAND_BUFFER_PROPERTY, /* command buffer timestamp in nanoseconds */
     RM_OP_HEAP_BUFFER_SIZE,        /* device, buffer size and options -> size and alignment */
+    RM_OP_HEAP_TEXTURE_SIZE,       /* device, texture descriptor -> size and alignment */
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
