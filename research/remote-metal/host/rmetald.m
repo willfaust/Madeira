@@ -2031,6 +2031,32 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_NEW_INDIRECT_COMMAND_BUFFER: {
+            if (h.payload_len != sizeof(struct rm_new_icb) + sizeof(struct WMTIndirectCommandBufferInfo)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct rm_new_icb *a=(const void *)payload;
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            const struct WMTIndirectCommandBufferInfo *i=(const void *)(a+1);
+            MTLIndirectCommandBufferDescriptor *d=[MTLIndirectCommandBufferDescriptor new];
+            d.commandTypes=(MTLIndirectCommandType)i->type;
+            d.maxFragmentBufferBindCount=i->max_fragment_buffer_binding;
+            d.maxKernelBufferBindCount=i->max_kernel_buffer_binding;
+            d.maxKernelThreadgroupMemoryBindCount=i->max_kernel_threadgroup_memory_binding;
+            d.maxMeshBufferBindCount=i->max_mesh_buffer_binding;
+            d.maxObjectBufferBindCount=i->max_object_buffer_binding;
+            d.maxObjectThreadgroupMemoryBindCount=i->max_object_threadgroup_memory_binding;
+            d.maxVertexBufferBindCount=i->max_vertex_buffer_binding;
+            d.inheritBuffers=i->inherit_buffers; d.inheritPipelineState=i->inherit_pso;
+            d.supportDynamicAttributeStride=i->support_dynamic_attribute_stride; d.supportRayTracing=i->support_ray_tracing;
+            id<MTLIndirectCommandBuffer> buffer=[(id<MTLDevice>)object newIndirectCommandBufferWithDescriptor:d
+                maxCommandCount:(NSUInteger)a->count options:(MTLResourceOptions)a->options];
+            struct rm_ret_handle_u64 result={rm_intern(buffer),buffer ? buffer.gpuResourceID._impl : 0};
+            reply(fd,&h,buffer ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
         case RM_OP_LIBRARY_SOURCE: {
             if (h.payload_len < sizeof(struct rm_library_source)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             const struct rm_library_source *a=(const void *)payload;

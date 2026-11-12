@@ -226,6 +226,7 @@ enum rm_op {
     RM_OP_COUNTER_RESOLVE,
     RM_OP_BLIT_WITH_SAMPLES,
     RM_OP_LIBRARY_SOURCE,
+    RM_OP_NEW_INDIRECT_COMMAND_BUFFER,
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
@@ -235,6 +236,7 @@ struct rm_counter_new { uint64_t device; uint32_t count, shared; };
 struct rm_counter_resolve { uint64_t buffer; uint32_t start, count; uint64_t data_length; };
 struct rm_blit_samples { uint64_t cmdbuf; uint32_t count, reserved; };
 struct rm_library_source { uint64_t device, length; };
+struct rm_new_icb { uint64_t device, count, options; };
 struct rm_library_source_result { uint64_t library; uint32_t error_length, reserved; };
 #define RM_LIBRARY_ERROR_MAX 4096u
 struct rm_sample_attachment { uint64_t buffer, start, end; };
