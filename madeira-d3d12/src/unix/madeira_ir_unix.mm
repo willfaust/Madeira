@@ -1425,9 +1425,9 @@ done:
  * ------------------------------------------------------------------------- */
 static pthread_once_t g_dxc_once = PTHREAD_ONCE_INIT;
 static int g_dxc_disk_on, g_dxc_slot_on;
-static uint64_t g_dxc_cap, g_dxc_target, g_dxc_bytes;
+static uint64_t g_dxc_cap, g_dxc_target;
+static struct mad_dxc_disk_state g_dxc_disk = MAD_DXC_DISK_STATE_INIT;
 static uint32_t g_dxc_hits, g_dxc_misses, g_dxc_store_fail;
-static pthread_mutex_t g_dxc_prune_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int mad_env_is_zero(const char *name)
 {
@@ -1446,18 +1446,12 @@ static void *mad_dxc_initial_prune(void *arg)
 {
     char dir[1200];
     unsigned nfiles = 0, removed = 0;
-    uint64_t left, before, current, estimate;
+    uint64_t left;
     if (!mad_dxc_dir(dir, sizeof dir)) return NULL;
     pthread_setname_np("MadeiraDxilScan");
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
-    pthread_mutex_lock(&g_dxc_prune_lock);
-    before = __atomic_load_n(&g_dxc_bytes, __ATOMIC_RELAXED);
-    left = mad_dxc_prune(dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target, &nfiles, &removed);
-    current = __atomic_load_n(&g_dxc_bytes, __ATOMIC_RELAXED);
-    do {
-        estimate = left + (current - before);
-    } while (!__atomic_compare_exchange_n(&g_dxc_bytes, &current, estimate, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-    pthread_mutex_unlock(&g_dxc_prune_lock);
+    if (!mad_dxc_counted_prune(&g_dxc_disk, dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target,
+                               1, &left, &nfiles, &removed)) return NULL;
     dprintf(2, "[d3d12-dxil-cache] ml1990 enabled: %u entries, %llu KB, bound %llu MB, %u evicted; retry slots %s (scanned off the caller's thread)\n",
             nfiles, (unsigned long long)(left >> 10), (unsigned long long)(uintptr_t)arg,
             removed, g_dxc_slot_on ? "on" : "off");
@@ -1493,7 +1487,7 @@ static void mad_dxc_init_once(void)
     /* madeira-duo (6 Nov 2026): the first scan stats every loose entry (17k on the Duo,
      * over a second), and this runs inside the first pipeline creation, on the game's
      * Main thread in PoE2: one 2.3 s hitch. It runs on its own thread now. Until it
-     * finishes g_dxc_bytes counts only this run's stores, so the bound is checked late,
+     * finishes the byte count covers only this run's stores, so the bound is checked late,
      * never early; the store path skips its own prune while this holds the lock. */
     {
         pthread_t scanner;
@@ -1555,19 +1549,19 @@ static void mad_dxc_store(uint64_t key, const void *blob, size_t len)
     struct mad_pack *pack = mad_dxc_pack();   /* madeira-bcd: NULL unless d3d12-shader-pack */
     if (pack) { mad_pack_put(pack, key, blob, len); return; }
     if (!mad_sc_path_ext(key, MAD_DXC_EXT, path, sizeof path)) return;
-    if (!mad_dxc_file_store(path, blob, len)) {
-        if (__atomic_add_fetch(&g_dxc_store_fail, 1, __ATOMIC_RELAXED) <= 3)
+    int stored = mad_dxc_counted_store(&g_dxc_disk, path, blob, len, &total);
+    if (stored != MAD_DXC_STORE_OK) {
+        if (stored == MAD_DXC_STORE_FAILED && __atomic_add_fetch(&g_dxc_store_fail, 1, __ATOMIC_RELAXED) <= 3)
             dprintf(2, "[d3d12-dxil-cache] ml1990 could not write an entry (errno %d)\n", errno);
         return;
     }
-    total = __atomic_add_fetch(&g_dxc_bytes, (uint64_t)len, __ATOMIC_RELAXED);
-    if (total > g_dxc_cap && mad_dxc_dir(dir, sizeof dir) && pthread_mutex_trylock(&g_dxc_prune_lock) == 0) {
+    if (total > g_dxc_cap && mad_dxc_dir(dir, sizeof dir)) {
         unsigned nfiles = 0, removed = 0;
-        uint64_t left = mad_dxc_prune(dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target, &nfiles, &removed);
-        __atomic_store_n(&g_dxc_bytes, left, __ATOMIC_RELAXED);
-        pthread_mutex_unlock(&g_dxc_prune_lock);
-        dprintf(2, "[d3d12-dxil-cache] ml1990 bound reached: %u evicted, %u entries, %llu KB left\n",
-                removed, nfiles, (unsigned long long)(left >> 10));
+        uint64_t left;
+        if (mad_dxc_counted_prune(&g_dxc_disk, dir, MAD_DXC_EXT, g_dxc_cap, g_dxc_target,
+                                  0, &left, &nfiles, &removed))
+            dprintf(2, "[d3d12-dxil-cache] ml1990 bound reached: %u evicted, %u entries, %llu KB left\n",
+                    removed, nfiles, (unsigned long long)(left >> 10));
     }
 }
 
