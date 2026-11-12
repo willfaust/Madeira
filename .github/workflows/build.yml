@@ -434,7 +434,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang ninja-build nasm libssl-dev pkg-config
           git submodule update --init --depth 1 FEX
-          git -C FEX submodule update --init --depth 1 External/Catch2 External/fmt External/range-v3 External/rpmalloc External/unordered_dense External/vixl External/xxhash External/jemalloc_glibc
+          git -C FEX submodule update --init --depth 1 External/Catch2 External/fmt External/range-v3 External/rpmalloc External/unordered_dense External/vixl External/xxhash External/jemalloc_glibc Source/Common/cpp-optparse
       - name: Build test harness and fixtures
         env:
           CC: clang
