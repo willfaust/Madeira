@@ -215,7 +215,7 @@ enum rm_op {
     RM_OP_RESIDENCY_COMMIT,      /* set -> status                                */
     RM_OP_QUEUE_ADD_RESIDENCY,   /* queue, set -> status                         */
     RM_OP_NEW_GEOM_PSO_INFO,     /* ml927: device, WMTMeshRenderPipelineInfo + WMTGeometryEmulationInfo -> handle (converter geometry emulation) */
-    RM_OP_RESIDENCY_BATCH,       /* validated atomic add/remove/all; action 0 probes support */
+    RM_OP_RESIDENCY_BATCH,       /* validated add/remove/all; action 0 probes support */
     RM_OP_COMMAND_BUFFER_PROPERTY, /* command buffer timestamp in nanoseconds */
 };
 
