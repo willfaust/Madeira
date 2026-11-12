@@ -25,7 +25,7 @@
 /* The guest sends WMT*Info structs verbatim, so the host must read them with
  * the SAME declarations. Both sides compile this header. */
 #define WINEMETAL_API
-#include "../../dxmt/src/winemetal/winemetal.h"
+#include "../../../dxmt/src/winemetal/winemetal.h"
 
 /* ---- handle table ------------------------------------------------------ */
 
