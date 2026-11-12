@@ -2031,6 +2031,28 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_HEAP_NEW_TEXTURE: {
+            if (h.payload_len != sizeof(struct rm_heap_new_texture) + sizeof(struct WMTTextureInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_new_texture *a = (const void *)payload;
+            id object = rm_resolve(a->heap, &err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLHeap)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTTextureInfo *i = (const void *)(a + 1);
+            MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+            d.pixelFormat = rm_fmt(i->pixel_format);
+            d.width = i->width; d.height = i->height; d.depth = i->depth;
+            d.arrayLength = i->array_length; d.textureType = (MTLTextureType)i->type;
+            d.mipmapLevelCount = i->mipmap_level_count; d.sampleCount = i->sample_count;
+            d.usage = (MTLTextureUsage)i->usage; d.resourceOptions = (MTLResourceOptions)i->options;
+            id<MTLHeap> heap = object;
+            id<MTLTexture> texture = a->offset == UINT64_MAX ? [heap newTextureWithDescriptor:d]
+                : [heap newTextureWithDescriptor:d offset:a->offset];
+            struct rm_ret_handle_u64 result = {rm_intern(texture), texture ? texture.gpuResourceID._impl : 0};
+            reply(fd, &h, texture ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
         case RM_OP_HEAP_CREATE: {
             if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTHeapInfo)) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
