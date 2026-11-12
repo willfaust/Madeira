@@ -26959,6 +26959,14 @@ static ULONG_PTR ios_hook_zone_ceiling( ULONG_PTR limit_low, ULONG_PTR limit_hig
     return ios_hook_zone_limit( ios_hook_zone_find( ios_hook_zones, cur, ios_session_peb ), limit_low, limit_high );
 }
 
+/* ios_self_write: whether [addr, addr + size) lies inside the calling process's own zone (its trampolines). */
+static int ios_hook_zone_holds( const char *addr, SIZE_T size )
+{
+    const struct ios_hook_zone *z = ios_hook_zone_find( ios_hook_zones, ios_jit_current_peb(), ios_session_peb );
+
+    return z && (ULONG_PTR)addr >= z->base && (ULONG_PTR)addr + size <= z->base + z->size;
+}
+
 /* map_image_view, virtual_mutex held: map a 64-bit process's ntdll (size bytes) top-down in [limit_low, limit_high]
  * with the zone directly above it. STATUS_SUCCESS: mapped, with its zone unless registering the zone failed; anything
  * else: nothing changed, the caller places the image the usual way. */
@@ -30817,6 +30825,153 @@ NTSTATUS virtual_uninterrupted_write_memory( void *addr, const void *buffer, SIZ
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     return ret;
 }
+
+
+#ifdef WINE_IOS
+/***********************************************************************
+ *           ios_self_write   (env.MADEIRA_SELF_WRITE, on unless 0)
+ *
+ * NtWriteVirtualMemory of a program into its own memory (the pseudo-handle), done here: the server writes with the target's
+ * task port, which iOS pseudo-processes do not have (mach_ios.c get_process_port), and refuses with STATUS_ACCESS_DENIED.
+ * Programs that hook themselves need it (Ubisoft Connect's 32-bit upc.exe hooks its own ntdll, user32 and kernelbase;
+ * Far Cry 4's 64-bit FC64.dll writes its jump into ntdll and its trampoline next to it; both exit with 0xdeadc0de when the
+ * write fails). As on Windows, writable pages are
+ * written and the write stops at the first one that is not; WriteProcessMemory itself makes a code page writable first,
+ * writes, flushes the instruction cache (which is what tells the emulator) and restores the protection.
+ *
+ * What may be written (ios_self_write_in_reach): by a 32-bit program, its own window; by a 64-bit program, one image view (the
+ * hooked code) or its own hook zone (env.MADEIRA_X64_HOOK_ZONE, the trampoline). Other 64-bit memory has no owner here (every
+ * pseudo-process shares one address space), so a write there still goes to the server.
+ *
+ * Page by page (4 KB, so a piece lies in one host page), the source read first with no lock held and without faulting, then
+ * under virtual_mutex:
+ *  - a page Wine records as writable is written as a guest store would be: directly when the host page is writable now
+ *    (mach_vm_write reports a page it cannot write instead of faulting; write watches as in
+ *    virtual_uninterrupted_write_memory), else through the pool's RW view of an anonymous page aliased to the JIT pool (ml638
+ *    keeps those RX at the guest address);
+ *  - a page recorded PAGE_EXECUTE_READ only when this thread's last writable NtProtectVirtualMemory covers it and this thread
+ *    has made no NtWriteVirtualMemory since (ios_self_write_grant). That protect is WriteProcessMemory's own: the emulator can
+ *    re-arm its code-change trap on a page it translates, recording PAGE_EXECUTE_READ, between that protect and the write. The
+ *    host page is made writable for the copy and put back to what Wine records; the recorded protection is not changed;
+ *  - anything else stops the write.
+ * A write that stops at its first page goes to the server request. Returns the bytes written; *paths gets 1 direct, 2 RW view,
+ * 4 temporarily writable. */
+static __thread struct { ULONG_PTR begin, end; } ios_self_write_grant;
+
+/* env.MADEIRA_SELF_WRITE = 0 turns this off. Read at each write into the program's own memory, so it is the session's own. */
+static int ios_self_write_enabled(void)
+{
+    const char *s = getenv( "MADEIRA_SELF_WRITE" );
+
+    return !(s && s[0] == '0' && !s[1]);
+}
+
+/* NtProtectVirtualMemory, after a successful change in this process. Only a later writable
+ * request replaces the record: the emulator's re-arm is a PAGE_EXECUTE_READ request on the
+ * same thread and must not clear it. */
+static void ios_self_write_note_protect( const char *base, SIZE_T size, ULONG prot )
+{
+    switch (prot & 0xff)
+    {
+    case PAGE_READWRITE: case PAGE_WRITECOPY: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY:
+        ios_self_write_grant.begin = (ULONG_PTR)base;
+        ios_self_write_grant.end = (ULONG_PTR)base + size;
+    }
+}
+
+static SIZE_T ios_self_write( char *dst, const char *src, SIZE_T size, unsigned *paths )
+{
+    ULONG_PTR grant_begin = ios_self_write_grant.begin, grant_end = ios_self_write_grant.end;
+    char stage[0x1000];   /* one page */
+    SIZE_T done = 0;
+
+    ios_self_write_grant.begin = ios_self_write_grant.end = 0;   /* one write call per protect */
+    *paths = 0;
+    while (done < size)
+    {
+        char *at = dst + done;
+        SIZE_T len = min( size - done, page_mask + 1 - ((ULONG_PTR)at & page_mask) );
+        mach_vm_size_t got = 0;
+        BOOL watch = FALSE;
+        sigset_t sigset;
+        void *rw;
+        BYTE vprot;
+        int writable, ok = 0;
+
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(ULONG_PTR)(src + done), len,
+                                    (mach_vm_address_t)(ULONG_PTR)stage, &got ) || got != len) break;
+        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+        vprot = get_page_vprot( at );
+        writable = (get_unix_prot( vprot & ~VPROT_WRITEWATCH ) & PROT_WRITE) != 0;
+        if (writable || ((vprot & 0x7f) == (VPROT_COMMITTED | VPROT_READ | VPROT_EXEC) &&
+                         (ULONG_PTR)at >= grant_begin && (ULONG_PTR)at + len <= grant_end))
+        {
+            if (!check_write_access( at, len, &watch ))
+            {
+                ok = !mach_vm_write( mach_task_self(), (mach_vm_address_t)(ULONG_PTR)at, (vm_offset_t)stage, len );
+                if (watch) update_write_watches( at, len, ok ? len : 0 );
+                if (ok) *paths |= 1;
+            }
+            if (!ok)
+            {
+                pthread_mutex_lock( &ios_pool_lock );   /* after virtual_mutex, as everywhere */
+                if ((ok = ios_jit_anon_alias_find_cover( at, len, &rw, NULL ))) memcpy( rw, stage, len );
+                pthread_mutex_unlock( &ios_pool_lock );
+                if (ok) *paths |= 2;
+            }
+            if (!ok && !writable && !mprotect_range( at, len, VPROT_WRITE, VPROT_EXEC ))
+            {
+                ok = !mach_vm_write( mach_task_self(), (mach_vm_address_t)(ULONG_PTR)at, (vm_offset_t)stage, len );
+                mprotect_range( at, len, 0, 0 );
+                if (ok) *paths |= 4;
+            }
+        }
+        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+        if (!ok) break;
+        done += len;
+    }
+    return done;
+}
+
+/* One line for a process's first self-write; at most 16 in all for a write that stopped or
+ * used the protect record. */
+static void ios_self_write_log( const char *dst, SIZE_T size, SIZE_T done, unsigned paths )
+{
+    static ULONG seen[16];
+    static unsigned n_seen, n_noted;
+    ULONG pid = HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess );
+    char stop[96] = "";
+    unsigned i;
+
+    for (i = 0; i < n_seen && seen[i] != pid; i++);
+    if (i == n_seen && n_seen < 16) seen[n_seen++] = pid;
+    else if (done == size && !(paths & 4)) return;
+    else if (n_noted++ >= 16) return;
+    if (done < size)   /* an unlocked read, for the log only */
+        snprintf( stop, sizeof(stop), ", stopped at %p (page vprot %#x): %s", dst + done, get_page_vprot( dst + done ),
+                  done ? "STATUS_PARTIAL_COPY" : "server request, as before" );
+    dprintf( 2, "[self-write] pid %04x: %p+%#lx, %#lx written (%s%s%s )%s\n", (unsigned)pid, dst, (unsigned long)size,
+             (unsigned long)done, (paths & 1) ? " direct" : "", (paths & 2) ? " rw-view" : "",
+             (paths & 4) ? " protect-record" : "", stop );
+}
+
+/* Whether [addr, addr + size) may be written by the calling program here (see ios_self_write). A window is 4 GB and
+ * contiguous, so a range of at most that size whose two ends lie outside every window misses every window. */
+static int ios_self_write_in_reach( const char *addr, SIZE_T size )
+{
+    struct file_view *view;
+    sigset_t sigset;
+    int own;
+
+    if (ios_wow_base()) return ios_wow_in_window( addr ) && ios_wow_in_window( addr + size - 1 );
+    if (size > IOS_WOW_WINDOW_SIZE || ios_wow_addr_in_any_window( addr ) || ios_wow_addr_in_any_window( addr + size - 1 ))
+        return 0;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    own = ios_hook_zone_holds( addr, size ) || ((view = find_view( addr, size )) && (view->protect & SEC_IMAGE));
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return own;
+}
+#endif
 
 
 /***********************************************************************
@@ -36321,6 +36476,9 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
     {
         __sync_fetch_and_add( &ios_vprotect_seq, 1 );
         VIRTUAL_DEBUG_DUMP_VIEW( view );
+#ifdef WINE_IOS
+        ios_self_write_note_protect( base, size, new_prot );   /* see ios_self_write */
+#endif
     }
 
 #ifdef WINE_IOS
@@ -38796,6 +38954,23 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
                                       SIZE_T size, SIZE_T *bytes_written )
 {
     unsigned int status;
+#ifdef WINE_IOS
+    /* a program's write into its own memory (ios_self_write). The pseudo-handle only, like
+     * NtReadVirtualMemory's branch above. A write that stops at its first page takes the server request below. */
+    if (process == NtCurrentProcess() && size && ios_self_write_enabled() &&
+        (ULONG_PTR)addr + size - 1 >= (ULONG_PTR)addr && ios_self_write_in_reach( addr, size ))
+    {
+        unsigned paths;
+        SIZE_T done = ios_self_write( addr, buffer, size, &paths );
+
+        ios_self_write_log( addr, size, done, paths );
+        if (done)
+        {
+            if (bytes_written) *bytes_written = done;
+            return done == size ? STATUS_SUCCESS : STATUS_PARTIAL_COPY;
+        }
+    }
+#endif
 
     if (virtual_check_buffer_for_read( buffer, size ))
     {
