@@ -458,6 +458,9 @@ enum MadeiraDock {
         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
         setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
+        // The same folder holds the program being played, for the session's code-buffer budget
+        // (virtual_ios.c ios_pool_fg_class).
+        setenv("MADEIRA_GAME_FOLDER", game.windowsInstallPath, 1)
         setenv("MADEIRA_STEAM_HOST_LOG", "C:\\madeira-dock.txt", 1)
         // The client receives only this game's extra arguments, separately from the host's
         // explorer/cmd command. An empty profile clears any previous game's choice.

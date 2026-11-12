@@ -805,6 +805,28 @@ OVERLAY = {
                         "0: the write goes to the server, which has no task port for the process and refuses it. Read at "
                         "each such write; a process's first one is logged as [self-write].",
                 "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    # JIT pool code buffers (build/ntdll-unix/virtual_ios.c tail carves; Ubisoft Connect with Far Cry 3 and Far Cry 4).
+    "env.MADEIRA_POOL_CARVE_MERGE": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Free code buffers merge and are cut to the size asked",
+                "note": "Default off. 1: a code buffer FEX releases merges with the free buffers next to it, and a free "
+                        "buffer 1 MB or more larger than a request is cut to the size asked, so adjacent free buffers can "
+                        "serve one large request and a small one does not take a whole large buffer. "
+                        "env.MADEIRA_POOL_CODE_FOREGROUND = 1 turns it on too. Set it in the game's own file; read at each "
+                        "request.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    "env.MADEIRA_POOL_CODE_FOREGROUND": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Code buffers for the program you launched",
+                "note": "Default off. 1: programs outside the launched program's folder (env.MADEIRA_GAME_FOLDER: a "
+                        "launcher, its helpers, Steam's client) get FEX code buffers of at most 16 MB, also from free ones; "
+                        "a buffer the launched program freed or left at exit is kept for it for 120 s; and "
+                        "env.MADEIRA_POOL_CARVE_MERGE is on. For a game behind a launcher whose helpers would otherwise fill "
+                        "the pool first (Far Cry 3 and Far Cry 4 behind Ubisoft Connect). Set it in the game's own file; "
+                        "read at each new buffer; [pool-fg] logs each program's class.",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
+    "env.MADEIRA_GAME_FOLDER": {"category": "Memory & JIT pool",
+                "note": "Set by the app at each launch: the folder of the program the player launched (a Steam game's "
+                        "install folder, else the folder of the library entry's program), for "
+                        "env.MADEIRA_POOL_CODE_FOREGROUND; cleared when the session ends. Not meant to be set by hand."},
     "pool-split": {"category": "Memory & JIT pool", "title": "Split JIT pool around the main thread's stack",
                 "kind": "bool", "default": "0",
                 "note": "1: when the pool would shrink below its size (pool, 896 MB by default) because the main "
