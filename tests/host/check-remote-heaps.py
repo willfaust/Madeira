@@ -80,7 +80,14 @@ struct unixcall_mtlheap_newtexture { obj_handle_t heap; struct WMTMemoryPointer 
 static void fill_texture_descriptor(MTLTextureDescriptor *d, struct WMTTextureInfo *i) { (void)d; (void)i; }
 static unsigned char guest[1024]; static unsigned calls,registered; static uint32_t status;
 static void *UInt32ToPtr(uint32_t p) { return p?guest+p:NULL; }
-static int wmtr_enabled(void) { return 1; }
+static int remote_enabled = 1;
+static int wmtr_enabled(void) { return remote_enabled; }
+@interface SharedHeap : NSObject
+- (MTLStorageMode)storageMode;
+@end
+@implementation SharedHeap
+- (MTLStorageMode)storageMode { return MTLStorageModeShared; }
+@end
 static void wmtr_buf_add(uint64_t h,void *p,uint64_t n,uint32_t opts,int cpu,int owned) { assert(h==42 && !p && n==4096 && opts==32 && !cpu && !owned); registered++; }
 static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t outlen,uint32_t *got) {
  (void)got; calls++;
@@ -109,6 +116,9 @@ int main(void) { @autoreleasepool {
  struct unixcall_mtlheap_newtexture t={0}; t.heap=17; t.info.ptr=(void *)(uintptr_t)256; t.offset=UINT64_MAX;
  assert(_MTLHeap_newTexture_wow64(&t)==STATUS_SUCCESS && t.ret==44 && tex->gpu_resource_id==5678 && !tex->mach_port);
  status=RM_ERR_BAD_OPCODE; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_UNSUCCESSFUL && b.ret==0 && registered==1);
+ b.ret=99; b.info.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && b.ret==0);
+ b.info.ptr=(void *)(uintptr_t)128; b.ret=99; remote_enabled=0; b.heap=(obj_handle_t)(uintptr_t)[SharedHeap new];
+ assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_NOT_IMPLEMENTED && b.ret==0);
  } return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-private-heap-client-') as t:
@@ -117,3 +127,31 @@ with tempfile.TemporaryDirectory(prefix='madeira-private-heap-client-') as t:
  subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),'-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],input=code,text=True,check=True)
  subprocess.run([str(exe)],check=True)
 print('remote heap clients and 32-bit wrappers pass')
+
+# A failed unix call must not expose uninitialized handles or sizes to the PE caller.
+thunks=(dxmt/'src/winemetal/winemetal_thunks.c').read_text()
+start=thunks.index('WINEMETAL_API obj_handle_t\nMTLDevice_newHeap(')
+end=thunks.index('WINEMETAL_API obj_handle_t\nMTLDevice_newLibraryWithSource(', start)
+thunk_test=r'''
+#define WINEMETAL_API
+#include <assert.h>
+#include "winemetal_thunks.h"
+#define UNIX_CALL(code, params) ((void)0)
+'''+thunks[start:end]+r'''
+int main(void) {
+ struct WMTHeapInfo heap={0}; struct WMTBufferInfo buffer={0};
+ struct WMTTextureInfo texture={0}; struct WMTIndirectCommandBufferInfo icb={0};
+ assert(!MTLDevice_newHeap(1,&heap));
+ struct WMTSizeAndAlign a=MTLDevice_heapBufferSizeAndAlign(1,16,0);
+ assert(!a.size && !a.align);
+ a=MTLDevice_heapTextureSizeAndAlign(1,&texture); assert(!a.size && !a.align);
+ assert(!MTLHeap_newBuffer(1,&buffer,0)); assert(!MTLHeap_newTexture(1,&texture,0));
+ assert(!MTLDevice_newIndirectCommandBuffer(1,&icb,1,0));
+ return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-thunk-') as t:
+ exe=Path(t)/'test'
+ subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(dxmt/'src/winemetal'),'-x','c','-','-o',str(exe)],input=thunk_test,text=True,check=True)
+ subprocess.run([str(exe)],check=True)
+print('heap and indirect-buffer thunks return zero on failed unix calls')
