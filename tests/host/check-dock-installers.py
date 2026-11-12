@@ -64,6 +64,9 @@ require('provided: { skipLauncher && installsPresentLauncher($0, drive: drive) }
         'try SteamInstallScripts.mark(provided, prefix: prefix)' in installers and
         '[.done, .provided, .pending, .limit].contains($0.status)' in installers,
         'prepare plans a present launcher\'s installer as provided, records it done and counts it as a third-party install')
+require('let values = launcherValues(found, drive: drive)' in installers and
+        installers.index('let values = launcherValues(found, drive: drive)') < installers.index('guard !found.isEmpty else {', installers.index('static func prepare(')),
+        'prepare writes a present shared launcher\'s values before planning, for every start that finds its installer')
 bridge = (app / 'WineProcessBridge.m').read_text(encoding='utf-8')
 require('sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"]' in installers and 'launcherSessionEnv = launcherLines(found)' in installers and
         re.search(r'unsetenv\("MADEIRA_MADSYNC_SESSION"\)\n\s+\}\n(?:\s*//[^\n]*\n)+\s+for name in DockInstallers\.sharedLauncherSessionNames '
@@ -73,7 +76,8 @@ require('sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"]' in installers and 'launche
 require('SteamSignIn.flag(name, default: true)' in installers, 'every installer switch defaults on and reads env.NAME')
 for switch in ('MADEIRA_DOCK_INSTALLERS', 'MADEIRA_INSTALL_DEFAULT_KEY', 'MADEIRA_DOCK_INSTALL_CHOICE',
                'MADEIRA_DOCK_INSTALL_SCM', 'MADEIRA_DOCK_INSTALL_SERVER_SYNC', 'MADEIRA_DOTNET_FUSION',
-               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_INSTALL_SKIP_LAUNCHER', 'MADEIRA_DOCK_INSTALL_REGISTRY'):
+               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_INSTALL_SKIP_LAUNCHER', 'MADEIRA_DOCK_INSTALL_REGISTRY',
+               'MADEIRA_INSTALL_LAUNCHER_REGISTRY'):
     require(f'flag("{switch}")' in installers, f'switch {switch} is read')
 require('reg.exe' not in installers, 'the batch never writes the registry (no reg.exe in the bundle)')
 require(content.count('setenv("MADEIRA_MADSYNC_SESSION", "0", 1)') == 1 and
@@ -399,6 +403,21 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(DockInstallers.launcherLines([tool, ubi]) == ["MADEIRA_APC_BUSY_QUEUE": "1"] && DockInstallers.launcherLines([tool]).isEmpty &&
                 DockInstallers.sharedLauncherSessionNames == ["MADEIRA_APC_BUSY_QUEUE"],
                 "  a game that runs the launcher gets its session line, another game none")
+        let ubiValues = DockInstallers.launcherValues([tool, ubi], drive: drive)
+        require(ubiValues.map(\.name) == ["InstallDir"] && ubiValues.first?.key == "Software\\Ubisoft\\Launcher" &&
+                DockInstallers.launcherValues([tool], drive: drive).isEmpty,
+                "  a game whose script runs the launcher's installer, the launcher present, gets the value its loader finds the launcher by")
+        // A prefix whose launcher key holds only the installer's language.
+        let device = "WINE REGISTRY Version 2\n\n[Software\\\\Wow6432Node\\\\Ubisoft\\\\Launcher] 1794273595\n#time=1dd70b1982a76ac\n\"Installer Language\"=\"1033\"\n\n[Software\\\\Wow6432Node\\\\Ubisoft\\\\Launcher\\\\Installs\\\\856] 1794273934\n\"installdir\"=\"C:\\\\Games\\\\FC4\"\n"
+        let installDir = "\"InstallDir\"=\"C:\\\\Program Files (x86)\\\\Ubisoft\\\\Ubisoft Game Launcher\\\\\""
+        let fixed = SteamInstallRegistry.write(ubiValues, in: device, now: 1)
+        require(fixed.changed == 2 && fixed.text.components(separatedBy: installDir).count == 3 &&
+                fixed.text.contains("\"Installer Language\"=\"1033\"\n" + installDir) && fixed.text.contains("[Software\\\\Ubisoft\\\\Launcher] 1\n" + installDir) &&
+                fixed.text.contains("\"installdir\"=\"C:\\\\Games\\\\FC4\""),
+                "  InstallDir goes beside the installer's value in the 32-bit view and into a new key in the plain view")
+        let kept = SteamInstallRegistry.write(ubiValues, in: device.replacingOccurrences(of: "\"Installer Language\"=\"1033\"", with: "\"InstallDir\"=\"D:\\\\UC\\\\\""), now: 1)
+        require(kept.changed == 1 && kept.text.contains("\"InstallDir\"=\"D:\\\\UC\\\\\"") && kept.text.components(separatedBy: installDir).count == 2,
+                "  an InstallDir the prefix has stays; only the view without one gets it")
         try? FileManager.default.removeItem(at: drive.appendingPathComponent("Program Files (x86)/Ubisoft"))
         let (found, scripts) = DockInstallers.found(game, drive: drive, defaultKey: true)
         require(scripts == 2 && found.map(\.run.name) == ["runtime a", "tool", "package", "gone", "shared runtime"], "game and shared scripts (\(found.map(\.run.name)))")

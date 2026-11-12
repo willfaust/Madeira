@@ -722,6 +722,8 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
 /// - `MADEIRA_INSTALL_SKIP_LAUNCHER`: a shared launcher's installer (sharedLauncherInstallers)
 ///   is recorded done instead of run when the launcher is already in the prefix (off: it runs
 ///   for every game that lists it).
+/// - `MADEIRA_INSTALL_LAUNCHER_REGISTRY`: a shared launcher in the prefix gets the values its
+///   games find it by (SharedLauncher.values) where the prefix has none (off: none are written).
 /// - `MADEIRA_DOCK_INSTALL_SEPARATE` (madeira-bcd): a start that runs installers runs only
 ///   them; the game starts after Madeira is restarted (off: the host follows in the same session).
 /// - `MADEIRA_DOCK_RESET_CLEAN` (madeira-bcd): Reset also moves what the installers put into
@@ -925,23 +927,30 @@ enum DockInstallers {
     /// The installers of a launcher that several games share: the installer's file name (lower
     /// case), the programs any one of which says the launcher is already in the prefix, and the
     /// lines the launcher needs in the session of a game that runs it. Every Ubisoft game's Steam
-    /// install script runs Ubisoft Connect's ~250 MB installer (Far Cry 3's "ubisoft connect pc
-    /// client", Far Cry 4's "uplaylauncher"), and the record of a run is per game, so each game ran
-    /// it again in a session of its own, although the prefix is one for every Dock game. The game
-    /// then starts Ubisoft Connect in its Dock session, whose game starter needs
-    /// env.MADEIRA_APC_BUSY_QUEUE = 1 there: without it an I/O completion for a busy thread was
-    /// handed to another waiting thread or dropped ([apc-requeue]) and the game starter never
-    /// started the play session ("Gamestarter must be initialized before game can be launched").
+    /// install script runs Ubisoft Connect's installer, and the record of a run is per game, so
+    /// each game would otherwise run it again although the prefix is shared. The game then
+    /// starts Ubisoft Connect in its Dock session, whose game starter needs
+    /// env.MADEIRA_APC_BUSY_QUEUE = 1: otherwise an I/O completion for a busy thread can go to
+    /// another waiting thread or be dropped, and the game starter never starts the play session.
+    ///
+    /// `values` are what the launcher's games read to find it, written at a start while the
+    /// launcher is in the prefix and only where the prefix has no such value. Ubisoft Connect's
+    /// installer leaves out InstallDir under HKLM\Software\Ubisoft\Launcher, and without it the
+    /// launcher's service and the games' Ubisoft loaders report the launcher as not installed.
     struct SharedLauncher: Sendable {
         let installer: String
         let programs: [String]
         let sessionEnv: [String: String]
+        let values: [SteamInstallValue]
     }
     nonisolated static let sharedLauncherInstallers: [SharedLauncher] = [
         SharedLauncher(installer: "ubisoftconnectinstaller.exe",
                        programs: ["C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\UbisoftConnect.exe",
                                   "C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\upc.exe"],
-                       sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"]),
+                       sessionEnv: ["MADEIRA_APC_BUSY_QUEUE": "1"],
+                       values: [SteamInstallValue(hive: .machine, key: "Software\\Ubisoft\\Launcher", name: "InstallDir",
+                                                  data: .string("C:\\Program Files (x86)\\Ubisoft\\Ubisoft Game Launcher\\"),
+                                                  followsInstall: false)]),
     ]
 
     /// The shared launcher a program installs, by its file name.
@@ -959,6 +968,16 @@ enum DockInstallers {
             guard let url = resolve(path, drive: drive) else { return false }
             return FileManager.default.fileExists(atPath: url.path, isDirectory: &folder) && !folder.boolValue
         }
+    }
+
+    /// The values of the shared launchers among a game's install-script programs that are in the
+    /// prefix (SharedLauncher.values).
+    nonisolated static func launcherValues(_ processes: [SteamInstallProcess], drive: URL) -> [SteamInstallValue] {
+        var values: [SteamInstallValue] = []
+        for process in processes where installsPresentLauncher(process, drive: drive) {
+            for value in sharedLauncher(process)?.values ?? [] where !values.contains(value) { values.append(value) }
+        }
+        return values
     }
 
     /// The session lines of the shared launchers among a game's install-script programs, whether
@@ -1177,6 +1196,18 @@ enum DockInstallers {
                     LogStore.shared.log("[dock-installers] app=\(app) registry values=\(values.count) written=\(written)")
                 } catch {
                     LogStore.shared.log("[dock-installers] app=\(app) registry values not written: \(error.localizedDescription)", level: .error)
+                }
+            }
+        }
+        // A shared launcher in the prefix: the values its games find it by, where missing.
+        if flag("MADEIRA_INSTALL_LAUNCHER_REGISTRY") {   // 0: a shared launcher's values (SharedLauncher.values) are not written
+            let values = launcherValues(found, drive: drive)
+            if !values.isEmpty {
+                do {
+                    let written = try SteamInstallRegistry.write(values, prefix: prefix)
+                    LogStore.shared.log("[dock-installers] app=\(app) launcher registry values=\(values.count) written=\(written)")
+                } catch {
+                    LogStore.shared.log("[dock-installers] app=\(app) launcher registry values not written: \(error.localizedDescription)", level: .error)
                 }
             }
         }
