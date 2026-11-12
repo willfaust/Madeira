@@ -29,6 +29,7 @@
 #ifndef MADEIRA_DXIL_CACHE_H
 #define MADEIRA_DXIL_CACHE_H
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -404,12 +405,12 @@ static inline uint64_t mad_dxc_prune(const char *dir, const char *ext, uint64_t 
         if (n == capn) {
             size_t nc = capn ? capn * 2 : 256;
             struct mad_dxc_prune_ent *nv = (struct mad_dxc_prune_ent *)realloc(v, nc * sizeof *v);
-            if (!nv) break;
+            if (!nv) { free(v); closedir(d); return UINT64_MAX; }
             v = nv; capn = nc;
         }
         v[n].mtime = st.st_mtime; v[n].size = (uint64_t)st.st_size;
         memcpy(v[n].name, de->d_name, nl + 1);   /* nl < sizeof name, checked above */
-        total += (uint64_t)st.st_size;
+        total = UINT64_MAX - total < (uint64_t)st.st_size ? UINT64_MAX : total + (uint64_t)st.st_size;
         n++;
     }
     closedir(d);
@@ -424,6 +425,53 @@ static inline uint64_t mad_dxc_prune(const char *dir, const char *ext, uint64_t 
     if (nfiles_out) *nfiles_out = (unsigned)(n - removed);
     if (removed_out) *removed_out = removed;
     return total;
+}
+
+
+struct mad_dxc_disk_state {
+    pthread_rwlock_t scan_lock;
+    pthread_mutex_t write_lock;
+    uint64_t bytes;
+    int initialized;
+};
+
+#define MAD_DXC_DISK_STATE_INIT { PTHREAD_RWLOCK_INITIALIZER, PTHREAD_MUTEX_INITIALIZER, 0, 0 }
+
+enum { MAD_DXC_STORE_FAILED = -1, MAD_DXC_STORE_BUSY = 0, MAD_DXC_STORE_OK = 1 };
+
+static inline int mad_dxc_counted_store(struct mad_dxc_disk_state *state, const char *path,
+                                        const void *blob, size_t len, uint64_t *total)
+{
+    struct stat st;
+    uint64_t previous = 0;
+    int stored;
+    /* shortcut: cache writes are skipped while scanning, queue them if complete cache coverage becomes necessary. */
+    if (pthread_rwlock_tryrdlock(&state->scan_lock) != 0) return MAD_DXC_STORE_BUSY;
+    pthread_mutex_lock(&state->write_lock);
+    if (state->initialized && stat(path, &st) == 0 && S_ISREG(st.st_mode)) previous = (uint64_t)st.st_size;
+    stored = mad_dxc_file_store(path, blob, len);
+    if (stored) {
+        uint64_t base = state->bytes >= previous ? state->bytes - previous : state->bytes;
+        state->bytes = UINT64_MAX - base < len ? UINT64_MAX : base + len;
+        *total = state->bytes;
+    }
+    pthread_mutex_unlock(&state->write_lock);
+    pthread_rwlock_unlock(&state->scan_lock);
+    return stored ? MAD_DXC_STORE_OK : MAD_DXC_STORE_FAILED;
+}
+
+static inline int mad_dxc_counted_prune(struct mad_dxc_disk_state *state, const char *dir, const char *ext,
+                                        uint64_t cap, uint64_t target, int wait, uint64_t *left,
+                                        unsigned *nfiles, unsigned *removed)
+{
+    int lock_status = wait ? pthread_rwlock_wrlock(&state->scan_lock) : pthread_rwlock_trywrlock(&state->scan_lock);
+    if (lock_status != 0) return 0;
+    *left = mad_dxc_prune(dir, ext, cap, target, nfiles, removed);
+    if (*left == UINT64_MAX) { pthread_rwlock_unlock(&state->scan_lock); return 0; }
+    state->bytes = *left;
+    state->initialized = 1;
+    pthread_rwlock_unlock(&state->scan_lock);
+    return 1;
 }
 
 #endif /* MADEIRA_DXIL_CACHE_H */
