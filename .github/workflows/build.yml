@@ -5,6 +5,11 @@ on:
     branches: [main, 'codex/pr-build-*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      x87_only:
+        description: Run FEX x87 assembly tests only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +24,7 @@ concurrency:
 
 jobs:
   plan:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.x87_only }}
     runs-on: xcode-27
     outputs:
       ipa: ${{ steps.key.outputs.ipa }}
@@ -414,3 +420,27 @@ jobs:
           if-no-files-found: error
           overwrite: true
           compression-level: 0
+
+  x87-assembly:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.x87_only }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Set up FEX and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build nasm libssl-dev pkg-config
+          git submodule update --init --depth 1 FEX
+          git -C FEX submodule update --init --depth 1 External/Catch2 External/fmt External/range-v3 External/rpmalloc External/unordered_dense External/vixl External/xxhash External/jemalloc_glibc
+      - name: Build test harness and fixtures
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S FEX -B "$RUNNER_TEMP/fex-x87" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=ON -DBUILD_FEXCONFIG=OFF
+          cmake --build "$RUNNER_TEMP/fex-x87" --target TestHarnessRunner asm_files --parallel 4
+      - name: Run x87 integer transfer tests
+        run: ctest --test-dir "$RUNNER_TEMP/fex-x87" --output-on-failure -R 'FILD_FISTP_I64_.*F64.asm'
