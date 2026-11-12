@@ -5,6 +5,11 @@ records what the shipped app contains, under which terms, and which
 obligations follow. It must be reviewed by an open-source licensing lawyer
 before any public release.
 
+The explanatory upstream-licence description in `LICENSE-EXCEPTION.md`
+reflects the code at adoption. Later DXMT upstream code is LGPL-2.1-or-later;
+the additional permission remains limited to the Madeira-authored changes it
+covers.
+
 ## What one built app contains
 
 Statically linked into the main executable (`Madeira` / `Madeira.debug.dylib`):
@@ -13,7 +18,7 @@ Statically linked into the main executable (`Madeira` / `Madeira.debug.dylib`):
 |---|---|---|---|
 | Wine unix side (ntdll, wineserver, win32u, wineios.drv) from the `wine` fork (branch `madeira-lgpl`) and `build/*-unix` | LGPL-2.1-or-later | LGPL-2.1-or-later (rebuilt from upstream wine-11.4, see `docs/wine-lgpl-provenance.md`); the earlier GPL-converted branch is retired | statically linked |
 | FEXCore and helpers (`FEX/build-ios/*.a`), including the rpmalloc fork under FEX/External | MIT (rpmalloc: 0BSD) | GPL-3.0-or-later + additional permission (Will Faust commits; Ryan Houdek rpmalloc commits stay 0BSD) | statically linked |
-| DXMT unix side + airconv (`libdxmt_combined.a`) | MIT | GPL-3.0-or-later + additional permission | statically linked |
+| DXMT unix side + airconv (`libdxmt_combined.a`) | MIT through v0.80; LGPL-2.1-or-later for later upstream code | GPL-3.0-or-later + additional permission for Madeira modifications | statically linked; LGPL obligations apply to later upstream code |
 | LLVM (inside `libdxmt_combined.a`) | Apache-2.0 with LLVM exception | none | statically linked |
 | gnutls 3.8.13, nettle 3.10.2, hogweed 3.10.2, gmp 6.3.0 | LGPL-2.1+ / dual LGPL-3+ or GPL-2+ / dual LGPL-3+ or GPL-2+ | none; Madeira elects LGPL-3.0-or-later for the dual-licensed three | statically linked; LGPL obligations apply; sources tracked in build/gnutls-ios/src |
 | FFmpeg 7.1.5 (libavformat, libavcodec, libavutil, libswresample) | LGPL-2.1-or-later (built `--disable-gpl --disable-nonfree --disable-version3`) | none | statically linked, winegstreamer's unix side only; LGPL obligations apply; the unmodified release tarball is tracked in `build/ffmpeg/src` with its SHA-256 and built by `build/ffmpeg/build.sh` |

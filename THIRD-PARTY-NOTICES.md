@@ -76,10 +76,10 @@ lives in a separate submodule. Each fork therefore carries its own
 
 - `wine/LICENSE-MADEIRA.md` — the LGPL-2.1 §3 conversion, exactly what changed
   and the two deliberate exceptions.
-- `FEX/LICENSE-MADEIRA.md`, `dxmt/LICENSE-MADEIRA.md` — upstream MIT
-  preserved; Madeira's modifications GPL-3.0-or-later. `dxmt`'s notice
-  also records the Direct3D 9 / DXSO import, file by file, which is kept under
-  LGPL-2.1-or-later as received.
+- `FEX/LICENSE-MADEIRA.md` — upstream MIT preserved; Madeira's modifications
+  GPL-3.0-or-later. `dxmt/LICENSE-MADEIRA.md` records older upstream MIT code,
+  later upstream LGPL-2.1-or-later code, Madeira's modifications, and the
+  Direct3D 9 / DXSO import kept under LGPL-2.1-or-later as received.
 - `FEX/External/rpmalloc/LICENSE-MADEIRA.md` — 0BSD preserved; only Will
   Faust's commits are GPL, and authorship is distinguishable via `git log`.
 
