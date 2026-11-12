@@ -80,7 +80,7 @@ check("if (dbg_output) dbg_output(buf);" in log and "fputs(buf, stderr);" in log
 check(d3d.find("static int g_quiet_log;") < d3d.find("static void d3d12_log("), "g_quiet_log is declared before d3d12_log")
 
 init = func_body(d3d, "static void mad_quiet_log_init(void)")
-check('mad_cfg_int_pe("quiet-log", 0)' in init, "quiet-log is read from the config, default 0")
+check('mad_cfg_int_pe("quiet-log", 1)' in init, "quiet-log is read from the config, default 1")
 check(init.find("d3d12_log(") < init.find("g_quiet_log = 1;"), "the quiet-log line is logged before the switch takes effect")
 create = func_body(d3d, "__declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(")
 check(bool(create), "MadeiraD3D12CreateDevice found")

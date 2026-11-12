@@ -3649,14 +3649,24 @@ static void ios_stuck_store_check( void )
     vm_deallocate( mach_task_self(), (vm_address_t)tl, tc * sizeof(*tl) );
 }
 
-static void ios_thread_sampler_main(void)
+/* Ordinary play keeps counters and the stuck-store repair, without periodic
+ * thread-suspending profiles. MADEIRA_PROBES=1 restores full profiling. */
+static int ios_probes_level(void)
+{
+    const char *value = getenv("MADEIRA_PROBES");
+    if (!value || !*value || !strcmp(value, "light")) return 1;
+    return !strcmp(value, "0") ? 0 : 2;
+}
+
+static void ios_thread_sampler_main(int full_probes)
 {
     int gen = 0;
+    const int profile = full_probes && !ios_lean_diag;
     /* ml1288: MADEIRA_STUCK_CHECK=0 turns off the check that completes a store stuck across a 16 KB page. */
     const char *sc = getenv( "MADEIRA_STUCK_CHECK" );
     const int stuck_check = !(sc && sc[0] == '0');
     ios_ts_calibrate();
-    wine_log_write(ios_lean_diag ? "[thread-sample] ml876 armed for [sync-census] only (MADEIRA_LEAN_DIAG: no bursts, no guest RIP profile)"
+    wine_log_write(!profile ? "[thread-sample] ml876 armed for [sync-census] and stuck-store checks only (no bursts, no guest RIP profile)"
                                  : "[thread-sample] ml876 armed (task-wide: burst of 4 passes / 250 ms every 20 s)");
     for (;;) {
         int b;
@@ -3664,9 +3674,9 @@ static void ios_thread_sampler_main(void)
         for (tick = 0; tick < 200; tick++)   /* ml1288: the stuck-store check every 100 ms between bursts */
         {
             usleep( 100000 );
-            if (stuck_check && !ios_lean_diag) ios_stuck_store_check();
+            if (stuck_check) ios_stuck_store_check();
         }
-        if (!ios_lean_diag) {
+        if (profile) {
         for (b = 0; b < 4; b++) { ios_thread_sampler_pass(b); usleep(250000); }
         wine_log_write("[thread-sample] ml876 burst done");
         }
@@ -3700,7 +3710,7 @@ static void ios_thread_sampler_main(void)
         /* ml979: profile the guest every third burst (~once a minute). Two
          * successive profiles are what distinguish a loop from a sweep: a
          * sweep's span and bucket set move, a loop's do not. */
-        if (!ios_lean_diag) { ++gen; ios_guest_rip_profile( gen ); }   /* ml1123: every burst (was every third) */
+        if (profile) { ++gen; ios_guest_rip_profile( gen ); }   /* ml1123: every burst (was every third) */
     }
 }
 
@@ -6884,15 +6894,11 @@ void server_init_process_done(void)
          * ios_thread_sampler_main() above. */
         if (__sync_bool_compare_and_swap(&ios_ts_armed, 0, 1))
         {
-            /* Madeira: MADEIRA_PROBES picks which always-on profilers start,
-             * for timing runs: unset/1 = all (as before); "light" = only the
-             * xprobe ([xp]/[xp-t]/[xp-api], counters read 4x a second, no thread
-             * is ever suspended); 0 = none. The thread sampler suspends every
-             * thread 4x per 20 s and the guest RIP profile suspends the game's
-             * threads 200x in a second after that -- cheap, but not free on a
-             * device whose efficiency cores are saturated (a heavy game at 1080p). */
+            /* Default/light: counters and stuck-store repair; 1: full diagnostic
+             * profiles; 0: neither sampler. The correctness check is independent
+             * of lean diagnostics whenever the sampler is running. */
             const char *probes_env = getenv("MADEIRA_PROBES");
-            int probes = !probes_env || !*probes_env ? 2 : !strcmp(probes_env, "0") ? 0 : !strcmp(probes_env, "light") ? 1 : 2;
+            int probes = ios_probes_level();
             /* 1: no thread-suspending samplers ([thread-sample], [rip-profile], [cpu-split], [wprof]) and rare memory walks; [xp] unchanged */
             const char *lean_env = getenv("MADEIRA_LEAN_DIAG");
             /* 1: a [power] line every 5 s (coalition GPU energy, IOReport, battery) and [power-t] (energy per thread) */
@@ -6900,14 +6906,14 @@ void server_init_process_done(void)
             ios_lean_diag = lean_env && *lean_env && strcmp(lean_env, "0") != 0;
             ios_power_probe_on = probe_env && *probe_env && strcmp(probe_env, "0") != 0;
             if (probes < 2)
-                wine_log_write("[probes] MADEIRA_PROBES=%s: thread sampler, guest RIP profile and W-thread profiler off%s",
-                               probes_env, probes ? "; [xp] counters stay" : "; [xp] counters off too");
+                wine_log_write("[probes] MADEIRA_PROBES=%s: thread-sample bursts, guest RIP profile and W-thread profiler off%s",
+                               probes_env ? probes_env : "light (default)", probes ? "; [xp] counters and stuck-store checks stay" : "; [xp] counters off too");
             if (ios_lean_diag)
                 wine_log_write("[lean-diag] madeira-bcd MADEIRA_LEAN_DIAG=%s: [thread-sample] bursts, guest RIP profile ([rip-profile], "
                                "[cpu-split]) and [wprof] off; [sync-census] every 20 s and [xp]/[xp-t]/[xp-api] every 250 ms / 1 s as "
                                "before; the warmer's memory walks every ~10 min", lean_env);
             ios_frame_stats_arm();   /* [frame]: off unless MADEIRA_FRAME_STATS is set */
-            if (probes >= 2) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(); });
+            if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_thread_sampler_main(probes >= 2); });
             if (probes >= 1) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_xprobe_main(); });   /* ml1128 */
             if (probes >= 2 && !ios_lean_diag) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_wprof_main(); });   /* ml1129 */
         }

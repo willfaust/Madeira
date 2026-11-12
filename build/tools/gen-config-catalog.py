@@ -180,13 +180,13 @@ OVERLAY = {
                         "at least 2 MB, so their stacks take less of the shared memory space. Never list Chromium "
                         "programs (SocialClubHelper.exe, Launcher.exe, steamwebhelper.exe). Read when a thread starts."},
     "quiet-log": {"category": "Direct3D 12", "title": "Cheaper Direct3D 12 logging (no census frames)",
-                "kind": "bool", "default": "0",
-                "note": "1: the Direct3D 12 runtime's log lines skip OutputDebugString (an exception and a server "
+                "kind": "bool", "default": "1",
+                "note": "Default on. 1: the Direct3D 12 runtime's log lines skip OutputDebugString (an exception and a server "
                         "request each, ~0.5 ms a line on the device) and reach the log through Wine's own debug "
                         "output and stderr only; the census frames between presents 1500 and 3000 and the list "
                         "12000-12400 draw dumps are off (each froze the game for 1-2 s); the per-shader "
                         "\"converted at runtime\" line is kept for the first 64 shaders and then every 1000th. "
-                        "A manual frame capture still works. Default off: the logging as before."},
+                        "A manual frame capture still works. 0 restores the verbose diagnostic logging."},
     "replay-split": {"category": "Direct3D 12", "title": "Log where Direct3D 12 submission time goes",
                 "kind": "bool", "default": "0",
                 "note": "Default off, logging only. 1: every 5 seconds a [perf] replay split line divides the time "
@@ -1003,16 +1003,27 @@ OVERLAY = {
                         "Rockstar Games Launcher installer, whose status text and finish page run on a timer, "
                         "stayed at \"Preparing to Install...\" after its work was done. A timer that has waited "
                         "100 ms now goes before such a paint. 0: the strict order, as before. Read once per app run."},
+    "env.MADEIRA_PROBES": {"category": "Debugging / logs", "title": "Periodic runtime profiling",
+                "kind": "text", "default": "light", "sources": ["build/ntdll-unix/server_ios.c"],
+                "note": "Default/light: keep [xp] counters, [sync-census] and stuck-store compatibility checks, "
+                        "without periodic thread-sample bursts, guest RIP profiles or W-thread profiling. "
+                        "1 (or any other nonempty value except 0/light): full profiling unless MADEIRA_LEAN_DIAG=1. 0: disable both sampler loops, "
+                        "including stuck-store checks. MADEIRA_STUCK_CHECK=0 separately disables the repair. Read once per process."},
+    "env.MADEIRA_DESKTOP_DIAG": {"category": "Debugging / logs", "title": "Periodic desktop dumps",
+                "kind": "bool", "default": "0", "sources": ["app/Madeira/Winios/Winios.m"],
+                "note": "1: dump desktop window trees every 5 seconds and all thread stacks every 20 seconds. "
+                        "Off by default. Event delivery, window layout and failure-triggered dumps do not need this switch. "
+                        "Read once per process before desktop diagnostics start; restart the app to change it."},
     # madeira-bcd: lean periodic diagnostics (build/ntdll-unix/server_ios.c, virtual_ios.c).
-    "env.MADEIRA_LEAN_DIAG": {"category": "Debugging / logs", "title": "Lean diagnostics (no thread-suspending samplers)",
+    "env.MADEIRA_LEAN_DIAG": {"category": "Debugging / logs", "title": "Lean diagnostics (no periodic profiles)",
                 "kind": "bool", "default": "0",
                 "sources": ["build/ntdll-unix/server_ios.c", "build/ntdll-unix/virtual_ios.c"],
-                "note": "1: the samplers that suspend threads stop ([thread-sample] bursts every 20 s, the guest RIP "
+                "note": "1: periodic diagnostic profiles stop ([thread-sample] bursts every 20 s, the guest RIP "
                         "profile behind [rip-profile] and [cpu-split], [wprof]); the warmer's address-space walks "
                         "([phys-map], slot and window inventory) run every ~10 min instead of every minute, its zone "
                         "check and allocation probe every minute instead of every 2 s; mprotect_exec's per-call ERR "
                         "line is kept for the first 200 calls, then every 1000th. [xp], [xp-t], [xp-api] and "
-                        "[sync-census] keep their rates. Off (default): every diagnostic as before. Read at session start."},
+                        "[sync-census] keep their rates. Unlike older builds, the stuck-store compatibility check remains active and may suspend suspect threads; MADEIRA_STUCK_CHECK=0 disables it. Off (default): no additional reductions; MADEIRA_PROBES still selects periodic profiles. Read at session start."},
     # madeira-bcd: the runtime's native helper threads at utility QoS (build/ntdll-unix/thread_ios.c).
     "env.MADEIRA_ECO_NATIVE": {"category": "Wine core (ntdll)", "title": "Runtime helper threads on efficiency cores",
                 "kind": "bool", "default": "0",

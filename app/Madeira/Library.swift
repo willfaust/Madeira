@@ -36,6 +36,7 @@ func L(_ text: String) -> String {
 enum DeviceLoadDiagnostics {
     private static var lastReport = 0.0
     private static var timer: Timer?
+    static var isActive: Bool { timer != nil }
     /// Opt-in (env.MADEIRA_DEVICE_STATS = 1): a line every 10 s during every
     /// session is a diagnostic, so it is off by default.
     static func start() {
@@ -6401,11 +6402,15 @@ struct LibraryMetrics: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(parts.joined(separator: ", "))
             .onAppear {
-                lastCount = madeira_shown_frame_count(); lastTime = Date(); UIDevice.current.isBatteryMonitoringEnabled = true
+                lastCount = madeira_shown_frame_count(); lastTime = Date()
+                UIDevice.current.isBatteryMonitoringEnabled = model.overlayFields.contains("Battery") || DeviceLoadDiagnostics.isActive
                 applyGPUMeter()
             }
             .onDisappear { UIDevice.current.isBatteryMonitoringEnabled = false; madeira_gpu_meter_enable(0) }
-            .onChange(of: model.overlayFields) { _, _ in applyGPUMeter() }
+            .onChange(of: model.overlayFields) { _, _ in
+                UIDevice.current.isBatteryMonitoringEnabled = model.overlayFields.contains("Battery") || DeviceLoadDiagnostics.isActive
+                applyGPUMeter()
+            }
             .onReceive(ticks) { now in
                 tick += 1
                 guard tick % max(1, Int((refresh / 0.5).rounded())) == 0 else { return }
@@ -6417,10 +6422,15 @@ struct LibraryMetrics: View {
                 // 0.1% needs more frames: thirty seconds (the ring holds 2048).
                 if model.overlayFields.contains("0.1% lows") { pointOneLow = FrameTimes.pointOnePercentLow(FrameTimes.read(windowMs: 30_000).intervals) }
                 if model.overlayFields.contains("Frame time") { frameMs = FrameTimes.current(windowMs: UInt32(max(0.5, refresh) * 1000)) }
-                var info = task_vm_info_data_t(); var size = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-                let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &size) } }
-                if result == KERN_SUCCESS { memory = Int(info.phys_footprint / 1048576) }
-                battery = UIDevice.current.batteryLevel < 0 ? -1 : Int(UIDevice.current.batteryLevel * 100)
+                if model.overlayFields.contains("RAM") {
+                    var info = task_vm_info_data_t(); var size = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+                    let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &size) } }
+                    if result == KERN_SUCCESS { memory = Int(info.phys_footprint / 1048576) }
+                }
+                if model.overlayFields.contains("Battery") {
+                    let level = UIDevice.current.batteryLevel
+                    battery = level < 0 ? -1 : Int(level * 100)
+                }
                 let state = ProcessInfo.processInfo.thermalState
                 if state != thermal {
                     LogStore.shared.log("[thermal] \(DeviceLoadDiagnostics.thermalName(thermal)) -> \(DeviceLoadDiagnostics.thermalName(state)) at \(String(format: "%.0f", fps)) FPS")

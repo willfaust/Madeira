@@ -83,7 +83,8 @@ final class ProMotionIntent {
             l.add(to: .main, forMode: .common)
             link = l
             activeMax = want
-            displaySyncApplied = false; armedAt = 0; tickStart = 0   // ml2021: per arming
+            displaySyncApplied = false; armedAt = 0; tickStart = 0
+            nextKickCheck = 0; kickEnabled = false   // ml2021: per arming
             fputs("[promote] display link armed preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz\n", stderr)
             // ml2020: stderr written before Wine starts is not in the exported log; say it there too
             LogStore.shared.log("[promote] display link armed min=\(Int(lo))Hz preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz")
@@ -127,7 +128,16 @@ final class ProMotionIntent {
     /// drawable waits fall with this on, that is what the display link alone does not do.
     private var kickLayer: CALayer?
     private var kickOn = false
-    static var kickEnabled: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE_KICK", fallback: false) }
+    private var kickEnabled = false
+    private var nextKickCheck: CFTimeInterval = 0
+
+    /// Keep file checks off the display-frequency path. Recheck once a second so
+    /// game environment exports after arming and live diagnostic edits still apply.
+    private func refreshKick(now: CFTimeInterval) {
+        guard now >= nextKickCheck else { return }
+        nextKickCheck = now + 1
+        kickEnabled = MadeiraConfig.flag("MADEIRA_PROMOTE_KICK", fallback: false)
+    }
 
     /// ml2021: env.MADEIRA_DISPLAY_SYNC applied to the game's layer once the session's
     /// environment is exported (the link is armed a few ms BEFORE the game's config lines
@@ -164,7 +174,8 @@ final class ProMotionIntent {
                                        (sender.targetTimestamp - sender.timestamp) * 1000))
             tickStart = now; tickCount = 1; tickMaxGap = 0
         }
-        if ProMotionIntent.kickEnabled { kick() }
+        refreshKick(now: now)
+        if kickEnabled { kick() }
     }
 
     private func kick() {
