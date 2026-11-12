@@ -53,7 +53,6 @@ APP_DIR="$REPO_ROOT/app/Madeira"
 
 FFMPEG_VERSION=7.1.5
 TARBALL="$SRC_DIR/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-SRC="$OBJ_DIR/ffmpeg-${FFMPEG_VERSION}"
 BUILD="$OBJ_DIR/build-$FFMPEG_VERSION"
 
 RECONFIGURE=0
@@ -82,10 +81,12 @@ if [ -z "$WANT" ] || [ "$GOT" != "$WANT" ]; then
     echo "  got      $GOT" >&2
     exit 1
 fi
-if [ ! -f "$SRC/configure" ]; then
+SRC="$OBJ_DIR/ffmpeg-${FFMPEG_VERSION}-${GOT}"
+if [ ! -f "$SRC/.madeira-extracted" ]; then
     echo "=== extracting ffmpeg-$FFMPEG_VERSION ==="
-    rm -rf "$SRC"
-    tar -C "$OBJ_DIR" -xJf "$TARBALL"
+    mkdir -p "$SRC"
+    tar -C "$SRC" --strip-components=1 -xJf "$TARBALL"
+    touch "$SRC/.madeira-extracted"
 fi
 
 # ------------------------------------------------------------------ configure
