@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sun, 4 Oct 2026 19:50:00 +0200
+Subject: [PATCH] kk: key cached shaders on all the pipeline state they read
+
+kk_hash_graphics_state is the key under which the Vulkan runtime's
+pipeline cache shares a compiled shader between pipelines, so every piece
+of pipeline state that the compile bakes into a shader must be in it. Five
+were not:
+
+- the input primitive class (vs.topology, Metal's inputPrimitiveTopology,
+  and the class an internal geometry shader reads): only points were keyed;
+- VK_POLYGON_MODE_POINT, which adds the point-fill geometry shader;
+- whether depth clip and clamp can both be off (vertex lowering) or both on
+  (fragment lowering);
+- alpha to coverage and alpha to one (msl_nir_lower_multisample_alpha);
+- the color attachment location map.
+
+With a cache, a pipeline that differs from an earlier one only in these
+would get the earlier one's shaders. Without a cache nothing changes.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-04-portal2-shader-cache.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index f6e38c0..7f1fc4f 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -124,8 +124,19 @@ has_static_depth_stencil_state(const struct vk_graphics_pipeline_state *state)
+       BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK));
+ }
+ 
++static bool kk_is_possible_both_depth_clip_clamp(
++   const struct vk_graphics_pipeline_state *state, bool enabled);
++
++/* Every piece of pipeline state that the compile reads must be in these keys:
++ * a pipeline cache hands the shaders of one pipeline to another whose keys
++ * match. */
+ struct kk_vs_key {
+    bool is_points;
++   /* Metal's input primitive class, and the internal geometry shader */
++   uint8_t topology_class;
++   bool point_fill;
++   /* msl_nir_lower_vs_disabled_depth_clamp_clip */
++   bool clip_clamp_off;
+    struct vk_vertex_input_state vi;
+ };
+ 
+@@ -136,6 +147,11 @@ kk_populate_vs_key(struct kk_vs_key *key,
+    memset(key, 0, sizeof(*key));
+    key->is_points =
+       (state->ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
++   key->topology_class = vk_primitive_topology_to_mtl_primitive_topology_class(
++      state->ia->primitive_topology);
++   key->point_fill =
++      state->rs && state->rs->polygon_mode == VK_POLYGON_MODE_POINT;
++   key->clip_clamp_off = kk_is_possible_both_depth_clip_clamp(state, false);
+    key->vi = *state->vi;
+ }
+ 
+@@ -151,6 +167,11 @@ struct kk_fs_key {
+    bool dynamic_input_attachment_map;
+    uint8_t depth_input_att;
+    uint8_t stencil_input_att;
++   uint8_t color_map[MESA_VK_MAX_COLOR_ATTACHMENTS];
++   bool alpha_to_coverage_enable;
++   bool alpha_to_one_enable;
++   /* msl_nir_lower_fs_combined_depth_clamp_clip */
++   bool clip_clamp_on;
+ };
+ 
+ static void
+@@ -175,8 +196,14 @@ kk_populate_fs_key(struct kk_fs_key *key,
+       key->rasterization_samples = state->ms->rasterization_samples;
+       key->static_sample_mask = state->ms->sample_mask;
+       key->sample_shading_enable = state->ms->sample_shading_enable;
++      key->alpha_to_coverage_enable = state->ms->alpha_to_coverage_enable;
++      key->alpha_to_one_enable = state->ms->alpha_to_one_enable;
+    }
+ 
++   for (uint32_t i = 0u; i < MESA_VK_MAX_COLOR_ATTACHMENTS; ++i)
++      key->color_map[i] = state->cal ? state->cal->color_map[i] : i;
++   key->clip_clamp_on = kk_is_possible_both_depth_clip_clamp(state, true);
++
+    /* Depth writes are removed unless there's an actual attachment */
+    key->has_depth = state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED;
+    key->has_stencil =

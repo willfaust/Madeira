@@ -39,7 +39,12 @@ if [ ! -f "$SRC/src/kosmickrisp/meson.build" ]; then
     exit 1
 fi
 
-for p in "$HERE"/patches/kosmickrisp-ios-*.patch; do
+if [ "${KK_PROFILE:-madeira}" = playport ]; then
+    set -- "$HERE"/playport-patches/*.patch
+else
+    set -- "$HERE"/patches/kosmickrisp-ios-*.patch
+fi
+for p in "$@"; do
     [ -e "$p" ] || continue
     m="$SRC/.madeira-applied-$(basename "$p")"
     if [ ! -f "$m" ]; then
@@ -90,7 +95,7 @@ if [ ! -f "$B/build.ninja" ]; then
         -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
         -Dglx=disabled -Degl=disabled -Dgbm=disabled \
         -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system \
-        -Dshader-cache=disabled -Dxmlconfig=disabled \
+        -Dshader-cache="${KK_SHADER_CACHE:-disabled}" -Dxmlconfig=disabled \
         -Dzstd=disabled -Dlibunwind=disabled -Dvalgrind=disabled -Dlmsensors=disabled \
         -Dexpat=disabled -Dbuild-tests=false -Dvideo-codecs= \
         -Dvulkan-icd-dir=share/vulkan/icd.d

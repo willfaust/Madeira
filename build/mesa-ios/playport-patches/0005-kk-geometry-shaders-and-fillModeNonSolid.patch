@@ -1,0 +1,1556 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 15:41:04 +0200
+Subject: [PATCH] kk: geometry shaders and fillModeNonSolid
+
+KosmicKrisp already emulates tessellation with poly, the library
+honeykrisp uses for geometry and tessellation on Apple GPUs, and its
+pipelines already reserve a third pre-render stage. Finish the geometry
+stage the same way honeykrisp does:
+
+- The stage before the geometry shader (vertex, or tess eval with
+  tessellation) runs as compute and writes its outputs to memory
+  (poly_nir_lower_vs_before_gs).
+- poly_nir_lower_gs splits the geometry shader into the geometry shader
+  proper, run as compute once per input primitive and instance, and a
+  rasterization shader, which becomes the render pipeline's vertex
+  function and reads back the vertex the draw names. Its count and
+  pre-GS programs are only for transform feedback and statistics
+  queries, which KosmicKrisp does not expose, so they are not built.
+- At draw time kk_launch_gs uploads the geometry parameters, runs both
+  compute stages (for an indirect draw, sized on the GPU by a new
+  libkk_gs_setup_indirect kernel and dispatched with
+  dispatchThreadsWithIndirectBuffer, whose argument layout is poly's
+  "indirect local" grid) and draws the rasterization shader with the
+  shape poly chose: a dynamic index buffer, a static one (widened to
+  32-bit, as Metal has no 8-bit indices), or none.
+- Input assembly happens in software, so only primitive restart is
+  unrolled before a geometry shader; the provoking vertex, the
+  geometry shader's gl_PrimitiveID in the fragment shader, clip and
+  cull distances and output-topology culling follow.
+- A points geometry shader with a dynamic index buffer kills the ~0
+  padding vertices: Metal restarts strips on ~0 but draws it in a point
+  list.
+- Geometry shaders unroll loops so poly can count vertices statically.
+
+fillModeNonSolid: VK_POLYGON_MODE_LINE is Metal's triangle fill mode.
+Metal has no point fill mode, so a pipeline with VK_POLYGON_MODE_POINT
+gets a geometry shader of its own that emits each triangle's vertices
+as points after culling the triangle as the rasterizer would (facing
+from the NDC area, the viewport's y direction, front face and cull
+mode, passed per draw).
+
+DXVK requires both geometryShader and fillModeNonSolid.
+
+Checked on the workstation only: the driver built for Linux on a mock
+Metal bridge compiles and records draws for vertex+geometry,
+tessellation+geometry and point/line fill pipelines, with every MSL
+library fully translated. Not run on a GPU.
+
+Class: feature
+Evidence: docs/evidence/2026-09-26-kosmickrisp-gs-fill-host.md
+Offered-upstream: no
+---
+ src/kosmickrisp/bridge/mtl_encoder.h          |   8 +
+ src/kosmickrisp/bridge/mtl_encoder.m          |  20 +
+ src/kosmickrisp/bridge/mtl_types.h            |   5 +
+ src/kosmickrisp/bridge/stubs/mtl_encoder.c    |  12 +
+ src/kosmickrisp/libkk/kk_geometry.cl          |  20 +
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c        |   2 +
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h        |  26 +-
+ src/kosmickrisp/vulkan/kk_cmd_draw.c          | 287 ++++++++-
+ .../vulkan/kk_nir_lower_descriptors.c         |  10 +
+ src/kosmickrisp/vulkan/kk_physical_device.c   |   2 +
+ src/kosmickrisp/vulkan/kk_shader.c            | 568 ++++++++++++++++--
+ src/kosmickrisp/vulkan/kk_shader.h            |  31 +
+ 12 files changed, 940 insertions(+), 51 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_encoder.h b/src/kosmickrisp/bridge/mtl_encoder.h
+index 02fe86f..706f295 100644
+--- a/src/kosmickrisp/bridge/mtl_encoder.h
++++ b/src/kosmickrisp/bridge/mtl_encoder.h
+@@ -71,6 +71,11 @@ void mtl_dispatch_threads(mtl_compute_encoder *encoder,
+ void mtl_dispatch_threadgroups_with_indirect_buffer(
+    mtl_compute_encoder *encoder, uint64_t addr, struct mtl_size local_size);
+ 
++/* addr holds MTLDispatchThreadsIndirectArguments: threads per grid, then
++ * threads per threadgroup, three words each. */
++void mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
++                                               uint64_t addr);
++
+ /* MTLRenderEncoder */
+ mtl_render_encoder *mtl_new_render_command_encoder_with_descriptor(
+    mtl_command_buffer *command_buffer, mtl_render_pass_descriptor *descriptor);
+@@ -91,6 +96,9 @@ void mtl_set_depth_stencil_state(mtl_render_encoder *encoder,
+ void mtl_set_stencil_references(mtl_render_encoder *encoder, uint32_t front,
+                                 uint32_t back);
+ 
++void mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                                enum mtl_triangle_fill_mode mode);
++
+ void mtl_set_front_face_winding(mtl_render_encoder *encoder,
+                                 enum mtl_winding winding);
+ 
+diff --git a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
+index 2c35562..cf36245 100644
+--- a/src/kosmickrisp/bridge/mtl_encoder.m
++++ b/src/kosmickrisp/bridge/mtl_encoder.m
+@@ -264,6 +264,16 @@ mtl_dispatch_threadgroups_with_indirect_buffer(mtl_compute_encoder *encoder,
+    }
+ }
+ 
++void
++mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
++                                          uint64_t addr)
++{
++   @autoreleasepool {
++      id<MTL4ComputeCommandEncoder> enc = (id<MTL4ComputeCommandEncoder>)encoder;
++      [enc dispatchThreadsWithIndirectBuffer:addr];
++   }
++}
++
+ /* MTLRenderEncoder */
+ 
+ /* Encoder commands */
+@@ -332,6 +342,16 @@ mtl_set_stencil_references(mtl_render_encoder *encoder, uint32_t front,
+    }
+ }
+ 
++void
++mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                           enum mtl_triangle_fill_mode mode)
++{
++   @autoreleasepool {
++      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
++      [enc setTriangleFillMode:(MTLTriangleFillMode)mode];
++   }
++}
++
+ void
+ mtl_set_front_face_winding(mtl_render_encoder *encoder,
+                            enum mtl_winding winding)
+diff --git a/src/kosmickrisp/bridge/mtl_types.h b/src/kosmickrisp/bridge/mtl_types.h
+index 26a9794..fc28a9d 100644
+--- a/src/kosmickrisp/bridge/mtl_types.h
++++ b/src/kosmickrisp/bridge/mtl_types.h
+@@ -229,6 +229,11 @@ enum mtl_winding {
+    MTL_WINDING_COUNTER_CLOCKWISE = 1,
+ };
+ 
++enum mtl_triangle_fill_mode {
++   MTL_TRIANGLE_FILL_MODE_FILL = 0,
++   MTL_TRIANGLE_FILL_MODE_LINES = 1,
++};
++
+ enum mtl_cull_mode {
+    MTL_CULL_MODE_NONE = 0,
+    MTL_CULL_MODE_FRONT = 1,
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_encoder.c b/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+index 57810ab..e66ef31 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_encoder.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_encoder.c
+@@ -124,6 +124,12 @@ mtl_dispatch_threadgroups_with_indirect_buffer(mtl_compute_encoder *encoder,
+ {
+ }
+ 
++void
++mtl_dispatch_threads_with_indirect_buffer(mtl_compute_encoder *encoder,
++                                          uint64_t addr)
++{
++}
++
+ /* MTLRenderEncoder */
+ mtl_render_encoder *
+ mtl_new_render_command_encoder_with_descriptor(
+@@ -162,6 +168,12 @@ mtl_set_stencil_references(mtl_render_encoder *encoder, uint32_t front,
+ {
+ }
+ 
++void
++mtl_set_triangle_fill_mode(mtl_render_encoder *encoder,
++                           enum mtl_triangle_fill_mode mode)
++{
++}
++
+ void
+ mtl_set_front_face_winding(mtl_render_encoder *encoder,
+                            enum mtl_winding winding)
+diff --git a/src/kosmickrisp/libkk/kk_geometry.cl b/src/kosmickrisp/libkk/kk_geometry.cl
+index b240bf2..4b143ca 100644
+--- a/src/kosmickrisp/libkk/kk_geometry.cl
++++ b/src/kosmickrisp/libkk/kk_geometry.cl
+@@ -42,3 +42,23 @@ libkk_prefix_sum_tess(global struct poly_tess_params *p)
+    desc[3] = 0;                  /* index_bias */
+    desc[4] = 0;                  /* start_instance */
+ }
++
++/* Indirect draw with a geometry shader: read the draw, size the vertex and
++ * geometry shader grids (poly's "indirect local" layout, dispatched with
++ * dispatchThreadsWithIndirectBuffer) and allocate the vertex output buffer and,
++ * for a dynamic topology, the output index buffer from the heap.
++ */
++KERNEL(1)
++libkk_gs_setup_indirect(uint64_t index_buffer, constant uint *draw,
++                        global struct poly_vertex_params *vp,
++                        global struct poly_geometry_params *p,
++                        global struct poly_heap *heap,
++                        uint64_t vs_outputs, uint32_t index_size_B,
++                        uint32_t index_buffer_range_el, uint32_t prim,
++                        uint32_t max_indices, uint32_t shape)
++{
++   poly_gs_setup_indirect(index_buffer, draw, vp, p, heap, vs_outputs,
++                          index_size_B, index_buffer_range_el, prim,
++                          false /* no transform feedback prefix sum */,
++                          max_indices, (enum poly_gs_shape)shape);
++}
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 22f4bf7..1b210fa 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -825,6 +825,8 @@ kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
+ 
+    if (grid.mode == KK_GRID_DIRECT)
+       mtl_dispatch_threads(encoder, grid.size, local_size);
++   else if (grid.mode == KK_GRID_INDIRECT_THREADS)
++      mtl_dispatch_threads_with_indirect_buffer(encoder, grid.addr);
+    else
+       mtl_dispatch_threadgroups_with_indirect_buffer(encoder, grid.addr,
+                                                      local_size);
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 46dfa33..2df469a 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -87,6 +87,17 @@ struct kk_per_draw_data {
+ 
+    uint64_t base_vertex_addr;
+    uint64_t base_instance_addr;
++
++   /* Address of the geometry param buffer if a geometry shader is used, else
++    * 0 */
++   uint64_t geometry_params;
++
++   /* 1 if the last vertex of a primitive is its provoking vertex. The
++    * geometry shader's input assembly orders strip vertices by it. */
++   uint32_t provoking_last;
++
++   /* KK_POINT_FILL_* bits, for VK_POLYGON_MODE_POINT emulation */
++   uint32_t point_fill_cull;
+ };
+ 
+ struct kk_attachment {
+@@ -351,7 +362,11 @@ bool kk_attachment_do_renderpass_resolve(const struct kk_attachment *attachment,
+ 
+ enum kk_grid_mode {
+    KK_GRID_DIRECT = 0u,
++   /* addr holds threadgroups per grid (MTLDispatchThreadgroupsIndirectArguments) */
+    KK_GRID_INDIRECT,
++   /* addr holds threads per grid, then threads per threadgroup
++    * (MTLDispatchThreadsIndirectArguments): poly's "indirect local" grids */
++   KK_GRID_INDIRECT_THREADS,
+ };
+ struct kk_grid {
+    enum kk_grid_mode mode;
+@@ -391,10 +406,19 @@ kk_grid_indirect(uint64_t addr)
+    };
+ }
+ 
++static struct kk_grid
++kk_grid_indirect_threads(uint64_t addr)
++{
++   return (struct kk_grid){
++      .mode = KK_GRID_INDIRECT_THREADS,
++      .addr = addr,
++   };
++}
++
+ static bool
+ kk_grid_is_indirect(struct kk_grid grid)
+ {
+-   return grid.mode == KK_GRID_INDIRECT;
++   return grid.mode != KK_GRID_DIRECT;
+ }
+ 
+ void kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 8f627aa..c0bd25b 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -833,6 +833,17 @@ kk_calculate_vbo_clamp(uint64_t vbuf, uint64_t sink, enum pipe_format format,
+    }
+ }
+ 
++/* Whether the bound pipeline runs a geometry shader: the application's, or
++ * the one emulating VK_POLYGON_MODE_POINT. Pipelines are monolithic, so the
++ * vertex shader knows. */
++static bool
++kk_pipeline_has_gs(struct kk_cmd_buffer *cmd)
++{
++   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++   return vs && (vs->info.vs.additional_stages_bits &
++                 BITFIELD_BIT(MESA_SHADER_GEOMETRY));
++}
++
+ static bool
+ is_primitive_culled(VkPrimitiveTopology topology)
+ {
+@@ -1130,7 +1141,10 @@ static uint64_t
+ kk_upload_vertex_params(struct kk_cmd_buffer *cmd,
+                         const struct kk_draw_data *data)
+ {
+-   const uint32_t wg_size[3] = {1, 1, 1};
++   /* The workgroup size is only read when a geometry shader dispatches the
++    * vertex (or tess eval) shader through params.grid; it matches the size the
++    * pre-render pipelines are compiled with. */
++   const uint32_t wg_size[3] = {64, 1, 1};
+ 
+    struct poly_vertex_params params;
+    poly_vertex_params_init(&params, 0, wg_size);
+@@ -1282,11 +1296,19 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+       }
+    }
+ 
+-   if (IS_DIRTY(RS_CULL_MODE) || IS_DIRTY(IA_PRIMITIVE_TOPOLOGY)) {
+-      /* Only disable rendering if primitive type is culled. */
++   if (IS_DIRTY(RS_CULL_MODE) || IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) ||
++       IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(GEOMETRY)) {
++      /* Only disable rendering if primitive type is culled. With a geometry
++       * shader, that is the type it outputs. */
++      struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++      bool culled = is_primitive_culled(dyn->ia.primitive_topology);
++      if (kk_pipeline_has_gs(cmd)) {
++         enum mesa_prim out = vs->info.vs.gs.mode;
++         culled = out != MESA_PRIM_POINTS && out != MESA_PRIM_LINES &&
++                  out != MESA_PRIM_LINE_STRIP;
++      }
+       gfx->is_cull_front_and_back =
+-         dyn->rs.cull_mode == VK_CULL_MODE_FRONT_AND_BACK &&
+-         is_primitive_culled(dyn->ia.primitive_topology);
++         dyn->rs.cull_mode == VK_CULL_MODE_FRONT_AND_BACK && culled;
+       if (gfx->is_cull_front_and_back) {
+          set_empty_scissor(enc);
+       } else {
+@@ -1323,6 +1345,15 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+                                          : MTL_WINDING_CLOCKWISE);
+    }
+ 
++   /* Metal draws triangle edges natively. VK_POLYGON_MODE_POINT is a
++    * geometry shader built into the pipeline, which rasterizes points. */
++   if (IS_DIRTY(RS_POLYGON_MODE)) {
++      mtl_set_triangle_fill_mode(enc,
++                                 dyn->rs.polygon_mode == VK_POLYGON_MODE_LINE
++                                    ? MTL_TRIANGLE_FILL_MODE_LINES
++                                    : MTL_TRIANGLE_FILL_MODE_FILL);
++   }
++
+    if (IS_DIRTY(RS_DEPTH_BIAS_FACTORS) || IS_DIRTY(RS_DEPTH_BIAS_ENABLE)) {
+       if (dyn->rs.depth_bias.enable)
+          mtl_set_depth_bias(enc, dyn->rs.depth_bias.constant_factor,
+@@ -1634,6 +1665,11 @@ build_per_draw_upload_mask(struct kk_cmd_buffer *cmd)
+       mask |= BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
+    }
+ 
++   /* So will a geometry shader. */
++   if (kk_pipeline_has_gs(cmd)) {
++      mask |= BITFIELD_BIT(MESA_SHADER_GEOMETRY);
++   }
++
+    struct kk_shader *fragment = cmd->state.shaders[MESA_SHADER_FRAGMENT];
+    if (fragment && fragment->info.uses_per_draw_data) {
+       mask |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+@@ -1839,6 +1875,13 @@ requires_unroll(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+    if (tess)
+       return false;
+ 
++   /* A geometry shader assembles its input primitives in software (poly),
++    * which handles every topology, index size and the provoking vertex, and
++    * bounds its index reads. It has no primitive restart, so only restart
++    * needs unrolling. */
++   if (kk_pipeline_has_gs(cmd))
++      return data->restart && data->indexed;
++
+    /* Metal does not support triangle fans */
+    if (data->prim == MESA_PRIM_TRIANGLE_FAN)
+       return true;
+@@ -1882,17 +1925,63 @@ upload_base_instance(struct kk_cmd_buffer *cmd, const struct kk_draw_data *data)
+    }
+ }
+ 
++/* Uploads gfx->per_draw_data and binds it for the following draws and
++ * dispatches. */
++static void
++kk_bind_per_draw_data(struct kk_cmd_buffer *cmd)
++{
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
++   struct kk_ptr shader_data_gpu =
++      kk_pool_upload(cmd, &gfx->per_draw_data, sizeof(gfx->per_draw_data), 8u);
++   if (unlikely(!shader_data_gpu.gpu))
++      return;
++
++   mtl_set_address(cmd->argument_table, shader_data_gpu.gpu, 2u);
++}
++
+ /* Prepares emulation data for stages like tessellation. It also upload system
+  * values not present in Metal such as drawID. */
+ static void
+ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+-                        uint32_t draw_id, const struct kk_draw_data *draw)
++                        uint32_t draw_id, const struct kk_draw_data *draw,
++                        bool provoking_last)
+ {
+    struct kk_graphics_state *gfx = &cmd->state.gfx;
+    gfx->per_draw_data.draw_id = draw_id;
++   gfx->per_draw_data.provoking_last = provoking_last;
++   gfx->per_draw_data.geometry_params = 0u;
+ 
+-   /* Prepare emulation data for tessellation. */
++   /* Culling state for the VK_POLYGON_MODE_POINT geometry shader, derived as
++    * kk_flush_dynamic_state derives Metal's. */
++   const struct vk_dynamic_graphics_state *dyn =
++      &cmd->vk.dynamic_graphics_state;
++   bool front_ccw = dyn->rs.front_face != VK_FRONT_FACE_CLOCKWISE;
++   if (cmd->state.shaders[MESA_SHADER_TESS_EVAL]) {
++      front_ccw ^= gfx->tess.info.ccw;
++      front_ccw ^=
++         dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
++   }
++   gfx->per_draw_data.point_fill_cull =
++      ((dyn->rs.cull_mode & VK_CULL_MODE_FRONT_BIT) ? KK_POINT_FILL_CULL_FRONT
++                                                    : 0u) |
++      ((dyn->rs.cull_mode & VK_CULL_MODE_BACK_BIT) ? KK_POINT_FILL_CULL_BACK
++                                                   : 0u) |
++      (front_ccw ? KK_POINT_FILL_FRONT_CCW : 0u) |
++      (dyn->vp.viewport_count && dyn->vp.viewports[0].height < 0.0f
++          ? KK_POINT_FILL_Y_FLIPPED
++          : 0u);
++
++   /* Prepare emulation data for tessellation, or for the vertex shader that
++    * feeds a geometry shader. The geometry parameters themselves are uploaded
++    * by kk_launch_gs, which knows the input primitive. */
+    bool tess = upload_mask & BITFIELD_BIT(MESA_SHADER_TESS_EVAL);
++   bool gs = upload_mask & BITFIELD_BIT(MESA_SHADER_GEOMETRY);
++   if (gs && !tess) {
++      gfx->per_draw_data.index_size = draw->index.el_size_B;
++      gfx->per_draw_data.base_vertex_addr = upload_base_vertex(cmd, draw);
++      gfx->per_draw_data.base_instance_addr = upload_base_instance(cmd, draw);
++      gfx->per_draw_data.vertex_params = kk_upload_vertex_params(cmd, draw);
++   }
+    if (tess) {
+       gfx->per_draw_data.index_size = draw->index.el_size_B;
+       gfx->per_draw_data.base_vertex_addr = upload_base_vertex(cmd, draw);
+@@ -1906,12 +1995,7 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+       }
+    }
+ 
+-   struct kk_ptr shader_data_gpu =
+-      kk_pool_upload(cmd, &gfx->per_draw_data, sizeof(gfx->per_draw_data), 8u);
+-   if (unlikely(!shader_data_gpu.gpu))
+-      return;
+-
+-   mtl_set_address(cmd->argument_table, shader_data_gpu.gpu, 2u);
++   kk_bind_per_draw_data(cmd);
+ }
+ 
+ static void
+@@ -1920,6 +2004,8 @@ kk_dispatch_compute(mtl_compute_encoder *enc, struct kk_grid grid,
+ {
+    if (grid.mode == KK_GRID_DIRECT)
+       mtl_dispatch_threads(enc, grid.size, local_size);
++   else if (grid.mode == KK_GRID_INDIRECT_THREADS)
++      mtl_dispatch_threads_with_indirect_buffer(enc, grid.addr);
+    else
+       mtl_dispatch_threadgroups_with_indirect_buffer(enc, grid.addr,
+                                                      local_size);
+@@ -2016,16 +2102,178 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+    return draw;
+ }
+ 
++/* Runs the stage before the geometry shader (vertex or tess eval, as compute)
++ * and the geometry shader (as compute), then returns the draw that rasterizes
++ * what the geometry shader wrote, with its rasterization shader as the vertex
++ * function. Follows honeykrisp's hk_launch_gs_prerast, without the count and
++ * pre-GS programs, which only transform feedback and statistics queries need.
++ *
++ * in_prim is the primitive type the geometry shader reads: the draw's, or the
++ * tessellator's output.
++ */
++static struct kk_draw_data
++kk_launch_gs(struct kk_cmd_buffer *cmd, struct kk_draw_data draw,
++             enum mesa_prim in_prim)
++{
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
++   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++   struct kk_shader *tes = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
++   const struct poly_gs_info *gsi = &vs->info.vs.gs;
++   bool indirect = kk_grid_is_indirect(draw.grid);
++
++   /* The stage before the geometry shader: with tessellation that is the tess
++    * eval shader, run as compute over the tessellator's indices, whose outputs
++    * need vertex params of their own. */
++   uint64_t prev_outputs = vs->info.vs.outputs_written;
++   mtl_compute_pipeline_state *prev_pipeline = vs->pipeline.gfx.pre_render[0];
++   if (tes) {
++      prev_outputs = tes->info.tess.tes_outputs_written;
++      prev_pipeline = vs->pipeline.gfx.pre_render[2];
++
++      const uint32_t wg_size[3] = {64, 1, 1};
++      struct poly_vertex_params vp;
++      poly_vertex_params_init(&vp, prev_outputs, wg_size);
++      gfx->per_draw_data.vertex_params =
++         kk_pool_upload(cmd, &vp, sizeof(vp), 8).gpu;
++      gfx->per_draw_data.vertex_outputs = prev_outputs;
++      /* Tess eval reads its vertex from the tessellator's index buffer
++       * itself (poly_load_tes_index); no software index pull. */
++      gfx->per_draw_data.index_size = 0u;
++      /* The tessellator emits its own winding, first vertex provoking. */
++      gfx->per_draw_data.provoking_last = false;
++   }
++
++   const uint32_t wg_size[3] = {64, 1, 1};
++   struct poly_geometry_params params;
++   poly_geometry_params_init(&params, in_prim, wg_size);
++   params.count_buffer_stride = gsi->count_words * 4;
++
++   uint32_t index_count = 0u, instance_count = 0u;
++   if (!indirect) {
++      poly_geometry_params_set_draw(&params, in_prim, gsi->shape,
++                                    gsi->max_indices, draw.grid.size.x,
++                                    draw.grid.size.y);
++      index_count = params.draw.index_count;
++      instance_count = params.draw.instance_count;
++
++      if (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED && index_count) {
++         struct kk_ptr ib = kk_pool_alloc(cmd, index_count * 4u, 4u);
++         params.output_index_buffer = ib.gpu;
++         draw.index.gpu.addr = ib.gpu;
++         draw.index.gpu.range = index_count * 4u;
++      }
++   } else if (gsi->shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
++      /* The setup kernel allocates the index buffer from the heap and puts its
++       * first index in params.draw. */
++      kk_heap(cmd);
++      draw.index.gpu.addr = dev->heap->gpu + sizeof(struct poly_heap);
++      draw.index.gpu.range = dev->heap->size_B - sizeof(struct poly_heap);
++   }
++
++   if (gsi->shape == POLY_GS_SHAPE_STATIC_INDEXED) {
++      /* poly stores the static topology as bytes; Metal has no 8-bit
++       * indices. */
++      uint32_t indices[ARRAY_SIZE(gsi->topology)];
++      for (uint32_t i = 0; i < gsi->max_indices; ++i)
++         indices[i] = gsi->topology[i];
++      struct kk_ptr ib = kk_pool_upload(cmd, indices,
++                                        MAX2(gsi->max_indices, 1u) * 4u, 4u);
++      draw.index.gpu.addr = ib.gpu;
++      draw.index.gpu.range = MAX2(gsi->max_indices, 1u) * 4u;
++   }
++
++   struct kk_ptr params_gpu = kk_pool_upload(cmd, &params, sizeof(params), 8u);
++   if (unlikely(!params_gpu.gpu))
++      return (struct kk_draw_data){.grid = kk_grid_1d(0u)};
++   gfx->per_draw_data.geometry_params = params_gpu.gpu;
++   kk_bind_per_draw_data(cmd);
++
++   struct kk_grid grid_vs, grid_gs;
++   if (indirect) {
++      struct libkk_gs_setup_indirect_args args = {
++         .draw = draw.grid.addr,
++         .vp = gfx->per_draw_data.vertex_params,
++         .p = params_gpu.gpu,
++         .heap = kk_heap(cmd),
++         .vs_outputs = prev_outputs,
++         .prim = in_prim,
++         .max_indices = gsi->max_indices,
++         .shape = gsi->shape,
++      };
++      if (!tes && draw.index.el_size_B) {
++         args.index_buffer = draw.index.gpu.addr;
++         args.index_size_B = draw.index.el_size_B;
++         args.index_buffer_range_el = draw.index.gpu.range /
++                                      draw.index.el_size_B;
++      }
++      libkk_gs_setup_indirect_struct(cmd, kk_grid_1d(1), true, args);
++
++      grid_vs = kk_grid_indirect_threads(
++         gfx->per_draw_data.vertex_params +
++         offsetof(struct poly_vertex_params, grid));
++      grid_gs = kk_grid_indirect_threads(
++         params_gpu.gpu + offsetof(struct poly_geometry_params, grid));
++   } else {
++      /* Metal validation rejects empty dispatches, and there is nothing to
++       * rasterize. */
++      if (draw.grid.size.x == 0u || draw.grid.size.y == 0u ||
++          params.grid[0] == 0u || index_count == 0u || instance_count == 0u)
++         return (struct kk_draw_data){.grid = kk_grid_1d(0u)};
++
++      grid_vs = kk_grid_2d(draw.grid.size.x, draw.grid.size.y);
++      grid_gs = kk_grid_2d(params.grid[0], params.grid[1]);
++   }
++
++   mtl_compute_encoder *enc = cs_get_compute(cmd);
++   const struct mtl_size local_size = {64, 1, 1};
++
++   mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
++                                    MTL_STAGE_DISPATCH);
++   mtl_compute_set_pipeline_state(enc, prev_pipeline);
++   kk_dispatch_compute(enc, grid_vs, local_size);
++
++   mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
++                                    MTL_STAGE_DISPATCH);
++   mtl_compute_set_pipeline_state(enc, vs->pipeline.gfx.gs);
++   kk_dispatch_compute(enc, grid_gs, local_size);
++
++   /* Rasterize. The rasterization shader finds its output vertex from the
++    * vertex and instance IDs; the draw has no base vertex or instance. */
++   struct kk_draw_data rast = {
++      .primitive_type = mesa_prim_to_mtl_primitive_type(gsi->mode),
++   };
++
++   if (poly_gs_indexed(gsi->shape)) {
++      rast.index.gpu = draw.index.gpu;
++      rast.index.el_size_B = 4u;
++   }
++
++   if (indirect) {
++      rast.grid = kk_grid_indirect(params_gpu.gpu +
++                                   offsetof(struct poly_geometry_params, draw));
++   } else {
++      rast.grid = kk_grid_3d(index_count, instance_count, 0u);
++   }
++
++   return rast;
++}
++
+ /* Get modifiable per draw data. */
+ static struct kk_draw_data
+ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
+                 uint32_t draw_id)
+ {
+-   bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
++   /* With tessellation or a geometry shader, the input primitive is
++    * assembled in software (which also handles adjacency) and the draw's
++    * primitive type is set when the emulation returns the final draw. */
++   bool emulated = cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
++                   kk_pipeline_has_gs(cmd);
+    struct kk_draw_data draw = {
+       .index.gpu = data->index_buffer,
+       .index.el_size_B = data->index_buffer_el_size_B,
+-      .primitive_type = tess ? 0u : mesa_prim_to_mtl_primitive_type(data->prim),
++      .primitive_type =
++         emulated ? 0u : mesa_prim_to_mtl_primitive_type(data->prim),
+    };
+ 
+    if (data->indirect) {
+@@ -2071,6 +2319,7 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+       return;
+ 
+    bool tess = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
++   bool gs = kk_pipeline_has_gs(cmd);
+ 
+    /* Unroll geometry. Skip draw if we fail. */
+    if (requires_unroll(cmd, data) && !kk_unroll_geometry(cmd, data))
+@@ -2080,11 +2329,17 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+       struct kk_draw_data draw_data = build_draw_data(cmd, data, i);
+ 
+       if (data->upload_mask)
+-         kk_upload_per_draw_data(cmd, data->upload_mask, i, &draw_data);
++         kk_upload_per_draw_data(cmd, data->upload_mask, i, &draw_data,
++                                 !data->flatshade_first);
+ 
+       if (tess)
+          draw_data = kk_launch_tess(cmd, draw_data);
+ 
++      if (gs)
++         draw_data = kk_launch_gs(cmd, draw_data,
++                                  tess ? cmd->state.gfx.tess.prim
++                                       : data->prim);
++
+       /* TODO_KOSMICKRISP Remove this once unroll, tess and any compute does not
+        * split render pass */
+       if (cmd->state.gfx.need_to_start_render_pass)
+diff --git a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+index 050206a..e5c43bc 100644
+--- a/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
++++ b/src/kosmickrisp/vulkan/kk_nir_lower_descriptors.c
+@@ -823,6 +823,16 @@ lower_poly(struct nir_builder *b, nir_intrinsic_instr *intrin, void *data)
+       return lower_sysval_to_per_draw(b, intrin, tess_params);
+    case nir_intrinsic_load_index_size_poly:
+       return lower_sysval_to_per_draw(b, intrin, index_size);
++   case nir_intrinsic_load_geometry_param_buffer_poly:
++      return lower_sysval_to_per_draw(b, intrin, geometry_params);
++   case nir_intrinsic_load_provoking_last:
++      return lower_sysval_to_per_draw(b, intrin, provoking_last);
++   case nir_intrinsic_load_rasterization_stream:
++      /* Only stream 0 is rasterized: there is no transform feedback. */
++      b->cursor = nir_instr_remove(&intrin->instr);
++      nir_def_rewrite_uses(&intrin->def,
++                           nir_imm_intN_t(b, 0, intrin->def.bit_size));
++      return true;
+    case nir_intrinsic_load_first_vertex:
+       /* Lower only compute shaders */
+       if (*(bool *)data) {
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 2d5be6b..5ddd013 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -233,6 +233,8 @@ kk_get_device_features(
+       .dualSrcBlend = true,
+       .fragmentStoresAndAtomics = true,
+       .fullDrawIndexUint32 = true,
++      .fillModeNonSolid = true,
++      .geometryShader = true,
+       .imageCubeArray = true,
+       .independentBlend = true,
+       .inheritedQueries = true,
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index cab3359..1a1b156 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -26,16 +26,38 @@
+ 
+ #include "poly/nir/poly_nir.h"
+ 
++#include "c11/threads.h"
++
++#include <math.h>
++
+ #include "vk_blend.h"
+ #include "vk_format.h"
+ #include "vk_graphics_state.h"
+ #include "vk_nir_convert_ycbcr.h"
+ #include "vk_pipeline.h"
+ 
++static nir_shader_compiler_options kk_gs_nir_options;
++
++static void
++kk_init_gs_nir_options(void)
++{
++   kk_gs_nir_options = kk_nir_options;
++   kk_gs_nir_options.max_unroll_iterations = 32;
++}
++
+ static const nir_shader_compiler_options *
+ kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
+                    UNUSED const struct vk_pipeline_robustness_state *rs)
+ {
++   /* Geometry shaders unroll their loops (as honeykrisp's do) so that poly
++    * can count their vertices and primitives at compile time: a geometry
++    * shader with static counts needs no index buffer written at run time and
++    * rasterizes with a static topology. Metal unrolls everything else. */
++   if (stage == MESA_SHADER_GEOMETRY) {
++      static once_flag once = ONCE_FLAG_INIT;
++      call_once(&once, kk_init_gs_nir_options);
++      return &kk_gs_nir_options;
++   }
+    return &kk_nir_options;
+ }
+ 
+@@ -386,12 +408,9 @@ kk_lower_vs_vbo(nir_shader *nir, const struct vk_graphics_pipeline_state *state,
+ 
+ /* Lowering for the stage which ends up as the vertex stage on hardware */
+ static void
+-kk_lower_hw_vs(nir_shader *nir, const struct vk_graphics_pipeline_state *state)
++kk_lower_hw_vs(nir_shader *nir, const struct vk_graphics_pipeline_state *state,
++               bool is_point)
+ {
+-   bool is_point =
+-      nir->info.stage == MESA_SHADER_TESS_EVAL
+-         ? nir->info.tess.point_mode
+-         : state->ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    if (is_point)
+       NIR_PASS(_, nir, msl_ensure_vertex_point_size_output);
+    else
+@@ -783,7 +802,11 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+    if ((nir->info.stage == MESA_SHADER_VERTEX ||
+         nir->info.stage == MESA_SHADER_TESS_EVAL) &&
+        !emulated_stage) {
+-      kk_lower_hw_vs(nir, state);
++      bool is_point =
++         nir->info.stage == MESA_SHADER_TESS_EVAL
++            ? nir->info.tess.point_mode
++            : state->ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
++      kk_lower_hw_vs(nir, state, is_point);
+    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       kk_lower_fs(dev, nir, state);
+    }
+@@ -848,8 +871,9 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+       pipe->gfx.render = NULL;
+       pipe->gfx.ds_handle = NULL;
+ 
+-      for (uint32_t i = 0u; i < pipe->gfx.pre_render_count; ++i)
+-         mtl_release(pipe->gfx.pre_render[i]);
++      if (pipe->gfx.gs)
++         mtl_release(pipe->gfx.gs);
++      pipe->gfx.gs = NULL;
+ 
+       /* Serialization data. */
+       u_foreach_bit(i, shader->info.vs.additional_stages_bits) {
+@@ -859,6 +883,9 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+       }
+    }
+ 
++   ralloc_free((void *)shader->gs_main.entrypoint_name);
++   ralloc_free((void *)shader->gs_main.code);
++
+    struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
+    ralloc_free((void *)data->entrypoint_name);
+    ralloc_free((void *)data->code);
+@@ -906,6 +933,8 @@ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
+       nir_shader_intrinsics_pass(nir, gather_vs_inputs, nir_metadata_all,
+                                  &shader->info.vs.attribs_read);
+       shader->info.vs.outputs_written = nir->info.outputs_written;
++   } else if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
++      shader->info.tess.tes_outputs_written = nir->info.outputs_written;
+    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       /* Some meta shaders like vk-meta-resolve will have depth_layout as NONE
+        * which is not a valid Metal layout */
+@@ -979,6 +1008,138 @@ kk_nir_lower_vertex_id_zero_base(struct nir_shader *nir)
+    return progress;
+ }
+ 
++/* poly pads each input primitive's run of a dynamic index buffer with ~0,
++ * relying on primitive restart. Metal restarts strips on ~0 but draws it as
++ * a vertex in a point list, so the rasterization shader of a points geometry
++ * shader would compute its output from vertex ID 0xffffffff, reading far out
++ * of bounds. Such a vertex computes vertex 0 instead and is killed with a NaN
++ * position.
++ */
++static void
++kk_nir_lower_gs_rast_point_padding(nir_shader *rast)
++{
++   nir_function_impl *impl = nir_shader_get_entrypoint(rast);
++   nir_builder b = nir_builder_at(nir_before_impl(impl));
++
++   nir_def *raw = nir_load_vertex_id(&b);
++   nir_def *padding = nir_ieq_imm(&b, raw, UINT32_MAX);
++   nir_def *safe = nir_bcsel(&b, padding, nir_imm_int(&b, 0), raw);
++
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic == nir_intrinsic_load_vertex_id &&
++             &intr->def != raw)
++            nir_def_rewrite_uses(&intr->def, safe);
++      }
++   }
++
++   /* Position stores are sunk to the end of the rasterization shader. */
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic != nir_intrinsic_store_output ||
++             nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_POS)
++            continue;
++
++         b.cursor = nir_before_instr(instr);
++         nir_def *value = intr->src[0].ssa;
++         nir_def *nan = nir_replicate(
++            &b, nir_imm_floatN_t(&b, NAN, value->bit_size),
++            value->num_components);
++         nir_def *killed = nir_bcsel(&b, padding, nan, value);
++         nir_src_rewrite(&intr->src[0], killed);
++      }
++   }
++
++   nir_progress(true, impl, nir_metadata_none);
++}
++
++/* Lower a geometry shader with poly (as honeykrisp does) into:
++ *
++ * - the geometry shader proper, a compute shader run once per input primitive
++ *   and instance on the outputs the previous stage wrote to memory. It writes
++ *   its output vertices to memory and, for dynamic topologies, an index buffer.
++ *   Compiled here to shader->gs_main.
++ * - a rasterization shader: a vertex shader that reads the vertex the draw
++ *   names back and stores it as its outputs. It replaces *nir_inout and is
++ *   compiled by the caller as this stage's code (msl_data[GEOMETRY]).
++ *
++ * The count and pre-GS shaders poly also returns are only needed for
++ * transform feedback and geometry statistics queries, which KosmicKrisp does
++ * not expose, so they are dropped.
++ */
++static void
++kk_compile_gs(struct kk_device *dev, nir_shader **nir_inout,
++              const struct vk_graphics_pipeline_state *state,
++              const struct vk_pipeline_robustness_state *robustness,
++              struct kk_shader *shader)
++{
++   struct kk_physical_device *pdev = kk_device_physical(dev);
++   nir_shader *gs = *nir_inout;
++   nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
++
++   NIR_PASS(_, gs, poly_nir_lower_gs, &count, &rast, &pre_gs,
++            &shader->info.gs.info);
++   ralloc_free(count);
++   ralloc_free(pre_gs);
++
++   /* Both halves read the draw's geometry parameters. */
++   shader->info.uses_per_draw_data = true;
++
++   /* The geometry shader proper: poly indexes it by global invocation ID as
++    * (input primitive, instance). */
++   gs->info.stage = MESA_SHADER_COMPUTE;
++   memset(&gs->info.cs, 0, sizeof(gs->info.cs));
++   gs->info.workgroup_size[0] = 64;
++   gs->info.workgroup_size[1] = 1;
++   gs->info.workgroup_size[2] = 1;
++   gs->xfb_info = NULL;
++   NIR_PASS(_, gs, kk_nir_lower_poly);
++   msl_optimize_nir(gs);
++   modify_nir_info(gs);
++
++   struct nir_to_msl_options options = {
++      .mem_ctx = NULL,
++      .disabled_workarounds = pdev->settings.disabled_workarounds,
++   };
++   shader->gs_main.code = nir_to_msl(gs, &options);
++   const char *entrypoint = nir_shader_get_entrypoint(gs)->function->name;
++   ralloc_steal(NULL, (void *)entrypoint);
++   shader->gs_main.entrypoint_name = (char *)entrypoint;
++   if (KK_DEBUG(MSL))
++      mesa_logi("%s\n", shader->gs_main.code);
++   ralloc_free(gs);
++
++   /* poly builds the rasterization shader with temporaries; lower them away
++    * as honeykrisp's agx_preprocess_nir does. */
++   NIR_PASS(_, rast, nir_lower_global_vars_to_local);
++   NIR_PASS(_, rast, nir_lower_vars_to_ssa);
++   NIR_PASS(_, rast, nir_opt_dce);
++   NIR_PASS(_, rast, nir_remove_dead_variables,
++            nir_var_function_temp | nir_var_shader_temp, NULL);
++
++   if (shader->info.gs.info.mode == MESA_PRIM_POINTS &&
++       shader->info.gs.info.shape == POLY_GS_SHAPE_DYNAMIC_INDEXED)
++      kk_nir_lower_gs_rast_point_padding(rast);
++
++   /* The rasterization shader is the hardware vertex stage, so it gets what
++    * kk_lower_nir gives a hardware vertex shader, and clip/cull distances. The
++    * system values those passes add are lowered by a second descriptor pass:
++    * everything else was lowered on the geometry shader before poly cloned
++    * it. */
++   kk_lower_hw_vs(rast, state,
++                  shader->info.gs.info.mode == MESA_PRIM_POINTS);
++   msl_nir_lower_clip_cull_distance(rast, 0);
++   NIR_PASS(_, rast, kk_nir_lower_descriptors, robustness, 0u, NULL);
++
++   *nir_inout = rast;
++}
++
+ static VkResult
+ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+                   struct kk_shader *prev_stage,
+@@ -1003,18 +1164,31 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+ 
+    gather_shader_info(shader, nir, state);
+ 
++   /* A stage before a geometry shader keeps its clip and cull distances as
++    * plain outputs: the geometry shader reads them, and its rasterization
++    * shader is the stage that feeds Metal's clip distances. */
++   bool before_gs = (stage == MESA_SHADER_VERTEX ||
++                     stage == MESA_SHADER_TESS_EVAL) &&
++                    nir->info.next_stage == MESA_SHADER_GEOMETRY;
+    unsigned num_cull_distances =
+       prev_stage ? prev_stage->info.num_cull_distances : 0;
+-   msl_nir_lower_clip_cull_distance(nir, num_cull_distances);
++   if (!before_gs && stage != MESA_SHADER_GEOMETRY)
++      msl_nir_lower_clip_cull_distance(nir, num_cull_distances);
+ 
+    /* When using poly to emulate tessellation, vertex and tess control shaders
+     * are turned to compute shaders that will be dispatched before the draw
+-    * call. Tess evalutaion shaders are turned into vertex shaders. */
++    * call. Tess evalutaion shaders are turned into vertex shaders.
++    *
++    * With a geometry shader, the stage before it (vertex or tess eval) runs as
++    * compute and writes its outputs to memory, the geometry shader runs as
++    * compute on those, and a rasterization shader derived from the geometry
++    * shader is the hardware vertex stage. */
+    if (stage == MESA_SHADER_VERTEX) {
+       /* VBO lowering needs to go here otherwise, the linking step removes all
+        * inputs since we read vertex attributes from UBOs. */
+       kk_lower_vs_vbo(nir, state, robustness);
+-      if (nir->info.next_stage == MESA_SHADER_TESS_CTRL) {
++      if (nir->info.next_stage == MESA_SHADER_TESS_CTRL ||
++          nir->info.next_stage == MESA_SHADER_GEOMETRY) {
+          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
+          NIR_PASS(_, nir, kk_nir_lower_vertex_id_zero_base);
+          nir->info.stage = MESA_SHADER_COMPUTE;
+@@ -1047,7 +1221,19 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+       shader->info.tess.info.mode = nir->info.tess._primitive_mode;
+ 
+       /* This destroys info so it needs to happen after the gather */
+-      NIR_PASS(_, nir, poly_nir_lower_tes, true);
++      if (before_gs) {
++         NIR_PASS(_, nir, poly_nir_lower_tes, false);
++         NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
++         nir->info.stage = MESA_SHADER_COMPUTE;
++         memset(&nir->info.cs, 0, sizeof(nir->info.cs));
++         nir->xfb_info = NULL;
++      } else {
++         NIR_PASS(_, nir, poly_nir_lower_tes, true);
++      }
++   } else if (stage == MESA_SHADER_GEOMETRY) {
++      /* Compiles the geometry shader proper into gs_main and replaces nir with
++       * its rasterization shader, which the common path below compiles. */
++      kk_compile_gs(dev, &nir, state, robustness, shader);
+    }
+ 
+    NIR_PASS(_, nir, kk_nir_lower_poly);
+@@ -1390,6 +1576,19 @@ gather_graphics_pipeline_create_info(
+ 
+       if (s->info.stage == MESA_SHADER_TESS_CTRL)
+          info->vs.tess_local_thread_size = s->info.tess.tcs_output_patch_size;
++
++      if (s->info.stage == MESA_SHADER_GEOMETRY) {
++         info->vs.gs = s->info.gs.info;
++
++         length = strlen(s->gs_main.code) + 1u;
++         vs->gs_main.code = ralloc_size(NULL, length);
++         memcpy(vs->gs_main.code, s->gs_main.code, length);
++
++         length = strlen(s->gs_main.entrypoint_name) + 1u;
++         vs->gs_main.entrypoint_name = ralloc_size(NULL, length);
++         memcpy(vs->gs_main.entrypoint_name, s->gs_main.entrypoint_name,
++                length);
++      }
+    }
+ 
+    uint8_t topology = state->ia->primitive_topology;
+@@ -1411,6 +1610,23 @@ gather_graphics_pipeline_create_info(
+       }
+    }
+ 
++   /* With a geometry shader, Metal rasterizes what the geometry shader
++    * outputs. */
++   if (info->vs.additional_stages_bits & BITFIELD_BIT(MESA_SHADER_GEOMETRY)) {
++      switch (info->vs.gs.mode) {
++      case MESA_PRIM_POINTS:
++         topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
++         break;
++      case MESA_PRIM_LINES:
++      case MESA_PRIM_LINE_STRIP:
++         topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
++         break;
++      default:
++         topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++         break;
++      }
++   }
++
+    info->vs.topology =
+       vk_primitive_topology_to_mtl_primitive_topology_class(topology);
+ }
+@@ -1429,10 +1645,14 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+     * previous stage. This means that any shader before that needs to be a
+     * compute pipeline to be launched before the render pipeline. */
+    uint32_t stages_bits = vs->info.vs.additional_stages_bits;
++   bool has_gs = stages_bits & BITFIELD_BIT(MESA_SHADER_GEOMETRY);
+    pipe->gfx.pre_render_count = util_bitcount(stages_bits) - 1u;
+    for (uint32_t i = 0u; i < pipe->gfx.pre_render_count; ++i) {
+-      uint32_t local_thread_size =
+-         (i == 0u) ? 64u : vs->info.vs.tess_local_thread_size;
++      /* The tess control shader runs one thread per output patch vertex;
++       * vertex and tess eval shaders run in groups of 64. */
++      uint32_t local_thread_size = vs_stage == MESA_SHADER_TESS_CTRL
++                                      ? vs->info.vs.tess_local_thread_size
++                                      : 64u;
+       result = kk_compile_compute_pipeline(device, &vs->msl_data[vs_stage],
+                                            local_thread_size,
+                                            &pipe->gfx.pre_render[i]);
+@@ -1442,6 +1662,16 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+       vs_stage = u_bit_scan(&stages_bits);
+    }
+ 
++   /* The geometry shader proper runs after the pre-render stages; vs_stage is
++    * now MESA_SHADER_GEOMETRY, whose code is the rasterization shader. */
++   if (has_gs) {
++      assert(vs_stage == MESA_SHADER_GEOMETRY);
++      result = kk_compile_compute_pipeline(device, &vs->gs_main, 64u,
++                                           &pipe->gfx.gs);
++      if (result != VK_SUCCESS)
++         return VK_ERROR_INVALID_SHADER_NV;
++   }
++
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+    mtl_library *vertex_library = mtl_new_library(
+       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
+@@ -1516,6 +1746,205 @@ destroy_vertex:
+    return result;
+ }
+ 
++/* Whether a pipeline rasterizes triangles with VK_POLYGON_MODE_POINT. Metal
++ * has no point fill mode, so such a pipeline gets a geometry shader of its own
++ * (kk_build_point_fill_gs) that turns each triangle into its three vertices as
++ * points, after culling it as the rasterizer would have. */
++static bool
++kk_needs_point_fill(const struct vk_graphics_pipeline_state *state,
++                    uint32_t shader_count,
++                    const struct vk_shader_compile_info *infos,
++                    enum mesa_prim *in_prim)
++{
++   if (!state || !state->rs ||
++       state->rs->polygon_mode != VK_POLYGON_MODE_POINT)
++      return false;
++
++   const nir_shader *tes = NULL;
++   for (uint32_t i = 0u; i < shader_count; ++i) {
++      /* A geometry shader's output is not handled. */
++      if (infos[i].nir->info.stage == MESA_SHADER_GEOMETRY)
++         return false;
++      if (infos[i].nir->info.stage == MESA_SHADER_TESS_EVAL)
++         tes = infos[i].nir;
++   }
++
++   if (tes) {
++      *in_prim = MESA_PRIM_TRIANGLES;
++      return tes->info.tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES &&
++             !tes->info.tess.point_mode;
++   }
++
++   if (!state->ia)
++      return false;
++
++   switch (state->ia->primitive_topology) {
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
++      *in_prim = MESA_PRIM_TRIANGLES;
++      return true;
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
++      *in_prim = MESA_PRIM_TRIANGLES_ADJACENCY;
++      return true;
++   default:
++      return false;
++   }
++}
++
++struct kk_output_store {
++   nir_io_semantics sem;
++   unsigned component;
++   unsigned num_components;
++   unsigned offset;
++   nir_alu_type type;
++};
++
++struct kk_output_stores {
++   struct kk_output_store stores[64];
++   unsigned count;
++};
++
++static bool
++gather_output_stores(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   struct kk_output_stores *out = data;
++   if (intr->intrinsic != nir_intrinsic_store_output)
++      return false;
++
++   struct kk_output_store st = {
++      .sem = nir_intrinsic_io_semantics(intr),
++      .component = nir_intrinsic_component(intr),
++      .num_components = util_last_bit(nir_intrinsic_write_mask(intr)),
++      .offset = nir_src_is_const(intr->src[1]) ? nir_src_as_uint(intr->src[1])
++                                               : 0u,
++      .type = nir_intrinsic_src_type(intr),
++   };
++
++   for (unsigned i = 0; i < out->count; ++i) {
++      struct kk_output_store *o = &out->stores[i];
++      if (o->sem.location == st.sem.location && o->offset == st.offset &&
++          o->component == st.component) {
++         o->num_components = MAX2(o->num_components, st.num_components);
++         return false;
++      }
++   }
++
++   assert(out->count < ARRAY_SIZE(out->stores));
++   if (out->count < ARRAY_SIZE(out->stores))
++      out->stores[out->count++] = st;
++   return false;
++}
++
++/* Build the geometry shader for VK_POLYGON_MODE_POINT: for each triangle that
++ * the rasterizer would not cull, emit its three vertices as points, with every
++ * output of the previous stage copied through. prev has lowered I/O. */
++static nir_shader *
++kk_build_point_fill_gs(struct kk_device *dev, nir_shader *prev,
++                       enum mesa_prim in_prim)
++{
++   struct kk_physical_device *pdev = kk_device_physical(dev);
++   nir_builder b_ = nir_builder_init_simple_shader(
++      MESA_SHADER_GEOMETRY,
++      kk_get_nir_options(&pdev->vk, MESA_SHADER_GEOMETRY, NULL),
++      "kk point fill");
++   nir_builder *b = &b_;
++   nir_shader *gs = b->shader;
++
++   struct kk_output_stores stores = {0};
++   nir_shader_intrinsics_pass(prev, gather_output_stores, nir_metadata_all,
++                              &stores);
++
++   bool adjacency = in_prim == MESA_PRIM_TRIANGLES_ADJACENCY;
++   gs->info.gs.input_primitive = in_prim;
++   gs->info.gs.output_primitive = MESA_PRIM_POINTS;
++   gs->info.gs.vertices_in = adjacency ? 6 : 3;
++   gs->info.gs.vertices_out = 3;
++   gs->info.gs.invocations = 1;
++   gs->info.gs.active_stream_mask = 1;
++   gs->info.inputs_read = prev->info.outputs_written;
++   gs->info.outputs_written = prev->info.outputs_written;
++   gs->info.clip_distance_array_size = prev->info.clip_distance_array_size;
++   gs->info.cull_distance_array_size = prev->info.cull_distance_array_size;
++   gs->info.io_lowered = true;
++   prev->info.next_stage = MESA_SHADER_GEOMETRY;
++
++   /* The triangle's facing, as the rasterizer would compute it: the sign of
++    * its area in framebuffer coordinates, which is the NDC area times the sign
++    * of the viewport height. */
++   nir_def *zero = nir_imm_int(b, 0);
++   nir_def *ndc[3];
++   for (unsigned v = 0; v < 3; ++v) {
++      nir_def *pos = nir_load_per_vertex_input(
++         b, 4, 32, nir_imm_int(b, v * (adjacency ? 2 : 1)), zero,
++         .io_semantics.location = VARYING_SLOT_POS,
++         .io_semantics.num_slots = 1, .dest_type = nir_type_float32);
++      nir_def *w = nir_channel(b, pos, 3);
++      ndc[v] = nir_fdiv(b, nir_channels(b, pos, 0x3),
++                        nir_vec2(b, w, w));
++   }
++   nir_def *e1 = nir_fsub(b, ndc[1], ndc[0]);
++   nir_def *e2 = nir_fsub(b, ndc[2], ndc[0]);
++   /* Counter-clockwise in a y-down framebuffer has negative cross product. */
++   nir_def *cross = nir_fsub(b, nir_fmul(b, nir_channel(b, e1, 0),
++                                         nir_channel(b, e2, 1)),
++                             nir_fmul(b, nir_channel(b, e2, 0),
++                                      nir_channel(b, e1, 1)));
++
++   nir_def *per_draw = nir_load_per_draw_ptr_kk(b, 1, 64);
++   nir_def *flags = nir_load_global_constant(
++      b, 1, 32,
++      nir_iadd_imm(b, per_draw,
++                   offsetof(struct kk_per_draw_data, point_fill_cull)),
++      .align_mul = 4);
++   nir_def *y_flipped =
++      nir_ine_imm(b, nir_iand_imm(b, flags, KK_POINT_FILL_Y_FLIPPED), 0);
++   nir_def *front_ccw =
++      nir_ine_imm(b, nir_iand_imm(b, flags, KK_POINT_FILL_FRONT_CCW), 0);
++   nir_def *ccw = nir_ixor(b, nir_flt_imm(b, cross, 0.0), y_flipped);
++   nir_def *front = nir_ieq(b, ccw, front_ccw);
++   nir_def *culled = nir_bcsel(
++      b, front,
++      nir_ine_imm(b, nir_iand_imm(b, flags, KK_POINT_FILL_CULL_FRONT), 0),
++      nir_ine_imm(b, nir_iand_imm(b, flags, KK_POINT_FILL_CULL_BACK), 0));
++
++   nir_push_if(b, nir_inot(b, culled));
++   {
++      for (unsigned v = 0; v < 3; ++v) {
++         nir_def *vertex = nir_imm_int(b, v * (adjacency ? 2 : 1));
++         for (unsigned i = 0; i < stores.count; ++i) {
++            const struct kk_output_store *st = &stores.stores[i];
++            unsigned bit_size = nir_alu_type_get_type_size(st->type);
++            nir_def *offset = nir_imm_int(b, st->offset);
++            nir_def *val = nir_load_per_vertex_input(
++               b, st->num_components, bit_size, vertex, offset,
++               .io_semantics = st->sem, .component = st->component,
++               .dest_type = st->type);
++            nir_store_output(b, val, offset, .io_semantics = st->sem,
++                             .component = st->component, .src_type = st->type,
++                             .write_mask = nir_component_mask(
++                                st->num_components));
++         }
++         /* With a geometry shader the fragment shader's gl_PrimitiveID is a
++          * varying (kk_compile_shaders); give it the input primitive. Unread,
++          * the varying is removed at link time. */
++         if (!(prev->info.outputs_written & VARYING_BIT_PRIMITIVE_ID)) {
++            nir_store_output(b, nir_load_primitive_id(b), zero,
++                             .io_semantics.location = VARYING_SLOT_PRIMITIVE_ID,
++                             .io_semantics.num_slots = 1,
++                             .src_type = nir_type_int32);
++         }
++         nir_emit_vertex(b, 0);
++      }
++   }
++   nir_pop_if(b, NULL);
++
++   nir_shader_gather_info(gs, nir_shader_get_entrypoint(gs));
++   gs->info.inputs_read |= VARYING_BIT_POS;
++   return gs;
++}
++
+ static VkResult
+ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+                    struct vk_shader_compile_info *infos,
+@@ -1531,21 +1960,27 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    enum kk_feature_key features = kk_make_feature_key(enabled_features);
+ 
+    /* Vulkan doesn't enforce a fragment shader to build pipelines. We may need
+-    * to create one. */
+-   nir_shader *nir_shaders[shader_count + 1u];
+-   struct kk_shader *shaders[shader_count + 1u];
++    * to create one, and a geometry shader for point fill. */
++   nir_shader *nir_shaders[shader_count + 2u];
++   struct kk_shader *shaders[shader_count + 2u];
+ 
+-   /* Determine if the pipeline contains tessellation stages */
+-   bool tess = false;
++   /* Determine if the pipeline contains tessellation or geometry stages */
++   bool tess = false, gs = false;
+    for (uint32_t i = 0u; i < shader_count; ++i) {
+       const struct vk_shader_compile_info *info = &infos[i];
+       if (info->nir->info.stage == MESA_SHADER_TESS_CTRL ||
+-          info->nir->info.stage == MESA_SHADER_TESS_EVAL) {
++          info->nir->info.stage == MESA_SHADER_TESS_EVAL)
+          tess = true;
+-         break;
+-      }
++      if (info->nir->info.stage == MESA_SHADER_GEOMETRY)
++         gs = true;
+    }
+ 
++   enum mesa_prim point_fill_prim = MESA_PRIM_TRIANGLES;
++   bool point_fill =
++      kk_needs_point_fill(state, shader_count, infos, &point_fill_prim);
++   if (point_fill)
++      gs = true;
++
+    /* Lower shaders, notably lowering IO. This is a prerequisite for intershader
+     * optimization. */
+    const struct vk_pipeline_robustness_state *vertex_robustness = &rs_none;
+@@ -1553,9 +1988,23 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       const struct vk_shader_compile_info *info = &infos[i];
+       nir_shader *nir = info->nir;
+ 
+-      /* For tessellation pipelines, some stages may be emulated in compute */
+-      bool emulated_stage = tess && (nir->info.stage == MESA_SHADER_VERTEX ||
+-                                     nir->info.stage == MESA_SHADER_TESS_CTRL);
++      /* For tessellation and geometry pipelines, the stages before the last
++       * pre-rasterization stage are emulated in compute. */
++      bool emulated_stage =
++         (tess && (nir->info.stage == MESA_SHADER_VERTEX ||
++                   nir->info.stage == MESA_SHADER_TESS_CTRL)) ||
++         (gs && (nir->info.stage == MESA_SHADER_VERTEX ||
++                 nir->info.stage == MESA_SHADER_TESS_EVAL));
++
++      /* With a geometry shader, gl_PrimitiveID in the fragment shader is what
++       * the geometry shader wrote, not the rasterizer's primitive ID (which
++       * would count the geometry shader's output primitives). */
++      if (gs && nir->info.stage == MESA_SHADER_FRAGMENT) {
++         const nir_lower_sysvals_to_varyings_options sysvals = {
++            .primitive_id = true,
++         };
++         NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals);
++      }
+ 
+       msl_preprocess_nir_workarounds(nir, pdev->settings.disabled_workarounds);
+       kk_lower_nir(dev, nir, emulated_stage, info->robustness,
+@@ -1577,6 +2026,22 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       total_shaders += 1u;
+    }
+ 
++   /* The point fill geometry shader goes right before the fragment shader,
++    * which is now always last. api_shaders maps back to the application's
++    * shaders; internal ones are destroyed once the pipeline is built. */
++   uint32_t api_index[shader_count + 2u];
++   for (uint32_t i = 0u; i < total_shaders; ++i)
++      api_index[i] = i < shader_count ? i : UINT32_MAX;
++   if (point_fill) {
++      uint32_t fs = total_shaders - 1u;
++      nir_shaders[total_shaders] = nir_shaders[fs];
++      api_index[total_shaders] = api_index[fs];
++      nir_shaders[fs] =
++         kk_build_point_fill_gs(dev, nir_shaders[fs - 1u], point_fill_prim);
++      api_index[fs] = UINT32_MAX;
++      total_shaders += 1u;
++   }
++
+    nir_opt_varyings_bulk(nir_shaders, total_shaders, true, UINT32_MAX,
+                          UINT32_MAX, nir_opts, NULL);
+    /* Second pass is required because some dEQP-VK.glsl.matrix.sub.dynamic.*
+@@ -1624,9 +2089,16 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+       gather_graphics_pipeline_create_info(state, shaders, total_shaders);
+       result = kk_compile_graphics_pipeline(dev, shaders[0]);
+ 
+-      /* Free generated fragment shader */
+-      if (shader_count != total_shaders)
+-         kk_shader_destroy(&dev->vk, shaders[shader_count], pAllocator);
++      /* Free generated fragment and geometry shaders, and put the
++       * application's shaders back in its order. */
++      struct kk_shader *api[shader_count];
++      for (uint32_t i = 0; i < total_shaders; i++) {
++         if (api_index[i] == UINT32_MAX)
++            kk_shader_destroy(&dev->vk, shaders[i], pAllocator);
++         else
++            api[api_index[i]] = shaders[i];
++      }
++      memcpy(shaders, api, shader_count * sizeof(*shaders));
+    }
+ 
+    if (result != VK_SUCCESS) {
+@@ -1643,11 +2115,18 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    return result;
+ }
+ 
++static bool
++kk_shader_has_gs_main(const struct kk_shader *shader)
++{
++   return shader->info.stage == MESA_SHADER_GEOMETRY ||
++          (shader->info.stage == MESA_SHADER_VERTEX &&
++           (shader->info.vs.additional_stages_bits &
++            BITFIELD_BIT(MESA_SHADER_GEOMETRY)));
++}
++
+ static void
+-kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
+-                 struct blob *blob)
++kk_msl_data_serialize(const struct msl_compile_data *data, struct blob *blob)
+ {
+-   struct msl_compile_data *data = &shader->msl_data[stage];
+    uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
+    uint32_t code_length = strlen(data->code) + 1;
+    blob_write_uint32(blob, entrypoint_length);
+@@ -1656,6 +2135,13 @@ kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
+    blob_write_bytes(blob, data->code, code_length);
+ }
+ 
++static void
++kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
++                 struct blob *blob)
++{
++   kk_msl_data_serialize(&shader->msl_data[stage], blob);
++}
++
+ static bool
+ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+                     struct blob *blob)
+@@ -1669,17 +2155,18 @@ kk_shader_serialize(struct vk_device *vk_dev, const struct vk_shader *vk_shader,
+          kk_msl_serialize(shader, stage, blob);
+       }
+    }
++   if (kk_shader_has_gs_main(shader))
++      kk_msl_data_serialize(&shader->gs_main, blob);
+ 
+    return !blob->out_of_memory;
+ }
+ 
+ static VkResult
+-kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
+-                   struct kk_shader *shader)
++kk_msl_data_deserialize(struct blob_reader *blob,
++                        struct msl_compile_data *data)
+ {
+    const uint32_t entrypoint_length = blob_read_uint32(blob);
+    const uint32_t code_length = blob_read_uint32(blob);
+-   struct msl_compile_data *data = &shader->msl_data[stage];
+    data->entrypoint_name = ralloc_array(NULL, char, entrypoint_length);
+    if (data->entrypoint_name == NULL)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+@@ -1697,6 +2184,13 @@ kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++kk_msl_deserialize(struct blob_reader *blob, mesa_shader_stage stage,
++                   struct kk_shader *shader)
++{
++   return kk_msl_data_deserialize(blob, &shader->msl_data[stage]);
++}
++
+ static VkResult
+ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+                       uint32_t binary_version,
+@@ -1729,6 +2223,12 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+       }
+    }
+ 
++   if (kk_shader_has_gs_main(shader)) {
++      result = kk_msl_data_deserialize(blob, &shader->gs_main);
++      if (result != VK_SUCCESS)
++         goto fail;
++   }
++
+    if (info.stage == MESA_SHADER_COMPUTE) {
+       uint32_t local_size_threads = shader->info.cs.local_size.x *
+                                     shader->info.cs.local_size.y *
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index dc5e060..b82c44a 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -13,12 +13,21 @@
+ 
+ #include "kosmickrisp/bridge/mtl_format.h"
+ 
++#include "poly/nir/poly_nir.h"
++
+ #include "vk_pipeline_cache.h"
+ 
+ #include "vk_shader.h"
+ 
+ struct kk_cmd_buffer;
+ 
++/* kk_per_draw_data::point_fill_cull: the rasterizer state the point fill
++ * geometry shader (VK_POLYGON_MODE_POINT) culls triangles with. */
++#define KK_POINT_FILL_CULL_FRONT BITFIELD_BIT(0)
++#define KK_POINT_FILL_CULL_BACK  BITFIELD_BIT(1)
++#define KK_POINT_FILL_FRONT_CCW  BITFIELD_BIT(2)
++#define KK_POINT_FILL_Y_FLIPPED  BITFIELD_BIT(3)
++
+ struct kk_tess_info {
+    enum tess_primitive_mode mode : 8;
+    enum gl_tess_spacing spacing  : 8;
+@@ -86,6 +95,11 @@ struct kk_shader_info {
+          bool has_ds;
+          bool has_depth_write;
+          bool has_stencil_test;
++
++         /* Geometry shader layout, copied from the geometry shader when the
++          * pipeline has one (additional_stages_bits has MESA_SHADER_GEOMETRY).
++          */
++         struct poly_gs_info gs;
+       } vs;
+ 
+       struct {
+@@ -94,9 +108,18 @@ struct kk_shader_info {
+          uint8_t tcs_output_patch_size;
+          uint8_t tcs_nr_patch_outputs;
+ 
++         /* Tess eval outputs, when a geometry shader reads them from memory */
++         uint64_t tes_outputs_written;
++
+          struct kk_tess_info info;
+       } tess;
+ 
++      struct {
++         /* How poly lowered the geometry shader: output primitive, index
++          * buffer shape and stride. */
++         struct poly_gs_info info;
++      } gs;
++
+       struct {
+          bool uses_flat_varyings;
+       } fs;
+@@ -114,6 +137,9 @@ struct kk_pipeline_handles {
+          mtl_render_pipeline_state *render;
+          /* Vertex, tess ctrl and tess eval at most needed before pre-render. */
+          mtl_compute_pipeline_state *pre_render[3];
++         /* The geometry shader, run as compute after pre_render. Its
++          * rasterization half is the render pipeline's vertex function. */
++         mtl_compute_pipeline_state *gs;
+          mtl_depth_stencil_state *ds_handle;
+          uint32_t pre_render_count;
+       } gfx;
+@@ -131,7 +157,12 @@ struct kk_shader {
+ 
+    struct kk_pipeline_handles pipeline;
+    struct kk_shader_info info;
++   /* For MESA_SHADER_GEOMETRY this is the rasterization shader: a vertex
++    * shader that reads what the geometry shader wrote. */
+    struct msl_compile_data msl_data[MESA_SHADER_STAGES];
++   /* The geometry shader itself, lowered to compute by poly. Set in geometry
++    * shaders and in vertex shaders of pipelines with a geometry shader. */
++   struct msl_compile_data gs_main;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,

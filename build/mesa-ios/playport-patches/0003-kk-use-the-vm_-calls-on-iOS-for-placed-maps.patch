@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Sat, 26 Sep 2026 14:47:14 +0200
+Subject: [PATCH 3/4] kk: use the vm_* calls on iOS for placed maps
+
+The iOS SDK refuses <mach/mach_vm.h> ("mach_vm.h unsupported"), so
+kk_bo.c does not compile for iOS. On a 64-bit task vm_remap, vm_map
+and vm_deallocate from <mach/vm_map.h> are the same kernel routines
+with 64-bit addresses. Call them through kk_vm_* names, which are the
+mach_vm_* calls everywhere else.
+
+Class: ios-port
+Evidence: docs/evidence/2026-09-26-kosmickrisp-ios-build.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_bo.c | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_bo.c b/src/kosmickrisp/vulkan/kk_bo.c
+index 5562b61..4e3cbbb 100644
+--- a/src/kosmickrisp/vulkan/kk_bo.c
++++ b/src/kosmickrisp/vulkan/kk_bo.c
+@@ -14,8 +14,23 @@
+ #include "util/u_memory.h"
+ 
+ #if DETECT_OS_APPLE
++#include <TargetConditionals.h>
+ #include <mach/mach_init.h>
++#if TARGET_OS_IPHONE
++/* The iOS SDK refuses <mach/mach_vm.h>. On a 64-bit task the vm_* calls in
++ * <mach/vm_map.h> are the same kernel routines with the same 64-bit types. */
++#include <mach/vm_map.h>
++typedef vm_address_t kk_vm_address_t;
++#define kk_vm_remap vm_remap
++#define kk_vm_map vm_map
++#define kk_vm_deallocate vm_deallocate
++#else
+ #include <mach/mach_vm.h>
++typedef mach_vm_address_t kk_vm_address_t;
++#define kk_vm_remap mach_vm_remap
++#define kk_vm_map mach_vm_map
++#define kk_vm_deallocate mach_vm_deallocate
++#endif
+ #endif /* DETECT_OS_APPLE */
+ 
+ VkResult
+@@ -100,8 +115,8 @@ VkResult
+ kk_bo_map_placed(struct kk_device *dev, struct kk_bo *bo, void **addr)
+ {
+ #if DETECT_OS_APPLE
+-   mach_vm_address_t src_addr = (mach_vm_address_t)bo->cpu;
+-   mach_vm_address_t dst_addr = (mach_vm_address_t)*addr;
++   kk_vm_address_t src_addr = (kk_vm_address_t)bo->cpu;
++   kk_vm_address_t dst_addr = (kk_vm_address_t)*addr;
+ 
+    int flags = VM_FLAGS_ANYWHERE;
+    if (dst_addr)
+@@ -114,7 +129,7 @@ kk_bo_map_placed(struct kk_device *dev, struct kk_bo *bo, void **addr)
+     * allows us to create a second mapping pointing to that same memory, placed
+     * wherever the caller requests. Note that this is used even without a fixed
+     * address, since we need a unique mapping to support reserved unmap. */
+-   kern_return_t ret = mach_vm_remap(mach_task_self(), &dst_addr, bo->size_B, 0,
++   kern_return_t ret = kk_vm_remap(mach_task_self(), &dst_addr, bo->size_B, 0,
+                                      flags, mach_task_self(), src_addr, false,
+                                      &cur_prot, &max_prot, VM_INHERIT_DEFAULT);
+    if (ret != KERN_SUCCESS)
+@@ -131,10 +146,10 @@ VkResult
+ kk_bo_unmap(struct kk_device *dev, struct kk_bo *bo, void *addr, bool reserved)
+ {
+ #if DETECT_OS_APPLE
+-   mach_vm_address_t unmap_addr = (mach_vm_address_t)addr;
++   kk_vm_address_t unmap_addr = (kk_vm_address_t)addr;
+    if (reserved) {
+       /* Replace with a reserved mapping using mach_vm_map */
+-      kern_return_t ret = mach_vm_map(
++      kern_return_t ret = kk_vm_map(
+          mach_task_self(), &unmap_addr, bo->size_B, 0,
+          VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, false,
+          VM_PROT_NONE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+@@ -144,7 +159,7 @@ kk_bo_unmap(struct kk_device *dev, struct kk_bo *bo, void *addr, bool reserved)
+    } else {
+       /* According to spec, we can only return a fail code here if the reserve
+        * flag is set, so ignore the result */
+-      mach_vm_deallocate(mach_task_self(), unmap_addr, bo->size_B);
++      kk_vm_deallocate(mach_task_self(), unmap_addr, bo->size_B);
+    }
+ #endif /* DETECT_OS_APPLE */
+ 

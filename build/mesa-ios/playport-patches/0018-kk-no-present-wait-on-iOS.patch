@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: The Playport authors <dev@playport.dev>
+Date: Thu, 8 Oct 2026 13:00:00 +0200
+Subject: [PATCH] kk: no present wait on iOS
+
+DXVK and vkd3d-proton use VK_KHR_present_wait (or present_wait2), when
+the driver has it, to release the game's frame latency only once its
+previous frame is on the screen: the Metal WSI's present wait returns
+from the drawable's presented handler. Hollow Knight runs with a frame
+latency of one, so on an iPhone at 120 Hz the game could queue no frame
+behind the one waiting for the display: the device log shows each
+present issued after the one before last was presented and before the
+last one was, on both routes. About 1.2 % (DXVK) and 1.5 % (vkd3d-proton)
+of frames missed their refresh, against 0.4 % on DXMT, which releases
+the latency when the previous frame's GPU work is done.
+
+On iOS, KosmicKrisp no longer advertises VK_KHR_present_wait or
+VK_KHR_present_wait2, and the Metal WSI's surface reports present wait
+2 only when the device has the extension. DXVK and vkd3d-proton then
+release the latency when the present's GPU work is done, as DXMT does.
+present_id and present_id2 stay.
+
+Class: ios-port
+Evidence: docs/evidence/2026-10-08-vulkan-perf-p99.md
+Offered-upstream: no
+---
+ src/kosmickrisp/vulkan/kk_physical_device.c | 25 +++++++++++++++++----
+ src/vulkan/wsi/wsi_common_metal.c           |  2 +-
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index e9c0fc8..a3f1cb8 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -19,6 +19,7 @@
+ #include "kosmickrisp/bridge/ns_process_info.h"
+ #include "kosmickrisp/compiler/nir_to_msl.h"
+ 
++#include "util/detect_os.h"
+ #include "util/disk_cache.h"
+ #include "util/mesa-blake3.h"
+ #include "git_sha1.h"
+@@ -29,6 +30,22 @@
+ #include "vk_drm_syncobj.h"
+ #include "vk_shader_module.h"
+ 
++#if DETECT_OS_APPLE
++#include <TargetConditionals.h>
++#endif
++
++/* No present wait on iOS. DXVK and vkd3d-proton use it, when it is there,
++ * to hold the game until its previous frame is on the screen (the Metal
++ * drawable's presented handler); without it they hold the game until that
++ * frame's GPU work is done, as DXMT does. A game with a frame latency of one
++ * (Hollow Knight) could then queue no frame behind the one waiting for the
++ * display, and at 120 Hz about 1 % of its frames missed their refresh. */
++#if DETECT_OS_APPLE && TARGET_OS_IPHONE
++#define KK_PRESENT_WAIT false
++#else
++#define KK_PRESENT_WAIT true
++#endif
++
+ static uint32_t
+ kk_get_vk_version()
+ {
+@@ -152,8 +169,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
+ #ifdef KK_USE_WSI_PLATFORM
+       .KHR_present_id = true,
+       .KHR_present_id2 = true,
+-      .KHR_present_wait = true,
+-      .KHR_present_wait2 = true,
++      .KHR_present_wait = KK_PRESENT_WAIT,
++      .KHR_present_wait2 = KK_PRESENT_WAIT,
+ #endif
+       .KHR_robustness2 = true,
+       .KHR_shader_fma = true,
+@@ -389,10 +406,10 @@ kk_get_device_features(
+       .presentId2 = true,
+ 
+       /* VK_KHR_present_wait */
+-      .presentWait = true,
++      .presentWait = KK_PRESENT_WAIT,
+ 
+       /* VK_KHR_present_wait2 */
+-      .presentWait2 = true,
++      .presentWait2 = KK_PRESENT_WAIT,
+ #endif
+ 
+       /* VK_KHR_robustness2 */
+diff --git a/src/vulkan/wsi/wsi_common_metal.c b/src/vulkan/wsi/wsi_common_metal.c
+index 049cde2..81ba62b 100644
+--- a/src/vulkan/wsi/wsi_common_metal.c
++++ b/src/vulkan/wsi/wsi_common_metal.c
+@@ -123,7 +123,7 @@ wsi_metal_surface_get_capabilities(VkIcdSurfaceBase *surface,
+    VkSurfaceCapabilitiesPresentWait2KHR *pwait2 =
+       vk_find_struct(caps->pNext, SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR);
+    if (pwait2)
+-      pwait2->presentWait2Supported = VK_TRUE;
++      pwait2->presentWait2Supported = pdevice->supported_extensions.KHR_present_wait2;
+ 
+    return VK_SUCCESS;
+ }
+-- 
+2.55.0
+
