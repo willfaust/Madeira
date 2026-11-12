@@ -74,7 +74,8 @@ MERGED = {'msfs-2024', 'counter-strike-2', 'breakneck', 'spelunky-2', 'albion-on
           'batman-arkham-city-goty', 'trails-in-the-sky-1st-chapter', 'subnautica-2', 'rdr1-steam', 'resident-evil-requiem', 'resident-evil-requiem-demo',
           'life-is-strange-remastered', 'life-is-strange-2', 'project-zomboid', 'spiderheck', 'rounds', 'plateup',
           'final-fantasy-tactics-ivalice-chronicles', 'jetboard-joust', 'dead-as-disco', 'tung', 'sekiro-shadows-die-twice', 'stardew-valley',
-          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod', 'persona-3-reload'}
+          'glyphica-typing-survival', 'the-adventures-of-elliot', 'the-escapists-2', 'garrys-mod', 'persona-3-reload',
+          'ubisoft-connect', 'far-cry-3', 'far-cry-4'}
 assert set(presets) == {'rdr2-steam', 'rdr2-other', 'gta5e-steam', 'gta5e-other', 'gta5l-steam', 'gta5l-other', 'gta4-steam',
                         'ghost-of-tsushima', 'god-of-war', 'horizon-zero-dawn', 'horizon-forbidden-west', 'ratchet-clank-rift-apart',
                         'crysis-remastered', 'crysis-2-remastered', 'crysis-3-remastered', 'rockstar-launcher', 'rockstar-launcher-setup',
@@ -286,8 +287,9 @@ assert standard['tested'] == ['env.MADEIRA_EC_HOOK_TRACE = 0'] and standard['swi
 bo2 = presets['black-ops-2']
 assert bo2['tested'] == ['env.MADEIRA_AUDIO_LEAD_MS = 150', 'env.MADEIRA_EC_HOOK_TRACE = 0'] and bo2['switches'] == '' \
     and bo2['version'] == 1, bo2
-assert not any(line.startswith('env.MADEIRA_AUDIO_LEAD_MS')
-               for p in presets.values() if p is not bo2 for line in p['lines']), 'the 150 ms audio lead is Black Ops II\'s only'
+assert not any(line.startswith('env.MADEIRA_AUDIO_LEAD_MS') and not (p['title'].startswith('Far Cry') and line == 'env.MADEIRA_AUDIO_LEAD_MS = 0')
+               for p in presets.values() if p is not bo2 for line in p['lines']), \
+    'the 150 ms audio lead is Black Ops II\'s only; Far Cry 3 and 4 turn the lead off (their FAudio voices break up with it)'
 # Borderlands 2 (owner's test, 2026-11-02): the standard list it ran with, no switches.
 bl2 = presets['borderlands-2']
 assert bl2['tested'] == ['env.MADEIRA_EC_HOOK_TRACE = 0'] and bl2['switches'] == '' and bl2['version'] == 1, bl2
@@ -804,7 +806,13 @@ check(id(steam + #"\GarrysMod"#, 4000) == "garrys-mod" && id(steam + #"\GarrysMo
       "Garry's Mod by App ID and folder (either branch) and by its 64-bit program")
 check(id(steam + #"\P3R"#, 2161700) == "persona-3-reload" && id(steam + #"\P3R\P3R\Binaries\Win64\P3R.exe"#) == "persona-3-reload",
       "Persona 3 Reload by App ID, folder and program")
-check(R.steamTitles.count == 52 && R.all.count == 78, "52 merged titles, 78 lists")
+check(id(#"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe"#) == "ubisoft-connect"
+      && id(#"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\upc.exe"#) == "ubisoft-connect", "Ubisoft Connect by its programs")
+check(id(steam + #"\Far Cry 3"#, 220240) == "far-cry-3" && id(steam + #"\Far Cry 3\bin\FC3UpdaterSteam.exe"#) == "far-cry-3"
+      && id(#"C:\Games\Far Cry 3\bin\FC3UpdaterSteam.exe"#) == "none", "Far Cry 3 by App ID, folder and its Steam updater (inside Steam only)")
+check(id(steam + #"\Far Cry 4"#, 298110) == "far-cry-4" && id(steam + #"\Far Cry 4\bin\FarCry4.exe"#) == "far-cry-4"
+      && id(#"C:\Games\Far Cry 4\bin\FarCry4.exe"#) == "none", "Far Cry 4 by App ID, folder and its program (inside Steam only)")
+check(R.steamTitles.count == 55 && R.all.count == 81, "55 merged titles, 81 lists")
 check(id(#"C:\Games\Foo\foo.exe"#) == "none" && id(steam + #"\Portal 2"#, 620) == "none", "other games")
 check(id("") == "none" && id("C:\\") == "none", "no path")
 print("PASS: Steam games by App ID or steamapps\\common folder, GTA V Enhanced and RDR2 inside and outside Steam, GoT, GoW, the Horizon games, Rift Apart and the three Crysis Remastered games by their programs, GTA V Legacy outside Steam, the 51 merged Steam titles, others none")
