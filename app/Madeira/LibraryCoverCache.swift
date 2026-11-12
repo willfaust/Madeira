@@ -8,7 +8,7 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-// The library's covers for the zoomable grid (docs/zoomable-grid.md, "Covers"). A lookup is synchronous: it returns the best
+// The library's covers for SwiftUI cards, glows and the zoomable grid (docs/zoomable-grid.md, "Covers"). A lookup is synchronous: it returns the best
 // bitmap resident for that game at once (the exact size, else the nearest other size, which the GPU scales) and asks for the
 // exact size, which replaces it in place when it lands (`updates`). Bitmaps are downsampled to the pixel width asked for
 // (ImageIO, off the main thread), held in memory under a byte budget, and the fetched files are kept on disk
@@ -80,13 +80,31 @@ final class LibraryCoverCache {
     // MARK: Disk
 
     nonisolated static let diskCap = 300 * 1024 * 1024
-    private var landedSinceTrim = 0
+    private final class DiskMaintenance: @unchecked Sendable {
+        let queue = DispatchQueue(label: "madeira.covers.disk", qos: .utility)
+        // Accessed only on queue. Include both downloaded originals and regenerable blur copies.
+        var written = 0
+    }
+    nonisolated private static let diskMaintenance = DiskMaintenance()
+    nonisolated static let trimIntervalBytes = 8 * 1024 * 1024
 
-    nonisolated private static func trimDiskInBackground() {
-        DispatchQueue.global(qos: .utility).async { trimDisk(cap: diskCap) }
+    nonisolated private static func didWriteDisk(bytes: Int) {
+        let state = diskMaintenance
+        state.queue.async {
+            state.written += bytes
+            guard state.written >= trimIntervalBytes else { return }
+            state.written = 0
+            trimDisk(cap: diskCap)
+        }
     }
 
-    /// Deletes the least recently used covers (a cover is its `.img` and its `.src`; a disk hit refreshes the modification time) until the folder is within 80% of `cap`.
+    nonisolated private static func trimDiskInBackground() {
+        diskMaintenance.queue.async { trimDisk(cap: diskCap) }
+    }
+
+    /// Trims to 80% of `cap`. Blur copies get a one-day age penalty because they can be rebuilt offline;
+    /// an original unused for longer can still go before a recently used blur copy.
+    /// A cover is its `.img` and `.src`; a disk hit refreshes the modification time.
     nonisolated static func trimDisk(cap: Int) {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
@@ -97,7 +115,9 @@ final class LibraryCoverCache {
             let values = try? image.resourceValues(forKeys: Set(keys))
             let record = originURL(image)
             let bytes = (values?.fileSize ?? 0) + ((try? record.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            covers.append((image, values?.contentModificationDate ?? .distantPast, bytes))
+            let derived = image.deletingPathExtension().lastPathComponent.hasSuffix("_spot")
+            let used = (values?.contentModificationDate ?? .distantPast).addingTimeInterval(derived ? -86_400 : 0)
+            covers.append((image, used, bytes))
             total += bytes
         }
         guard total > cap else { return }
@@ -136,13 +156,26 @@ final class LibraryCoverCache {
 
     // MARK: Lookups
 
-    func image(for source: Source, pixelWidth: Int) -> (image: UIImage, exact: Bool)? {
+    private var consumers: [UUID: String] = [:]
+
+    /// A visible view owns a token. Only the last consumer may cancel shared work; zoom snapshots without a token
+    /// keep their short-lived requests until completion.
+    func releaseDemand(_ token: UUID) {
+        guard let key = consumers.removeValue(forKey: token), !consumers.values.contains(key),
+              let job = loading[key], !job.unownedDemand, !job.reconsider else { return }
+        // A download decode retains its body even when its queued operation is canceled. Keep that slot until it lands.
+        // An executing file operation may also be writing the shared disk copy; let it finish before reusing that key.
+        if !job.decodingDownload, !(job.op?.isExecuting ?? false) { cancel(job) }
+    }
+
+    func image(for source: Source, pixelWidth: Int, demand: UUID? = nil) -> (image: UIImage, exact: Bool)? {
+        if let demand { consumers[demand] = source.key }
         let want = Self.bucket(pixelWidth)
         if let hit = memory.object(forKey: name(source.variant, want)) {
             if source.file == nil { reconsider(source) }
             return (hit.image, true)
         }
-        load(source, bucket: want)
+        load(source, bucket: want, tracked: demand != nil)
         // Another variant of the art stands in until this one lands (an install or uninstall switches it): a card never goes blank.
         return (bestResident(source.variant, near: want) ?? bestResident(source.other.variant, near: want)).map { ($0, false) }
     }
@@ -213,6 +246,7 @@ final class LibraryCoverCache {
         var priority: Operation.QueuePriority
         var lane: Lane
         var demanded: Bool
+        var unownedDemand = false
         var rank: Int
         var seq = 0
         var op: Operation?
@@ -229,21 +263,21 @@ final class LibraryCoverCache {
             demanded = priority == .high
             remaining = source.urls
         }
-        var cancelable: Bool { !demanded && !reconsider && !(op?.isExecuting ?? false) }
+        var cancelable: Bool { !demanded && !reconsider && !decodingDownload && !(op?.isExecuting ?? false) }
     }
 
     private var loading: [String: Job] = [:]
-    private var waiting: [String: [(Source, Int, Operation.QueuePriority)]] = [:]
+    private var waiting: [String: [(Source, Int, Operation.QueuePriority, Bool)]] = [:]
     /// The candidate each game's bitmaps came from (nil: a cover file, or a disk copy from before the record was kept).
     private var origin: [String: String] = [:]
 
-    private func load(_ source: Source, bucket: Int, priority: Operation.QueuePriority = .high, rank: Int = 0, lane: Lane = .demand) {
+    private func load(_ source: Source, bucket: Int, priority: Operation.QueuePriority = .high, rank: Int = 0, lane: Lane = .demand, tracked: Bool = false) {
         let key = source.key
         let id = "\(source.variant)#\(bucket)"
         guard !inFlight.contains(id) else {
             // Asked for already (by the prefetch): a view asking now makes it a view's request.
             if let job = loading[key] {
-                if priority == .high { promote(job) } else if job.lane == .ahead, !job.demanded { job.rank = rank }
+                if priority == .high { job.unownedDemand = job.unownedDemand || !tracked; promote(job) } else if job.lane == .ahead, !job.demanded { job.rank = rank }
             }
             return
         }
@@ -253,11 +287,12 @@ final class LibraryCoverCache {
         // One load per game at a time: another size waits for it and then decodes the disk copy it wrote (a card and its glow never
         // fetch the same cover twice, nor end on two different candidates).
         if let running = loading[key] {
-            if priority == .high { promote(running) }
-            waiting[key, default: []].append((source, bucket, priority))
+            if priority == .high { running.unownedDemand = running.unownedDemand || !tracked; promote(running) }
+            waiting[key, default: []].append((source, bucket, priority, tracked))
             return
         }
         let job = Job(source: source, bucket: bucket, priority: priority, lane: lane, rank: rank)
+        job.unownedDemand = priority == .high && !tracked
         loading[key] = job
         enqueue(job)
     }
@@ -304,7 +339,8 @@ final class LibraryCoverCache {
     private var activePrefetch = 0
 
     private func needsNetwork(_ job: Job) {
-        guard loading[job.source.key] === job, !job.cancelled else { return }
+        guard loading[job.source.key] === job, !job.cancelled, !job.holdsSlot,
+              !netPending.contains(where: { $0 === job }) else { return }
         guard !job.remaining.isEmpty else { landed(job, image: nil, from: nil); return }
         netSeq += 1
         job.seq = netSeq
@@ -365,9 +401,7 @@ final class LibraryCoverCache {
             download(job)
             return
         }
-        releaseSlot(job)
-        landedSinceTrim += 1
-        if landedSinceTrim >= 25 { landedSinceTrim = 0; Self.trimDiskInBackground() }
+        // Keep the slot through decoding: queued operations retain the response body.
         let bucket = job.bucket, key = job.source.key, disk = Self.diskURL(key), spot = job.source.spot
         let operation = BlockOperation()
         operation.addExecutionBlock {
@@ -375,6 +409,9 @@ final class LibraryCoverCache {
                 Task { @MainActor in
                     guard !job.cancelled, self.loading[key] === job else { return }
                     job.remaining.removeFirst()
+                    job.decodingDownload = false
+                    job.op = nil
+                    self.releaseSlot(job)
                     self.needsNetwork(job)
                 }
                 return
@@ -382,6 +419,7 @@ final class LibraryCoverCache {
             _ = Self.folderMade
             try? data.write(to: disk, options: .atomic)
             try? url.absoluteString.write(to: Self.originURL(disk), atomically: true, encoding: .utf8)
+            Self.didWriteDisk(bytes: data.count)
             if spot {
                 image = Self.bakeSpotCopy(of: image, key: key, from: url.absoluteString, pixelWidth: bucket)
             } else {
@@ -401,10 +439,11 @@ final class LibraryCoverCache {
         job.task?.cancel()
         job.task = nil
         job.op?.cancel()
+        job.op = nil
         netPending.removeAll { $0 === job }
         releaseSlot(job)
         inFlight.remove("\(job.source.variant)#\(job.bucket)")
-        for (waiter, size, _) in waiting.removeValue(forKey: key) ?? [] { inFlight.remove("\(waiter.variant)#\(size)") }
+        for (waiter, size, _, _) in waiting.removeValue(forKey: key) ?? [] { inFlight.remove("\(waiter.variant)#\(size)") }
         if loading[key] === job { loading[key] = nil }
     }
 
@@ -413,19 +452,23 @@ final class LibraryCoverCache {
     private func landed(_ job: Job, image: UIImage?, from: String?) {
         let source = job.source, key = source.key
         guard loading[key] === job, !job.cancelled else { return }   // dropped, and perhaps asked for again since
+        // The operation captures the job (and downloaded Data); release the reverse edge when it finishes.
+        job.op = nil
         releaseSlot(job)
         job.task = nil
         inFlight.remove("\(source.variant)#\(job.bucket)")
         loading[key] = nil
         let next = waiting.removeValue(forKey: key) ?? []
-        for (waiter, size, _) in next { inFlight.remove("\(waiter.variant)#\(size)") }
+        for (waiter, size, _, _) in next { inFlight.remove("\(waiter.variant)#\(size)") }
         if job.reconsider {
             if let image, let from {
                 dropResident(source)
                 origin[key] = from
                 store(image, source: source, bucket: job.bucket)
             }
-            for (waiter, size, priority) in next { load(waiter, bucket: size, priority: priority) }
+            for (waiter, size, priority, tracked) in next where !tracked || consumers.values.contains(key) {
+                load(waiter, bucket: size, priority: priority, tracked: tracked)
+            }
             return
         }
         guard let image else {
@@ -439,7 +482,9 @@ final class LibraryCoverCache {
         }
         if let from { origin[key] = from }
         store(image, source: source, bucket: job.bucket)
-        for (waiter, size, priority) in next { load(waiter, bucket: size, priority: priority) }
+        for (waiter, size, priority, tracked) in next where !tracked || consumers.values.contains(key) {
+            load(waiter, bucket: size, priority: priority, tracked: tracked)
+        }
         if source.file == nil { reconsider(source) }
     }
 
@@ -547,6 +592,7 @@ final class LibraryCoverCache {
         _ = folderMade
         try? data.write(to: copy, options: .atomic)
         if let from { try? from.write(to: originURL(copy), atomically: true, encoding: .utf8) }
+        didWriteDisk(bytes: data.count)
         return downsample(data: data, pixelWidth: pixelWidth) ?? baked
     }
 
@@ -627,5 +673,46 @@ extension LibraryCoverCache.Source {
             modificationTimes[leaf] = time
         }
         return (url, "file-\(leaf)-\(Int(time * 1000))")
+    }
+}
+
+/// The SwiftUI cards and their glow share the grid's disk files, request scheduler and decoded-image budget.
+/// Clear the view's reference when it leaves the lazy grid; NSCache alone cannot release an image a view still holds.
+struct LibraryCachedArtwork<Content: View>: View {
+    let source: LibraryCoverCache.Source?
+    let pixelWidth: Int
+    @ViewBuilder var content: (Image?) -> Content
+    @State private var image: UIImage?
+    @State private var demand = UUID()
+    @State private var active = false
+
+    var body: some View {
+        ZStack {
+            // Keep a lifecycle host even when the caller's unloaded content is EmptyView.
+            Color.clear.frame(width: 0, height: 0)
+            content(image.map { Image(uiImage: $0) })
+        }
+        .onAppear { active = true; refresh() }
+        .onChange(of: source) { old, new in
+            if old?.key != new?.key {
+                LibraryCoverCache.shared.releaseDemand(demand)
+                image = nil
+            }
+            refresh()
+        }
+        .onChange(of: pixelWidth) { _, _ in refresh() }
+        .onReceive(LibraryCoverCache.shared.updates) { key in
+            if source?.key == key { refresh() }
+        }
+        .onDisappear {
+            active = false
+            LibraryCoverCache.shared.releaseDemand(demand)
+            image = nil
+        }
+    }
+
+    private func refresh() {
+        guard active, let source, pixelWidth > 0 else { return }
+        image = LibraryCoverCache.shared.image(for: source, pixelWidth: pixelWidth, demand: demand)?.image
     }
 }

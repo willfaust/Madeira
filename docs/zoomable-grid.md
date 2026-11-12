@@ -76,16 +76,37 @@ while the setting is off.
   returns the best resident bitmap for that game at once, the exact size replaces
   it in place; misses fetch the same candidate URLs as the SwiftUI cards, are
   downsampled with ImageIO off the main thread and kept on disk
-  (`Caches/madeira-covers/`, capped at 300 MB, least recently used removed first).
+  (`Caches/madeira-covers/`, capped at 300 MiB). The original SwiftUI cards and
+  their glow use the same cache through `LibraryCachedArtwork`; they keep the
+  original live blur appearance. Visible cards and glows own demand tokens, so
+  leaving the page releases obsolete work after its last consumer leaves.
+  A downloaded response keeps its network slot until decoding completes, which
+  bounds queued response bodies as well as active downloads. Completion and
+  cancellation also release the job's operation to break its capture cycle.
+  In-progress disk
+  writes and downloaded decodes finish even after demand ends.
   A not-downloaded game's cover carries the blur spot (`LibraryCoverSpot`), baked
   once at the widest bucket and kept as its own disk copy beside the plain one;
   every bucket after that downsamples the baked copy, so a zoom or a re-decode
-  does not bake again.
+  does not bake again while that copy remains cached. Disk trimming gives
+  regenerable blur copies a one-day age penalty. It favors keeping original
+  posters of similar recency, but can evict an old original before a recent
+  blur copy.
+  It runs on one utility queue, after each 8 MiB of image writes (including
+  recreated blur copies), and trims to 80% of the cap. Evicted blur copies can
+  be baked again offline from the retained original; larger originals can still
+  exceed the cap. The cap is a trim target, not a strict instantaneous limit.
   A chosen cover file is keyed by name and modification time, and falls back to
   the store match's art when it cannot be read. The grid cards, the zoom's stage
   and the glow all read it. Covers a screen or two ahead of the scroll are
   requested at idle. A memory warning, or a game starting, gives back the glow's
   textures; a game starting also frees the decoded bitmaps.
+  `python3 tests/host/check-library-cover-cache.py` exercises the production
+  scheduler, ImageIO decode, Core Image blur baker and disk cache on macOS with
+  3,600 synthetic 300×450 posters, 90% with blur variants. It also typechecks
+  the SwiftUI artwork views against the iOS Simulator SDK without launching
+  a simulator. It does not establish on-device lifecycle, Metal rendering,
+  scrolling smoothness, FPS or thermal results.
 - **Measured label bands.** Each card's label height (title 1-2 lines, pills on one
   or two rows, played line) is measured per level from the fonts the card uses;
   a row takes its tallest card. Bands are memoised by the label's shape (its

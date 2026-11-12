@@ -154,6 +154,7 @@ final class LibraryGlowView: UIView {
         var style = ""
         var artPixels = Int(LibraryGlowView.artPixels.width)
         var builtExact = false
+        var coverImage: UIImage?
         /// The art's pixel width the card's geometry needs: a texture made for another width is never drawn, whatever it looks like.
         var wantedArtPixels = Int(LibraryGlowView.artPixels.width)
         var stale = false
@@ -166,6 +167,19 @@ final class LibraryGlowView: UIView {
         var dimmed = false
     }
     private var entries: [String: Entry] = [:]
+    private var coverDemands: [String: UUID] = [:]
+
+    deinit {
+        let tokens = Array(coverDemands.values)
+        Task { @MainActor in for token in tokens { LibraryCoverCache.shared.releaseDemand(token) } }
+    }
+
+    private func releaseCoverDemands(except keys: Set<String> = []) {
+        for (key, token) in coverDemands where !keys.contains(key) {
+            LibraryCoverCache.shared.releaseDemand(token)
+            coverDemands[key] = nil
+        }
+    }
     private var raysBySeed: [Int: MTLTexture] = [:]
     private struct TweenSet {
         var rays = LibraryGlowTween(0)    // 0 soft ... 1 crisp
@@ -260,6 +274,7 @@ final class LibraryGlowView: UIView {
     }
 
     private func releaseTextures() {
+        releaseCoverDemands()
         entries = [:]
         raysBySeed = [:]
         markDirty()
@@ -267,6 +282,7 @@ final class LibraryGlowView: UIView {
 
     private var drawablesReleased = false
     private func releaseResources() {
+        releaseCoverDemands()
         entries = [:]
         raysBySeed = [:]
         guard !drawablesReleased, viewport != .zero else { return }
@@ -480,7 +496,7 @@ final class LibraryGlowView: UIView {
 
     private func coverLanded(_ key: String) {
         var changed = false
-        for (id, entry) in entries where entry.sourceKey == key && (entry.texture == nil || !entry.builtExact) {
+        for (id, entry) in entries where entry.sourceKey == key {
             entries[id]?.stale = true       // made again from the better bitmap
             changed = true
         }
@@ -494,6 +510,7 @@ final class LibraryGlowView: UIView {
         lastAnimation = began
         let height = target.bounds.height
         let cards = host.glowCards(between: origin, and: origin + height)
+        releaseCoverDemands(except: Set(cards.map(\.key)))
         let dark = traitCollection.userInterfaceStyle == .dark
         let reduceMotion = UIAccessibility.isReduceMotionEnabled
         let time = Date().timeIntervalSinceReferenceDate
@@ -700,18 +717,26 @@ final class LibraryGlowView: UIView {
             if let known = raysBySeed[card.seed] { entry.rays = known }
             else if let made = makeRays(seed: card.seed) { raysBySeed[card.seed] = made; entry.rays = made }
         }
+        if entry.sourceKey != card.sourceKey, let token = coverDemands.removeValue(forKey: card.key) {
+            LibraryCoverCache.shared.releaseDemand(token)
+        }
         entry.sourceKey = card.sourceKey
         entry.dimmed = card.dimmed
         let artWidth = LibraryGridGeometry.artworkRect(cardWidth: card.frame.width).width
         let artPixels = Self.artPixels(scale: Self.scale(artWidth: artWidth, reference: referenceArt))
         let style = "\(dark ? 1 : 0)\(card.dimmed ? 1 : 0)-\(artPixels)"
         entry.wantedArtPixels = artPixels
-        guard entry.texture == nil || entry.style != style || entry.stale, !entry.pending,
+        guard entry.texture == nil || entry.style != style || entry.stale || !entry.builtExact, !entry.pending,
               var source = LibraryGridHostController.coverSource(card.card, page: host?.page) else { return }
         source.spot = false   // the glow is lit from the plain art
-        guard let found = LibraryCoverCache.shared.image(for: source, pixelWidth: 96), let cg = found.image.cgImage else { return }
-        entry.pending = true
+        let demand = coverDemands[card.key] ?? UUID()
+        coverDemands[card.key] = demand
+        guard let found = LibraryCoverCache.shared.image(for: source, pixelWidth: 96, demand: demand), let cg = found.image.cgImage else { return }
         entry.stale = false
+        // Size notifications need not rebuild an unchanged glow; a replacement candidate must rebuild even an exact one.
+        if entry.texture != nil, entry.style == style, entry.coverImage === found.image { return }
+        entry.pending = true
+        let image = found.image
         let key = card.key, dimmed = card.dimmed, exact = found.exact
         queueWork.async { [weak self] in
             let texture = self.flatMap { $0.makeTexture(LibraryGlowBase.render(cover: cg, dark: dark, dimmed: dimmed, artPixels: artPixels), artPixels: artPixels) }
@@ -724,6 +749,7 @@ final class LibraryGlowView: UIView {
                     current.artPixels = artPixels
                     current.style = style
                     current.builtExact = exact
+                    current.coverImage = image
                 }
                 self.entries[key] = current
                 self.markDirty()

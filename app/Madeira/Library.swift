@@ -1246,6 +1246,7 @@ final class LibraryModel: ObservableObject {
             let name = entry.id.uuidString + ".jpg"
             if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
                (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                LibraryCoverCache.Source.coverFileChanged(named: name)
                 entry.coverFile = name
             }
         }
@@ -1284,6 +1285,7 @@ final class LibraryModel: ObservableObject {
             let name = entry.id.uuidString + ".jpg"
             if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
                (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                LibraryCoverCache.Source.coverFileChanged(named: name)
                 entry.coverFile = name
             }
         }
@@ -1318,6 +1320,7 @@ final class LibraryModel: ObservableObject {
             let name = entry.id.uuidString + ".jpg"
             if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
                (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                LibraryCoverCache.Source.coverFileChanged(named: name)
                 entry.coverFile = name
             }
         }
@@ -1349,6 +1352,7 @@ final class LibraryModel: ObservableObject {
             let name = entry.id.uuidString + ".jpg"
             if (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil,
                (try? jpeg.write(to: dir.appendingPathComponent(name), options: .atomic)) != nil {
+                LibraryCoverCache.Source.coverFileChanged(named: name)
                 entry.coverFile = name
             }
         }
@@ -2360,24 +2364,31 @@ enum SteamCatalog {
 struct LibraryArtwork: View {
     let entry: LibraryEntry
     var backdrop = false
+    @Environment(\.displayScale) private var displayScale
+
+    private var source: LibraryCoverCache.Source? {
+        var source = LibraryCoverCache.Source.entry(entry)
+        if backdrop, let id = entry.steamID ?? entry.steamAppID {
+            let key = source.flatMap { $0.file == nil ? nil : $0.key + "-hero" } ?? "steam-\(id)-hero"
+            source = LibraryCoverCache.Source(key: key, file: source?.file, urls: SteamCatalog.hero(id).map { [$0] } ?? [])
+        }
+        return source
+    }
+
     var body: some View {
         GeometryReader { geometry in
-        ZStack {
-            Color(uiColor: .secondarySystemFill)
-            Image(systemName: entry.desktop == true ? "desktopcomputer" : "gamecontroller.fill").font(.largeTitle).foregroundStyle(.secondary)
-            if let name = entry.coverFile,
-               let image = UIImage(contentsOfFile: LibraryModel.documents.appendingPathComponent("madeira-art/" + URL(fileURLWithPath: name).lastPathComponent).path) {
-                Image(uiImage: image).resizable().scaledToFill()
-                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center).clipped()
-            } else if let id = entry.steamID ?? entry.steamAppID {   // a store match, else the Steam game itself
-                AsyncImage(url: backdrop ? SteamCatalog.hero(id) : SteamCatalog.cover(id)) { image in
-                    image.resizable().scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .center).clipped()
-                } placeholder: { Color.clear }
+            ZStack {
+                Color(uiColor: .secondarySystemFill)
+                Image(systemName: entry.desktop == true ? "desktopcomputer" : "gamecontroller.fill").font(.largeTitle).foregroundStyle(.secondary)
+                LibraryCachedArtwork(source: source, pixelWidth: Int((geometry.size.width * displayScale).rounded(.up))) { image in
+                    if let image {
+                        image.resizable().scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                    }
+                }
             }
-        }
-        .frame(width: geometry.size.width, height: geometry.size.height)
-        .clipped().accessibilityHidden(true)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped().accessibilityHidden(true)
         }
     }
 }
@@ -2703,58 +2714,22 @@ struct AmbientGlowLayer: View {
 private struct AmbientGlowCard: View {
     let item: AmbientGlowItem
     let frame: CGRect
-    @State private var image: UIImage?
+    private var source: LibraryCoverCache.Source? {
+        switch item.art {
+        case .steam(let id): return .steam(id)
+        case .library(let entry): return .entry(entry)
+        }
+    }
+
     var body: some View {
-        ZStack {
-            if let image = image ?? AmbientArtwork.cached(item.id) {
-                AmbientGlow(image: Image(uiImage: image), size: frame.size, seed: item.seed, dimmed: item.dimmed, pressed: item.pressed)
+        LibraryCachedArtwork(source: source, pixelWidth: 96) { image in
+            if let image {
+                AmbientGlow(image: image, size: frame.size, seed: item.seed, dimmed: item.dimmed, pressed: item.pressed)
             } else {
                 Color.clear.frame(width: 1, height: 1)
             }
         }
         .position(x: frame.midX, y: frame.midY)
-        .task(id: item.id) { if image == nil { image = await AmbientArtwork.load(item) } }
-    }
-}
-
-/// A card's artwork for its glow: loaded once, shrunk (the glow blurs it anyway) and
-/// kept, so the glow's three layers share one small bitmap instead of each decoding
-/// the full artwork.
-@MainActor
-enum AmbientArtwork {
-    private static let cache = NSCache<NSString, UIImage>()
-
-    static func cached(_ id: String) -> UIImage? { cache.object(forKey: id as NSString) }
-
-    static func load(_ item: AmbientGlowItem) async -> UIImage? {
-        if let hit = cached(item.id) { return hit }
-        var image: UIImage?
-        switch item.art {
-        case .steam(let appID):
-            for url in SteamGamesRules.artwork(appID: appID, owned: { SteamOwnedLibrary.shared.game($0) }) {
-                if let found = await fetch(url) { image = found; break }
-            }
-        case .library(let entry):
-            if let name = entry.coverFile {
-                image = UIImage(contentsOfFile: LibraryModel.documents
-                    .appendingPathComponent("madeira-art/" + URL(fileURLWithPath: name).lastPathComponent).path)
-            } else if let id = entry.steamID ?? entry.steamAppID, let url = SteamCatalog.cover(id) {
-                image = await fetch(url)
-            }
-        }
-        guard let image, image.size.width > 0 else { return nil }
-        let size = CGSize(width: 96, height: (96 * image.size.height / image.size.width).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let small = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        cache.setObject(small, forKey: item.id as NSString)
-        return small
-    }
-
-    private static func fetch(_ url: URL) async -> UIImage? {
-        guard let (data, response) = try? await URLSession.shared.data(from: url),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return UIImage(data: data)
     }
 }
 
