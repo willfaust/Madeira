@@ -355,8 +355,8 @@ static inline int mad_dxc_file_store(const char *path, const void *blob, size_t 
 {
     char tmp[1300];
     int fd, ok;
-    if (snprintf(tmp, sizeof tmp, "%s.tmp%u", path, (unsigned)getpid()) >= (int)sizeof tmp) return 0;
-    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (snprintf(tmp, sizeof tmp, "%s.tmpXXXXXX", path) >= (int)sizeof tmp) return 0;
+    fd = mkstemp(tmp);
     if (fd < 0) return 0;
     ok = write(fd, blob, len) == (ssize_t)len;
     close(fd);
