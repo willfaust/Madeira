@@ -528,6 +528,14 @@ OVERLAY = {
                 "note": "set by the library for one launch of a game from another store; not a setting"},
     "env.MADEIRA_THREAD_REAP_CHECKED": {"category": "Exceptions & threads", "title": "Check the previous exited thread before freeing it", "kind": "bool", "default": "1",
                 "note": "ml2290: on (default): a thread that exits frees the previous exited thread's stacks only after finding that thread, by its process, thread id and pthread, in the live TEB list (the hand-off env.MADEIRA_EA_CEF = 1 already used). 32-bit processes started one after another can get the same window and TEB addresses; the unchecked hand-off then made a new thread free its own kernel stack at exit and hang there holding the memory lock (testers' log, 2026-10-31: a launcher installer's second VC++ redistributable, the installer waiting on that thread forever). 0: the upstream hand-off, unless MADEIRA_EA_CEF = 1."},
+    # A process ended by another one (build/ntdll-unix/process_ios.c NtTerminateProcess; Ubisoft Connect's game starter).
+    "env.MADEIRA_KILL_REAP": {"category": "Wine core (ntdll)", "title": "A killed program's resources are released as an exit's",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: a program another one ends with TerminateProcess releases its FEX code buffers, "
+                        "window and handles as its own exit would, instead of holding them until the session ends "
+                        "(Ubisoft Connect's game starter ends a suspended copy of the game this way). Set it in the game's "
+                        "own file; read at each such call; logged as [kill-reap].",
+                "sources": ["build/ntdll-unix/process_ios.c"]},
     "env.MADEIRA_EC_NATIVE_CHILD": {"category": "Wine core (ntdll)", "title": "Start aarch64 programs in a 64-bit x86 session", "kind": "bool", "default": "0",
                 "note": "ml2280: off (default): an aarch64 program (services.exe, cmd.exe, conhost.exe) started in a session whose first program is 64-bit x86 (ARM64EC) is refused and CreateProcess fails at once. The session's ntdll loads the emulator into it and its threads have no CPU area, so it crashed at its first executable allocation and its exception path faulted until the storm handler ended it (testers' log, 2026-10-28: services.exe started on demand for a launcher installer, twice, 20 s each). A game that needs one starts in the Wine desktop. 1: starts them anyway; MADEIRA_EC_CONHOST=1 still lets conhost.exe through."},
     "env.MADEIRA_SCM_ON_DEMAND": {"category": "Wine libraries", "title": "Start the service manager when a program needs it", "kind": "bool", "default": "1",
