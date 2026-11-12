@@ -227,6 +227,7 @@ enum rm_op {
     RM_OP_BLIT_WITH_SAMPLES,
     RM_OP_LIBRARY_SOURCE,
     RM_OP_NEW_INDIRECT_COMMAND_BUFFER,
+    RM_OP_NEW_TILE_PIPELINE,
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };

@@ -2031,6 +2031,63 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_NEW_TILE_PIPELINE: {
+            if (h.payload_len < sizeof(struct rm_wmt_info) + sizeof(struct WMTTileRenderPipelineInfo)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct rm_wmt_info *a=(const void *)payload;
+            if (a->info_len != sizeof(struct WMTTileRenderPipelineInfo) || a->extra_count > 255 ||
+                h.payload_len != sizeof(*a) + sizeof(struct WMTTileRenderPipelineInfo) + (uint64_t)a->extra_count * sizeof(uint64_t)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct WMTTileRenderPipelineInfo *i=(const void *)(a+1);
+            if (i->num_binary_archives_for_lookup != a->extra_count || i->binary_archives_for_lookup.ptr) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id device=rm_resolve(a->owner,&err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id function=nil, archive=nil;
+            if (i->tile_function) {
+                function=rm_resolve(i->tile_function,&err);
+                if (err == RM_OK && ![function conformsToProtocol:@protocol(MTLFunction)]) err=RM_ERR_WRONG_CLASS;
+            }
+            if (err == RM_OK && i->binary_archive_for_serialization) {
+                archive=rm_resolve(i->binary_archive_for_serialization,&err);
+                if (err == RM_OK && ![archive conformsToProtocol:@protocol(MTLBinaryArchive)]) err=RM_ERR_WRONG_CLASS;
+            }
+            NSMutableArray *archives=[NSMutableArray arrayWithCapacity:a->extra_count];
+            const uint64_t *handles=(const void *)(i+1);
+            for (uint32_t n=0; err==RM_OK && n<a->extra_count; ++n) {
+                id item=rm_resolve(handles[n],&err);
+                if (err == RM_OK && ![item conformsToProtocol:@protocol(MTLBinaryArchive)]) err=RM_ERR_WRONG_CLASS;
+                if (err == RM_OK) [archives addObject:item];
+            }
+            if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            MTLTileRenderPipelineDescriptor *desc=[MTLTileRenderPipelineDescriptor new];
+            for (unsigned n=0;n<8;++n) desc.colorAttachments[n].pixelFormat=rm_fmt(i->color_formats[n]);
+            for (unsigned n=0;n<31;++n) if (i->immutable_tile_buffers & (1u<<n)) desc.tileBuffers[n].mutability=MTLMutabilityImmutable;
+            desc.rasterSampleCount=i->raster_sample_count; desc.threadgroupSizeMatchesTileSize=i->tgsize_matches_tile_size;
+            desc.tileFunction=function;
+            MTLPipelineOption options=MTLPipelineOptionNone;
+            if (@available(macOS 15.0, *)) {
+                if (archives.count) desc.binaryArchives=archives;
+                if (i->fail_on_binary_archive_miss) options=MTLPipelineOptionFailOnBinaryArchiveMiss;
+            }
+            NSError *error=nil;
+            id<MTLRenderPipelineState> pipeline=[(id<MTLDevice>)device newRenderPipelineStateWithTileDescriptor:desc
+                                                       options:options reflection:nil error:&error];
+            if (@available(macOS 15.0, *)) {
+                if (!error && archive) [(id<MTLBinaryArchive>)archive addTileRenderPipelineFunctionsWithDescriptor:desc error:&error];
+            }
+            NSData *messageBytes=[(error.localizedDescription ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+            uint32_t n=(uint32_t)MIN(messageBytes.length,RM_LIBRARY_ERROR_MAX);
+            struct { struct rm_library_source_result header; uint8_t text[RM_LIBRARY_ERROR_MAX]; } result={0};
+            result.header.library=rm_intern(pipeline); result.header.error_length=n;
+            if (n) memcpy(result.text,messageBytes.bytes,n);
+            reply(fd,&h,RM_OK,&result,(uint32_t)(sizeof(result.header)+n)); break;
+        }
         case RM_OP_NEW_INDIRECT_COMMAND_BUFFER: {
             if (h.payload_len != sizeof(struct rm_new_icb) + sizeof(struct WMTIndirectCommandBufferInfo)) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
