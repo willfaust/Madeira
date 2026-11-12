@@ -31,7 +31,7 @@ for arch in arm64ec aarch64; do
     if [ ! -f "$B/build.ninja" ]; then
         SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson setup "$B" "$R/dxmt" \
             --cross-file "$X" --native-file "$R/dxmt/build-osx.txt" --buildtype release \
-            -Dwine_build_path="$W" -Dwine_builtin_dll=true -Denable_nvapi=true
+            -Dwine_build_path="$W" -Dwine_builtin_dll=true -Denable_nvapi=true -Dbuild_macos_bridge=false
     fi
     SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson compile -C "$B" -j "$JOBS"
     DEST="$R/app/Madeira/$arch-windows"
