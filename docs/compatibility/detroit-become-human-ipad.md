@@ -91,3 +91,13 @@ build manifest/App UUID and config, then verify the Windows x64 Vulkan fixture
 chain and repeat the menu/scene/input observation on that package. Record later
 failures as well. Preserve caches and saves; do not ask users to delete them just
 to obtain a clean-looking run.
+
+## Complete experimental sources and historical IPA
+
+The [broader experimental source profile](../../build/vulkan-ios/experimental/README.md)
+contains all historical source changes, the ten MoltenVK patches, explicit build
+entry points, generic regressions and the historical unsigned IPA download and
+hash record. Its source helper reconstructs the published snapshot's exact Git
+tree without replacing main. The optional current-main MoltenVK profile is a
+separate build; neither it nor the historical IPA is retroactively identified
+as the earlier screenshot package.

@@ -1,0 +1,94 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.h
+@@ -145,6 +145,7 @@
+ 								  MVKShaderModule* shaderModule);
+ 	void handleCompilationError(NSError* err, const char* opDesc);
+     MTLFunctionConstant* getFunctionConstant(NSArray<MTLFunctionConstant*>* mtlFCs, NSUInteger mtlFCID);
++	void setOwner(MVKVulkanAPIDeviceObject* owner);
+ 	void compileLibrary(const std::string& msl,
+ 						const std::vector<std::pair<uint32_t, MVKShaderMacroValue> >* specializationMacroDef = nullptr);
+ 	void compressMSL(const std::string& msl);
+@@ -159,7 +160,7 @@
+ 	/** When true, representing a library created with source, but never specialized */
+ 	bool _maySpecializeWithMacro;
+ 	/** Can only be populated when _maySpecializeWithMacro is true */
+-	std::map<std::vector<std::pair<uint32_t, MVKShaderMacroValue>>, MVKShaderLibrary *> _specializationVariants;
++	std::map<std::vector<std::pair<uint32_t, MVKShaderMacroValue>>, std::unique_ptr<MVKShaderLibrary>> _specializationVariants;
+ };
+ 
+ 
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKShaderModule.mm
+@@ -103,7 +103,7 @@
+ 				lib = entry->second->_mtlLibrary;
+ 			} else {
+ 				MVKShaderLibrary *new_mvklib = new MVKShaderLibrary(_owner, _shaderConversionResultInfo, _compressedMSL, &spec_list);
+-				_specializationVariants[spec_list] = new_mvklib;
++				_specializationVariants[spec_list].reset(new_mvklib);
+ 				lib = new_mvklib->_mtlLibrary;
+ 			}
+ 		}
+@@ -270,8 +270,10 @@
+ MVKShaderLibrary::MVKShaderLibrary(const MVKShaderLibrary& other) :
+ 	MVKBaseDeviceObject(other._device),
+ 	_owner(other._owner),
+-	_maySpecializeWithMacro(other._maySpecializeWithMacro),
+-	_specializationVariants(other._specializationVariants) {
++	_maySpecializeWithMacro(other._maySpecializeWithMacro) {
++	for (const auto& item : other._specializationVariants) {
++		_specializationVariants.emplace(item.first, std::make_unique<MVKShaderLibrary>(*item.second));
++	}
+ 
+ 	_mtlLibrary = [other._mtlLibrary retain];
+ 	_shaderConversionResultInfo = other._shaderConversionResultInfo;
+@@ -279,14 +281,21 @@
+ }
+ 
+ MVKShaderLibrary& MVKShaderLibrary::operator=(const MVKShaderLibrary& other) {
+-	if (_mtlLibrary != other._mtlLibrary) {
+-		[_mtlLibrary release];
+-		_mtlLibrary = [other._mtlLibrary retain];
+-	}
+-	_owner = other._owner;
+-	_shaderConversionResultInfo = other._shaderConversionResultInfo;
+-	_compressedMSL = other._compressedMSL;
+-	return *this;
++    if (this == &other) { return *this; }
++    MVKShaderLibrary copy(other);
++    std::swap(_device, copy._device);
++    std::swap(_owner, copy._owner);
++    std::swap(_mtlLibrary, copy._mtlLibrary);
++    std::swap(_shaderConversionResultInfo, copy._shaderConversionResultInfo);
++    std::swap(_compressedMSL, copy._compressedMSL);
++    std::swap(_maySpecializeWithMacro, copy._maySpecializeWithMacro);
++    _specializationVariants.swap(copy._specializationVariants);
++    return *this;
++}
++
++void MVKShaderLibrary::setOwner(MVKVulkanAPIDeviceObject* owner) {
++    _owner = owner;
++    for (auto& item : _specializationVariants) { item.second->setOwner(owner); }
+ }
+ 
+ // If err object is nil, the compilation succeeded without any warnings.
+@@ -308,9 +317,6 @@
+ MVKShaderLibrary::~MVKShaderLibrary() {
+ 	[_mtlLibrary release];
+ 
+-	for (auto& item: _specializationVariants) {
+-		delete item.second;
+-	}
+ }
+ 
+ 
+@@ -380,7 +386,7 @@
+ 	for (auto& otherPair : other->_shaderLibraries) {
+ 		if ( !findShaderLibrary(&otherPair.first) ) {
+ 			_shaderLibraries.emplace_back(otherPair.first, new MVKShaderLibrary(*otherPair.second));
+-			_shaderLibraries.back().second->_owner = _owner;
++			_shaderLibraries.back().second->setOwner(_owner);
+ 		}
+ 	}
+ }

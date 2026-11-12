@@ -22,3 +22,9 @@ They do not prove GPU presentation, driver compatibility or gameplay on iOS.
 An optional, isolated MoltenVK v1.4.2 source backport for direct pipeline-cache
 exports is documented in `patches/README.md`. `MADEIRA_MOLTENVK_LIBRARY` selects
 its static archive at build time; omitting it keeps the official archive path.
+
+The explicitly optional [broader experimental profile](experimental/README.md)
+contains the complete historical Detroit study source diff, ten MoltenVK source
+patches, build/config entry points, generic probes and the historical unsigned
+IPA's download/hash record. It does not enable policies in ordinary builds or
+establish current-main game compatibility.
