@@ -12368,7 +12368,7 @@ static D3D12_RESOURCE_ALLOCATION_INFO * STDMETHODCALLTYPE device_GetResourceAllo
         struct mad_device *md = (struct mad_device *)This;
         if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
             bytes = d->Width;
-            MTLDevice_heapBufferSizeAndAlign(md->mtl_device, d->Width ? d->Width : 1, WMTResourceStorageModePrivate, &msz, &mal);   /* ml1145 */
+            MadeiraMTLDevice_heapBufferSizeAndAlign(md->mtl_device, d->Width ? d->Width : 1, WMTResourceStorageModePrivate, &msz, &mal);   /* ml1145 */
         } else {
             struct WMTTextureInfo ti; enum WMTPixelFormat pf; int isd;
             UINT subs = (d->MipLevels ? d->MipLevels : 1) *
@@ -12376,7 +12376,7 @@ static D3D12_RESOURCE_ALLOCATION_INFO * STDMETHODCALLTYPE device_GetResourceAllo
             device_GetCopyableFootprints(This, d, 0, subs, 0, NULL, NULL, NULL, &bytes);
             if (d->SampleDesc.Count > 1) a = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
             if (mad_texinfo_from_desc(d, &ti, &pf, &isd) && ((ti.width && ti.height) || !mad_zero_extent_guard()))   /* d3d12-zero-extent-guard: Metal aborts on a zero extent */
-                MTLDevice_heapTextureSizeAndAlign(md->mtl_device, &ti, &msz, &mal);   /* ml1145 */
+                MadeiraMTLDevice_heapTextureSizeAndAlign(md->mtl_device, &ti, &msz, &mal);   /* ml1145 */
         }
         /* ml1145: a placed resource is really placed now, so the application must
          * plan its heap with the size and alignment Metal needs, not the linear
@@ -15071,7 +15071,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
         if ((!ti.width || !ti.height) && mad_zero_extent_guard()) { free(r); mad_refuse_log(desc, heap_type, "zero-size texture (Metal aborts the process on it)"); return E_INVALIDARG; }
         if (ph && ph->mtl) {   /* ml1145: inside the application's heap, at its offset */
             UINT64 psz = 0, pal = 0;
-            MTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &psz, &pal);
+            MadeiraMTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &psz, &pal);
             if (psz && pal && !(poff % pal) && poff + psz <= ph->desc.SizeInBytes)
                 r->texture = MTLHeap_newTextureAtOffset(ph->mtl, &ti, poff);
             if (r->texture) { r->placed_heap = ph; r->placed_off = poff; r->placed_size = psz; mad_pl_add(ph, r); ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
@@ -15080,7 +15080,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
         if (!r->texture && !(desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
             && ti.sample_count <= 1) {   /* ml1072 */
             UINT64 hsz = 0, hal = 0, hoff = 0; int hidx;
-            MTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &hsz, &hal);
+            MadeiraMTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &hsz, &hal);
             if (hsz && hsz <= MAD_HP_MAX_TEX && (hidx = mad_hp_alloc(d, hsz, hal, &hoff)) >= 0) {
                 r->texture = MTLHeap_newTextureAtOffset(d->theaps[hidx].heap, &ti, hoff);
                 if (r->texture) { r->hp_used = 1; r->hp_heap = (unsigned)hidx; r->hp_off = hoff; r->hp_size = hsz; InterlockedIncrement(&d->hp_textures); }
@@ -15120,7 +15120,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
                         : (desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ? MAD_CAT_TEX_UAV : MAD_CAT_TEX_PLAIN, bytes, +1);
             if (!r->hp_used) {   /* madeira-bcd metal-gap: a standalone texture, as Metal sizes it */
                 UINT64 msz = 0, mal = 0;
-                MTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &msz, &mal);
+                MadeiraMTLDevice_heapTextureSizeAndAlign(d->mtl_device, &ti, &msz, &mal);
                 if (msz) {
                     r->metal_bytes = msz;
                     InterlockedExchangeAdd64(&g_sa_tex_bytes, (LONG64)msz);
@@ -15154,7 +15154,7 @@ static HRESULT mad_create_resource_at(struct mad_device *d, D3D12_HEAP_TYPE heap
         info.memory.ptr = NULL;
         if (ph && ph->mtl && heap_type == D3D12_HEAP_TYPE_DEFAULT) {   /* ml1145: inside the application's heap */
             UINT64 psz = 0, pal = 0;
-            MTLDevice_heapBufferSizeAndAlign(d->mtl_device, info.length, info.options, &psz, &pal);
+            MadeiraMTLDevice_heapBufferSizeAndAlign(d->mtl_device, info.length, info.options, &psz, &pal);
             if (psz && pal && !(poff % pal) && poff + psz <= ph->desc.SizeInBytes)
                 r->buffer = MTLHeap_newBufferAtOffset(ph->mtl, &info, poff);
             if (r->buffer) { r->placed_heap = ph; r->placed_off = poff; r->placed_size = psz; mad_pl_add(ph, r); ID3D12Heap_AddRef((ID3D12Heap *)ph); InterlockedIncrement(&g_placed_in_heap); }
@@ -21548,7 +21548,7 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
     }
     if (d->mtl_device && d->mtl_queue) {
         struct WMTBufferInfo nbi;
-        d->resset = MTLDevice_newResidencySet(d->mtl_device, 4096);
+        d->resset = MadeiraMTLDevice_newResidencySet(d->mtl_device, 4096);
         if (d->resset) MTLCommandQueue_addResidencySet(d->mtl_queue, d->resset);
         d3d12_log("[madeira-d3d12] residency set: %s\n", d->resset ? "attached to the queue" : "UNAVAILABLE (per-draw lists only)");
         memset(&nbi, 0, sizeof nbi);
