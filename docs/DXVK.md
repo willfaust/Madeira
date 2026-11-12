@@ -56,7 +56,7 @@ licence texts copied in by hand, like vkd3d-proton's.
 
 ## Selecting it
 
-madeira.cfg, or a game's own lines (Settings › Graphics › Direct3D 10/11 writes it):
+madeira.cfg, or a game's own lines (Settings › Display and Graphics › Direct3D 10/11 writes it):
 
 ```
 d3d11 = dxvk

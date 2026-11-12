@@ -52,12 +52,14 @@ for path in sources:
 
 library = (app / 'Library.swift').read_text()
 require('var eaOfferID: String?' in library, 'library entries record their EA offer')
-require(library.count('$0.eaOfferID == nil') >= 2,
+newlook = (app / 'NewLook.swift').read_text()
+settings_pages = (app / 'SettingsPages.swift').read_text()
+require('entry.eaOfferID == nil' in newlook[newlook.index('static func added()'):],
         'Other games: no EA game (it is listed in the EA app section)')
-require('case .eaSignIn: EASignInView()' in library and 'eaSignIn' in library[library.index('enum SettingsSheet'):],
+require('case .eaSignIn: EASignInView()' in settings_pages and 'eaSignIn' in library[library.index('enum SettingsSheet'):],
         'Settings: the EA sign-in sheet')
-require('EASettingsSection(open: { settingsSheet = $0 })' in library, 'Settings: the EA app section')
-require('EAGamesSection(search: search' in library, 'Library: the EA app section')
+require('case .ea: EASettingsSection(open: { sheet = $0 })' in settings_pages, 'Settings: the EA app section')
+require('case .ea: EAGamesSection(search: ""' in newlook, 'Stores: the EA app section')
 require('EAEntrySection(entry: $entry)' in library, 'Game details: the EA app section')
 require('if !EALibrary.shared.signedIn {' in library, 'Play: an EA game needs the sign-in')
 require('entry.eaOfferID != nil && $0.eaOfferID == entry.eaOfferID' in library, 'save: one entry per EA game')

@@ -109,7 +109,33 @@ enum ExternalStorageIdentity {
 
 /// Preserve parsed Steam metadata and add only paths not already registered.
 enum ExternalSteamLibraries {
-    static func add(paths: [String], to data: Data?) throws -> Data {
+    /// The external-drive entries (`C:\External\...`) that sit above one of `paths`, such as
+    /// `C:\External\steam` when the library is `C:\External\steam\SteamLibrary`. A drive
+    /// added from its top folder once and later found to hold its library one level down
+    /// leaves such an entry behind. Seen on a tester's device (Nov 7 2026): with it listed,
+    /// both of the client's libraryfolders.vdf files lacked the real library, the client
+    /// did not know the games were there and Dock stopped with code 41
+    /// (launch-install-directory-mismatch); swapping the entry for the real library fixed
+    /// every game. Only Madeira's own External folder is touched; a listed path that is
+    /// itself a library being added stays.
+    /// env.MADEIRA_EXTERNAL_PRUNE_PARENT_LIBRARIES = 0 keeps every entry.
+    static func staleParents(of paths: [String], in listed: [String]) -> Set<String> {
+        let added = Set(paths.map(key))
+        var stale: Set<String> = []
+        for entry in listed.map(key) where entry.hasPrefix("c:\\external\\") && !added.contains(entry) {
+            if added.contains(where: { $0.hasPrefix(entry + "\\") }) { stale.insert(entry) }
+        }
+        return stale
+    }
+
+    /// A library path compared without case, slash style or trailing separators.
+    static func key(_ path: String) -> String {
+        var text = path.replacingOccurrences(of: "/", with: "\\").lowercased()
+        while text.hasSuffix("\\") { text.removeLast() }
+        return text
+    }
+
+    static func add(paths: [String], to data: Data?, pruneParents: Bool = true) throws -> Data {
         var root: [String: SteamValue] = [:]
         if let data {
             var parser = try SteamKeyValues(data)
@@ -118,10 +144,17 @@ enum ExternalSteamLibraries {
         }
         var folders = root["libraryfolders"]?.fields ?? [:]
         guard folders.count < 4096 else { throw ExternalStorageError.invalidRecord }
+        let windowsPaths = try paths.map { "C:\\" + (try ExternalStoragePath.components($0)).joined(separator: "\\") }
+        if pruneParents {
+            let entryPath: (SteamValue) -> String? = { $0["path"]?.string ?? $0.string }
+            let stale = staleParents(of: windowsPaths, in: folders.values.compactMap(entryPath))
+            if !stale.isEmpty {
+                folders = folders.filter { _, value in entryPath(value).map { !stale.contains(key($0)) } ?? true }
+            }
+        }
         var listed = Set(folders.values.compactMap { ($0["path"]?.string ?? $0.string)?.lowercased() })
         var next = 0
-        for relative in paths {
-            let path = "C:\\" + (try ExternalStoragePath.components(relative)).joined(separator: "\\")
+        for path in windowsPaths {
             guard listed.insert(path.lowercased()).inserted else { continue }
             while folders[String(next)] != nil { next += 1 }
             folders[String(next)] = .object(["path": .text(path), "apps": .object([:])])

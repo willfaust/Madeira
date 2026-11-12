@@ -1937,6 +1937,44 @@ NTSTATUS WINAPI NtCreateThread( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRI
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/* [thread-start] A thread's start routine, as the guest must see it.
+ *
+ * ARM64EC code that runs from a JIT-pool image copy computes the address of a
+ * function with ADRP/ADD and so gets the COPY address, which lies inside no
+ * module. On Windows the start routine of a thread (NtCreateThreadEx's argument,
+ * the initial Rcx/X0, ThreadQuerySetWin32StartAddress) is inside the module
+ * image. StarCraft's ClientSdk looks at where each new thread starts and
+ * overwrites the first byte of one that starts outside every module (it
+ * NtProtectVirtualMemory's the copy address RWX and writes 0xC3); the thread
+ * then runs the damaged copy and dies with c000001d.
+ *
+ * So a start address inside a pool image copy (not FEX's own module) is turned
+ * back into the image VA (pe_base + offset). Executing at the image VA is
+ * already redirected to the owning process's copy (exec-fault path in
+ * signal_arm64_ios.c, ios_jit_translate_addr_for_owner), as for DLL entry
+ * points. MADEIRA_THREAD_START_PE_VA=0 passes the address through unchanged. */
+static void *ios_thread_start_pe_va( void *start )
+{
+    extern uint64_t ios_jit_reverse_translate( uint64_t addr, uint64_t *module_base );
+    extern int ios_jit_pool_pc_is_fex( uintptr_t pc );
+    static int enabled = -1;
+    static volatile int logged;
+    uint64_t mod = 0, va;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_THREAD_START_PE_VA" );
+        enabled = !(e && e[0] == '0');
+    }
+    if (!enabled || !start) return start;
+    if (ios_jit_pool_pc_is_fex( (uintptr_t)start )) return start;
+    va = ios_jit_reverse_translate( (uint64_t)(uintptr_t)start, &mod );
+    if (!va || !mod || va == (uint64_t)(uintptr_t)start) return start;
+    if (__sync_add_and_fetch( &logged, 1 ) <= 32)
+        dprintf( 2, "[thread-start] pool %p -> image %p\n", start, (void *)(uintptr_t)va );
+    return (void *)(uintptr_t)va;
+}
+
 /***********************************************************************
  *              NtCreateThreadEx   (NTDLL.@)
  */
@@ -2045,6 +2083,8 @@ NTSTATUS WINAPI NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATT
         }
         return status;
     }
+
+    start = ios_thread_start_pe_va( start );   /* MADEIRA_THREAD_START_PE_VA */
 
     if ((status = alloc_object_attributes( attr, &objattr, &len ))) return status;
 

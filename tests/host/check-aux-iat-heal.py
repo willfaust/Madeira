@@ -65,6 +65,12 @@ c0, c1 = struct.unpack_from('<II', k32_img, 0x2b300)
 assert (c0 & 0x9F00001F) == 0x9000000B and (c1 & 0xFFC003FF) == 0xF940016B, 'continuation shape'
 assert ntd_img[0x92090:0x9209a] == bytes.fromhex('488bc448895820555de9'), 'RtlQueryPerformanceCounter FFS'
 assert ntd_img[0x920a0:0x920aa] == bytes.fromhex('488bc448895820555de9'), 'RtlQueryPerformanceFrequency FFS'
+# Where each fast-forward sequence jumps (its jmp rel32): the native ARM64EC entry the
+# heal stores. Read from the shipped ntdll, so a rebuilt ntdll.dll (its code moves)
+# keeps the check meaningful; 0x71aac / 0x71d04 were the Oct 4 copy's.
+def ffs_target(rva):
+    return rva + 14 + struct.unpack_from('<i', ntd_img, rva + 10)[0]
+QPC_NATIVE, QPF_NATIVE = ffs_target(0x92090), ffs_target(0x920a0)
 
 begin = virtual.index('/* madeira-bcd: aux-IAT heal (begin).')
 heal = virtual[begin:virtual.index('/* madeira-bcd: aux-IAT heal (end) */', begin)]
@@ -229,7 +235,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (tmp / 'k32.img').write_bytes(bytes(k32_img))
     (tmp / 'ntd.img').write_bytes(bytes(ntd_img))
     c = tmp / 'aux.c'
-    c.write_text(harness)
+    c.write_text(harness.replace('0x71aac', hex(QPC_NATIVE)).replace('0x71d04', hex(QPF_NATIVE)))
     exe = tmp / 'aux'
     cmd = [os.environ.get('CC', 'cc'), '-O1', '-g', '-std=gnu11', '-Wall', '-Werror', '-Wno-unused-function',
            '-fsanitize=undefined', str(c), '-o', str(exe)]

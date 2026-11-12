@@ -32,6 +32,11 @@ assert '{ IOS_SCH_IPC_CONNECT, IOS_SCH_IPC_TRACE, 5, 0xe9, 0 },' in first_hook
 assert 'rebind' not in later_blob and 'IPC_CONNECT' not in later_hook and 'IPC_TRACE' not in later_hook
 assert '{ IOS_SCH296_RENDER_CHANNEL_KEEP, IOS_SCH296_RENDER_CHANNEL_THUNK, 7, 0xe9, 1 },' in later_hook
 assert not re.search(r'#define IOS_SCH296_IPC_(TRACE|COUNT)', native)
+# 2.4.0.302 keeps 296's layout: no rebind trace, the same channel retention hook.
+blob302, hook302 = sch_table('ios_sch302_blob'), sch_table('ios_sch302_hook')
+assert 'rebind' not in blob302 and 'IPC_CONNECT' not in hook302 and 'IPC_TRACE' not in hook302
+assert '{ IOS_SCH302_RENDER_CHANNEL_KEEP, IOS_SCH302_RENDER_CHANNEL_THUNK, 7, 0xe9, 1 },' in hook302
+assert not re.search(r'#define IOS_SCH302_IPC_(TRACE|COUNT)', native)
 
 with tempfile.TemporaryDirectory(prefix='madeira-sc-ipc-') as name:
     folder = Path(name)

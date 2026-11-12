@@ -34,6 +34,14 @@ void winios_direct_cursor_show(int show);
 /* Wine's cursor position in screen pixels, after clipping. */
 void winios_direct_cursor_pos(int x, int y);
 
+/* How the program in front reads the mouse, from the Wine server
+ * (build/wineserver/queue_ios.c madeira_report_mouse_reader), with each mouse
+ * event. A change notifies; the same flags again do nothing. */
+#define WINIOS_READER_RAW_CAPTURE 0x1  /* raw mouse input without legacy messages, or capturing it */
+#define WINIOS_READER_LL_HOOK     0x2  /* a low-level mouse hook (older DirectInput) */
+#define WINIOS_READER_RAW         0x4  /* raw mouse input registered at all (SDL's relative mode) */
+void winios_direct_cursor_reader(unsigned int flags);
+
 /* ---- app side ---- */
 
 /* Called on the reporting thread, outside the lock, at most once until the
@@ -52,6 +60,7 @@ struct winios_direct_cursor_state {
     int w, h, hot_x, hot_y;    /* current image; w == 0: none yet */
     unsigned int image_serial; /* bumps on every new image */
     unsigned int reports;      /* counts notifying reports: a program is live */
+    unsigned int reader;       /* WINIOS_READER_* of the program in front, 0 until reported */
 };
 
 /* Snapshot the state and re-arm the notification. */

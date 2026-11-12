@@ -31,7 +31,7 @@ pin = (root / 'build/wine-mono/pin.sh').read_text()
 fetch = (root / 'build/wine-mono/fetch.sh').read_text()
 bridge = (root / 'app/Madeira/WineProcessBridge.m').read_text()
 onboarding = (root / 'app/Madeira/Onboarding.swift').read_text()
-library = (root / 'app/Madeira/Library.swift').read_text()
+pages = (root / 'app/Madeira/SettingsPages.swift').read_text()
 project = (root / 'app/Madeira.xcodeproj/project.pbxproj').read_text()
 failures = 0
 
@@ -185,7 +185,7 @@ check('guard try WineMonoInstaller.sha256(of: archive) == WineMonoPin.tarSHA256'
       'the download is checked before it is unpacked, and installed by one rename')
 check('case .wineMono: wineMonoPage' in onboarding and 'mono.install()' in onboarding,
       'setup: the Wine Mono page downloads it')
-check('WineMonoSettingsSection()' in library, 'Settings: .NET Framework')
+check('case .runtimes:\n            WineMonoSettingsSection()' in pages, 'Settings: .NET Framework (the Runtimes page)')
 check('A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711' in project
       and 'path = "WineMono.swift"' in project and project.count('A2000711 /* WineMono.swift */,') == 1
       and project.count('A1000711 /* WineMono.swift in Sources */,') == 1,

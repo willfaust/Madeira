@@ -45,6 +45,7 @@ final class HardwareInput {
     static var pointerLockAvailable = true
     static var desktopMode = false
     static var hiddenCursorAbsolute = false   // MADEIRA_POINTER_HIDDEN_ABSOLUTE, off by default
+    var readsMotion = false                   // MouseReader: the program reads mouse motion
     static let moveFlag: UInt32 = 1
     static let absoluteFlag: UInt32 = 0x8000
     static func desktopSize() -> (w: Int, h: Int) { (1024, 768) }
@@ -138,6 +139,29 @@ assert(!direct.pointerLocked)
 direct.cursorState.shown = 1
 direct.updateAutoLock()
 assert(!direct.pointerLocked)
+
+// A program that reads motion is captured although its cursor shows (CS2 keeps its arrow in a match),
+// and released when it stops reading; HIDDEN_ABSOLUTE keeps it uncaptured.
+for desktop in [false, true] {
+    let h = reset(desktop: desktop)
+    h.cursorState = (1, 1)
+    h.lastReportAt = Clock.now
+    h.updateAutoLock()
+    assert(!h.pointerLocked)
+    h.readsMotion = true
+    assert(!h.cursorShownForRoute)
+    h.updateAutoLock()
+    assert(h.pointerLocked && h.lockedByUs, "a motion reader with its cursor up was not captured")
+    h.readsMotion = false
+    h.updateAutoLock()
+    assert(!h.pointerLocked, "capture outlived the motion reader")
+    h.readsMotion = true
+    HardwareInput.hiddenCursorAbsolute = true
+    assert(h.cursorShownForRoute)
+    h.updateAutoLock()
+    assert(!h.pointerLocked)
+    HardwareInput.hiddenCursorAbsolute = false
+}
 
 // Hidden mouse-look must not get an absolute desktop cursor move after its delta.
 for relative in [false, true] {

@@ -382,16 +382,22 @@ final class EADownloader: @unchecked Sendable {
     }
 
     /// Whether the file on disk has the entry's size and CRC-32.
+    /// Each read is drained in its own autorelease pool: the
+    /// reads are autoreleased and a repair checks the whole game without suspending.
     static func matches(_ url: URL, _ entry: EAZipEntry, progress: (Int) -> Void = { _ in }) throws -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         var crc = EACRC32()
         var total: Int64 = 0
         while true {
-            let chunk = handle.readData(ofLength: 4 << 20)
-            if chunk.isEmpty { break }
-            crc.update(chunk); total += Int64(chunk.count)
-            progress(chunk.count)
+            let count: Int = autoreleasepool {
+                let chunk = handle.readData(ofLength: 4 << 20)
+                crc.update(chunk)
+                return chunk.count
+            }
+            if count == 0 { break }
+            total += Int64(count)
+            progress(count)
         }
         return total == entry.uncompressedSize && crc.checksum == entry.crc32
     }

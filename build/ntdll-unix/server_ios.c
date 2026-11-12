@@ -3546,7 +3546,7 @@ static int ios_ldst_ea( uint32_t insn, const arm_thread_state64_t *st, uint64_t 
 }
 
 int ios_store_split_crossing( uint32_t insn, arm_thread_state64_t *st, const arm_neon_state64_t *neon,
-                              uintptr_t rx, uintptr_t rw, size_t sz );   /* ml1289, signal_arm64_ios.c */
+                              uintptr_t rx, uintptr_t rw, size_t sz, uintptr_t *blocked );   /* ml1289, signal_arm64_ios.c */
 
 static void ios_stuck_store_check( void )
 {
@@ -3616,7 +3616,7 @@ static void ios_stuck_store_check( void )
             unsigned hits = ++ios_stuck[slot].hits;
             int r = ios_store_split_crossing( insn, &st, have_neon ? &neon : NULL,
                                               (uintptr_t)ios_jit_rx_base_global, (uintptr_t)ios_jit_rw_base_global,
-                                              ios_jit_pool_size_global );
+                                              ios_jit_pool_size_global, NULL );
             if (r > 0)
             {
                 __darwin_arm_thread_state64_set_pc_fptr( st, (void *)(uintptr_t)(pc + 4) );
@@ -3792,6 +3792,17 @@ unsigned int CDECL wine_server_call( void *req_ptr )
     sigset_t old_set;
     unsigned int ret;
 
+#ifdef WINE_IOS
+    {
+        /* exe-window end-parent (process_ios.c): a launcher whose own copy waits for its
+         * fixed base ends itself here, outside every section (no ntdll lock held) */
+        extern volatile int ios_exewin_end_parent_armed;
+        extern void ios_exe_win_end_parent_check(void);
+        if (__builtin_expect( __atomic_load_n( &ios_exewin_end_parent_armed, __ATOMIC_RELAXED ), 0 ) &&
+            !(ios_section_state() & (IOS_SECTION_DEPTH | IOS_SECTION_ABORT)))
+            ios_exe_win_end_parent_check();
+    }
+#endif
     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
     ret = server_call_unlocked( req_ptr );
     pthread_sigmask( SIG_SETMASK, &old_set, NULL );

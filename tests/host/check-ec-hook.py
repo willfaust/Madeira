@@ -29,7 +29,7 @@ check('mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)addr, size,'
       'the peek is a kernel copy (an unreadable address returns an error, never a SIGBUS)')
 
 sync = native.index('/* Compare code before any copy overwrites .hexpthk changes.')
-copy = native.index('memcpy(jit_rw_dest, base, size);', sync)
+copy = native.index('ios_copy_keep_owned(jit_rw_dest, base, size);', sync)
 block = native[sync:copy]
 check('ios_ec_hook_report( idx,' in block and 'code_ranges[r]' in block,
       'all executable sections are compared before synchronization, including thunks')

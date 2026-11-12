@@ -111,6 +111,30 @@ check(folders["0"]?["apps"]?["9000"]?.string == "42" && folders["0"]?["label"]?.
 check(folders["2"]?.string == "D:\\OldLibrary" && value["othermetadata"]?.string == "keep",
       "legacy paths and unrelated metadata are kept")
 check(try ExternalSteamLibraries.add(paths: paths, to: updated) == updated, "repeat updates do not duplicate paths")
+// A leftover entry for the top of a drive (C:\External\steam) sits above the drive's real
+// library (C:\External\steam\SteamLibrary): it is replaced, other entries stay (code 41 fix).
+let leftover = Data(#"""
+"libraryfolders" {
+    "0" { "path" "C:\\Program Files (x86)\\Steam" "apps" { "228980" "1" } }
+    "1" { "path" "C:\\External\\steam" "contentid" "18" "apps" { } }
+    "2" { "path" "C:\\External\\SteamUSB\\SteamLibrary" "apps" { } }
+    "3" { "path" "C:\\Games" "apps" { } }
+}
+"""#.utf8)
+let drivePaths = ["Program Files (x86)/Steam", "External/steam/SteamLibrary"]
+var pruned = try SteamKeyValues(try ExternalSteamLibraries.add(paths: drivePaths, to: leftover))
+let prunedPaths = Set(try pruned.read()["libraryfolders"]!.fields.values.compactMap { $0["path"]?.string?.lowercased() })
+check(prunedPaths == ["c:\\program files (x86)\\steam", "c:\\external\\steam\\steamlibrary", "c:\\external\\steamusb\\steamlibrary", "c:\\games"],
+      "a leftover drive entry above the library is replaced by the library")
+var kept = try SteamKeyValues(try ExternalSteamLibraries.add(paths: drivePaths, to: leftover, pruneParents: false))
+check(try kept.read()["libraryfolders"]!.fields.count == 5, "pruneParents false keeps the leftover entry")
+check(ExternalSteamLibraries.staleParents(of: [#"C:\External\steam"#, #"C:\External\steam\SteamLibrary"#],
+                                          in: [#"C:\External\steam\"#]).isEmpty,
+      "an entry that is itself a library being added stays")
+check(ExternalSteamLibraries.staleParents(of: [#"C:\Games\Steam\SteamLibrary"#], in: [#"C:\Games\Steam"#]).isEmpty,
+      "entries outside C:\\External are never removed")
+check(ExternalSteamLibraries.staleParents(of: [#"C:\External\steam2\SteamLibrary"#], in: [#"C:\External\steam"#]).isEmpty,
+      "a sibling folder whose name starts the same is not a parent")
 for bad in ["\"libraryfolders\" {", "\"libraryfolders\" \"bad\"", "\"unrelated\" \"x\""] {
     rejects("invalid library metadata is not replaced") { _ = try ExternalSteamLibraries.add(paths: paths, to: Data(bad.utf8)) }
 }

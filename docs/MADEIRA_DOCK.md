@@ -29,8 +29,9 @@ them.
 ## Source and licence
 
 - Source: the `madeira-dock` submodule
-  (`https://github.com/125hz/madeira-dock`, pinned at `e1bf62f`), about 1,850 lines of
-  C. Copyright 2026 125hz, **GPL-3.0-or-later with the Madeira
+  (`https://github.com/willfaust/madeira-dock`, the URL in `.gitmodules`; this
+  repository pins the commit), in C.
+  Copyright 2026 125hz, **GPL-3.0-or-later with the Madeira
   Converter Exception** (the owner open-sourced it on 2026-09-27; it used to
   be a closed executable).
 - Research references: OpenSteamworks (MIT) and Valve's public Steamworks
@@ -111,8 +112,36 @@ library session. The sheet has:
    choice" puts the kept launcher back at the next start. Log lines:
    `[dock-start-program]`.
 
-Tap a game. Dock is started with Steam's default launch option only; custom
-arguments are not supported.
+Tap a game. Dock is started with the launch entry Madeira picks from Steam's
+launch configuration, or key 0 when none can be picked; extra arguments from the
+library profile go to Valve's `LaunchApp` through
+`MADEIRA_STEAM_HOST_ARGUMENTS` (bounded; see the Dock README).
+
+**Friends.** Off unless chosen: Settings › Steam › Status is Offline by default,
+and Offline (`MADEIRA_DOCK_PERSONA_STATE=0`, or the variable missing) leaves
+Friends off for the whole session, as before Friends existed: Dock sends Steam
+nothing of its own and the game's menu has no Friends page. Online, Away or
+Invisible makes Dock sign in to Friends while the game runs the way desktop
+Steam's Friends window does, with the messages that window sends over the
+client's own connection (status, persona data for unnamed friends, the
+friends-status subscription and lobby invites; Dock README, "Friends"), so
+friends see the chosen status and the session receives theirs. Online, Away
+and Invisible can also be changed from the Friends page. Dock writes the
+friends list to `C:\madeira-friends.bin` every 3 s (online, invited and
+same-game friends first when there are more than 250) and accepts commands in
+`C:\madeira-friends-cmd.bin` (formats, limits and the `friends-*` report lines
+in the Dock README). In a lobby, Invite sends a real lobby invite. Join goes
+through the client's own accepted-invite path to the running game. January
+client build only; elsewhere `friends-available=0` and the launch is
+unchanged. The in-game Session menu's Friends page (`DockFriends.swift`) reads
+the feed and sends the commands; incoming lobby invites show at the top with
+Accept. A missing, invalid or stale feed (older than 15 s: a host that did not
+end cleanly) shows no list, and `MadeiraDock.cleanup()` (session end, app
+start, sign-out) removes the feed and any unread command. Tested: sending an
+invite, receiving one and joining with it, joining a friend without an invite,
+being joined without sending one, and the Offline status turning friends off
+(Dock `docs/HANDOFF.md`). Friends' status comes from Dock, not Steam's Web
+API: a trial of Web API presence got a refresh token revoked (2026-10-29).
 
 ## How a launch works
 
@@ -164,8 +193,14 @@ arguments are not supported.
    C:\madeira-dock-installers.cmd & C:\windows\system32\dockhost.exe`: the
    installers first, then the host, in the same session.
 
-   madeira-bcd: such a start runs only the installers (`... cmd.exe /c call
-   C:\madeira-dock-installers.cmd`, `MADEIRA_DOCK_INSTALL_SEPARATE`). In one
+   A game whose own lines hold an address-space layout line
+   (`env.MADEIRA_RDR2_VA_HOLD`, `env.MADEIRA_SC_PA_POOLS`) instead runs only the
+   installers (`... cmd.exe /c call C:\madeira-dock-installers.cmd`); every other
+   game runs them and then starts, in one session and with no restart.
+   `MADEIRA_DOCK_INSTALL_SEPARATE` (the game's lines, else madeira.cfg) decides
+   when set: `1` always runs them alone, `0` never does.
+
+   madeira-bcd: why such a start runs only the installers. In one
    session, the installers' copies in the JIT pool left Red Dead Redemption 2
    too little room, and it stopped while loading (`[jit-pool] EXHAUSTED`). The
    session ends after the batch; the app runs one session per run, so Madeira
@@ -452,6 +487,7 @@ Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_IMAGE_RETIRE` | on | `0`: a Dock launch does not turn on the engine's `MADEIRA_JIT_IMAGE_RETIRE` (an explicit `env.MADEIRA_JIT_IMAGE_RETIRE` still wins) |
 | `MADEIRA_DOCK_IMAGE_MAP_GUARD` | on | `0`: a Dock launch does not turn on Wine's `MADEIRA_IMAGE_MAP_GUARD` |
 | `MADEIRA_DOCK_CLIENT_202601` | on | read by the host: `0` disables its January 2026 client adapter |
+| `MADEIRA_DOCK_CRASH_REPORT` | on | read by the host (build/dock-patches/0004): `0` does not report a crash of the host (`host-unhandled-exception`, result 60) before the process ends |
 | `MADEIRA_DOCK_HANDOFF_DIAGNOSTICS` | on | read by the host: `0` drops its numeric transfer diagnostics |
 | `MADEIRA_DOCK_SESSION_WAIT` | on | read by the host: `0` fails a launch refused with 35 (another session playing) at once instead of asking again for up to three minutes |
 | `MADEIRA_DOCK_OFFLINE_LOGON` | on | `0`: no offline starts. The app never asks for one and hides the Game details mark; read by the host too, which then does not look up Valve's offline-logon methods |
@@ -461,7 +497,7 @@ Valve's; Dock does not touch the files.
 | `MADEIRA_DOCK_INSTALL_SCM` | on | `0`: the batch records "services off" instead of starting the service manager (also read by the host's `--start-services`) |
 | `MADEIRA_DOCK_INSTALL_SERVER_SYNC` | on | `0`: a start that runs installers keeps madsync and leaves the service step out |
 | `MADEIRA_DOCK_INSTALL_REGISTRY` | on | Before each Dock start the app writes the "Registry" values of the install scripts in the game's folder, as Valve's client does when it installs a game (a launcher that reads its folder there offered to install the game). Missing values are added, a path that follows the install folder is corrected, any other value stays; per-language values follow the install's language. `0`: only the programs' records are written, as before 2026-11-02 |
-| `MADEIRA_DOCK_INSTALL_SEPARATE` | on | madeira-bcd. `0`: the host follows the installers in the same session |
+| `MADEIRA_DOCK_INSTALL_SEPARATE` | auto | unset: only a game whose own lines hold `env.MADEIRA_RDR2_VA_HOLD` or `env.MADEIRA_SC_PA_POOLS` runs its one-time installs in a session of their own (and starts after a restart); `1`: every game does; `0`: none does, the host follows the installers in the same session |
 | `MADEIRA_DOCK_INSTALL_LAYOUT` | on | madeira-bcd. `0`: a session of one-time installs keeps the game's `env.MADEIRA_SC_PA_POOLS` and `env.MADEIRA_RDR2_VA_HOLD` lines |
 | `MADEIRA_TIMER_FAIRNESS` | on | madeira-bcd, read by the wineserver. `0`: a WM_PAINT that is always pending keeps every timer of its thread waiting, as Windows' order says |
 | `MADEIRA_DOCK_RESET_CLEAN` | on | madeira-bcd. `0`: Reset only forgets the records; installed files stay |
@@ -557,6 +593,12 @@ credentials:
 - `check-dock-report.py`: the report parser, its messages (including 34),
   the ordered callback IDs, rejection of private and malformed fields, and that every report round the pinned host
   writes is accepted.
+- `check-dock-friends.py`: the Friends model (`DockFriends.swift` compiled on
+  the host against a temporary drive): feed bounds, display order, the command
+  bytes and 31-bit sequences, matching a command to its own result after it
+  was sent, the timeout, reset and session end, no list from a missing,
+  invalid or stale feed, no names or SteamIDs in the log, and Offline (friends
+  off) as the default status.
 - `check-dock-path.py`: the transfer path through Wine's own path resolver
   (`WINE_FILE_C` can point at `dlls/ntdll/unix/file.c` when the wine
   submodule is not checked out).

@@ -427,15 +427,25 @@ struct GestureZonePanel: View {
         .background(GlassShape())
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18), lineWidth: 1))
+        // Panel gaps must not dismiss the selection beneath them: the editor's
+        // dismissal area leaves the panel's column out (GestureZonePanel.column).
         .contentShape(Rectangle())
-        .onTapGesture { } // Panel gaps must not dismiss the selection beneath them.
         .position(x: panelX, y: screen.height / 2)
     }
 
     /// The side of the screen the zone covers less of.
-    private var panelX: CGFloat {
+    private var panelX: CGFloat { Self.centerX(zone: zone, screen: screen) }
+
+    private static func centerX(zone: GestureZone, screen: CGSize) -> CGFloat {
         let half = min(340, screen.width - 32) / 2 + 16
         return zone.x + zone.w / 2 < 0.5 ? screen.width - half : half
+    }
+
+    /// The full-height column the panel is centred in (its height follows its
+    /// content), with a little slop, for the editor's dismissal area.
+    static func column(zone: GestureZone, screen: CGSize) -> CGRect {
+        let w = min(340, screen.width - 32) + 8
+        return CGRect(x: centerX(zone: zone, screen: screen) - w / 2, y: 0, width: w, height: screen.height)
     }
 
     private var directionsShown: [String] {

@@ -24,14 +24,11 @@ struct MadeiraApp: App {
         ProfileUnification.run()
         // Games and downloads keep going when Madeira leaves the screen (BackgroundRun.swift).
         BackgroundRun.shared.start()
-        // Read the cached library before the first grid page is built.
-        if LibraryGridArm.enabled, SteamOwnedLibrary.enabled { SteamOwnedLibrary.shared.start() }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .background(InteractionFrameRateInstaller())   // touch frame-rate request (New library grid)
                 .modifier(ClaimGamepadEvents())
                 .onAppear {
                     ExternalDrives.shared.mountAll()
@@ -41,6 +38,7 @@ struct MadeiraApp: App {
                     WineGeckoModel.shared.installAutomatically()  // on Wi-Fi, so Wine never asks (WineGecko.swift)
                     AchievementWatcher.shared.start()             // unlock banners from Steam's stats files (SteamAchievements.swift)
                     ClaudeHelp.install()                          // the fixes guide beside madeira-log.txt (ClaudeHelp.swift)
+                    LogTrail.install()                            // presses, focus, screens, taps, start steps (LogTrail.swift)
                 }
                 // madeira://jit-network/... (the Madeira JIT shortcut returning, JITNetwork.swift),
                 // else a shared game setup (a .madeirasetup file or madeira://setup?d=..., GameSetupShare.swift),

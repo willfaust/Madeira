@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 125hz
 # Madeira Converter Exception: see LICENSE-EXCEPTION.md
-"""The library page's sections (app/Madeira/Library.swift and SteamGames.swift), on the host.
+"""The store sections (app/Madeira/NewLook.swift and SteamGames.swift), on the host.
 
-Source checks that the library page is laid out as the fork's sectioned library:
-Steam (the games being downloaded and the games Steam installed, collapsed by the
-title), its Not installed group (folding on its own), then Other games (the
-games you added, with Add a game); one grid without the Steam section; the
-texts; the collapse switch MADEIRA_LIBRARY_COLLAPSE and the remembered states;
-search and layout apply to every section; pull to refresh; the log line.
+Source checks that the Stores tab lists every store's section and Other games, and that the
+Steam section keeps its parts: title, sign-in card, downloading games, empty text, Not installed
+(folding on its own) and the installed games folded below; Other games is the games you added
+with Add a game; pull to refresh on the Library tab; the texts and remembered states.
+The old zoomable grid, store tabs, collapsible titles and MADEIRA_LIBRARY_COLLAPSE/TABS
+switches were removed with the old design.
 The rules behind the groups and the sort are compiled and run by
 check-steam-games.py.
 """
@@ -34,112 +34,70 @@ def between(text, start, end):
 
 
 library = (app / 'Library.swift').read_text()
+newlook = (app / 'NewLook.swift').read_text()
 games = (app / 'SteamGames.swift').read_text()
 docs = (root / 'docs/LIBRARY.md').read_text()
 steam_docs = (root / 'docs/STEAM_LIBRARY.md').read_text()
 
-view = between(library, 'struct LibraryView: View {', 'struct ExecutableBrowser: View {')
-page = between(view, '    private var library: some View {', '    private func cells(')
 section = between(games, 'struct SteamGamesSection: View {', 'struct SteamSignInCard: View {')
 body = between(section, '    var body: some View {', '    private func cell(')
 
-# ------------------------------------------------------------------ order of the page
-steam_at = page.index('SteamGamesSection(search: search, layout: layout, sort: sort, width: viewport.size.width,')
-others_at = page.index('LibrarySectionHeader(title: L("Other games")')
-# The Desktop button is LibraryView.desktopButton (both grids show it).
-require(page.index('desktopButton') < steam_at < others_at and 'Label("Desktop", systemImage: "desktopcomputer")' in view,
-        'page order: Desktop, then Steam, then Other games')
-require('let steamFirst = MadeiraDock.enabled && SteamGamesSection.hasInstalled' in page[:steam_at]
-        and 'part: .installed, open: { selected = $0 })' in page[steam_at:others_at]
-        and 'if SteamGamesSection.shown {' in page[steam_at:others_at],
-        'Other games is a section exactly when the Steam section is shown; installed Steam games come first')
-require('part: steamFirst ? .notInstalled : .all, open: { selected = $0 })' in page[others_at:]
-        and 'if MadeiraDock.enabled && tab.shows(.steam) {' in page[others_at:],
-        'Not installed follows Other games; with nothing installed the whole Steam section does')
-single = page[others_at:]
-require('ContentUnavailableView("Make yourself at home"' in single and single.count('cells(entries, width: viewport.size.width)') == 2,
-        'without the Steam section: one grid of the games you added, or the empty-library message')
-require('.refreshable { await SteamGamesSection.refresh() }' in page, 'pull down on the library refreshes the Steam section')
+# ------------------------------------------------------------------ the Stores tab
+content = between(newlook, '    @ViewBuilder private var content: some View {\n        switch store {', '    /// Other games:')
+for case, view in (('steam', 'SteamGamesSection'), ('epic', 'EpicGamesSection'), ('gog', 'GOGGamesSection'),
+                   ('itch', 'ItchGamesSection'), ('ea', 'EAGamesSection')):
+    require(f'case .{case}: {view}(search: ""' in content, f'Stores: the {case} page is its own section')
+require('case .other: otherGames' in content, 'Stores: Other games is the last page')
+require('case steam, epic, gog, itch, ea, other' in newlook, 'Stores: Other games comes after every store')
+require('.refreshable { await refresh() }' in newlook
+        and 'NewLookScrollPage(refresh: { await SteamGamesSection.refresh() }' in library,
+        'pull down on the Library tab refreshes the Steam section (and the other stores)')
 
 # ------------------------------------------------------------------ Other games
-others = between(page, 'LibrarySectionHeader(title: L("Other games")', '} else if model.entries.filter(')
-require('count: entries.count' in others and 'collapsed: SteamGamesSection.collapsible ? $hideOthers : nil' in others,
-        'Other games: count and a collapsible title (MADEIRA_LIBRARY_COLLAPSE)')
-require('Label("Add a game"' not in others and '{ EmptyView() }' in others and 'browser = true' in page,
-        'Other games: no Add a game button of its own; the + in the navigation bar opens the executable browser')
-require('"Copy a game\'s folder into Madeira › wine › drive_c with the Files app, then tap + and choose its .exe."' in others
-        and 'L("No other games match your search.")' in others, 'Other games: empty and no-match texts')
-require(others.index('if hideOthers && SteamGamesSection.collapsible {') < others.index('} else if entries.isEmpty {')
-        < others.index('cells(entries, width: viewport.size.width)'), 'Other games: collapsed, empty, then the games')
-require('@AppStorage("madeiraLibraryHideOthers") private var hideOthers = false' in view, 'Other games: remembered collapsed state')
-entries = between(view, 'private var entries: [LibraryEntry] {', 'var body: some View {')
-require('$0.desktop != true' in entries and '$0.steamAppID == nil' in entries
-        and 'localizedCaseInsensitiveContains(search)' in entries,
-        'Other games: the games you added (no Steam game, no desktop), filtered by the search')
-require('LibraryCells(items: items, layout: layout, width: viewportWidth)' in view, "Other games: the library's layout")
+others = between(newlook, '    private var otherGames: some View {', '/// The new look\'s question over every tab')
+require('title: L("Add a game")' in others and 'action: add' in others, 'Other games: Add a game button')
+require('"Import a game\'s folder, a .zip or .7z, or an .exe, or choose one already on this device."' in others
+        and 'if games.isEmpty {' in others, 'Other games: empty text')
+require('NewLookStore.other.prefix' in others and 'open(game.entry)' in others, 'Other games: the games you added, each opens its page')
+added = between(newlook, 'static func added()', 'static func all(search:')
+require('entry.desktop != true' in added and 'entry.listedInLibrary' in added and 'entry.steamAppID == nil' in added,
+        'Other games: the games you added (no Steam game, no desktop)')
 
 # ------------------------------------------------------------------ Steam and Not installed
-require('LibrarySectionHeader(title: "Steam", count: installed.count,' in body and
-        'collapsed: collapsible ? $hideInstalled : nil)' in body, 'Steam: installed count and a collapsible title')
+require('LibrarySectionHeader(title: "", count: nil)' in body and 'LibrarySectionHeader(title: "Steam"' not in body,
+        'Steam: no title row of its own (the store page names the store); the spinner and Workshop stay')
 require('if steam.refreshing { ProgressView().accessibilityLabel("Refreshing Steam library") }' in body,
         'Steam: a progress indicator while the library refreshes')
-require('@AppStorage("madeiraLibraryHideInstalled") private var hideInstalled = false' in section and
-        '@AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true' in section,
-        'Steam: remembered states (installed shown, Not installed open by default)')
-require('static var collapsible: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_COLLAPSE") }' in section,
-        'MADEIRA_LIBRARY_COLLAPSE (on by default) makes the titles collapsible')
-order = [body.index('LibrarySectionHeader(title: "Steam"'), body.index('SteamSignInCard { showSignIn = true }'),
-         body.index('if hideInstalled && collapsible {'),
-         body.index('LibraryCells(items: groups.downloading + installed, layout: layout, width: width)'),
+require('@AppStorage("madeiraSteamShowUninstalled") private var showUninstalled = true' in section and
+        '@AppStorage("madeiraNewLookSteamShowInstalled") private var showInstalled = false' in section,
+        'Steam: remembered states (Not installed open by default, installed folded away at first)')
+require('collapsible' not in section, 'Steam: no collapsible title any more')
+order = [body.index('LibrarySectionHeader(title: "", count: nil)'), body.index('SteamSignInCard { showSignIn = true }'),
+         body.index('LibraryCells(items: top, layout: layout, width: width)'),
          body.index('"Pull down to load your Steam library."'), body.index('Text("Not installed").font(.headline)'),
-         body.index('LibraryCells(items: groups.notInstalled, layout: layout, width: width)')]
-require(order == sorted(order), 'Steam order: title, sign-in, downloading + installed, empty text, Not installed')
+         body.index('LibraryCells(items: groups.notInstalled, layout: layout, width: width)'),
+         body.index('NewLookInstalledHeader(id: "steam-installed"')]
+require(order == sorted(order), 'Steam order: spinner row, sign-in, downloading, empty text, Not installed, installed (folded)')
+require('let fold = part == .all' in body and 'let top = fold ? groups.downloading : groups.downloading + installed' in body,
+        'Steam: the store page lists downloading games first and folds the installed ones below')
 require('"No Windows games were found in this Steam library."' in body, 'Steam: empty-library text')
-require('} else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && search.isEmpty {' in body,
+require('} else if signedIn && !steam.refreshing && groups.notInstalled.isEmpty && installed.isEmpty && search.isEmpty {' in body,
         'Steam: the empty text only when signed in, loaded, nothing owned to install and no search')
 require('if part != .installed && signedIn && !groups.notInstalled.isEmpty {' in body and 'if showUninstalled {' in body
         and '.accessibilityValue(showUninstalled ? "Shown" : "Hidden")' in body,
-        'Not installed: signed in, folds on its own, not with the Steam title')
+        'Not installed: signed in, folds on its own')
 require('let items = SteamGamesRules.items(installed: model.games, owned: owned, search: search)' in body and
         'SteamGamesRules.groups(items, downloading: Set(steam.downloads.keys))' in body and
         'SteamGamesRules.sorted(groups.installed, by: sort, recorded: recorded)' in body,
-        "Steam: the search, the groups and the library's Sort by apply")
+        "Steam: the search, the groups and the sort apply")
 card = between(games, 'struct SteamSignInCard: View {', '// MARK: - Artwork')
 require('"Sign in to Steam"' in card and '"See your Steam games here and install them without leaving Madeira."' in card,
         'the sign-in card')
 cell = between(games, 'struct SteamGameCell: View {', '/// Progress, speed and the state of one download.')
-require('if list && dense {' in cell and '} else if list {' in cell, "Steam cards: the library's list and compact list rows")
-require('SteamGamesSection.shown' in view and '[library-sections] native-steam=' in view, 'log line [library-sections]')
-require(re.search(r'\[library-sections\][^"]*\\\((?!SteamOwnedLibrary\.enabled|SteamGamesSection\.)', view) is None,
-        'the log line has flags only')
-
-# ------------------------------------------------------------------ store tabs
-tabs = between(library, 'enum LibraryStoreTab: String, CaseIterable, Identifiable {', 'struct LibraryStoreTabBar: View {')
-bar = between(library, 'struct LibraryStoreTabBar: View {', 'struct LibraryCells<Item: Identifiable, Cell: View>: View {')
-grid_page = (root / 'app/Madeira/LibraryGridPage.swift').read_text()
-grid_build = between(grid_page, '@MainActor static func build(_ inputs: Inputs)', 'private mutating func append(')
-require('static var enabled: Bool { MadeiraConfig.flag("MADEIRA_LIBRARY_TABS") }' in tabs
-        and 'guard enabled else { return [] }' in tabs and 'return tabs.count < 2 ? [] : [.all] + tabs' in tabs,
-        'store tabs: only the shown sections, none with fewer than two, MADEIRA_LIBRARY_TABS=0 turns them off')
-require('guard let tab = LibraryStoreTab(rawValue: stored), tabs.contains(tab) else { return .all }' in tabs,
-        'store tabs: a tab that is no longer offered shows All')
-require('.pickerStyle(.segmented)' in bar and 'ViewThatFits(in: .horizontal) {' in bar
-        and 'ScrollView(.horizontal, showsIndicators: false) {' in bar,
-        'store tabs: the system segmented control, capsules that scroll when it does not fit')
-require('group == "platform" ? LibraryStoreTab.available(' in view
-        and page.index('LibraryStoreTabBar(tabs: storeTabs, selection: $storeTab)') < page.index('desktopButton'),
-        'store tabs: at the top of the page, with Group by Platform only')
-require(all(f'tab.shows(.{t})' in page for t in ('steam', 'other', 'gog', 'itch', 'epic', 'ea')),
-        'store tabs: each section shows on its tab and on All')
-require(grid_build.index('page.append(.fixed(.storeTabs), spacing: 0)') < grid_build.index('page.append(.fixed(.desktop)')
-        and all(f'tab.shows(.{t})' in grid_build for t in ('steam', 'other')) and 'where tab.shows(store.tab)' in grid_build
-        and 'tabs = i.tabs; tab = i.tab' in grid_page,
-        'store tabs: the zoomable grid shows the same tabs and sections, and rebuilds when the tab changes')
-require('MADEIRA_LIBRARY_TABS' in docs, 'docs/LIBRARY.md: the store tabs and their switch')
+require('if list && dense {' in cell and '} else if list {' in cell, "Steam cards: the list and compact list rows")
 
 # ------------------------------------------------------------------ docs
-require('MADEIRA_LIBRARY_COLLAPSE' in docs and '**Other games**' in docs and '**Not installed**' in docs,
-        'docs/LIBRARY.md: the sections and the switch')
+require('**Other games**' in docs and '**Not installed**' in docs, 'docs/LIBRARY.md: the sections')
 require('Pull down' in steam_docs, 'docs/STEAM_LIBRARY.md: pull down to refresh')
 
 if failures:

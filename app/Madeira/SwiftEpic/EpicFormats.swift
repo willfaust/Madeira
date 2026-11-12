@@ -138,15 +138,23 @@ enum EpicCodec {
 
     static func sha1(_ data: Data) -> Data { Data(Insecure.SHA1.hash(data: data)) }
 
+    /// Each read is drained in its own autorelease pool: FileHandle's reads are autoreleased,
+    /// and a repair hashes the whole game without suspending, so without the pool every
+    /// block read stayed in memory until the end. Satisfactory's repair (about 20 GB) passed
+    /// 9.5 GB in ten seconds and iOS ended Madeira at about 20% (Wave 11, 2026-11-07); the
+    /// GOG downloader has the same pool since build 63.
     static func sha1(of url: URL, progress: (Int) -> Void = { _ in }) throws -> Data {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var sha = Insecure.SHA1()
         while true {
-            let block = try handle.read(upToCount: 4 << 20) ?? Data()
-            if block.isEmpty { break }
-            sha.update(data: block)
-            progress(block.count)
+            let count: Int = try autoreleasepool {
+                let block = try handle.read(upToCount: 4 << 20) ?? Data()
+                sha.update(data: block)
+                return block.count
+            }
+            if count == 0 { break }
+            progress(count)
         }
         return Data(sha.finalize())
     }

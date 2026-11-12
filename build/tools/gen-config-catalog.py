@@ -45,13 +45,31 @@ INT_READERS = {"madeira_cfg_int", "mad_cfg_int_pe"}
 # Titles, kinds and fixed choices for options with a dedicated Settings row.
 # "choices" are (value, label); the empty value means "remove the key".
 OVERLAY = {
+    # Read through DockInstallers.separateSession (a key string, not flag("...")), so the scan does not find it.
+    "env.MADEIRA_DOCK_INSTALL_SEPARATE": {"category": "Steam & Dock", "title": "", "kind": "bool", "default": "",
+                "sources": ["app/Madeira/DockInstallers.swift"],
+                "note": "unset: only a game whose own lines hold an address-space layout line (env.MADEIRA_RDR2_VA_HOLD, "
+                        "env.MADEIRA_SC_PA_POOLS) runs its one-time installs in a session of their own and starts after a "
+                        "restart; every other game starts right after them in the same session. 1: always a session of their "
+                        "own; 0: never"},
     # Madeira in the background (app/Madeira/BackgroundRun.swift, build/ntdll-unix/audio_null_ios.c).
+    "env.MADEIRA_LIBRARY_COVER_CACHE": {"category": "App & front end", "title": "Library covers from the cover cache", "kind": "bool", "default": "1",
+                "note": "On by default: the SwiftUI cards (list layouts, the original grid, the GOG, itch.io, Epic Games and EA "
+                        "sections) take their covers from the zoomable grid's cover cache: downsampled off the main thread, kept "
+                        "in memory and on disk, so a big library scrolls without covers popping in again. 0: AsyncImage, as before. "
+                        "Read at app start."},
     "background-run": {"category": "App & front end", "title": "Keep a game running in the background (minutes)",
                 "kind": "int", "default": "10", "sources": ["app/Madeira/BackgroundRun.swift"],
                 "note": "Minutes a running game keeps going after you switch apps or lock the screen, so a long load "
                         "finishes while you are away. Loading and other CPU work go on; drawing waits until Madeira is "
                         "back (background-pause). The game's sound is muted meanwhile. 0: iOS pauses the game within "
                         "seconds, as before. A game's own config can set it. [bg-run] lines in the log."},
+    # Apple Pencil as a mouse (app/Madeira/ContentView.swift, MetalBackedView).
+    "pencil-mouse": {"category": "App & front end", "title": "Apple Pencil as a mouse",
+                "kind": "bool", "default": "0", "sources": ["app/Madeira/ContentView.swift"],
+                "note": "1: the Apple Pencil acts as a mouse. Touching the screen is a left press and drag as before; "
+                        "hovering above it moves the pointer; squeezing an Apple Pencil Pro right-clicks where it is. "
+                        "Ignored in mouse-look (relative) mode. A game's own config can set it. [pencil] line in the log."},
     "background-gpu-gate": {"category": "App & front end", "title": "Hold GPU work in the background",
                 "kind": "bool", "default": "1", "sources": ["app/Madeira/BackgroundRun.swift"],
                 "note": "On by default. While Madeira is not the active app, any thread other than the app's main "
@@ -136,6 +154,23 @@ OVERLAY = {
                         "pool: reusable 3 seconds later, once no thread runs in them. Before, they stayed in use "
                         "until Madeira closed, and a game started after many such exits got 16 MB code buffers and "
                         "ran slowly. 0 keeps them in use, as before."},
+    "env.MADEIRA_JIT_SMALL_NOTICE": {"category": "Memory & JIT pool", "title": "Banner when the JIT pool came out smaller",
+                "kind": "bool", "default": "0",
+                "note": "Default off. 1: once a game is up, a banner says JIT memory is small this time whenever iPadOS "
+                        "gave the pool less than asked (nearly every start without pool-split, and most games are fine). "
+                        "A start that really runs out says Not enough memory either way."},
+    "env.MADEIRA_JIT_POOL_NOTICE_NOW": {"category": "Memory & JIT pool", "title": "Say at once when a game ran out of JIT memory",
+                "kind": "bool", "default": "1",
+                "note": "Default on. When a library game's start runs out of JIT pool ([jit-pool] EXHAUSTED) while the "
+                        "starting screen is up, the screen says Not enough memory at once and offers Close Madeira; the "
+                        "next app run starts the game by itself. 0: the start waits for Steam's code 45 and the alert "
+                        "comes after the session, as before."},
+    "env.MADEIRA_JIT_POOL_AUTO": {"category": "Memory & JIT pool", "title": "Bigger JIT pool for a game that ran out",
+                "kind": "bool", "default": "1",
+                "note": "Default on. A library game whose session logs [jit-pool] EXHAUSTED gets pool-split = 1 and "
+                        "env.MADEIRA_X64_IMAGE_NOCOPY = 1 added to its own config (a key it already sets, to any value, "
+                        "stays as it is), and the alert after the session asks for Madeira to be reopened, since the pool "
+                        "is set up once per app run. 0: nothing is added. Read when the pool runs out."},
     "env.MADEIRA_X64_IMAGE_NOCOPY": {"category": "Memory & JIT pool", "title": "Pure-x64 images without a JIT-pool copy",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: an x64-only image (not ARM64EC hybrid, not a Wine builtin) in a 64-bit "
@@ -587,6 +622,7 @@ OVERLAY = {
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
     "env.MADEIRA_WOW_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 32-bit window's anonymous RWX memory is plain read/write to the host once Wine Mono's libmono-2.0-x86.dll is mapped there (ml1279/ml1282). 1: in every 32-bit window. 0: never (stores go through the JIT pool's alias, and FEX's Mono bridge stays off)."},
+    "env.MADEIRA_X64_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 64-bit program's anonymous RWX memory is plain read/write to the host once Unity's mono-2.0-bdwgc.dll is mapped. 1: in every 64-bit process. 0: never (stores go through the JIT pool's alias)."},
     "env.MADEIRA_WINEMONO_BRIDGE": {"note": "FEX's Mono backpatcher bridge (ml712). On by itself for Wine Mono, 32- and 64-bit (ml1282/ml1286); for the 32-bit runtime in a guest window it also turns SMC detection off once the backpatcher is found (ml1280). 0 keeps it off."},
     "env.MADEIRA_MONO_DEFAULTS": {"category": "Wine libraries", "note": "Wine Mono, 32- and 64-bit: mscoree sets MONO_THREADS_SUSPEND=coop and adds keep-delegates to MONO_DEBUG before Mono loads, and puts the previous values back once Mono has read them (ml1282); values already set win. 0 sets nothing."},
     "cpu-count": {"title": "Reported CPU count (0 = device)"},
@@ -851,6 +887,19 @@ OVERLAY = {
                         "must start on a 32 GB boundary, gets 0x7800000000 (20 GB of it really reserved). 2: also "
                         "libcef.dll's (0x7000000000) and Oilpan's; the JIT pool's RW alias moves to 0x7900000000. "
                         "Off by default; set it in the game's own file; read at session start."},
+    "env.MADEIRA_CEF_CMDLINE": {"category": "Memory & JIT pool", "title": "Let in-process Chromium read the game's command line",
+                "kind": "bool", "default": "0",
+                "note": "1: in a program named by env.MADEIRA_CEF_PA_EXES, libcef.dll's cef_initialize clears the game's "
+                        "command_line_args_disabled, so Chromium switches given with env.MADEIRA_CHILD_ARGS (such as "
+                        "--single-process) reach it. For a game whose Chromium helper processes are refused memory "
+                        "(BeamNG.drive). Default off; set it in the game's own file; log [cef-cmdline]."},
+    "env.MADEIRA_CEF_PA_EXES": {"category": "Memory & JIT pool", "title": "Games that run Chromium in their own process",
+                "kind": "text", "default": "",
+                "note": "Exe names, separated by ';' (e.g. BeamNG.drive.x64.exe). A listed program gets the address "
+                        "space SocialClubHelper.exe gets under env.MADEIRA_SC_PA_POOLS: room for chrome_elf.dll's and "
+                        "libcef.dll's PartitionAlloc pools, Oilpan and V8's cage. Use it with env.MADEIRA_SC_PA_POOLS = 2 "
+                        "for a game that loads libcef.dll itself and stops in chrome_elf.dll (80000003). Empty by "
+                        "default; set it in the game's own file; read at session start."},
     "avail-phys": {"category": "Memory & JIT pool", "title": "Report the memory left before the app's limit as available",
                 "kind": "bool", "default": "0",
                 "note": "Default off. 1: Windows programs' available physical memory (GlobalMemoryStatusEx) is what "
@@ -1081,6 +1130,12 @@ OVERLAY = {
                         "Launcher 132 MB, Social Club 68 MB through a whole RDR2 session). Larger uploads still get a "
                         "block of their own; each named program logs one [small-rings] line. Unset or 0 (default): "
                         "32 MB, as before. Set it in the game's own file; read when the program starts."},
+    "env.MADEIRA_D3D11_NO_VIDEO_DEVICE": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Direct3D 11: use software video presentation",
+                "kind": "bool", "default": "0",
+                "sources": ["build/dxmt-patches/0002-d3d11-video-device-fallback.patch"],
+                "note": "1: reject D3D11 devices explicitly requested with VIDEO_SUPPORT so Unity can fall back "
+                        "to CPU-backed Media Foundation samples. Direct3D rendering still uses Metal. Set per game."},
     # DXMT's Direct3D 9 index buffers read it (dxmt, build/dxmt-patches/0001-d3d9-index-range-per-draw.patch).
     "env.MADEIRA_D3D9_INDEX_RANGE": {"category": "Direct3D 9/10/11 (DXMT)",
                 "title": "Direct3D 9: upload only the index bytes a draw reads",
@@ -1243,6 +1298,9 @@ OVERLAY = {
                 "note": "Default off. 1: an x64 image's PE volatile metadata (MSVC /volatileMetadata) is cleared when it is "
                         "mapped, so FEX orders every instruction of it by its TSO settings instead of only the listed ones. "
                         "Slower; for testing memory-ordering bugs. Logged as [fex-vmeta]. Read at session start."},
+    "env.MADEIRA_AUDIO_MIX": {"category": "Audio", "title": "Play alongside other apps' audio", "kind": "bool", "default": "1",
+                "note": "Default on: a game's sound mixes with other apps', so a Discord voice call or music keeps playing "
+                        "while Madeira runs. 0: Madeira's audio stops the others, as before. Read when a session starts."},
     "env.MADEIRA_AUDIO_RESUME": {"category": "Audio", "title": "Bring game audio back after an interruption", "kind": "bool",
                 "default": "0",
                 "note": "Default off: after a call, Siri, an alarm or a suspension the sound stays off until the game restarts. "
@@ -1290,8 +1348,14 @@ OVERLAY = {
                         "a second) or presenting makes no progress, and the 5-repeat guard counts per thread within 5 ms; for a "
                         "Unity title that throws managed exceptions through null-check traps while it keeps drawing. Read once "
                         "per session."},
+    "env.MADEIRA_VCRT_ARM64_AUTO": {"category": "Wine core (ntdll)", "title": "ARM64 Visual C++ marker for Unreal games", "kind": "bool", "default": "1",
+                "note": "Default on: a game with an Unreal Engine folder (Engine\\Binaries or Engine\\Extras) starts with "
+                        "env.MADEIRA_VCRT_ARM64_KEY = 1, so its bootstrap stops asking for the ARM64 Visual C++ redistributable "
+                        "(Satisfactory, Subnautica 2). A MADEIRA_VCRT_ARM64_KEY line in madeira.cfg or the game's config wins. "
+                        "0: only such a line sets it. Read at launch."},
     "env.MADEIRA_VCRT_ARM64_KEY": {"category": "Wine core (ntdll)", "title": "ARM64 Visual C++ runtime marker", "kind": "text", "default": "",
-                "note": "Default empty: nothing written. 1 (or a version such as 14.50.35717): the session has the ARM64 Visual "
+                "note": "Default empty: nothing written, except for an Unreal Engine game, which gets 1 automatically "
+                        "(env.MADEIRA_VCRT_ARM64_AUTO). 0 turns it off for a game. 1 (or a version such as 14.50.35717): the session has the ARM64 Visual "
                         "C++ 2015-2022 redistributable's Installed marker (volatile keys; one the prefix has is left alone), for "
                         "an Unreal bootstrap program that sees an ARM64 machine and stops asking for that redistributable "
                         "(exit 0x2329). Read at session start."},
@@ -1315,7 +1379,8 @@ OVERLAY = {
                 "kind": "bool", "default": "0",
                 "note": "Default off: success with no path, as before. 1: QueryDisplayConfig returns the virtual monitor's one path "
                         "(source and target mode, the desktop size) and DisplayConfigGetDeviceInfo names its source, target and "
-                        "adapter, for a game that builds its fullscreen window from the paths."},
+                        "adapter and answers its preferred mode and colour info, for a game that builds its fullscreen window from "
+                        "the paths (Unity, e.g. REPLACED: white screen)."},
     "env.MADEIRA_REDELIV_CHILD_ONLY": {"category": "Exceptions & threads", "title": "A fault storm in a helper program ends only that program",
                 "kind": "bool", "default": "1",
                 "note": "Default on: when the fault-storm guard gives up on a thread of a program the session started (a "

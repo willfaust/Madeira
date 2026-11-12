@@ -53,79 +53,89 @@ struct ItchGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var itch = ItchLibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @AppStorage("madeiraLibraryHideItch") private var hidden = false
     @AppStorage("madeiraItchShowUninstalled") private var showUninstalled = true
-    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches ItchSheets (LibraryGridPage.swift).
-    var inGrid = false
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookItchShowInstalled") private var showInstalled = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
         let items = ItchGamesRules.items(itch, search: search)
         let mine = items.filter { $0.installed != nil || itch.downloads[$0.id] != nil }
         let others = items.filter { $0.installed == nil && itch.downloads[$0.id] == nil }
-        let collapsible = SteamGamesSection.collapsible
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let top = mine.filter { itch.downloads[$0.id] != nil }
+        let folded = mine.filter { itch.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "itch.io", count: mine.count, collapsed: collapsible ? $hidden : nil) {
-                if itch.refreshing { ProgressView().accessibilityLabel("Refreshing itch.io library") }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if itch.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing itch.io library") } }
+            if !itch.signedIn {
+                Button { sheets.itchSignIn = true } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "person.crop.circle.badge.plus").font(.system(size: 30)).foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sign in to itch.io").font(.headline)
+                            Text("See the games you bought or claimed on itch.io here and install them without leaving Madeira.")
+                                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }.padding(14)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain)
+                    .menuPad("signin:itch", cornerRadius: 16) { sheets.itchSignIn = true }
             }
-            if !(hidden && collapsible) {
-                if !itch.signedIn {
-                    Button { sheets.itchSignIn = true } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "person.crop.circle.badge.plus").font(.system(size: 30)).foregroundStyle(.tint)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Sign in to itch.io").font(.headline)
-                                Text("See the games you bought or claimed on itch.io here and install them without leaving Madeira.")
-                                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                        }.padding(14)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-                    }.buttonStyle(.plain)
+            if !top.isEmpty {
+                LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+            } else if itch.signedIn && !itch.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
+                Text(itch.libraryUpdated == nil ? "Pull down to load your itch.io library."
+                     : "No Windows games yet. Games you buy or claim on itch.io show here, and so do the games in your itch.io collections. For a free game, use Find a game.")
+                    .foregroundStyle(.secondary)
+            }
+            if itch.signedIn {
+                Button { sheets.itchFind = true } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "magnifyingglass.circle.fill").font(.system(size: 30)).foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Find a game on itch.io").font(.headline)
+                            Text("Search itch.io or paste a game's link, add free games to this library and install them here.")
+                                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    }.padding(14)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain)
+                    .padItem("itch-find", cornerRadius: 16) { sheets.itchFind = true }
+            }
+            if itch.signedIn && !others.isEmpty {
+                Button {
+                    var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
+                } label: {
+                    HStack {
+                        Text("Not installed").font(.headline)
+                        Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
+                    }.contentShape(Rectangle()).frame(minHeight: 44)
+                }.buttonStyle(.plain)
+                    .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                    .padItem("itch-not-installed", cornerRadius: 16) { showUninstalled.toggle() }
+                if showUninstalled {
+                    LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
-                if !mine.isEmpty {
-                    LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if itch.signedIn && !itch.refreshing && others.isEmpty && search.isEmpty {
-                    Text(itch.libraryUpdated == nil ? "Pull down to load your itch.io library."
-                         : "No Windows games yet. Games you buy or claim on itch.io show here, and so do the games in your itch.io collections. For a free game, use Find a game.")
-                        .foregroundStyle(.secondary)
-                }
-                if itch.signedIn {
-                    Button { sheets.itchFind = true } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "magnifyingglass.circle.fill").font(.system(size: 30)).foregroundStyle(.tint)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Find a game on itch.io").font(.headline)
-                                Text("Search itch.io or paste a game's link, add free games to this library and install them here.")
-                                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                        }.padding(14)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-                    }.buttonStyle(.plain)
-                }
-                if itch.signedIn && !others.isEmpty {
-                    Button {
-                        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { showUninstalled.toggle() }
-                    } label: {
-                        HStack {
-                            Text("Not installed").font(.headline)
-                            Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                                .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
-                        }.contentShape(Rectangle()).frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                        .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
-                    if showUninstalled {
-                        LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
+            }
+            if !folded.isEmpty {
+                // Nothing to install or download: the installed games just show, with a plain title.
+                let only = top.isEmpty && !(itch.signedIn && !others.isEmpty)
+                NewLookInstalledHeader(id: "itch-installed", count: folded.count, open: only ? nil : $showInstalled)
+                if only || showInstalled {
+                    LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
             }
         }
-        .modifier(ItchSheets(open: open, attached: !inGrid))
+        .modifier(ItchSheets(open: open))
     }
 
     private func cell(_ item: ItchItem, list: Bool, dense: Bool) -> some View {
@@ -136,45 +146,39 @@ struct ItchGamesSection: View {
                 sheets.itchGame = .init(id: item.id)
             }
         } label: { ItchGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "itch:\(item.id)")
     }
 }
 
 /// What the itch.io section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
-/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+/// sign-in sheets and the error alert. The section attaches it.
 struct ItchSheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var itch = ItchLibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if ItchLibrary.enabled { itch.start(); itch.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && ItchLibrary.enabled { itch.reconcileSession() } }
-            .sheet(item: $sheets.itchGame) { selection in
-                ItchGameSheet(gameID: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if ItchLibrary.enabled { itch.start(); itch.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && ItchLibrary.enabled { itch.reconcileSession() } }
+        .sheet(item: $sheets.itchGame) { selection in
+            ItchGameSheet(gameID: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.itchSignIn) { ItchSignInView() }
-            .sheet(isPresented: $sheets.itchFind) {
-                ItchFindView { id in
-                    sheets.itchFind = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheets.itchGame = .init(id: id) }
-                }
-            }
-            .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
-                Button("OK", role: .cancel) { itch.error = nil }
-            } message: { Text(itch.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.itchSignIn) { ItchSignInView() }
+        .sheet(isPresented: $sheets.itchFind) {
+            ItchFindView { id in
+                sheets.itchFind = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { sheets.itchGame = .init(id: id) }
+            }
+        }
+        .alert("itch.io", isPresented: Binding(get: { itch.error != nil }, set: { if !$0 { itch.error = nil } })) {
+            Button("OK", role: .cancel) { itch.error = nil }
+        } message: { Text(itch.error ?? "") }
     }
 }
 
@@ -185,6 +189,9 @@ struct ItchGameArtwork: View {
     var body: some View {
         if let entry = library.entries.first(where: { $0.itchGameID == item.id }), entry.coverFile != nil {
             LibraryArtwork(entry: entry)
+        } else if LibraryCachedArtwork.enabled {
+            // Downsampled, kept in memory and on disk (LibraryCoverCache.swift).
+            LibraryCachedArtwork(source: .store("itch", "\(item.id)", item.cover))
         } else {
             GeometryReader { geometry in
                 ZStack {
@@ -346,6 +353,7 @@ struct ItchGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -432,6 +440,25 @@ struct ItchGameSheet: View {
                 steamActionLabel(itch.hasPartialDownload(gameID) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!itch.signedIn)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: ItchItem) -> (() -> Void)? {
+        if let download = itch.downloads[gameID] {
+            switch download.state {
+            case .active, .queued:
+                return { itch.pause(gameID) }
+            case .paused:
+                return { itch.install(gameID) }
+            case .failed:
+                return { itch.install(gameID) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.itchEntry(installed); dismiss(); open(entry) }
+        } else if item.owned != nil {
+            return itch.signedIn ? { itch.install(gameID) } : nil
+        }
+        return nil
     }
 }
 

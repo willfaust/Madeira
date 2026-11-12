@@ -88,7 +88,7 @@ final class LogStore: ObservableObject {
             try? FileManager.default.removeItem(at: prevLogURL)
             try? FileManager.default.moveItem(at: logFileURL, to: prevLogURL)
         }
-        try? "".write(to: logFileURL, atomically: true, encoding: .utf8)
+        try? LogRuns.initialHeader().write(to: logFileURL, atomically: true, encoding: .utf8)   // madeira-log-summary: the block at the top
         // A session that never returned to the library (a crash, Force close) wrote
         // no madeira-summary.txt; summarize it now. A launch without a session
         // leaves the last summary in place (LogSummary.write).
@@ -105,6 +105,7 @@ final class LogStore: ObservableObject {
                 let finished = task; task = .invalid
                 UIApplication.shared.endBackgroundTask(finished)
             }
+            LogStore.shared.flushRepeats()
             DispatchQueue.global(qos: .utility).async {
                 LogSummary.write(from: logFileURL, source: "madeira-log.txt (this session, up to when Madeira went to the background)")
                 DispatchQueue.main.async {
@@ -123,6 +124,8 @@ final class LogStore: ObservableObject {
         // Tail the log file. Reads everything Wine + DXMT + FEX write via
         // dprintf(STDERR_FILENO, ...), wine_log_write, etc.
         tail = LogTail(path: logFileURL.path) { [weak self] line in
+            LogTrail.see(line)   // a game's start steps, its errors and its end (LogTrail.swift)
+            self?.tick(after: line)
             self?.handleRawLine(line)
         }
         tail?.start()
@@ -209,9 +212,66 @@ final class LogStore: ObservableObject {
 
     /// Public entry point for Swift-side logging (kept for ContentView calls)
     func log(_ message: String, level: LogEntry.Level = .info) {
+        // madeira-log-trail: an error says what was going on (the game and its last start step).
+        let message = level == .error && LogTrail.enabled && !message.contains(" (during: ") ? message + LogTrail.during() : message
         handleRawLine(message)
         // Also append to the file so it shows up in pulled logs alongside Wine output
+        guard Self.collapseRepeats else { appendToFile(message, level: level); return }
+        // madeira-log-trail: the same line again within a minute is counted, not written; the
+        // count is written before the next different line (or when Madeira goes to the background).
+        repeatLock.lock()
+        let now = Date()
+        if message == lastWritten, now.timeIntervalSince(lastWrittenAt) < 60 {
+            repeats += 1; lastWrittenAt = now
+            repeatLock.unlock()
+            return
+        }
+        let skipped = repeats, previous = lastWritten
+        lastWritten = message; lastWrittenAt = now; repeats = 0
+        repeatLock.unlock()
+        if skipped > 0 { appendToFile(Self.repeatLine(skipped, previous), level: .info) }
         appendToFile(message, level: level)
+    }
+
+    /// (log-fixes) Wine, FEX and DXMT write into this file without a time. In each second that
+    /// such lines arrive, one "[time]" line is written, so every one of them sits within about a
+    /// second of a time (Sentry check Nov 9: 87-99% of a game's log had none).
+    /// env.MADEIRA_LOG_TICK = 0 turns it off.
+    private static let tickLines = MadeiraConfig.flag("MADEIRA_LOG_TICK")
+    private var lastTick = 0
+    func tick(after line: String) {
+        guard Self.tickLines, !Self.hasTime(line) else { return }
+        let second = Int(Date().timeIntervalSince1970)
+        repeatLock.lock()
+        let due = second != lastTick
+        if due { lastTick = second }
+        repeatLock.unlock()
+        if due { appendToFile("[time]", level: .info) }
+    }
+    /// "[13:12:20.701] ..." (this file's own lines).
+    static func hasTime(_ line: String) -> Bool {
+        let u = line.utf8
+        guard u.count > 3, u.first == UInt8(ascii: "[") else { return false }
+        let second = u[u.index(after: u.startIndex)]
+        return second >= UInt8(ascii: "0") && second <= UInt8(ascii: "9")
+    }
+
+    /// env.MADEIRA_LOG_COLLAPSE = 0 writes every repeated line again.
+    private static let collapseRepeats = MadeiraConfig.flag("MADEIRA_LOG_COLLAPSE")
+    private let repeatLock = NSLock()
+    private var lastWritten = ""
+    private var lastWrittenAt = Date.distantPast
+    private var repeats = 0
+    static func repeatLine(_ count: Int, _ line: String) -> String {
+        "[log-repeat] repeated \(count) more time\(count == 1 ? "" : "s"): " + (line.count > 80 ? String(line.prefix(80)) + "…" : line)
+    }
+    /// Writes the count of lines held back as repeats.
+    func flushRepeats() {
+        repeatLock.lock()
+        let skipped = repeats, previous = lastWritten
+        repeats = 0; lastWritten = ""
+        repeatLock.unlock()
+        if skipped > 0 { appendToFile(Self.repeatLine(skipped, previous), level: .info) }
     }
 
     /// Called from tail-file callback (background queue) or C callback.
@@ -363,7 +423,7 @@ final class LogStore: ObservableObject {
         pendingUpdates.removeAll()
         stateLock.unlock()
         entries.removeAll()
-        try? "".write(to: logFileURL, atomically: true, encoding: .utf8)
+        try? LogRuns.initialHeader().write(to: logFileURL, atomically: true, encoding: .utf8)   // madeira-log-summary: the block at the top
     }
 
     /// Write to file (called from `log()` for Swift-side messages so they

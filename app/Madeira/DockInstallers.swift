@@ -528,8 +528,14 @@ enum DockInstallScripts {
         return result
     }
 
-    /// The Dock sheet's line about the plan, or nil when every program is already done.
-    static func note(_ items: [DockInstallPlanItem]) -> String? {
+    /// Why a program was left out because Wine has its own of what it installs (DockInstallers.runnable). Nothing
+    /// is wrong and nothing is asked of the player, so the screens leave these out; the log still lists them.
+    static let wineProvides: Set<String> = ["Wine's own .NET is used", "Wine's own DirectX is used"]
+
+    /// The Dock sheet's line about the plan, or nil when every program is already done or left out because
+    /// Wine provides it (`wineProvides`).
+    static func note(_ all: [DockInstallPlanItem]) -> String? {
+        let items = all.filter { !($0.status == .unsupported && $0.reason.map(wineProvides.contains) == true) }
         func names(_ status: DockInstallStatus) -> String {
             var seen: [String] = []
             for item in items where item.status == status {
@@ -713,6 +719,8 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
 /// - `MADEIRA_DOCK_INSTALL_SERVER_SYNC`: a start that runs installers turns madsync off for
 ///   its session (off: madsync stays and the service-manager step is left out).
 /// - `MADEIRA_DOTNET_FUSION`: place Wine's fusion.dll in the .NET 2.0 folder when missing.
+/// - `MADEIRA_INSTALL_SKIP_DIRECTX`: Microsoft's DirectX redistributable (DXSETUP.exe) is left out
+///   (Wine's own d3dx9/d3dx10/d3dx11, D3DCompiler, XAudio and XInput answer; off: it runs).
 /// - `MADEIRA_INSTALL_SKIP_DOTNET`: .NET Framework 2.0-4.x setups are left out (Wine's own
 ///   .NET answers for them; off: they run like any other program).
 /// - `MADEIRA_DOCK_INSTALL_SEPARATE` (madeira-bcd): a start that runs installers runs only
@@ -741,6 +749,8 @@ enum DockInstallers {
     /// What the starting screen says once the installs ended, until the session has closed (the
     /// wineserver writes the registry to disk as it stops; Madeira asks for the restart then).
     nonisolated static let closingWords = "This session now closes. Madeira asks you to restart it when it has; wait for that."
+    /// The starting screen once it offers Close Madeira (LibraryModel.installsRestartReady).
+    nonisolated static let closeWords = "The installs are saved. Tap Close Madeira (the round arrow below), then open Madeira again and start the game."
     /// madeira-bcd: the game's lines a session of one-time installs runs without. Social Club's
     /// layout 2 (env.MADEIRA_SC_PA_POOLS) and RDR2's hold (env.MADEIRA_RDR2_VA_HOLD) take the
     /// 4 GB slots 32-bit programs run in, so the Visual C++ setups' second 32-bit process could
@@ -748,6 +758,28 @@ enum DockInstallers {
     /// 2026-10-03 16:00 and 2026-10-12 10:00). Both serve the game's Social Club only; the game's
     /// other lines stay (the Rockstar Service install needs env.MADEIRA_EXECREQ_LEAVE).
     nonisolated static let installSessionDroppedKeys: Set<String> = ["env.MADEIRA_SC_PA_POOLS", "env.MADEIRA_RDR2_VA_HOLD"]
+
+    /// Whether a start that runs one-time installs runs only them, so the game starts after a
+    /// restart of Madeira (env.MADEIRA_DOCK_INSTALL_SEPARATE). Set in the game's own lines or
+    /// madeira.cfg, "0" means never and anything else always. Unset, only a game whose own
+    /// lines hold one of `installSessionDroppedKeys` does: those games are why the separate
+    /// session exists (Red Dead Redemption 2's JIT pool ran out with the installers' copies in
+    /// it, and Social Club's layouts left the Visual C++ setups no 32-bit room). Every other
+    /// game runs its installs and then starts in the same session, with no restart to ask for.
+    nonisolated static func separateSession(game: (String) -> String? = MadeiraConfig.gameValue,
+                                            global: (String) -> String? = { MadeiraConfig.get($0) }) -> Bool {
+        let key = "env.MADEIRA_DOCK_INSTALL_SEPARATE"
+        if let set = game(key) ?? global(key) ?? ProcessInfo.processInfo.environment["MADEIRA_DOCK_INSTALL_SEPARATE"] {
+            return set != "0"
+        }
+        return installSessionDroppedKeys.contains { game($0) != nil }
+    }
+
+    /// The log's words for why `separateSession` said yes.
+    nonisolated static func separateReason(game: (String) -> String? = MadeiraConfig.gameValue) -> String {
+        let layout = installSessionDroppedKeys.sorted().filter { game($0) != nil }
+        return layout.isEmpty ? "env.MADEIRA_DOCK_INSTALL_SEPARATE" : "the game's " + layout.joined(separator: ", ")
+    }
 
     /// madeira-bcd: for a session of one-time installs (the app sets MADEIRA_DOCK_INSTALLS_SESSION),
     /// the game's config file (MADEIRA_CFG_GAME) is replaced by a copy without
@@ -903,9 +935,15 @@ enum DockInstallers {
     /// under it: Batman: Arkham City GOTY's .NET 3.5 setup ("/web /q") sat invisible on
     /// "Extracting Files" and held the game's start (log 2026-10-31 23:22). They are left out,
     /// as GameNative (Wine on Android) does. Newer .NET (Core, 5+) setups still run.
+    ///
+    /// And with `skipDirectX`: Microsoft's DirectX redistributable (DXSETUP.exe, June 2010). It ended with -9
+    /// ("internal error") in each player log that ran it after 0.2.0 (it was pending in 36 of 122), so a game's first
+    /// start showed a failed install. What it installs, Wine has its own of: d3dx9_*, d3dx10_*, d3dx11_*,
+    /// D3DCompiler_*, XAudio2, X3DAudio and XInput.
     nonisolated static func runnable(_ process: SteamInstallProcess, drive: URL, has32Bit: Bool, hasMsiexec: Bool,
-                                     skipDotNet: Bool = false) -> String? {
+                                     skipDotNet: Bool = false, skipDirectX: Bool = false) -> String? {
         if skipDotNet && isDotNetFramework(process) { return "Wine's own .NET is used" }
+        if skipDirectX && isDirectXRedist(process) { return "Wine's own DirectX is used" }
         if process.executable.lowercased().hasSuffix(".msi") { return hasMsiexec ? nil : "Windows Installer package" }
         guard let file = resolve(process.executable, drive: drive), let machine = machine(file) else { return nil }
         return machine == 0x14c && !has32Bit ? "32-bit installer" : nil
@@ -919,6 +957,15 @@ enum DockInstallers {
         if file.hasPrefix("dotnetfx") || (file.hasPrefix("ndp") && file.hasSuffix(".exe")) { return true }
         let key = process.run.key.lowercased()
         return key.contains("\\net framework setup\\ndp") || key.contains("\\commonredist\\dotnet\\")
+    }
+
+    /// Microsoft's DirectX redistributable: DXSETUP.exe (its own name, wherever Steam's _CommonRedist\DirectX or the
+    /// game ships it), or Steam's CommonRedist DirectX key as the entry's HasRunKey.
+    nonisolated static func isDirectXRedist(_ process: SteamInstallProcess) -> Bool {
+        let file = process.executable.split(separator: "\\").last.map { $0.lowercased() } ?? ""
+        if file == "dxsetup.exe" { return true }
+        let key = process.run.key.lowercased()
+        return key.contains("\\commonredist\\directx")
     }
 
     nonisolated static var bundleHas32Bit: Bool { bundled("i386-windows") }
@@ -1094,6 +1141,7 @@ enum DockInstallers {
         }
         let defaultKey = flag("MADEIRA_INSTALL_DEFAULT_KEY")
         let skipDotNet = flag("MADEIRA_INSTALL_SKIP_DOTNET")   // 0: .NET Framework setups run too
+        let skipDirectX = flag("MADEIRA_INSTALL_SKIP_DIRECTX")   // 0: the DirectX redistributable runs too
         let (found, scripts) = Self.found(game, drive: drive, defaultKey: defaultKey)
         // A Record as done / Reset request saved since the last start, before the plan reads
         // the registry.
@@ -1122,7 +1170,7 @@ enum DockInstallers {
                                             done: { DockInstallScripts.marked($0, in: registry[$0.hive] ?? "") },
                                             exists: { resolve($0, drive: drive) != nil },
                                             runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec,
-                                                                 skipDotNet: skipDotNet) })
+                                                                 skipDotNet: skipDotNet, skipDirectX: skipDirectX) })
         // ml2020: a publisher's program the script installed (or installs now), by its record's
         // key: the game session's service-manager decision (DockGameSession) reads the count.
         thirdPartyInstalls = items.filter { [.done, .pending, .limit].contains($0.status)
@@ -1159,7 +1207,12 @@ enum DockInstallers {
                 try Data(text.utf8).write(to: batchFile, options: .atomic)
                 script = "C:\\" + scriptName
                 serverSync = sessionOff
-                installsOnly = flag("MADEIRA_DOCK_INSTALL_SEPARATE")   // 0: the host follows the installers in the same session
+                // unset: only a game whose own lines hold an address-space layout runs them in a
+                // session of their own; 1: every game does (and then restarts); 0: none does
+                installsOnly = separateSession()
+                LogStore.shared.log("[dock-installers] app=\(app) " + (installsOnly
+                    ? "the installs run in a session of their own (\(separateReason())); the game starts after a restart"
+                    : "the installs run first and the game starts after them in the same session"))
             } catch {
                 LogStore.shared.log("[dock-installers] app=\(app) batch not written: \(error.localizedDescription)", level: .error)
             }

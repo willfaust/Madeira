@@ -323,6 +323,17 @@ final class DockStartScreen: ObservableObject {
     func poll(_ model: LibraryModel, rendered: Bool) {
         guard active else { return }
         let elapsed = Date().timeIntervalSince(started)
+        // A session of one-time installs: 45 s after its batch ended the wineserver has
+        // written the registry to disk (MadeiraDockModel.watchReport waits as long), so the
+        // starting screen offers Close Madeira. Decided here too, every 0.5 s while the
+        // session runs, so the button does not depend on the report watch or the alert.
+        // DockInstallers is main-actor state; this poll runs on the main thread (LibraryModel's timer).
+        let (installsOnly, installsFinished) = MainActor.assumeIsolated { (DockInstallers.installsOnly, DockInstallers.finishedAt) }
+        if installsOnly, !model.installsRestartReady, let finished = installsFinished,
+           Date().timeIntervalSince(finished) >= 45 {
+            model.installsRestartReady = true
+            LogStore.shared.log("[dock-installers] the starting screen offers Close Madeira (one-time installs ended 45 s ago)")
+        }
         var report: MadeiraDock.Report?
         // The host's result: a start that stopped keeps the starting screen with the report's words.
         if !exitObserved && MadeiraConfig.flag("MADEIRA_DOCK_STATUS") {   // 0: the starting screen does not watch the host's result

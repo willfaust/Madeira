@@ -313,6 +313,29 @@ assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 
 assert(PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 1, shown: false, hiddenAbsolute: true))
 assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: true, reports: 1, shown: false, relative: true, hiddenAbsolute: true))
 assert(!PointerPolicy.cursorShown(desktop: false, directEnabled: false, reports: 1, shown: false, hiddenAbsolute: true))
+// A program that reads mouse motion turns, whatever its cursor shows (CS2 keeps its arrow in a
+// match): relative moves, not the iOS pointer's position, which stops at the screen edge.
+for desktop in [false, true] {
+    let reading = PointerPolicy.cursorShown(desktop: desktop, directEnabled: true, reports: 1, shown: true, readsMotion: true)
+    assert(!reading)
+    assert(PointerPolicy.route(focused: true, hover: true, locked: false, cursorShown: reading, absoluteAllowed: true) == .relative)
+    // The game's own MADEIRA_POINTER_HIDDEN_ABSOLUTE wins; the rollback ignores the reader.
+    assert(PointerPolicy.cursorShown(desktop: desktop, directEnabled: true, reports: 1, shown: true,
+                                     hiddenAbsolute: true, readsMotion: true))
+    assert(PointerPolicy.cursorShown(desktop: desktop, directEnabled: true, reports: 1, shown: true,
+                                     routingEnabled: false, readsMotion: true))
+}
+// Which readers count: capture and hooks always, any raw registration only when the game opts in.
+assert(!MouseReader.readsMotion(flags: 0, enabled: true, rawLook: true))
+assert(MouseReader.readsMotion(flags: MouseReader.rawCapture, enabled: true, rawLook: false))
+assert(!MouseReader.readsMotion(flags: MouseReader.llHook, enabled: true, rawLook: false))
+assert(MouseReader.readsMotion(flags: MouseReader.llHook, enabled: true, rawLook: true))
+assert(!MouseReader.readsMotion(flags: MouseReader.raw, enabled: true, rawLook: false))
+assert(MouseReader.readsMotion(flags: MouseReader.raw, enabled: true, rawLook: true))
+assert(!MouseReader.readsMotion(flags: MouseReader.rawCapture | MouseReader.raw, enabled: false, rawLook: true))
+assert(MouseReader.describe(0) == "cursor")
+assert(MouseReader.describe(MouseReader.rawCapture | MouseReader.raw) == "raw-capture+raw")
+assert(MouseReader.describe(MouseReader.llHook) == "ll-hook")
 
 // The rollback keeps the desktop absolute even when its hidden-cursor
 // metadata says otherwise; direct-mode visibility remains unchanged.
@@ -345,6 +368,20 @@ assert(lockAction(locked: true, byUs: true, sinceReport: 3) == .unlock)      // 
 assert(lockAction(locked: true, byUs: true, sinceReport: 3, sinceMotion: 3) == .none)
 assert(lockAction(locked: true, byUs: true, over: false) == .none)           // locked pointers do not hover
 assert(lockAction(locked: true, byUs: false, shown: true) == .none)          // the user's own lock stays
+
+// iPadOS refused the lock: tell the player once per game, only while Madeira is in front.
+func refusedNotice(enabled: Bool = true, requested: Bool = true, locked: Bool = false, active: Bool = true,
+                   shown: Bool = false) -> Bool {
+    LockRefusedNotice.shouldShow(enabled: enabled, requested: requested, locked: locked, active: active,
+                                 shownThisGame: shown)
+}
+assert(refusedNotice())
+assert(!refusedNotice(enabled: false))                       // MADEIRA_POINTER_LOCK_NOTICE=0
+assert(!refusedNotice(requested: false))                     // nothing was asked for
+assert(!refusedNotice(locked: true))                         // iPadOS granted it
+assert(!refusedNotice(active: false))                        // Control Center or another app in front
+assert(!refusedNotice(shown: true))                          // once per game
+assert(LockRefusedNotice.settle > 0.25 && LockRefusedNotice.visibleFor >= 5)
 print("SWIFT-OK")
 '''
 
@@ -630,6 +667,28 @@ int main(void)
     winios_direct_cursor_get(&s);
     assert(s.shown == 0);
 
+    /* The mouse reader: a change notifies, the same flags again do not, unknown bits are dropped. */
+    winios_direct_cursor_get(&s);
+    assert(s.reader == 0);
+    i = notified;
+    winios_direct_cursor_reader(WINIOS_READER_RAW);
+    assert(notified == i + 1);
+    winios_direct_cursor_reader(WINIOS_READER_RAW | 0x80);
+    assert(notified == i + 1);                        /* pending, and nothing changed anyway */
+    winios_direct_cursor_get(&s);
+    assert(s.reader == WINIOS_READER_RAW);
+    winios_direct_cursor_reader(WINIOS_READER_RAW);
+    assert(notified == i + 1);                        /* re-armed, but the same flags */
+    winios_direct_cursor_reader(WINIOS_READER_RAW_CAPTURE | WINIOS_READER_RAW);
+    assert(notified == i + 2);
+    winios_direct_cursor_get(&s);
+    assert(s.reader == (WINIOS_READER_RAW_CAPTURE | WINIOS_READER_RAW));
+    winios_direct_cursor_reader(0);
+    assert(notified == i + 3);
+    winios_direct_cursor_get(&s);
+    assert(s.reader == 0);
+    notified = i;                                     /* the counts below start from here */
+
     /* Images: copied, serial bumps, oversized or empty ones are refused. */
     for (i = 0; i < (int)sizeof(img); i++) img[i] = (unsigned char)i;
     winios_direct_cursor_set(7, 3, 2, 1, 1, img);
@@ -676,6 +735,11 @@ print('PASS: direct-mode cursor state: inert until enabled, first-report and tra
       'coalescing, visibility, image copy and bounds, concurrent reports')
 
 # ------------------------------------------------------- 4. Source wiring ---
+# A program that reads mouse motion keeps the mouse when the iPad pointer leaves the game view
+# (letterbox bar or screen edge) while iPadOS refuses the lock: no hover-exit block.
+check('let mouse = base && (!Self.focusEnabled || pointerLocked || readsMotion || over || !gameButtons.isEmpty)' in source,
+      'mouse focus survives a hover exit while the program reads motion')
+check('mouse kept off the game view: the program reads mouse motion' in source, 'the kept mouse is logged once')
 # Cursor metadata is enabled only once the app asked, including desktop mode;
 # the compositor still owns the desktop cursor's image and drawing.
 check('if (!winios_desktop_mode() || !winios_cursor_set) return;' not in driver
@@ -723,7 +787,8 @@ check('HardwareInput.swift in Sources */,' in pbx and 'path = HardwareInput.swif
 check('Winios/WiniosCursor.c in Sources */,' in pbx and 'path = "Winios/WiniosCursor.c";' in pbx,
       'WiniosCursor.c is built')
 switches = ('MADEIRA_HWINPUT', 'MADEIRA_INPUT_FOCUS', 'MADEIRA_DIRECT_CURSOR', 'MADEIRA_POINTER_ABSOLUTE',
-            'MADEIRA_POINTER_LOCK', 'MADEIRA_POINTER_AUTOLOCK', 'MADEIRA_MOUSE_ROUTING')
+            'MADEIRA_POINTER_LOCK', 'MADEIRA_POINTER_AUTOLOCK', 'MADEIRA_POINTER_LOCK_NOTICE',
+            'MADEIRA_MOUSE_ROUTING')
 for switch in switches:
     check(f'flag("{switch}", defaultOn: true)' in source, f'{switch} switch, default on')
 glue = source.split('// MARK: - Device glue', 1)[1]
@@ -808,6 +873,20 @@ check(re.search(r'm\.scroll\.valueChangedHandler = \{ \[weak self\] _, x, y in\s
                 r'let wheel = GCMouseWheel\.axes\(Double\(x\), Double\(y\)\)\s*'
                 r'self\?\.scrolled\(wheel\.dx, wheel\.dy\)', glue) is not None,
       'the GCMouse wheel goes through GCMouseWheel.axes')
+# iPadOS refusing the lock: checked once the request has settled, shown once per game.
+check('DispatchQueue.main.asyncAfter(deadline: .now() + LockRefusedNotice.settle) { settle() }' in glue
+      and 'HardwareInput.shared.systemLockSettled(requested: wanted,' in glue
+      and 'shownThisGame: lockRefusedShown' in glue,
+      'a refused pointer lock raises the once-per-game notice through LockRefusedNotice')
+check('HardwareInput.shared.dismissLockRefusedHint("the lock was granted")' in glue,
+      'a lock granted later hides the notice')
+check('HardwareInput.shared.gameSessionStarted()' in (app / 'ContentView.swift').read_text(),
+      'each library launch resets the once-per-game notice')
+check('if hw.lockRefusedHint && !model.startingScreen && !model.menu' in (app / 'Library.swift').read_text(),
+      'the game shows the notice (LibraryHUD)')
+strings = (app / 'Localizable.xcstrings').read_text()
+check('"Mouse leaving the game? In iPad Settings > Multitasking & Gestures, choose Full Screen Apps."' in strings,
+      'the notice is in the string catalog')
 docs = (root / 'docs/KEYBOARD_MOUSE.md').read_text()
 for name in switches + ('MADEIRA_NAV_KEYS_E0', 'sensMouse', 'padRightStickMouse', 'ignoreTouchesWithMouse',
                         'Ctrl+Alt+P'):

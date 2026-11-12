@@ -14,3 +14,23 @@
 	path = madeira-dock
 	url = https://github.com/willfaust/madeira-dock.git
 	branch = main
+[submodule "third_party/agent-skills/claude-code-apple-skills"]
+	path = third_party/agent-skills/claude-code-apple-skills
+	url = https://github.com/rshankras/claude-code-apple-skills.git
+	update = none
+	shallow = true
+[submodule "third_party/agent-skills/ios-simulator-skill"]
+	path = third_party/agent-skills/ios-simulator-skill
+	url = https://github.com/conorluddy/ios-simulator-skill.git
+	update = none
+	shallow = true
+[submodule "third_party/agent-skills/SwiftUI-Agent-Skill"]
+	path = third_party/agent-skills/SwiftUI-Agent-Skill
+	url = https://github.com/twostraws/SwiftUI-Agent-Skill.git
+	update = none
+	shallow = true
+[submodule "third_party/agent-skills/Swift-Concurrency-Agent-Skill"]
+	path = third_party/agent-skills/Swift-Concurrency-Agent-Skill
+	url = https://github.com/twostraws/Swift-Concurrency-Agent-Skill.git
+	update = none
+	shallow = true

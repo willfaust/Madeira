@@ -23,6 +23,7 @@ start = source.index('                    int aliased = ios_write_alias(')
 end = source.index('                    ++wr_seen;', start)
 policy = source[start:end]
 assert 'ios_alias_store_pair( insn, fault_addr, gpr, &alias_fault, honor_guest_prot )' in source
+assert 'fault_addr = split_blocked;\n                            goto dispatch_guest_fault;' in source
 start = source.index('                int honor_guest_prot = 1;')
 end = source.index('                if (rw_addr && honor_guest_prot && ios_alias_write_is_trapped', start)
 honor = source[start:end]
@@ -251,16 +252,32 @@ int main(void)
     uint32_t pair = stp(1, 1, 2, 29, 30, 31);
     trapped_page = second_rx;
     memset(backing, 0x5a, 3 * 0x4000);
-    assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0) == -1);
+    assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0, &blocked) == -1);
+    assert(blocked == second_rx);                                 /* names the protected page */
     assert(backing[0x3fff] == 0x5a && state.__sp == second_rx - 8);
     trapped_page = 0;
-    assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0) == 1);
+    assert(ios_store_split_crossing(pair, &state, NULL, 0, 0, 0, &blocked) == 1 && !blocked);
     assert(state.__sp == second_rx + 8);
     assert(*(uint64_t *)(backing + 0x4000 - 8) == 11 && *(uint64_t *)(backing + 0x8000) == 22);
     state.__fp = second_rx - 8; state.__x[0] = 33; state.__x[1] = 44;
-    assert(ios_store_split_crossing(stp(1, 1, 2, 0, 1, 29), &state, NULL, 0, 0, 0) == 1);
+    assert(ios_store_split_crossing(stp(1, 1, 2, 0, 1, 29), &state, NULL, 0, 0, 0, NULL) == 1);
     assert(state.__fp == second_rx + 8 && state.__lr == 22);
     assert(*(uint64_t *)(backing + 0x4000 - 8) == 33 && *(uint64_t *)(backing + 0x8000) == 44);
+    /* Slay the Spire 2: stur x3, [x8] (0xf8000103) at ...fffc crosses into a page
+       FEX still protects. The refusal must name that page, not the first one. */
+    state.__x[8] = second_rx - 4; state.__x[3] = 0x1122334455667788ull;
+    memset(backing, 0x5a, 3 * 0x4000);
+    trapped_page = second_rx;
+    assert(ios_store_split_crossing(0xf8000103u, &state, NULL, 0, 0, 0, &blocked) == -1);
+    assert(blocked == second_rx && backing[0x3ffc] == 0x5a && backing[0x8000] == 0x5a);
+    trapped_page = 0;                                             /* FEX invalidated it */
+    assert(ios_store_split_crossing(0xf8000103u, &state, NULL, 0, 0, 0, &blocked) == 1 && !blocked);
+    assert(*(uint32_t *)(backing + 0x3ffc) == 0x55667788u && *(uint32_t *)(backing + 0x8000) == 0x11223344u);
+    assert(state.__x[8] == second_rx - 4);                        /* unscaled: no writeback */
+    trapped_page = anon_rx + 0x3000;                              /* first page protected */
+    assert(ios_store_split_crossing(0xf8000103u, &state, NULL, 0, 0, 0, &blocked) == -1);
+    assert(blocked == anon_rx + 0x3ffc);                          /* the first byte, as ios_alias_write */
+    trapped_page = 0;
     /* Low pool views use the main pool's alias distance, with their own bounds. */
     ios_jit_rx_base_global = (void *)(anon_rx + 0x100000);
     ios_jit_rw_base_global = (void *)((uintptr_t)backing + 0x100000);

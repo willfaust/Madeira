@@ -1504,6 +1504,19 @@ void register_builtin_classes(void)
             return;
         }
     }
+    /* The "Message" class (HWND_MESSAGE windows) is NOT in builtin_classes:
+     * upstream registers it with the desktop class in init_user, once per
+     * process.  Here init_user runs once per iOS process, so only the
+     * session's first pseudo-process had it, and every later one (a Steam
+     * game the Dock starts) failed CreateWindow(L"Message", ..., HWND_MESSAGE)
+     * with ERROR_INVALID_HANDLE (grab_class).  winmm's devices thread makes
+     * exactly that window, so waveOut had no device and such games were
+     * silent (Muv-Luv photonflowers: "SoundDeviceError(557)", winmm
+     * "CreateWindow failed: 6").  Register it per process with the rest.  The
+     * desktop class is left to init_user and ios_child_desktop_fixup.  In the
+     * session process this is a duplicate the server refuses, which
+     * register_builtin tolerates. */
+    register_builtin( &message_builtin_class );
     register_builtins();
     if (done_count < ARRAYSIZE(done))
     {
@@ -1512,7 +1525,7 @@ void register_builtin_classes(void)
         done_count++;
     }
     else dprintf(2, "[builtin-classes] registry FULL — pid=%04x will re-register per call\n", (int)pid);
-    dprintf(2, "[builtin-classes] registered builtin classes for pid=%04x peb=%p\n", (int)pid, peb);
+    dprintf(2, "[builtin-classes] registered builtin classes (with Message) for pid=%04x peb=%p\n", (int)pid, peb);
     pthread_mutex_unlock( &builtin_lock );
 }
 

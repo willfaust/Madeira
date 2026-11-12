@@ -37,41 +37,88 @@ Removing an entry never removes the game's files or saves.
 
 ## Library screen
 
-- Layouts: cards, compact cards, list and compact list (one short row per
-  game). Sort by last played, name, date added or folder size. Search by title.
-- Group by: **Platform** (the default) is the sections below. **Last played**
-  (Today, Past 7 days, Past 30 days, Earlier, Never played), **Installed**
-  (Installed, then Not installed) and **None** (one grid) list the games you
-  added and Steam's games together, each group in the Sort by order. A Steam
-  game counts as played when Madeira or Steam last started it, and as
-  installed while it downloads. Not installed Steam games are listed only while
-  signed in. Group titles collapse like the section titles, and each one's
-  state is remembered.
-- Sections, as in the fork's library: when Madeira Dock is available,
-  **Steam** (the Steam games being downloaded and the games Steam has
-  installed, with their count; a **Sign in to Steam** card when signed out),
-  its **Not installed** group (the account's other games, with their count),
-  then **Other games** (the games you added; **+** in the navigation bar adds one). Tapping
-  **Steam** or **Other games** collapses it; **Not installed** folds on its
-  own, open by default; each state is remembered. Search, the layout and, for
-  installed games, Sort by apply to every section. Pull down to read the
-  Steam install records and the account's library again. Without Madeira
-  Dock the games you added are one grid.
-- Store tabs: with Group by Platform and two or more sections, a segmented control at
-  the top of the page shows **All** of them or one at a time (**Steam**, **Other** for the
-  games you added, **GOG**, **itch.io**, **Epic**, **EA**). Only the sections the page shows
-  get a tab; the choice is remembered, and a tab whose store is turned off shows All. When
-  the segments do not fit across, they become capsules that scroll sideways.
-- Grid cards: a game that is not installed shows its artwork darkened, with a
-  download glyph on a soft circle of blur. Every grid card throws ambient
-  light on the page around it, like an LED strip behind a TV: its artwork's own
-  colours, with arcs of the ring brightening and falling into shadow and the
-  colours travelling around it as if a film were playing (fainter and less vivid
-  for a game that is not installed; held still with Reduce Motion). Pressing a
-  card shrinks its artwork, and its light draws in with crisp rays and goes out
-  behind it like a spotlight's aperture closing; on release the artwork springs
-  back and the light opens again slowly. The width a row of cards leaves goes
-  into the gaps between them, so each card's light keeps to its own space.
+- The library (the only look; the old page, its New look switch, the zoomable
+  grid and the ambient glow are gone): the Madeira island behind every page and a
+  tab bar with three tabs, **Library**, **Stores** and **Settings**, each with its
+  own search field under the title. On an iPhone held upright the bar floats at
+  the bottom; sideways and on iPad it sits at the top. On iOS 26 the bar, the game
+  page's back button and the button hints are Apple's Liquid Glass and **Play** is
+  Apple's prominent glass button (before iOS 26, and with Reduce Transparency, a
+  blurred or solid capsule); cards and rows stay plain. **Library** lists every installed game
+  of every store and the games you added, most recently played first, under a
+  banner of the game played last (its wide art, **Play** and **Game page**; only
+  under All), with a chip per store, and the JIT pill (**Ready** and the free space when JIT is on, **JIT
+  is off** to enable it). Until Steam's install records are read the first time,
+  an empty Library shows **Loading your games…**, not "Nothing installed yet".
+  A pinch on the covers changes how big they are as the fingers move (a click as
+  each column goes; lifting the fingers never opens a game), and Settings ›
+  Appearance › **Cover size** picks Small, Medium or Large. **Add a game** and **Desktop**
+  (and **Big Picture** where it is built in) sit above the covers. A cover opens the game's page; there **Play** is the only
+  filled button, the quick switches (FPS limit, performance overlay, touch
+  controls) and each group of pages follow, each row with a line saying what it does, then **Get Help**, and **Uninstall**
+  is last. Its pages slide in and out. **Stores** lists every store with whether you are signed in and how
+  many of its games are installed; a store's page is that store's own section
+  below (sign-in, downloading and installed games, Not installed, and each game's
+  download sheet; **Not installed** folds under the games to install, and the
+  installed ones fold under **Installed**). Each store has its fixed logo (Steam, Epic Games,
+  GOG, itch.io, EA), white on the store's colour. **Other games** is the games you
+  added and **Add a game file**. Under the stores the page shows the downloads:
+  the running download big under **Now**, with its store's
+  steps (Get ready, Check files, Download files, Finish installing; itch.io: Get
+  ready, Download files, Unpack files) and "Step 2 of 4 · 1.2 GB of 13 GB · about 5
+  min left"; failed ones are under **Needs attention** and waiting or paused ones
+  under **Waiting**, each with **Pause**, **Resume** (**Try
+  again** after a failure) and **Remove**, which asks first (a first install also
+  loses the files downloaded so far; an update or a repair only stops). Each row
+  shows how much is done, e.g. "1.2 GB of 13 GB · about 5 min left". The
+  Stores tab shows the overall % while one runs and **!** when one failed. Nothing shows
+  there while nothing downloads. **Settings** starts
+  with four tiles (JIT, Memory+, Free space, Games ready), then the pages in short
+  groups (Games, Storage, This device, Stores, Look, Help, About), each on
+  the one neutral icon tile (a store's page shows the store's logo), under the JIT
+  pill; a page opens as before, with the island behind it. Each tab's search field
+  looks in its own tab: **Library** in your installed games; **Stores** in installed
+  games, the games in your stores that are not installed (opening that store's
+  page and the game's own sheet), the stores, and what Steam's and itch.io's
+  catalogs have; **Settings** in the Settings pages. A drag puts the keyboard
+  away. The starting screen shows the
+  island, **Starting <game>** with the elapsed time, a tile per step (Get ready,
+  First-time setup when the game has one-time installs, Start Steam and Open
+  <game> for a Madeira Dock start) and **Stop**; a start that stopped says why with
+  **Get Help** first.
+- A controller in the new look (`PadHighlight.swift`; player 1's pad through
+  `LibraryController`, so only while no game runs, and on the starting screen):
+  the first press shows one highlight where it was, and touching the screen hides
+  it. The D-pad or left stick moves it to the nearest item that way (a held
+  direction repeats), **A** presses it, **B** goes back, cancels or closes, **X**
+  plays the highlighted game (or the page's game), **Y** puts the keyboard up in the
+  open tab's search field, **LB**/**RB** go round the three tabs,
+  **LT**/**RT** move a page up or down and **Menu**
+  opens a cover's options (Play, Game page, Cancel). A sheet keeps the highlight
+  inside it and starts on its safe choice; closing it puts the highlight back.
+  On the starting screen B moves the highlight to **Stop** and only A on Stop stops.
+  The highlight reaches a store's page too (its game cards, sign-in card and Not
+  installed); on a store game's sheet A is its Install, Resume, Pause or Open and B
+  closes it. The Settings list and Search's results are highlight items, and B on a
+  Settings page goes back (the switches inside a page are touch only). On a game's
+  pages (Display, Controls, Launch, Compatibility, Library, Advanced) every row is a
+  highlight item and the page scrolls with it: A flips a switch, steps a choice or a
+  slider to its next value, or opens the row. **Ready** in the JIT pill is not an
+  item (only **JIT is off** is). In the Library the page scrolls with the highlight
+  down the covers. The highlight follows the shape it is on: around a button or
+  cover at a 4 pt gap, on a tab's own capsule (so it stays inside the bar), and
+  inside a row of a card, rounded to match the card. The button hints draw the
+  controller's own symbols (a DualSense's cross, circle, square and triangle; an
+  Xbox pad's letters).
+  The log notes `[new-look] cover size <width> (<n> across)` after a pinch.
+  `env.MADEIRA_NEW_LOOK_PAD = 0` turns the highlight off. The log notes
+  `[pad-highlight] on` and `[pad-highlight] layer <name> opened`, and
+  `[new-look] downloads: pause|resume|remove <store>:<id>`. The log notes
+  `[menu-pad] connected <controller>` once per controller.
+- `MenuPad.swift` keeps the plumbing the highlight relies on: the window's claim on
+  controller events (iOS's own focus does not also walk and press a page's buttons),
+  the lists that take no system focus while a controller is connected, and the
+  store game sheet's layer (B closes it, A is its Install, Resume, Pause or Open).
 - **Desktop** opens the Wine desktop (explorer and services in a virtual
   desktop) with its own profile; its Resolution is the desktop's size.
 - The build label (`MadeiraBuild` in Info.plist, else the bundle version) is
@@ -363,7 +410,13 @@ only the last error status. No program names are involved.
 One Wine session runs per app run: a second one cannot start in the same
 process (the wineserver's permanent objects from the first session remain and
 the registry initialisation aborts). The library asks to restart Madeira
-instead.
+instead. The alert names the game whose Play it held: its Close Madeira keeps
+that game (`NextLibraryGame`, `SavesAndShortcuts.swift`), and the next app run
+starts it by itself through Play, once, if Madeira is opened again within 30
+minutes and no Home Screen shortcut or `steam://run` request comes first.
+Later forgets it. Log: `[session-once] the next app run starts the held game`,
+then `[session-once] starting <title>, which Play asked for before the
+restart`.
 
 ## First-run setup
 
@@ -555,15 +608,13 @@ menu owns input, the game sees a connected pad at rest.
 | `MADEIRA_SESSION_DIAGNOSTICS` | off | `1` shows the in-game menu's Diagnostics: frame capture (render-target pixels to `Documents/capture`) and GPU sync, for Direct3D 12 games |
 | `MADEIRA_FRONTEND_KEYBOARD` | on | Keyboard opens the game view's own keyboard instead of the key window |
 | `MADEIRA_ONBOARDING` | on | first-run setup never opens, and Settings › JIT/Steam have no **Run setup again** |
-| `MADEIRA_LIBRARY_COLLAPSE` | on | the **Steam** and **Other games** titles do not collapse (**Not installed** still folds) |
-| `MADEIRA_LIBRARY_TABS` | on | no store tabs: every section on one page |
-| `MADEIRA_LIBRARY_AMBIENT` | on | no ambient light around the library's grid cards |
+| `MADEIRA_NEW_LOOK_PAD` | on | touch only: no controller highlight |
 
 Opt-in (`env.NAME = 1`), off by default:
 
 | Switch | `1` means |
 | --- | --- |
-| `MADEIRA_PROMOTE` | the display link also holds the panel at its maximum rate in the 60 FPS cap (Settings › Display) |
+| `MADEIRA_PROMOTE` | the display link also holds the panel at its maximum rate in the 60 FPS cap (Settings › Display and Graphics) |
 | `MADEIRA_THERMAL_CAP` | while iOS reports the device as serious or critical, a session at the 60 cap, MAX or RAW runs at the 40 cap (30 where 40 is not offered) and returns to its own mode at nominal; a cap chosen during the session is kept. Logs `[thermal-cap]` |
 | `MADEIRA_DEVICE_STATS` | a `[device-load]` line (thermal state, low power, screen capture) every 10 s while Wine runs |
 

@@ -135,6 +135,7 @@ final class MadeiraDockModel: ObservableObject {
                     status = ended + "\n" + DockInstallers.restartWords
                     LogStore.shared.log("[dock-installers] the session still runs 45 s after the installs ended (a program they started); the restart is offered now")
                     LibraryModel.shared.restartNotice = DockInstallers.restartNotice(ended)
+                    LibraryModel.shared.installsRestartReady = true
                 }
                 if started && idle >= 5 {
                     if DockInstallers.installsOnly {
@@ -145,6 +146,7 @@ final class MadeiraDockModel: ObservableObject {
                         status = ended + "\n" + DockInstallers.restartWords
                         LogStore.shared.log("[dock-installers] the installs-only session ended; the game starts after Madeira is restarted")
                         LibraryModel.shared.restartNotice = DockInstallers.restartNotice(DockInstallers.poll(drive: MadeiraDock.drive))
+                        LibraryModel.shared.installsRestartReady = true
                     } else {
                         status = "Madeira Dock stopped before reporting a result. Export the log."
                         LogStore.shared.log("[madeira-dock] session ended without a host result", level: .error)

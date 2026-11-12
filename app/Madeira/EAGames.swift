@@ -60,51 +60,59 @@ struct EAGamesSection: View {
     let open: (LibraryEntry) -> Void
     @ObservedObject private var ea = EALibrary.shared
     @ObservedObject private var library = LibraryModel.shared
-    @AppStorage("madeiraLibraryHideEA") private var hidden = false
     @AppStorage("madeiraEAShowUninstalled") private var showUninstalled = true
-    /// In the zoomable grid the section sits in a collection view cell: the grid's page attaches EASheets (LibraryGridPage.swift).
-    var inGrid = false
+    /// (new-look) The store's page lists games to install first; the installed ones fold away under them (closed at first).
+    @AppStorage("madeiraNewLookEAShowInstalled") private var showInstalled = false
     @ObservedObject private var sheets = LibraryStoreSheets.shared
 
     var body: some View {
         let items = EAGamesRules.items(ea, search: search)
         let mine = items.filter { $0.installed != nil || ea.downloads[$0.id] != nil }
         let others = items.filter { $0.installed == nil && ea.downloads[$0.id] == nil }
-        let collapsible = SteamGamesSection.collapsible
+        // (new-look) Games to install come first (the Library tab already has the installed ones): what is
+        // downloading stays on top, the installed games go under Not installed in a group that starts closed.
+        let top = mine.filter { ea.downloads[$0.id] != nil }
+        let folded = mine.filter { ea.downloads[$0.id] == nil }
         VStack(alignment: .leading, spacing: 14) {
-            LibrarySectionHeader(title: "EA app", count: mine.count, collapsed: collapsible ? $hidden : nil) {
-                if ea.refreshing { ProgressView().accessibilityLabel("Refreshing EA library") }
+            // The store page already says which store it is; only a refreshing spinner is left of the old title row.
+            if ea.refreshing { HStack { Spacer(); ProgressView().accessibilityLabel("Refreshing EA library") } }
+            if !ea.signedIn {
+                EASignInCard { sheets.eaSignIn = true }
             }
-            if !(hidden && collapsible) {
-                if !ea.signedIn {
-                    EASignInCard { sheets.eaSignIn = true }
+            if !top.isEmpty {
+                LibraryCells(items: top, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
+            } else if ea.signedIn && !ea.refreshing && others.isEmpty && folded.isEmpty && search.isEmpty {
+                Text(ea.libraryUpdated == nil ? "Pull down to load your EA library."
+                     : "No PC games were found in this EA account.").foregroundStyle(.secondary)
+            }
+            if ea.signedIn && !others.isEmpty {
+                Button {
+                    var instant = Transaction(); instant.disablesAnimations = true; withTransaction(instant) { showUninstalled.toggle() }   // at once (Cameron, Nov 7)
+                } label: {
+                    HStack {
+                        Text("Not installed").font(.headline)
+                        Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
+                    }.contentShape(Rectangle()).frame(minHeight: 44)
+                }.buttonStyle(.plain)
+                    .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
+                    .padItem("ea-not-installed", cornerRadius: 16) { showUninstalled.toggle() }
+                if showUninstalled {
+                    LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
-                if !mine.isEmpty {
-                    LibraryCells(items: mine, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                } else if ea.signedIn && !ea.refreshing && others.isEmpty && search.isEmpty {
-                    Text(ea.libraryUpdated == nil ? "Pull down to load your EA library."
-                         : "No PC games were found in this EA account.").foregroundStyle(.secondary)
-                }
-                if ea.signedIn && !others.isEmpty {
-                    Button {
-                        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeInOut(duration: 0.2)) { showUninstalled.toggle() }
-                    } label: {
-                        HStack {
-                            Text("Not installed").font(.headline)
-                            Text("\(others.count)").font(.subheadline).foregroundStyle(.secondary)
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                                .rotationEffect(.degrees(showUninstalled ? 90 : 0)).foregroundStyle(.secondary)
-                        }.contentShape(Rectangle()).frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                        .accessibilityValue(showUninstalled ? "Shown" : "Hidden")
-                    if showUninstalled {
-                        LibraryCells(items: others, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
-                    }
+            }
+            if !folded.isEmpty {
+                // Nothing to install or download: the installed games just show, with a plain title.
+                let only = top.isEmpty && !(ea.signedIn && !others.isEmpty)
+                NewLookInstalledHeader(id: "ea-installed", count: folded.count, open: only ? nil : $showInstalled)
+                if only || showInstalled {
+                    LibraryCells(items: folded, layout: layout, width: width) { item, list, dense in cell(item, list: list, dense: dense) }
                 }
             }
         }
-        .modifier(EASheets(open: open, attached: !inGrid))
+        .modifier(EASheets(open: open))
     }
 
     private func cell(_ item: EAItem, list: Bool, dense: Bool) -> some View {
@@ -115,39 +123,33 @@ struct EAGamesSection: View {
                 sheets.eaGame = .init(id: item.id)
             }
         } label: { EAGameCell(item: item, list: list, dense: dense) }
-            .libraryCardButtonStyle(grid: !list)
+            .libraryCardButtonStyle(grid: !list, pad: "ea:\(item.id)")
     }
 }
 
 /// What the EA app section's page owns: the library's start and its reconcile after every session, the download and
-/// sign-in sheets and the error alert. The section attaches it on the original page; the zoomable grid's page attaches it
-/// itself, as it does Steam's (a sheet would belong to a collection view cell, which the grid can reuse).
+/// sign-in sheets and the error alert. The section attaches it.
 struct EASheets: ViewModifier {
     let open: (LibraryEntry) -> Void
-    var attached = true
     @ObservedObject private var ea = EALibrary.shared
     @ObservedObject private var sheets = LibraryStoreSheets.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @ViewBuilder func body(content: Content) -> some View {
-        if attached {
-            content
-            // The library reappears after every session: downloads continue then.
-            .onAppear { if EALibrary.enabled { ea.start(); ea.reconcileSession() } }
-            .onChange(of: scenePhase) { _, phase in if phase == .active && EALibrary.enabled { ea.reconcileSession() } }
-            .sheet(item: $sheets.eaGame) { selection in
-                EAGameSheet(offerID: selection.id) { entry in
-                    // Let the download sheet finish dismissing before presenting the details page.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
-                }
+        content
+        // The library reappears after every session: downloads continue then.
+        .onAppear { if EALibrary.enabled { ea.start(); ea.reconcileSession() } }
+        .onChange(of: scenePhase) { _, phase in if phase == .active && EALibrary.enabled { ea.reconcileSession() } }
+        .sheet(item: $sheets.eaGame) { selection in
+            EAGameSheet(offerID: selection.id) { entry in
+                // Let the download sheet finish dismissing before presenting the details page.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { open(entry) }
             }
-            .sheet(isPresented: $sheets.eaSignIn) { EASignInView() }
-            .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
-                Button("OK", role: .cancel) { ea.error = nil }
-            } message: { Text(ea.error ?? "") }
-        } else {
-            content
         }
+        .sheet(isPresented: $sheets.eaSignIn) { EASignInView() }
+        .alert("EA app", isPresented: Binding(get: { ea.error != nil }, set: { if !$0 { ea.error = nil } })) {
+            Button("OK", role: .cancel) { ea.error = nil }
+        } message: { Text(ea.error ?? "") }
     }
 }
 
@@ -168,6 +170,7 @@ struct EASignInCard: View {
             }.padding(14)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
         }.buttonStyle(.plain)
+            .menuPad("signin:ea", cornerRadius: 16, action: signIn)
     }
 }
 
@@ -178,6 +181,9 @@ struct EAGameArtwork: View {
     var body: some View {
         if let entry = library.entries.first(where: { $0.eaOfferID == item.id }), entry.coverFile != nil {
             LibraryArtwork(entry: entry)
+        } else if LibraryCachedArtwork.enabled {
+            // Downsampled, kept in memory and on disk (LibraryCoverCache.swift).
+            LibraryCachedArtwork(source: .store("ea", "\(item.id)", item.cover))
         } else {
             GeometryReader { geometry in
                 ZStack {
@@ -345,6 +351,7 @@ struct EAGameSheet: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(item.title).font(.title2.bold())
                                 primaryAction(item)
+                                    .menuPadSheet { primaryPress(item)?() }
                             }
                         }.padding(.vertical, 24)
                     }
@@ -415,6 +422,25 @@ struct EAGameSheet: View {
                 steamActionLabel(ea.hasPartialDownload(offerID) ? "Resume download" : "Install", symbol: "arrow.down.circle.fill")
             }.buttonStyle(.borderedProminent).disabled(!ea.signedIn || !owned.downloadable)
         }
+    }
+
+    /// What A on a controller does on this sheet (MenuPad.swift): the same as the button above.
+    private func primaryPress(_ item: EAItem) -> (() -> Void)? {
+        if let download = ea.downloads[offerID] {
+            switch download.state {
+            case .active, .queued:
+                return { ea.pause(offerID) }
+            case .paused:
+                return { ea.install(offerID) }
+            case .failed:
+                return { ea.install(offerID) }
+            }
+        } else if let installed = item.installed {
+            return { let entry = LibraryModel.shared.eaEntry(installed); dismiss(); open(entry) }
+        } else if let owned = item.owned {
+            return ea.signedIn && owned.downloadable ? { ea.install(offerID) } : nil
+        }
+        return nil
     }
 }
 

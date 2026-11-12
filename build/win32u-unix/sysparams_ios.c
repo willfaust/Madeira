@@ -9084,10 +9084,86 @@ NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEAD
 }
 
 #ifdef WINE_IOS
+/* iOS-Madeira: env.MADEIRA_VDCFG_PATH = 1, the last two answers for the listed virtual path. Unity asks for the
+ * target's preferred mode and its advanced colour info before it accepts a fullscreen mode; the generic answers
+ * skip the source-less virtual monitor, so the game read 0x0, made a zero-width render texture and drew nothing
+ * (REPLACED: a white screen). Answered only on, only for the virtual monitor's target on the virtual adapter
+ * LUID that QueryDisplayConfig listed, and only when the generic answer failed. The preferred mode is the
+ * current virtual mode, the same one the path's source and target modes carry. */
+static NTSTATUS ios_vdcfg_virtual_device_info( DISPLAYCONFIG_DEVICE_INFO_HEADER *packet )
+{
+    LUID virtual_luid;
+    DEVMODEW devmode;
+    BOOL ours;
+
+    if (packet->type != DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE &&
+        packet->type != DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO)
+        return STATUS_UNSUCCESSFUL;
+
+    if (!lock_display_devices( FALSE )) return STATUS_UNSUCCESSFUL;
+    ios_virtual_luid_locked( &virtual_luid );
+    ours = list_head( &monitors ) == &virtual_monitor.entry && !virtual_monitor.source &&
+           packet->id == virtual_monitor.output_id &&
+           !memcmp( &packet->adapterId, &virtual_luid, sizeof(virtual_luid) );
+    memset( &devmode, 0, sizeof(devmode) );
+    devmode.dmSize = sizeof(devmode);
+    if (ours && !ios_virtual_enum_display_settings( ENUM_CURRENT_SETTINGS, &devmode, 0 )) ours = FALSE;
+    unlock_display_devices();
+    if (!ours || !devmode.dmPelsWidth || !devmode.dmPelsHeight) return STATUS_UNSUCCESSFUL;
+
+    if (packet->type == DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE)
+    {
+        DISPLAYCONFIG_TARGET_PREFERRED_MODE *preferred = (DISPLAYCONFIG_TARGET_PREFERRED_MODE *)packet;
+        DISPLAYCONFIG_VIDEO_SIGNAL_INFO *signal = &preferred->targetMode.targetVideoSignalInfo;
+        UINT32 freq = devmode.dmDisplayFrequency ? devmode.dmDisplayFrequency : 60;
+
+        if (packet->size < sizeof(*preferred)) return STATUS_INVALID_PARAMETER;
+        memset( &preferred->width, 0, sizeof(*preferred) - offsetof(DISPLAYCONFIG_TARGET_PREFERRED_MODE, width) );
+        preferred->width = devmode.dmPelsWidth;
+        preferred->height = devmode.dmPelsHeight;
+        signal->pixelRate = (UINT64)freq * preferred->width * preferred->height;
+        signal->hSyncFreq.Numerator = freq * preferred->width;
+        signal->hSyncFreq.Denominator = 1;
+        signal->vSyncFreq.Numerator = freq;
+        signal->vSyncFreq.Denominator = 1;
+        signal->activeSize.cx = signal->totalSize.cx = preferred->width;
+        signal->activeSize.cy = signal->totalSize.cy = preferred->height;
+        signal->videoStandard = D3DKMDT_VSS_OTHER;
+        signal->scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
+        return STATUS_SUCCESS;
+    }
+    else
+    {
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *color = (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *)packet;
+
+        if (packet->size < sizeof(*color)) return STATUS_INVALID_PARAMETER;
+        color->advancedColorSupported = 0;   /* no HDR on the virtual monitor */
+        color->advancedColorEnabled = 0;
+        color->wideColorEnforced = 0;
+        color->advancedColorForceDisabled = 0;
+        color->colorEncoding = DISPLAYCONFIG_COLOR_ENCODING_RGB;
+        color->bitsPerColorChannel = 8;
+        return STATUS_SUCCESS;
+    }
+}
+
 NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEADER *packet )
 {
     NTSTATUS ret = display_config_get_device_info( packet );
     static int logged;
+
+    if (ret != STATUS_SUCCESS && packet && packet->size >= sizeof(*packet) && ios_vdcfg_path_enabled())
+    {
+        NTSTATUS virtual_ret = ios_vdcfg_virtual_device_info( packet );
+        if (virtual_ret != STATUS_UNSUCCESSFUL)
+        {
+            static int vlogged;
+            ret = virtual_ret;
+            if (vlogged++ < 4)
+                dprintf( 2, "[vdcfg] MADEIRA_VDCFG_PATH=1: DisplayConfigGetDeviceInfo type=%d answered for the "
+                         "virtual monitor -> %#x\n", (int)packet->type, (unsigned)ret );
+        }
+    }
 
     /* type: 1 source name, 2 target name, 3 preferred mode, 4 adapter name,
      * 9 advanced colour info ... (DISPLAYCONFIG_DEVICE_INFO_TYPE) */

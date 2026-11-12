@@ -62,6 +62,25 @@ enum NextSteamApp {
     }
 }
 
+/// The library game whose Play was held because a session already ran in that app run
+/// (LibraryModel.holdForRestart). The Restart Madeira alert's Close Madeira keeps it, and the
+/// next app run starts it once, if that run begins within 30 minutes.
+enum NextLibraryGame {
+    private static let key = "madeira.nextLibraryGame"
+    static func set(_ id: UUID) {
+        UserDefaults.standard.set(["id": id.uuidString, "at": Date().timeIntervalSince1970], forKey: key)
+    }
+    static func take() -> UUID? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: key) else { return nil }
+        UserDefaults.standard.removeObject(forKey: key)
+        guard let text = saved["id"] as? String, let id = UUID(uuidString: text),
+              let at = saved["at"] as? Double else { return nil }
+        let age = Date().timeIntervalSince1970 - at
+        guard age >= 0, age < 30 * 60 else { return nil }
+        return id
+    }
+}
+
 // MARK: - Zip writing (stored)
 
 /// Uncompressed zip (saves are small, and many are compressed already). No

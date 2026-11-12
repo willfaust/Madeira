@@ -22,6 +22,7 @@
 		A1007B30 /* SwiftItch/itch_7z.c in Sources */ = {isa = PBXBuildFile; fileRef = A2007B30 /* itch_7z.c */; };
 		A1007B04 /* ItchLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B04 /* ItchLibrary.swift */; };
 		A1007B05 /* ItchGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007B05 /* ItchGames.swift */; };
+		A1BA7701 /* BattleNet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2BA7701 /* BattleNet.swift */; };
 		A1006A01 /* GOGLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A01 /* GOGLibrary.swift */; };
 		A1006A02 /* GOGGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A02 /* GOGGames.swift */; };
 		A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2006A03 /* GOGAPI.swift */; };
@@ -45,8 +46,8 @@
 		A1009C03 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2009C03 /* Localizable.xcstrings */; };
 		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
 		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
-		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
 		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
+		A1F0A002 /* DockFriends.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F0A002 /* DockFriends.swift */; };
 		A1000700 /* SteamCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000700 /* SteamCloud.swift */; };
 		A1000920 /* ExternalDrives.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000920 /* ExternalDrives.swift */; };
 		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
@@ -63,6 +64,16 @@
 		A1000713 /* CabinetReader.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000713 /* CabinetReader.c */; };
 		A10007A1 /* SettingsPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20007A1 /* SettingsPages.swift */; };
 		A1000602 /* SteamDownloadBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000602 /* SteamDownloadBackground.swift */; };
+		A1F00C01 /* GameCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C01 /* GameCandidate.swift */; };
+		A1F00C02 /* AddGame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C02 /* AddGame.swift */; };
+		A1F00C03 /* WingetCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C03 /* WingetCore.swift */; };
+		A1F00C04 /* WingetCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C04 /* WingetCatalog.swift */; };
+		A1F00C05 /* WingetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C05 /* WingetViews.swift */; };
+		A1F00C06 /* WingetPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C06 /* WingetPlan.swift */; };
+		A1F00C07 /* WingetInstalls.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C07 /* WingetInstalls.swift */; };
+		A1F00C08 /* PEResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C08 /* PEResources.swift */; };
+		A1F00C09 /* InstallerWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C09 /* InstallerWatch.swift */; };
+		A1F00C0A /* DesktopKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00C0A /* DesktopKeys.swift */; };
 		A1008B01 /* BackgroundRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2008B01 /* BackgroundRun.swift */; };
 		A1000600 /* SteamInstall.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000600 /* SteamInstall.swift */; };
 		A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000609 /* ContentDecryptor.swift */; };
@@ -189,30 +200,34 @@
 		A1007C01 /* GPUCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007C01 /* GPUCards.swift */; };
 		A1000914 /* LibraryPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000914 /* LibraryPrefs.swift */; };
 		A1000990 /* GameIniFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000990 /* GameIniFiles.swift */; };
+		A1E1A001 /* IniSettingHelp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2E1A001 /* IniSettingHelp.swift */; };
+		A1E1A003 /* UnityPlayerPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2E1A003 /* UnityPlayerPrefs.swift */; };
+		B1E1A002 /* game-config-folders.txt in Resources */ = {isa = PBXBuildFile; fileRef = B2E1A002 /* game-config-folders.txt */; };
+		A100D501 /* ModsCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200D501 /* ModsCore.swift */; };
+		A100D502 /* ModsArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200D502 /* ModsArchive.swift */; };
+		A100D503 /* ModsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200D503 /* ModsView.swift */; };
 		A1009C01 /* GameSetupShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C01 /* GameSetupShare.swift */; };
 		A1009C04 /* SteamAchievements.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2009C04 /* SteamAchievements.swift */; };
+		A100CA04 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA04 /* LogsView.swift */; };
 		A100CA01 /* ClaudeHelp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA01 /* ClaudeHelp.swift */; };
+		A100CA02 /* PrivacyScrub.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA02 /* PrivacyScrub.swift */; };
+		A100CA03 /* HelpReport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200CA03 /* HelpReport.swift */; };
 		A1000208 /* GameProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000208 /* GameProfiles.swift */; };
 		A1000911 /* GameRecommendations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000911 /* GameRecommendations.swift */; };
 		A1000912 /* GameRecommendationsApply.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000912 /* GameRecommendationsApply.swift */; };
 		A1000400 /* Library.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000400 /* Library.swift */; };
 		A1000977 /* LibraryCoverSpot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000977 /* LibraryCoverSpot.swift */; };
-		A1000976 /* LibraryGridZoomStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000976 /* LibraryGridZoomStart.swift */; };
-		A1000975 /* LibraryGridZoomIdle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000975 /* LibraryGridZoomIdle.swift */; };
-		A1000974 /* LibraryGridZoomHaptics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000974 /* LibraryGridZoomHaptics.swift */; };
+		A1F00A01 /* NewLook.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00A01 /* NewLook.swift */; };
+		A1F00A02 /* PadHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2F00A02 /* PadHighlight.swift */; };
+		B1F00A03 /* MadeiraIsland.png in Resources */ = {isa = PBXBuildFile; fileRef = B2F00A03 /* MadeiraIsland.png */; };
+		A1000D52 /* MenuPad.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000D52 /* MenuPad.swift */; };
+		A1000E71 /* LogTrail.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E71 /* LogTrail.swift */; };
+		A1000FA1 /* LogSlim.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000FA1 /* LogSlim.swift */; };
+		A1000E81 /* GetHelp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E81 /* GetHelp.swift */; };
+		A1000E82 /* GetHelpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E82 /* GetHelpView.swift */; };
+		A1000E90 /* GetHelpFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E90 /* GetHelpFiles.swift */; };
 		A1000973 /* DeferredMainWork.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000973 /* DeferredMainWork.swift */; };
-		A1000972 /* InteractionFrameRate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000972 /* InteractionFrameRate.swift */; };
-		A1000970 /* LibraryGridZoomBlend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000970 /* LibraryGridZoomBlend.swift */; };
-		A1000969 /* LibraryGridGlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000969 /* LibraryGridGlow.swift */; };
-		A1000968 /* LibraryGridCardCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000968 /* LibraryGridCardCell.swift */; };
-		A1000967 /* LibraryGridZoomStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000967 /* LibraryGridZoomStage.swift */; };
-		A1000966 /* LibraryGridZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000966 /* LibraryGridZoom.swift */; };
-		A1000965 /* LibraryGridPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000965 /* LibraryGridPage.swift */; };
-		A1000964 /* LibraryGridHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000964 /* LibraryGridHost.swift */; };
 		A1000963 /* LibraryCoverCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000963 /* LibraryCoverCache.swift */; };
-		A1000962 /* LibraryGridZoomScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000962 /* LibraryGridZoomScene.swift */; };
-		A1000961 /* LibraryGridZoomModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000961 /* LibraryGridZoomModel.swift */; };
-		A1000960 /* LibraryGridLevels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000960 /* LibraryGridLevels.swift */; };
 		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
 		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
 		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
@@ -301,6 +316,7 @@
 		A2007B31 /* itch_7z.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SwiftItch/itch_7z.h"; sourceTree = "<group>"; };
 		A2007B04 /* ItchLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchLibrary.swift"; sourceTree = "<group>"; };
 		A2007B05 /* ItchGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ItchGames.swift"; sourceTree = "<group>"; };
+		A2BA7701 /* BattleNet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BattleNet.swift"; sourceTree = "<group>"; };
 		A2006A01 /* GOGLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGLibrary.swift"; sourceTree = "<group>"; };
 		A2006A02 /* GOGGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GOGGames.swift"; sourceTree = "<group>"; };
 		A2006A03 /* GOGAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftGOG/GOGAPI.swift"; sourceTree = "<group>"; };
@@ -324,8 +340,8 @@
 		A2009C03 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
 		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
-		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
 		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
+		A2F0A002 /* DockFriends.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DockFriends.swift"; sourceTree = "<group>"; };
 		A2000700 /* SteamCloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamCloud.swift"; sourceTree = "<group>"; };
 		A2000920 /* ExternalDrives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalDrives.swift"; sourceTree = "<group>"; };
 		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
@@ -343,6 +359,16 @@
 		A2000714 /* CabinetReader.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CabinetReader.h; sourceTree = "<group>"; };
 		A20007A1 /* SettingsPages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsPages.swift"; sourceTree = "<group>"; };
 		A2000602 /* SteamDownloadBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamDownloadBackground.swift"; sourceTree = "<group>"; };
+		A2F00C01 /* GameCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameCandidate.swift; sourceTree = "<group>"; };
+		A2F00C02 /* AddGame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddGame.swift; sourceTree = "<group>"; };
+		A2F00C03 /* WingetCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetCore.swift; sourceTree = "<group>"; };
+		A2F00C04 /* WingetCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetCatalog.swift; sourceTree = "<group>"; };
+		A2F00C05 /* WingetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetViews.swift; sourceTree = "<group>"; };
+		A2F00C06 /* WingetPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetPlan.swift; sourceTree = "<group>"; };
+		A2F00C07 /* WingetInstalls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WingetInstalls.swift; sourceTree = "<group>"; };
+		A2F00C08 /* PEResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEResources.swift; sourceTree = "<group>"; };
+		A2F00C09 /* InstallerWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallerWatch.swift; sourceTree = "<group>"; };
+		A2F00C0A /* DesktopKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopKeys.swift; sourceTree = "<group>"; };
 		A2008B01 /* BackgroundRun.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRun.swift; sourceTree = "<group>"; };
 		A2000600 /* SteamInstall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamInstall.swift"; sourceTree = "<group>"; };
 		A2000609 /* ContentDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Content/ContentDecryptor.swift"; sourceTree = "<group>"; };
@@ -485,30 +511,34 @@
 		A2007C01 /* GPUCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUCards.swift; sourceTree = "<group>"; };
 		A2000914 /* LibraryPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryPrefs.swift; sourceTree = "<group>"; };
 		A2000990 /* GameIniFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameIniFiles.swift; sourceTree = "<group>"; };
+		A2E1A001 /* IniSettingHelp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IniSettingHelp.swift; sourceTree = "<group>"; };
+		A2E1A003 /* UnityPlayerPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnityPlayerPrefs.swift; sourceTree = "<group>"; };
+		B2E1A002 /* game-config-folders.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "game-config-folders.txt"; sourceTree = "<group>"; };
+		A200D501 /* ModsCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModsCore.swift; sourceTree = "<group>"; };
+		A200D502 /* ModsArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModsArchive.swift; sourceTree = "<group>"; };
+		A200D503 /* ModsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModsView.swift; sourceTree = "<group>"; };
 		A2009C01 /* GameSetupShare.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameSetupShare.swift; sourceTree = "<group>"; };
 		A2009C04 /* SteamAchievements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamAchievements.swift; sourceTree = "<group>"; };
+		A200CA04 /* LogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsView.swift; sourceTree = "<group>"; };
 		A200CA01 /* ClaudeHelp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHelp.swift; sourceTree = "<group>"; };
+		A200CA02 /* PrivacyScrub.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyScrub.swift; sourceTree = "<group>"; };
+		A200CA03 /* HelpReport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpReport.swift; sourceTree = "<group>"; };
 		A2000208 /* GameProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameProfiles.swift; sourceTree = "<group>"; };
 		A2000911 /* GameRecommendations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendations.swift; sourceTree = "<group>"; };
 		A2000912 /* GameRecommendationsApply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameRecommendationsApply.swift; sourceTree = "<group>"; };
 		A2000400 /* Library.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Library.swift; sourceTree = "<group>"; };
 		A2000977 /* LibraryCoverSpot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverSpot.swift"; sourceTree = "<group>"; };
-		A2000976 /* LibraryGridZoomStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStart.swift"; sourceTree = "<group>"; };
-		A2000975 /* LibraryGridZoomIdle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomIdle.swift"; sourceTree = "<group>"; };
-		A2000974 /* LibraryGridZoomHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomHaptics.swift"; sourceTree = "<group>"; };
+		A2F00A01 /* NewLook.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewLook.swift; sourceTree = "<group>"; };
+		A2F00A02 /* PadHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadHighlight.swift; sourceTree = "<group>"; };
+		B2F00A03 /* MadeiraIsland.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = MadeiraIsland.png; sourceTree = "<group>"; };
+		A2000D52 /* MenuPad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MenuPad.swift"; sourceTree = "<group>"; };
+		A2000E71 /* LogTrail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogTrail.swift"; sourceTree = "<group>"; };
+		A2000FA1 /* LogSlim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LogSlim.swift"; sourceTree = "<group>"; };
+		A2000E81 /* GetHelp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GetHelp.swift"; sourceTree = "<group>"; };
+		A2000E82 /* GetHelpView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GetHelpView.swift"; sourceTree = "<group>"; };
+		A2000E90 /* GetHelpFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GetHelpFiles.swift"; sourceTree = "<group>"; };
 		A2000973 /* DeferredMainWork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DeferredMainWork.swift"; sourceTree = "<group>"; };
-		A2000972 /* InteractionFrameRate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "InteractionFrameRate.swift"; sourceTree = "<group>"; };
-		A2000970 /* LibraryGridZoomBlend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomBlend.swift"; sourceTree = "<group>"; };
-		A2000969 /* LibraryGridGlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridGlow.swift"; sourceTree = "<group>"; };
-		A2000968 /* LibraryGridCardCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridCardCell.swift"; sourceTree = "<group>"; };
-		A2000967 /* LibraryGridZoomStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomStage.swift"; sourceTree = "<group>"; };
-		A2000966 /* LibraryGridZoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoom.swift"; sourceTree = "<group>"; };
-		A2000965 /* LibraryGridPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridPage.swift"; sourceTree = "<group>"; };
-		A2000964 /* LibraryGridHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridHost.swift"; sourceTree = "<group>"; };
 		A2000963 /* LibraryCoverCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryCoverCache.swift"; sourceTree = "<group>"; };
-		A2000962 /* LibraryGridZoomScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomScene.swift"; sourceTree = "<group>"; };
-		A2000961 /* LibraryGridZoomModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomModel.swift"; sourceTree = "<group>"; };
-		A2000960 /* LibraryGridLevels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridLevels.swift"; sourceTree = "<group>"; };
 		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestDisplay.swift; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
 		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
@@ -627,6 +657,7 @@
 				A2007B31 /* itch_7z.h */,
 				A2007B04 /* ItchLibrary.swift */,
 				A2007B05 /* ItchGames.swift */,
+				A2BA7701 /* BattleNet.swift */,
 				A2006A01 /* GOGLibrary.swift */,
 				A2006A02 /* GOGGames.swift */,
 				A2006A03 /* GOGAPI.swift */,
@@ -650,8 +681,8 @@
 				A2000910 /* Assets.xcassets */,
 				A2000902 /* GlassSkin.swift */,
 				A2000903 /* LiquidMetalSkin.metal */,
-				A2000904 /* AmbientGlow.metal */,
 				A2000601 /* SteamOwnedLibrary.swift */,
+				A2F0A002 /* DockFriends.swift */,
 				A2000700 /* SteamCloud.swift */,
 				A2000920 /* ExternalDrives.swift */,
 				A2000921 /* ExternalStorage.swift */,
@@ -671,6 +702,16 @@
 				A2000714 /* CabinetReader.h */,
 				A20007A1 /* SettingsPages.swift */,
 				A2000602 /* SteamDownloadBackground.swift */,
+				A2F00C01 /* GameCandidate.swift */,
+				A2F00C02 /* AddGame.swift */,
+				A2F00C03 /* WingetCore.swift */,
+				A2F00C04 /* WingetCatalog.swift */,
+				A2F00C05 /* WingetViews.swift */,
+				A2F00C06 /* WingetPlan.swift */,
+				A2F00C07 /* WingetInstalls.swift */,
+				A2F00C08 /* PEResources.swift */,
+				A2F00C09 /* InstallerWatch.swift */,
+				A2F00C0A /* DesktopKeys.swift */,
 				A2008B01 /* BackgroundRun.swift */,
 				A2000600 /* SteamInstall.swift */,
 				A2000609 /* ContentDecryptor.swift */,
@@ -728,30 +769,34 @@
 				A2007C01 /* GPUCards.swift */,
 				A2000914 /* LibraryPrefs.swift */,
 				A2000990 /* GameIniFiles.swift */,
+				A2E1A001 /* IniSettingHelp.swift */,
+				A2E1A003 /* UnityPlayerPrefs.swift */,
+				B2E1A002 /* game-config-folders.txt */,
+				A200D501 /* ModsCore.swift */,
+				A200D502 /* ModsArchive.swift */,
+				A200D503 /* ModsView.swift */,
 				A2009C01 /* GameSetupShare.swift */,
 				A2009C04 /* SteamAchievements.swift */,
+				A200CA04 /* LogsView.swift */,
 				A200CA01 /* ClaudeHelp.swift */,
+				A200CA02 /* PrivacyScrub.swift */,
+				A200CA03 /* HelpReport.swift */,
 				A2000208 /* GameProfiles.swift */,
 				A2000911 /* GameRecommendations.swift */,
 				A2000912 /* GameRecommendationsApply.swift */,
 				A2000400 /* Library.swift */,
 				A2000977 /* LibraryCoverSpot.swift */,
-				A2000976 /* LibraryGridZoomStart.swift */,
-				A2000975 /* LibraryGridZoomIdle.swift */,
-				A2000974 /* LibraryGridZoomHaptics.swift */,
+				A2F00A01 /* NewLook.swift */,
+				A2F00A02 /* PadHighlight.swift */,
+				B2F00A03 /* MadeiraIsland.png */,
+				A2000D52 /* MenuPad.swift */,
+				A2000E71 /* LogTrail.swift */,
+				A2000FA1 /* LogSlim.swift */,
+				A2000E81 /* GetHelp.swift */,
+				A2000E82 /* GetHelpView.swift */,
+				A2000E90 /* GetHelpFiles.swift */,
 				A2000973 /* DeferredMainWork.swift */,
-				A2000972 /* InteractionFrameRate.swift */,
-				A2000970 /* LibraryGridZoomBlend.swift */,
-				A2000969 /* LibraryGridGlow.swift */,
-				A2000968 /* LibraryGridCardCell.swift */,
-				A2000967 /* LibraryGridZoomStage.swift */,
-				A2000966 /* LibraryGridZoom.swift */,
-				A2000965 /* LibraryGridPage.swift */,
-				A2000964 /* LibraryGridHost.swift */,
 				A2000963 /* LibraryCoverCache.swift */,
-				A2000962 /* LibraryGridZoomScene.swift */,
-				A2000961 /* LibraryGridZoomModel.swift */,
-				A2000960 /* LibraryGridLevels.swift */,
 				A2000401 /* GuestDisplay.swift */,
 				A2000004 /* JITAllocator.c */,
 				A2000005 /* JITAllocator.h */,
@@ -1017,6 +1062,8 @@
 				A1000910 /* Assets.xcassets in Resources */,
 				B1000004 /* madeira-jit.js in Resources */,
 				B100CA02 /* Give-to-Claude-with-log-and-cfg.txt in Resources */,
+				B1E1A002 /* game-config-folders.txt in Resources */,
+				B1F00A03 /* MadeiraIsland.png in Resources */,
 				B1000051 /* Madeira JIT.shortcut in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1098,6 +1145,7 @@
 				A1007B30 /* SwiftItch/itch_7z.c in Sources */,
 				A1007B04 /* ItchLibrary.swift in Sources */,
 				A1007B05 /* ItchGames.swift in Sources */,
+				A1BA7701 /* BattleNet.swift in Sources */,
 				A1006A01 /* GOGLibrary.swift in Sources */,
 				A1006A02 /* GOGGames.swift in Sources */,
 				A1006A03 /* SwiftGOG/GOGAPI.swift in Sources */,
@@ -1119,8 +1167,8 @@
 				A1000900 /* LiquidMetal.metal in Sources */,
 				A1000902 /* GlassSkin.swift in Sources */,
 				A1000903 /* LiquidMetalSkin.metal in Sources */,
-				A1000904 /* AmbientGlow.metal in Sources */,
 				A1000601 /* SteamOwnedLibrary.swift in Sources */,
+				A1F0A002 /* DockFriends.swift in Sources */,
 				A1000700 /* SteamCloud.swift in Sources */,
 				A1000920 /* ExternalDrives.swift in Sources */,
 				A1000921 /* ExternalStorage.swift in Sources */,
@@ -1139,6 +1187,16 @@
 				A1000713 /* CabinetReader.c in Sources */,
 				A10007A1 /* SettingsPages.swift in Sources */,
 				A1000602 /* SteamDownloadBackground.swift in Sources */,
+				A1F00C01 /* GameCandidate.swift in Sources */,
+				A1F00C02 /* AddGame.swift in Sources */,
+				A1F00C03 /* WingetCore.swift in Sources */,
+				A1F00C04 /* WingetCatalog.swift in Sources */,
+				A1F00C05 /* WingetViews.swift in Sources */,
+				A1F00C06 /* WingetPlan.swift in Sources */,
+				A1F00C07 /* WingetInstalls.swift in Sources */,
+				A1F00C08 /* PEResources.swift in Sources */,
+				A1F00C09 /* InstallerWatch.swift in Sources */,
+				A1F00C0A /* DesktopKeys.swift in Sources */,
 				A1008B01 /* BackgroundRun.swift in Sources */,
 				A1000600 /* SteamInstall.swift in Sources */,
 				A1000609 /* SwiftSteam/Content/ContentDecryptor.swift in Sources */,
@@ -1193,30 +1251,32 @@
 				A1007C01 /* GPUCards.swift in Sources */,
 				A1000914 /* LibraryPrefs.swift in Sources */,
 				A1000990 /* GameIniFiles.swift in Sources */,
+				A1E1A001 /* IniSettingHelp.swift in Sources */,
+				A1E1A003 /* UnityPlayerPrefs.swift in Sources */,
+				A100D501 /* ModsCore.swift in Sources */,
+				A100D502 /* ModsArchive.swift in Sources */,
+				A100D503 /* ModsView.swift in Sources */,
 				A1009C01 /* GameSetupShare.swift in Sources */,
 				A1009C04 /* SteamAchievements.swift in Sources */,
+				A100CA04 /* LogsView.swift in Sources */,
 				A100CA01 /* ClaudeHelp.swift in Sources */,
+				A100CA02 /* PrivacyScrub.swift in Sources */,
+				A100CA03 /* HelpReport.swift in Sources */,
 				A1000208 /* GameProfiles.swift in Sources */,
 				A1000911 /* GameRecommendations.swift in Sources */,
 				A1000912 /* GameRecommendationsApply.swift in Sources */,
 				A1000400 /* Library.swift in Sources */,
 				A1000977 /* LibraryCoverSpot.swift in Sources */,
-				A1000976 /* LibraryGridZoomStart.swift in Sources */,
-				A1000975 /* LibraryGridZoomIdle.swift in Sources */,
-				A1000974 /* LibraryGridZoomHaptics.swift in Sources */,
+				A1F00A01 /* NewLook.swift in Sources */,
+				A1F00A02 /* PadHighlight.swift in Sources */,
+				A1000D52 /* MenuPad.swift in Sources */,
+				A1000E71 /* LogTrail.swift in Sources */,
+				A1000FA1 /* LogSlim.swift in Sources */,
+				A1000E81 /* GetHelp.swift in Sources */,
+				A1000E82 /* GetHelpView.swift in Sources */,
+				A1000E90 /* GetHelpFiles.swift in Sources */,
 				A1000973 /* DeferredMainWork.swift in Sources */,
-				A1000972 /* InteractionFrameRate.swift in Sources */,
-				A1000970 /* LibraryGridZoomBlend.swift in Sources */,
-				A1000969 /* LibraryGridGlow.swift in Sources */,
-				A1000968 /* LibraryGridCardCell.swift in Sources */,
-				A1000967 /* LibraryGridZoomStage.swift in Sources */,
-				A1000966 /* LibraryGridZoom.swift in Sources */,
-				A1000965 /* LibraryGridPage.swift in Sources */,
-				A1000964 /* LibraryGridHost.swift in Sources */,
 				A1000963 /* LibraryCoverCache.swift in Sources */,
-				A1000962 /* LibraryGridZoomScene.swift in Sources */,
-				A1000961 /* LibraryGridZoomModel.swift in Sources */,
-				A1000960 /* LibraryGridLevels.swift in Sources */,
 				A1000401 /* GuestDisplay.swift in Sources */,
 				A1000004 /* JITAllocator.c in Sources */,
 				A1000005 /* EntitlementChecker.swift in Sources */,

@@ -4,19 +4,12 @@
 import SwiftUI
 
 // Settings in pages, as Game details is: the Settings tab lists a few groups of rows,
-// and each row opens a page with the sections that were on the one long page. Each
-// section is the same view it was there. While the search field holds text, the tab
-// shows the one long page filtered, as before, so a match is found wherever it lives.
-// env.MADEIRA_SETTINGS_PAGES = 0 keeps the one long page.
+// and each row opens a page with the sections it holds.
 
 enum SettingsPages {
-    /// On by default: the Settings tab lists its pages, each opening the sections it holds.
-    /// 0: the one long page with every section, as before.
-    static var enabled: Bool { MadeiraConfig.flag("MADEIRA_SETTINGS_PAGES") }
-
     enum Page: Hashable, CaseIterable {
-        case steam, gog, itch, epic, ea, runtimes, graphics, display, memory, pointer, jit, signing, saves, drives,
-             appearance, advanced, credits
+        case steam, gog, itch, epic, ea, runtimes, displayGraphics, memory, pointer, jit, signing, saves, drives,
+             appearance, advanced, logs, credits
 
         var title: String {
             switch self {
@@ -26,8 +19,7 @@ enum SettingsPages {
             case .epic: return "Epic Games"
             case .ea: return "EA app"
             case .runtimes: return "Runtimes"
-            case .graphics: return "Graphics"
-            case .display: return "Display"
+            case .displayGraphics: return "Display and Graphics"
             case .memory: return "Memory and sync"
             case .pointer: return "Pointer and touch"
             case .jit: return "JIT"
@@ -36,6 +28,7 @@ enum SettingsPages {
             case .drives: return "External drives"
             case .appearance: return "Appearance"
             case .advanced: return "Advanced"
+            case .logs: return "Logs"
             case .credits: return "Credits"
             }
         }
@@ -48,8 +41,7 @@ enum SettingsPages {
             case .epic: return "gamecontroller"
             case .ea: return "arrow.down.circle"
             case .runtimes: return "puzzlepiece.extension"
-            case .graphics: return "cpu"
-            case .display: return "display"
+            case .displayGraphics: return "display"
             case .memory: return "memorychip"
             case .pointer: return "cursorarrow"
             case .jit: return "bolt"
@@ -58,7 +50,46 @@ enum SettingsPages {
             case .drives: return "externaldrive"
             case .appearance: return "paintpalette"
             case .advanced: return "wrench.and.screwdriver"
+            case .logs: return "doc.text.magnifyingglass"
             case .credits: return "heart"
+            }
+        }
+
+        /// The page's name for the iPad layout's stored choice.
+        var key: String { String(describing: self) }
+
+        /// The store a store's page is for (its logo is the page's icon).
+        var store: NewLookStore? {
+            switch self {
+            case .steam: return .steam
+            case .gog: return .gog
+            case .itch: return .itch
+            case .epic: return .epic
+            case .ea: return .ea
+            default: return nil
+            }
+        }
+
+        /// One line under the page's title on iPad, saying what the page is for.
+        var blurb: String {
+            switch self {
+            case .steam: return L("Sign in to Steam and start games with Madeira Dock.")
+            case .gog: return L("Sign in to GOG to install your GOG games.")
+            case .itch: return L("Sign in to itch.io to install your itch.io games.")
+            case .epic: return L("Sign in to Epic Games to install your Epic games.")
+            case .ea: return L("Sign in to the EA app to install your EA games.")
+            case .runtimes: return L("The extra Windows parts some games need to start.")
+            case .displayGraphics: return L("How games are drawn, and their frame rate on this screen.")
+            case .memory: return L("How games use this device's memory.")
+            case .pointer: return L("The mouse pointer and touch in games.")
+            case .jit: return L("JIT lets games run fast. Madeira needs it to play.")
+            case .signing: return L("When this copy of Madeira needs signing again.")
+            case .saves: return L("Back up your game saves and bring them back.")
+            case .drives: return L("Keep games on an external drive.")
+            case .appearance: return L("How Madeira looks: the library's store sidebar, the bars, and the touch buttons in games.")
+            case .advanced: return L("Logs, help and every option, for when something goes wrong.")
+            case .logs: return L("What Madeira and your games wrote while running.")
+            case .credits: return L("The people and projects Madeira is built on.")
             }
         }
 
@@ -71,63 +102,28 @@ enum SettingsPages {
             case .epic: return EpicLibrary.enabled
             case .ea: return EALibrary.enabled
             case .signing: return SigningRefresh.enabled
-            case .graphics: return GraphicsSettings.shown
-            case .display, .memory: return LibraryView.runtimeSettingsShown
+            // One page for both (display-graphics): it shows when either part would.
+            case .displayGraphics: return GraphicsSettings.shown || LibraryView.runtimeSettingsShown
+            case .memory: return LibraryView.runtimeSettingsShown
             default: return true
             }
         }
     }
 
-    /// The rows of the Settings tab, in groups.
-    static let groups: [(String?, [Page])] = [
-        ("Getting games", [.steam, .gog, .itch, .epic, .ea, .runtimes]),
-        ("Running games", [.graphics, .display, .memory, .pointer]),
-        ("Device", [.jit, .signing, .saves, .drives]),
-        (nil, [.appearance, .advanced, .credits]),
+    /// The Settings tab: short groups as in the mock-up, games first. Signing in to a
+    /// store is also on the Stores tab, so the stores come lower down.
+    static let newLookGroups: [(String?, [Page])] = [
+        ("Games", [.displayGraphics, .memory, .pointer, .runtimes]),
+        ("Storage", [.saves, .drives]),
+        ("This device", [.jit, .signing]),
+        ("Stores", [.steam, .gog, .itch, .epic, .ea]),
+        ("Look", [.appearance]),
+        ("Help", [.logs, .advanced]),
+        ("About", [.credits]),
     ]
 }
 
-/// The Settings tab's first page: the status, then a row for each page.
-struct SettingsPagesList: View {
-    var startDock: (DockGame, Bool) -> Void
-    @ObservedObject private var jitState = LibraryJITState.shared
-    @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
-
-    var body: some View {
-        Form {
-            Section { LibraryStatus().listRowBackground(Color.clear) }
-            ForEach(Array(SettingsPages.groups.enumerated()), id: \.offset) { _, group in
-                let pages = group.1.filter(\.shown)
-                if !pages.isEmpty {
-                    Section {
-                        ForEach(pages, id: \.self) { page in
-                            NavigationLink { SettingsPageView(page: page, startDock: startDock) } label: { row(page) }
-                        }
-                    } header: { if let title = group.0 { Text(title) } }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private func row(_ page: SettingsPages.Page) -> some View {
-        if let value = summary(page) {
-            LabeledContent { Text(value).lineLimit(1) } label: { Label(page.title, systemImage: page.symbol) }
-        } else {
-            Label(page.title, systemImage: page.symbol)
-        }
-    }
-
-    private func summary(_ page: SettingsPages.Page) -> String? {
-        switch page {
-        case .jit: return jitState.enabled ? "On" : "Off"
-        case .appearance: return liquidMetal.on ? "Liquid metal" : "Liquid Glass"
-        default: return nil
-        }
-    }
-}
-
-/// One page. Its sheets hang off its own Form, as the long page's did, never off a
-/// page the navigation has covered.
+/// One page. Its sheets hang off its own Form, never off a page the navigation has covered.
 struct SettingsPageView: View {
     let page: SettingsPages.Page
     var startDock: (DockGame, Bool) -> Void
@@ -135,29 +131,38 @@ struct SettingsPageView: View {
     @State private var refresh = 0
     @ObservedObject private var input = InputSettings.shared
     @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
-    @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
-    @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    @AppStorage(NewLook.zoomHapticsKey) private var zoomHaptics = true
+    @AppStorage(NewLook.coverWidthKey) private var coverWidth: Double = 104
     @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     @State private var developerUI = !FrontendChoice.preferNew
     @State private var restartNotice = false
 
     var body: some View {
-        Form { content }
+        Form {
+            content
+        }
             .navigationTitle(page.title).navigationBarTitleDisplayMode(.inline)
+            // (new-look) The island behind the page, and B goes back.
+            .modifier(NewLookSettingsChrome())
             .alert("Restart Madeira", isPresented: $restartNotice) {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text("Close Madeira from the app switcher and open it again to switch interfaces.")
             }
             .sheet(item: $sheet, onDismiss: { refresh += 1 }) { sheet in
-                switch sheet {
-                case .allSettings: AllSettingsView()
-                case .steamSignIn: SteamSignInView()
-                case .gogSignIn: GOGSignInView()
-                case .epicSignIn: EpicSignInView()
-                case .eaSignIn: EASignInView()
-                case .dock: MadeiraDockView(start: startDock)
+                Group {
+                    switch sheet {
+                    case .allSettings: AllSettingsView()
+                    case .steamSignIn: SteamSignInView()
+                    case .gogSignIn: GOGSignInView()
+                    case .epicSignIn: EpicSignInView()
+                    case .eaSignIn: EASignInView()
+                    case .dock: MadeiraDockView(start: startDock)
+                    }
                 }
+                // A controller's B closes it, and the Settings list leaves the pad alone meanwhile.
+                .menuPadSheet()
+                .logScreen("Settings sheet: \(String(describing: sheet))")
             }
     }
 
@@ -172,8 +177,10 @@ struct SettingsPageView: View {
             WineMonoSettingsSection()
             if VCRedistModel.enabled { VCRedistSettingsSection() }
             WineGeckoSettingsSection()
-        case .graphics: GraphicsSettings(refresh: refresh)
-        case .display: DisplayRateSettings()
+        case .displayGraphics:
+            // The Direct3D and Vulkan pickers first, then the display rate in its own section.
+            if GraphicsSettings.shown { GraphicsSettings(refresh: refresh) }
+            if LibraryView.runtimeSettingsShown { DisplayRateSettings() }
         case .memory: RuntimeMemorySyncSettings(open: { sheet = $0 }, refresh: refresh)
         case .pointer: Section("Pointer") { LibraryPointerSettings() }
         case .jit: JITSettingsSection()
@@ -184,16 +191,20 @@ struct SettingsPageView: View {
         case .advanced:
             Section {
                 Toggle("Extended logging", isOn: $input.diagnostics)
-                // ClaudeHelp.swift: the fixes guide, logs and madeira.cfg to a chat.
-                ClaudeHelpButton(entry: nil)
+                // GetHelpView.swift: the scrubbed report as one .txt for the Madeira Discord (Cameron, Nov 8).
+                DiscordLogButton(entry: nil, row: true)
+                NavigationLink { Form { LogsSection() }.navigationTitle("Logs") } label: {
+                    Label("Logs", systemImage: "doc.text.magnifyingglass")      // LogsView.swift
+                }
             } header: { Text("Diagnostics") } footer: {
-                Text("Get Help from Claude shares a guide to known fixes, the last logs and madeira.cfg. For one game's config too, use the button on its Game details page.")
+                Text("Save copy for Discord makes one text file (up to 5 MB) with the last game's log and your settings, with personal details taken out. Post it in the Madeira Discord.")
             }
             Section {
                 Button("All settings") { sheet = .allSettings }
             } footer: {
                 Text("Every option Madeira reads from madeira.cfg, by subsystem.")
             }
+        case .logs: LogsSection()
         case .credits: SettingsCreditsSection()
         }
     }
@@ -212,12 +223,17 @@ struct SettingsPageView: View {
             Text("Glass is the system's Liquid Glass. Solid draws each button as a plain opaque disc; a game's Opacity slider still fades them.")
         }
         Section {
-            Toggle("New library grid", isOn: $zoomableGrid)
-            if zoomableGrid {
-                Toggle("Zoom haptics", isOn: $zoomHaptics)
+            // The Library's covers; a pinch on them changes it too. A on it steps to the next size.
+            Picker("Cover size", selection: Binding(get: { NewLook.coverStep(coverWidth) },
+                                                    set: { coverWidth = NewLook.coverWidths[$0] })) {
+                Text("Small").tag(0)
+                Text("Medium").tag(1)
+                Text("Large").tag(2)
             }
+            .padItem("ap-cover-size", cornerRadius: 12) { coverWidth = NewLook.coverWidths[(NewLook.coverStep(coverWidth) + 1) % 3] }
+            Toggle("Zoom haptics", isOn: $zoomHaptics)
         } footer: {
-            Text("Pinch the library's cards to change how many fit across. Off, the cards use the original grid. Zoom haptics click as the pinch crosses a size.")
+            Text("Pinch the library's covers to change how many fit across. Zoom haptics click as the pinch crosses a size.")
         }
         Section {
             Toggle("Use developer interface", isOn: Binding(get: { developerUI }, set: { on in
@@ -229,7 +245,7 @@ struct SettingsPageView: View {
     }
 }
 
-/// The credits, on their own page and last on the long one.
+/// The credits, on their own page.
 struct SettingsCreditsSection: View {
     var body: some View {
         Section {

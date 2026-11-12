@@ -51,16 +51,22 @@ madsync = (root / 'build/madsync/madsync.c').read_text(encoding='utf-8')
 
 # ------------------------------------------------------------------ static rules
 lower = installers.lower()
-# One documented exception: .NET Framework setups (isDotNetFramework, env.MADEIRA_INSTALL_SKIP_DOTNET),
-# which do not finish under Wine's own .NET. Outside that function no name decides anything.
-named = re.sub(r'nonisolated static func isdotnetframework.*?\n    \}\n', '', lower, flags=re.S)
+# Two documented exceptions: .NET Framework setups (isDotNetFramework, env.MADEIRA_INSTALL_SKIP_DOTNET), which do
+# not finish under Wine's own .NET, and the DirectX redistributable (isDirectXRedist, env.MADEIRA_INSTALL_SKIP_DIRECTX),
+# which ended with -9 on device and whose files Wine has its own of. Outside those two functions (and comments) no
+# name decides anything.
+named = re.sub(r'nonisolated static func (isdotnetframework|isdirectxredist)\(.*?\n    \}\n', '', lower, flags=re.S)
+named = '\n'.join(line for line in named.splitlines() if not line.lstrip().startswith('//'))
+dx = re.search(r'nonisolated static func isdirectxredist\(.*?\n    \}\n', lower, flags=re.S)
 require('func isdotnetframework' in lower and 'dotnetfx' not in named and
-        not any(n in lower for n in ('dxsetup', 'vcredist', 'vc_redist', 'dxwebsetup', 'physx', 'ndp4')),
-        'no redistributable names: nothing is decided by program name, except the .NET Framework setups')
+        dx is not None and 'dxsetup.exe' in dx.group(0) and 'vcredist' not in dx.group(0) and
+        not any(n in named for n in ('dxsetup', 'vcredist', 'vc_redist', 'dxwebsetup', 'physx', 'ndp4')),
+        'no redistributable names: nothing is decided by program name, except the .NET Framework and DirectX setups '
+        '(redist-name-exception-v2)')
 require('SteamSignIn.flag(name, default: true)' in installers, 'every installer switch defaults on and reads env.NAME')
 for switch in ('MADEIRA_DOCK_INSTALLERS', 'MADEIRA_INSTALL_DEFAULT_KEY', 'MADEIRA_DOCK_INSTALL_CHOICE',
                'MADEIRA_DOCK_INSTALL_SCM', 'MADEIRA_DOCK_INSTALL_SERVER_SYNC', 'MADEIRA_DOTNET_FUSION',
-               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_DOCK_INSTALL_REGISTRY'):
+               'MADEIRA_INSTALL_SKIP_DOTNET', 'MADEIRA_INSTALL_SKIP_DIRECTX', 'MADEIRA_DOCK_INSTALL_REGISTRY'):
     require(f'flag("{switch}")' in installers, f'switch {switch} is read')
 require('reg.exe' not in installers, 'the batch never writes the registry (no reg.exe in the bundle)')
 require(content.count('setenv("MADEIRA_MADSYNC_SESSION", "0", 1)') == 1 and
@@ -106,6 +112,9 @@ enum SteamSignIn {
 enum MadeiraConfig {
     nonisolated(unsafe) static var values: [String: String] = [:]
     static func get(_ key: String) -> String? { values[key] }
+    // DockInstallers.separateSession reads the game's own lines by default
+    nonisolated(unsafe) static var gameValues: [String: String] = [:]
+    static func gameValue(_ key: String) -> String? { gameValues[key] }
     static var gameURL: URL? { nil }
     // DockGameSession.swift (compiled with the production installers for isMicrosoftKey)
     static func flag(_ name: String, fallback: Bool = true) -> Bool { getenv(name).map { String(cString: $0) != "0" } ?? fallback }
@@ -363,6 +372,19 @@ func pe(_ url: URL, machine: UInt16) throws {
                 DockInstallers.isDotNetFramework(setup("C:\\x\\setup.exe", key: "SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full")) &&
                 DockInstallers.isDotNetFramework(setup("C:\\x\\setup.exe", key: "Software\\Valve\\Steam\\Apps\\CommonRedist\\DotNet\\3.5")),
                 "  found by file name or by its setup key")
+        // The DirectX redistributable: Wine's own d3dx/XAudio/XInput answer (DXSETUP ended with -9 on device).
+        let dx = setup("C:\\Games\\_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe")
+        require(DockInstallers.runnable(dx, drive: drive, has32Bit: true, hasMsiexec: true, skipDirectX: true) == "Wine's own DirectX is used" &&
+                DockInstallers.runnable(dx, drive: drive, has32Bit: true, hasMsiexec: true) == nil, "the DirectX redistributable is left out only with skipDirectX")
+        require(DockInstallers.isDirectXRedist(setup("C:\\x\\setup.exe", key: "Software\\Valve\\Steam\\Apps\\CommonRedist\\DirectX\\Jun2010")) &&
+                !DockInstallers.isDirectXRedist(setup("C:\\x\\setup.exe")),
+                "  found by file name or by Steam's DirectX key, not by any setup.exe")
+        // Left out because Wine provides it: the screens say nothing about it (the log still lists it).
+        let quiet = [DockInstallPlanItem(process: dx, status: .unsupported, reason: "Wine's own DirectX is used"),
+                     DockInstallPlanItem(process: fx35, status: .unsupported, reason: "Wine's own .NET is used")]
+        require(DockInstallScripts.note(quiet) == nil, "  a skipped DirectX or .NET setup is not on the screens")
+        require(DockInstallScripts.note(quiet + [DockInstallPlanItem(process: setup("C:\\x\\vcredist_x64.exe"), status: .pending)])
+                .map { $0.contains("Runs first") && !$0.contains("Wine's own") } == true, "  the others still are")
         require(!DockInstallers.isDotNetFramework(setup("C:\\x\\windowsdesktop-runtime-8.0.11-win-x64.exe")) &&
                 !DockInstallers.isDotNetFramework(setup("C:\\x\\DXSETUP.exe", key: "Software\\Valve\\Steam\\Apps\\CommonRedist\\DirectX\\Jun2010")) &&
                 !DockInstallers.isDotNetFramework(tool), "  newer .NET, DirectX and other programs still run")
@@ -471,9 +493,22 @@ func pe(_ url: URL, machine: UInt16) throws {
         require(!DockInstallers.serverSync && ((try? String(contentsOf: drive.appendingPathComponent("madeira-dock-installers.cmd"), encoding: .utf8)) ?? "").contains("--start-services")
                 && !(DockInstallers.note ?? "").contains("standard synchronization"),
                 "no inproc-sync (fastsync, the default engine): the service step runs, no madsync note")
-        require((DockInstallers.note ?? "").contains("This start runs only them; afterwards restart Madeira and start the game again.")
+        require(!DockInstallers.installsOnly && !(DockInstallers.note ?? "").contains("This start runs only them")
+                && logged("the installs run first and the game starts after them in the same session"),
+                "MADEIRA_DOCK_INSTALL_SEPARATE unset, no layout line in the game's own lines: installs, then the game, in one session")
+        setenv("MADEIRA_DOCK_INSTALL_SEPARATE", "1", 1)
+        DockInstallers.setRunsNext(7000, true, prefix: prefix)
+        DockInstallers.prepare(game, drive: drive, prefix: prefix, has32Bit: true, hasMsiexec: false, fusionSource: nil)
+        require(DockInstallers.installsOnly && (DockInstallers.note ?? "").contains("This start runs only them; afterwards restart Madeira and start the game again.")
                 && logged("this session runs only the one-time installs"),
-                "MADEIRA_DOCK_INSTALL_SEPARATE (on by default): a start that runs installers runs only them")
+                "MADEIRA_DOCK_INSTALL_SEPARATE=1: a start that runs installers runs only them")
+        unsetenv("MADEIRA_DOCK_INSTALL_SEPARATE")
+        require(DockInstallers.separateSession(game: { $0 == "env.MADEIRA_RDR2_VA_HOLD" ? "1" : nil }, global: { _ in nil }) &&
+                DockInstallers.separateSession(game: { $0 == "env.MADEIRA_SC_PA_POOLS" ? "2" : nil }, global: { _ in nil }) &&
+                !DockInstallers.separateSession(game: { _ in nil }, global: { _ in nil }) &&
+                !DockInstallers.separateSession(game: { $0 == "env.MADEIRA_RDR2_VA_HOLD" ? "1" : $0 == "env.MADEIRA_DOCK_INSTALL_SEPARATE" ? "0" : nil }, global: { _ in nil }) &&
+                DockInstallers.separateSession(game: { _ in nil }, global: { $0 == "env.MADEIRA_DOCK_INSTALL_SEPARATE" ? "1" : nil }),
+                "a layout line in the game's own lines runs installs alone; the setting wins either way")
         unsetenv("MADEIRA_DOCK_INSTALL_SERVER_SYNC")
         setenv("MADEIRA_DOCK_INSTALL_SCM", "0", 1)
         DockInstallers.setRunsNext(7000, true, prefix: prefix)

@@ -328,12 +328,13 @@ import UserNotifications
         }
     }
 
-    /// Back as it was: the game session's own category (WineProcessBridge.m), and a
-    /// session we only made active for a download made inactive again.
+    /// Back as it was: the game session's own category (WineProcessBridge.m: it mixes
+    /// with other apps unless MADEIRA_AUDIO_MIX=0), and a session we only made active for
+    /// a download made inactive again.
     private func restoreSession() {
         let session = AVAudioSession.sharedInstance()
         if changedCategory {
-            try? session.setCategory(.playback, options: [])
+            try? session.setCategory(.playback, options: MadeiraConfig.flag("MADEIRA_AUDIO_MIX") ? [.mixWithOthers] : [])
             changedCategory = false
         }
         if activatedSession, !gameRunning {
