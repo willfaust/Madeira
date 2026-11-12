@@ -17055,6 +17055,175 @@ static void ios_sc_render_handler_patch( char *base, SIZE_T total_size, const IM
              ipc_split ? "separate renderer IPC manager installed; renderer channels retained" : "IPC split disabled" );
 }
 
+/* [ubi-cef] Ubisoft Connect's libcef.dll keeps the browser's command line (on unless env.MADEIRA_UBI_CEF = 0, which also turns
+ * off process_ios.c's switches). Like [sc-rph] above, this edits a third-party module in memory, and only for a build listed
+ * in ios_ubi_cef_builds.
+ *
+ * upc.exe, Ubisoft Connect's CEF browser, runs with cef_settings_t.command_line_args_disabled set, so CEF's
+ * ChromeMainDelegateCef::BasicStartupComplete (chrome_main_delegate_cef.cc, the branch for a process without --type=)
+ * rebuilds the global command line from the program name alone and clears its switch map: none of process_ios.c
+ * ubi_cef_cmdline's switches takes effect, and the launcher needs more 32-bit processes than the session has guest windows.
+ * In 32-bit libcef.dll the check is
+ *     83 7R 38 00          cmp dword [reg+0x38], 0     ; settings_->command_line_args_disabled (cef_settings_t +0x38)
+ *     0f 84 rel32          je   skip                   ; taken when the flag is 0: the discard is skipped
+ * and the target of the je starts with the next two reads of the same settings object
+ *     8b ?? 04  83 7R 0c 00    mov r, [reg+4] ; cmp dword [reg+0xc], 0     ; no_sandbox, browser_subprocess_path.length
+ * The je's "0f 84" becomes "90 e9" (nop; jmp rel32, same target and length; the two bytes hold no relocation), so the discard
+ * never runs. Only the process's own view changes, at image-map time, before the section protections, the JIT-pool copy and
+ * any execution of the page, so no code-cache invalidation is involved. It applies only to an i386 image named libcef.dll
+ * (file name and export name), only in upc.exe without --type= (a helper never runs the branch; other programs' libcef.dll is
+ * left alone), and only to a listed build (TimeDateStamp, SizeOfImage, RVA) whose ten bytes at the RVA are the table's and,
+ * with the je's target, match the pattern above. Any other build is left as it is and logged: a new Ubisoft Connect release
+ * is one more table row once its site has been checked. */
+/* ubi-cef-test:begin */
+#define IOS_UBI_CEF_SITE 10u
+
+/* The libcef.dll builds whose site has been checked, each with the ten bytes expected there (cmp dword [reg+0x38], 0;
+ * je rel32): Ubisoft Connect 175.0.13393 (CEF 135). */
+static const struct { unsigned int stamp, image_size, rva; unsigned char bytes[IOS_UBI_CEF_SITE]; } ios_ubi_cef_builds[] =
+{
+    { 0x67f4497d, 0x0bc62000, 0x287464, { 0x83, 0x78, 0x38, 0x00, 0x0f, 0x84, 0xb1, 0x00, 0x00, 0x00 } },
+};
+
+static unsigned int ios_ubi_le32( const unsigned char *p )
+{
+    return p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+/* Is the last path component of [path, path+len) `want` (lower case ASCII), any case? */
+static int ios_ubi_leaf_is( const WCHAR *path, size_t len, const char *want )
+{
+    size_t base = 0, k, n = strlen( want );
+
+    if (!path) return 0;
+    for (k = 0; k < len; k++) if (path[k] == '\\' || path[k] == '/') base = k + 1;
+    if (len - base != n) return 0;
+    for (k = 0; k < n; k++)
+    {
+        WCHAR c = path[base + k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != (WCHAR)want[k]) return 0;
+    }
+    return 1;
+}
+
+/* The calling process is the Ubisoft Connect browser: image upc.exe, a command line that has no "--type=". */
+static int ios_ubi_cef_browser_process( const WCHAR *image, size_t image_len, const WCHAR *cl, size_t cl_len )
+{
+    static const char typesw[] = "--type=";
+    size_t k, j;
+
+    if (!cl || !cl_len || !ios_ubi_leaf_is( image, image_len, "upc.exe" )) return 0;
+    for (k = 0; k + sizeof(typesw) - 1 <= cl_len; k++)
+    {
+        for (j = 0; j < sizeof(typesw) - 1; j++) if (cl[k + j] != (WCHAR)typesw[j]) break;
+        if (j == sizeof(typesw) - 1) return 0;
+    }
+    return 1;
+}
+
+/* Is the check at code[at..]? `code` is len bytes of one section's memory. */
+static int ios_ubi_cef_match( const unsigned char *code, size_t len, size_t at )
+{
+    unsigned int rel, r;
+    size_t tgt;
+
+    if (at > len || len - at < IOS_UBI_CEF_SITE) return 0;
+    if (code[at] != 0x83 || (code[at + 1] & 0xf8) != 0x78 || code[at + 1] == 0x7c ||
+        code[at + 2] != 0x38 || code[at + 3] != 0x00) return 0;     /* cmp dword [reg+0x38], 0 */
+    if (code[at + 4] != 0x0f || code[at + 5] != 0x84) return 0;     /* je rel32 */
+    rel = ios_ubi_le32( code + at + 6 );
+    if (rel < 0x40 || rel > 0x400) return 0;                        /* the discard block is short and lies ahead */
+    tgt = at + IOS_UBI_CEF_SITE + rel;
+    if (tgt > len || len - tgt < 7) return 0;
+    r = code[at + 1] & 7;
+    return code[tgt] == 0x8b && (code[tgt + 1] & 0xc7) == (0x40u | r) && code[tgt + 2] == 0x04 &&
+           code[tgt + 3] == 0x83 && code[tgt + 4] == (0x78u | r) && code[tgt + 5] == 0x0c && code[tgt + 6] == 0x00;
+}
+
+/* Find the check in `view` (the mapped image, RVA == offset, `view_size` bytes). NULL on success, with *site the RVA of
+ * the cmp; otherwise the reason nothing is to be changed. */
+static const char *ios_ubi_cef_locate( const unsigned char *view, size_t view_size, unsigned int *site )
+{
+    static const char name[] = "libcef.dll";
+    const unsigned char *pe;
+    unsigned int lfanew, nsec, optsize, stamp, soi, exp_rva, name_rva, k;
+
+    if (!view || view_size < 0x200 || view[0] != 'M' || view[1] != 'Z') return "no MZ header";
+    lfanew = ios_ubi_le32( view + 0x3c );
+    if (lfanew < 0x40 || lfanew > 0x400 || (size_t)lfanew + 0x100 > view_size) return "PE header out of range";
+    pe = view + lfanew;
+    if (pe[0] != 'P' || pe[1] != 'E' || pe[2] || pe[3]) return "no PE signature";
+    if ((pe[4] | (pe[5] << 8)) != 0x014c || (pe[0x18] | (pe[0x19] << 8)) != 0x010b) return "not a 32-bit x86 image";
+    if (!((pe[0x16] | (pe[0x17] << 8)) & 0x2000)) return "not a DLL";
+    nsec = pe[6] | (pe[7] << 8);
+    optsize = pe[0x14] | (pe[0x15] << 8);
+    stamp = ios_ubi_le32( pe + 8 );
+    soi = ios_ubi_le32( pe + 0x50 );
+    if (!nsec || nsec > 96 || optsize < 0x78 + 8 || (size_t)lfanew + 0x18 + optsize + 40u * nsec > view_size)
+        return "section table out of range";
+    exp_rva = ios_ubi_le32( pe + 0x78 );
+    if (!exp_rva || (size_t)exp_rva + 0x10 > view_size) return "no export directory";
+    name_rva = ios_ubi_le32( view + exp_rva + 0x0c );
+    if (!name_rva || (size_t)name_rva + sizeof(name) > view_size) return "no export name";
+    for (k = 0; k < sizeof(name); k++)
+    {
+        unsigned char c = view[name_rva + k];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != (unsigned char)name[k]) return "export name is not libcef.dll";
+    }
+
+    for (k = 0; k < sizeof(ios_ubi_cef_builds) / sizeof(ios_ubi_cef_builds[0]); k++)
+    {
+        unsigned int rva = ios_ubi_cef_builds[k].rva;
+
+        if (stamp != ios_ubi_cef_builds[k].stamp || soi != ios_ubi_cef_builds[k].image_size) continue;
+        if ((size_t)rva + IOS_UBI_CEF_SITE > view_size || memcmp( view + rva, ios_ubi_cef_builds[k].bytes, IOS_UBI_CEF_SITE ) ||
+            !ios_ubi_cef_match( view, view_size, rva )) return "a known build, but its bytes differ";
+        *site = rva;
+        return NULL;
+    }
+    return "not a known libcef.dll build (ios_ubi_cef_builds)";
+}
+
+/* The change: je -> nop; jmp (the same six bytes, the same target). 1 when made. */
+static int ios_ubi_cef_apply( unsigned char *view, unsigned int site )
+{
+    if (view[site + 4] != 0x0f || view[site + 5] != 0x84) return 0;
+    view[site + 4] = 0x90;
+    view[site + 5] = 0xe9;
+    return 1;
+}
+/* ubi-cef-test:end */
+
+static void ios_ubi_cef_patch( char *base, SIZE_T total_size, const IMAGE_NT_HEADERS *nt, const UNICODE_STRING *nt_name )
+{
+    const char *e = getenv( "MADEIRA_UBI_CEF" );   /* read at each libcef.dll mapping, so it is the session's own */
+    PEB *peb;
+    RTL_USER_PROCESS_PARAMETERS *pp;
+    unsigned int site = 0;
+    const char *why;
+
+    if ((e && e[0] == '0' && !e[1]) || !nt_name || !nt_name->Buffer || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) return;
+    if (!ios_ubi_leaf_is( nt_name->Buffer, nt_name->Length / sizeof(WCHAR), "libcef.dll" )) return;
+    peb = ios_jit_current_peb();
+    pp = peb ? peb->ProcessParameters : NULL;
+    if (!pp || !pp->ImagePathName.Buffer ||
+        !ios_ubi_cef_browser_process( pp->ImagePathName.Buffer, pp->ImagePathName.Length / sizeof(WCHAR),
+                                      pp->CommandLine.Buffer, pp->CommandLine.Length / sizeof(WCHAR) ))
+        return;   /* a helper or another program's libcef.dll: left alone */
+    if ((why = ios_ubi_cef_locate( (const unsigned char *)base, total_size, &site )))
+    {
+        dprintf( 2, "[ubi-cef] libcef.dll at %p not patched: %s -- upc.exe's CEF drops the Chromium switches "
+                    "(the launcher then needs more guest windows than the session has)\n", base, why );
+        return;
+    }
+    if (!ios_ubi_cef_apply( (unsigned char *)base, site )) return;
+    dprintf( 2, "[ubi-cef] libcef.dll at %p: the command-line discard of upc.exe's CEF (cef_settings_t."
+                "command_line_args_disabled, RVA 0x%x, a known build) is skipped: je -> nop; jmp, two bytes "
+                "(MADEIRA_UBI_CEF=0 leaves upc.exe alone)\n", base, site );
+}
+
 /* Does the calling pseudo-process have socialclub.dll mapped? The table is read
  * under the pool lock, the images' export names outside it (the caller holds
  * virtual_mutex, so none of this process's images can be unmapped meanwhile). */
@@ -26872,6 +27041,8 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     }
     /* madeira-bcd: [sc-rph], before the protections and the JIT-pool copy. */
     ios_sc_render_handler_patch( ptr, total_size, nt, sec, nt_name );
+    /* [ubi-cef], same place: on unless env.MADEIRA_UBI_CEF = 0 (see ios_ubi_cef_patch). */
+    ios_ubi_cef_patch( ptr, total_size, nt, nt_name );
     /* [fex-vmeta], likewise (opt-in, ignore-volatile-metadata). */
     ios_ignore_volatile_metadata( ptr, total_size, nt, (ULONG_PTR)image_info->base, nt_name );
 
