@@ -2031,6 +2031,30 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_LIBRARY_SOURCE: {
+            if (h.payload_len < sizeof(struct rm_library_source)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_library_source *a=(const void *)payload;
+            if (a->length > RM_CHUNK_BYTES || h.payload_len != sizeof(*a) + a->length) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            NSString *source=[[NSString alloc] initWithBytes:a+1 length:(NSUInteger)a->length encoding:NSASCIIStringEncoding];
+            NSError *error=nil; id<MTLLibrary> library=nil;
+            if (source) {
+                MTLCompileOptions *options=[MTLCompileOptions new]; options.languageVersion=MTLLanguageVersion3_1;
+                library=[(id<MTLDevice>)object newLibraryWithSource:source options:options error:&error];
+            }
+            NSString *message=error.localizedDescription ?: (source ? @"" : @"Invalid ASCII shader source");
+            NSData *messageBytes=[message dataUsingEncoding:NSUTF8StringEncoding];
+            uint32_t n=(uint32_t)MIN(messageBytes.length,RM_LIBRARY_ERROR_MAX);
+            struct { struct rm_library_source_result header; uint8_t text[RM_LIBRARY_ERROR_MAX]; } result={0};
+            result.header.library=rm_intern(library); result.header.error_length=n;
+            if (n) memcpy(result.text,messageBytes.bytes,n);
+            reply(fd,&h,RM_OK,&result,(uint32_t)(sizeof(result.header)+n)); break;
+        }
         case RM_OP_COUNTER_NEW_TIMESTAMP: {
             if (h.payload_len != sizeof(struct rm_counter_new)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             const struct rm_counter_new *a=(const void *)payload;
