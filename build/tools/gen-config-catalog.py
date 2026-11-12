@@ -1081,6 +1081,26 @@ OVERLAY = {
                         "Launcher 132 MB, Social Club 68 MB through a whole RDR2 session). Larger uploads still get a "
                         "block of their own; each named program logs one [small-rings] line. Unset or 0 (default): "
                         "32 MB, as before. Set it in the game's own file; read when the program starts."},
+    "env.MADEIRA_FEX_INDEPENDENT_DENORMALS": {"category": "FEX / x86 translation",
+                "title": "x86: keep denormal input and output modes independent",
+                "kind": "bool", "default": "0",
+                "sources": ["build/fex-patches/0002-ios-arm64ec-independent-denormals.patch"],
+                "note": "1: use AFP for independent x86 FTZ and DAZ on ARM64EC when the host reports support. "
+                        "This adds FPCR writes at native transitions. FEX_HOSTFEATURES=disableafp overrides it."},
+    "env.MADEIRA_MF_CPU_VIDEO": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Media Foundation: use CPU-backed video samples",
+                "kind": "bool", "default": "0",
+                "sources": ["build/ntdll-unix/winegstreamer_unixlib_ios.c",
+                            "build/dxmt-patches/0002-d3d11-video-device-fallback.patch"],
+                "note": "1: default to the 64-bit parser and ARGB32 video, and let clients fall back from "
+                        "D3D11 video devices to CPU-backed samples. Individual parser, format and device settings still win."},
+    "env.MADEIRA_D3D11_NO_VIDEO_DEVICE": {"category": "Direct3D 9/10/11 (DXMT)",
+                "title": "Direct3D 11: override video device creation",
+                "kind": "bool", "default": "",
+                "sources": ["build/dxmt-patches/0002-d3d11-video-device-fallback.patch"],
+                "note": "1: reject D3D11 devices explicitly requested with VIDEO_SUPPORT. "
+                        "0: allow them even in CPU-video mode. Unset: follow the CPU-video setting. "
+                        "Ordinary Direct3D devices are unaffected."},
     # DXMT's Direct3D 9 index buffers read it (dxmt, build/dxmt-patches/0001-d3d9-index-range-per-draw.patch).
     "env.MADEIRA_D3D9_INDEX_RANGE": {"category": "Direct3D 9/10/11 (DXMT)",
                 "title": "Direct3D 9: upload only the index bytes a draw reads",

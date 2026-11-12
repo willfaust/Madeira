@@ -2190,6 +2190,8 @@ static NTSTATUS wma_transform_notify_qos( void *args )
  * decoder produces, and the first format media_source.c offers anyway); only
  * the native format and media_source.c's YUV list become media types, so a
  * consumer that insists on RGB can be served by choosing it here.
+ * MADEIRA_MF_CPU_VIDEO=1 defaults to ARGB32 for clients using CPU-backed
+ * Media Foundation video samples. An explicit format still wins.
  *
  * A parser has up to MAV_MAX_STREAMS streams.  Each stream handle is a
  * separate object inside the parser so a parser handle passed as a stream
@@ -2234,6 +2236,12 @@ static BOOL wg_video_switch_on(void)
     return !(v && v[0] == '0' && !v[1]);
 }
 
+static BOOL wg_cpu_video_requested(void)
+{
+    const char *v = getenv( "MADEIRA_MF_CPU_VIDEO" );
+    return v && !strcmp( v, "1" );
+}
+
 static enum mav_pixel_format wg_video_native_format(void)
 {
     static const struct { const char *name; enum mav_pixel_format fmt; } names[] =
@@ -2245,7 +2253,7 @@ static enum mav_pixel_format wg_video_native_format(void)
     const char *v = getenv( "MADEIRA_WG_VIDEO_FORMAT" );
     unsigned int i;
 
-    if (!v || !*v) return MAV_PIX_NV12;
+    if (!v || !*v) return wg_cpu_video_requested() ? MAV_PIX_BGRA : MAV_PIX_NV12;
     for (i = 0; i < ARRAY_SIZE(names); i++)
         if (!strcasecmp( v, names[i].name )) return names[i].fmt;
     mav_log( "MADEIRA_WG_VIDEO_FORMAT=%.16s is not one of nv12/i420/yv12/yuy2/rgb32/argb32/abgr32; using nv12", v );
@@ -2731,11 +2739,12 @@ static NTSTATUS wgp_seek( void *args )
 
 /* A 64-bit (ARM64EC) caller has this table by default for the WMA decoder
  * (virtual_ios.c, ios_wg_64bit_enabled); its parser is refused as before
- * unless MADEIRA_WG_64BIT=1. */
+ * unless MADEIRA_WG_64BIT=1 or the CPU-video mode requests it. An explicit
+ * MADEIRA_WG_64BIT=0 still disables the binding (see virtual_ios.c). */
 static NTSTATUS wgp_create64( void *args )
 {
     const char *e = getenv( "MADEIRA_WG_64BIT" );
-    if (!(e && e[0] == '1')) return STATUS_NOT_IMPLEMENTED;
+    if (e ? e[0] != '1' : !wg_cpu_video_requested()) return STATUS_NOT_IMPLEMENTED;
     return wgp_create( args );
 }
 

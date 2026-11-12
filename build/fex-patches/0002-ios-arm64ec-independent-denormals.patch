@@ -1,0 +1,29 @@
+diff --git a/Source/Windows/Common/CPUFeatures.cpp b/Source/Windows/Common/CPUFeatures.cpp
+index 57c8125..92ef45f 100644
+--- a/Source/Windows/Common/CPUFeatures.cpp
++++ b/Source/Windows/Common/CPUFeatures.cpp
+@@ -131,8 +131,10 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
+    * write in ExitFunctionEC. Without AFP, FEX takes its ordinary path for scalar
+    * SSE (an extra INS per op), which is what most ARM64 hosts run.
+    *
+-   * FEX_HOSTFEATURES=enableafp restores AFP (when the probe does not say AFP=0);
+-   * FEX_HOSTFEATURES=disablelrcpc2 turns the offset forms off. */
++   * MADEIRA_FEX_INDEPENDENT_DENORMALS=1 selects AFP only after a positive
++   * host probe, so x86 MXCSR FTZ and DAZ can be represented independently.
++   * Keep FEX_HOSTFEATURES=enableafp as the explicit expert override;
++   * disableafp takes precedence. disablelrcpc2 turns the offset forms off. */
+   {
+     const char* Probe = getenv("FEX_MADEIRA_HOSTPROBE");
+     const auto Has = [Probe](const char* Key, char Want) {
+@@ -152,7 +154,10 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
+     const uint64_t Override = HostFeaturesOverride();
+
+     HostFeatures.SupportsTSOImm9 = Has("LRCPC2", '1') && !(Override & FEXCore::Config::HostFeatures::DISABLELRCPC2);
+-    HostFeatures.SupportsAFP = (Override & FEXCore::Config::HostFeatures::ENABLEAFP) && !Has("AFP", '0');
++    const char* Denormals = getenv("MADEIRA_FEX_INDEPENDENT_DENORMALS");
++    const bool AccurateDenormals = Denormals && strcmp(Denormals, "1") == 0 && Has("AFP", '1');
++    const bool ForcedAFP = (Override & FEXCore::Config::HostFeatures::ENABLEAFP) && !Has("AFP", '0');
++    HostFeatures.SupportsAFP = !(Override & FEXCore::Config::HostFeatures::DISABLEAFP) && (AccurateDenormals || ForcedAFP);
+     LogMan::Msg::IFmt("FEX: ml1231 iOS ARM64EC host features: LRCPC2={} AFP={} (probe {})", HostFeatures.SupportsTSOImm9,
+                       HostFeatures.SupportsAFP, Probe ? Probe : "none");
+   }
