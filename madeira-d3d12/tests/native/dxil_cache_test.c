@@ -15,11 +15,13 @@
  *   - the size bound evicts least-recently-used entries and nothing else.
  *
  * Build and run (Linux / WSL / macOS):
- *   cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I madeira-d3d12/src \
+ *   cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -pthread -I madeira-d3d12/src \
  *      madeira-d3d12/tests/native/dxil_cache_test.c -o /tmp/dxil_cache_test && /tmp/dxil_cache_test
  */
 #include "unix/madeira_dxil_cache.h"
 
+#include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -405,11 +407,62 @@ static void test_prune(void)
     CHECK(mad_dxc_prune("/nonexistent/ml1990", MAD_DXC_EXT, 1, 1, &nf, &rm) == 0 && nf == 0, "missing directory");
 }
 
+struct concurrent_store {
+    const char *path;
+    unsigned char value;
+    int failures;
+};
+
+static void *store_repeatedly(void *opaque)
+{
+    struct concurrent_store *s = opaque;
+    unsigned char data[65536];
+    memset(data, s->value, sizeof data);
+    for (unsigned i = 0; i < 64; ++i)
+        if (!mad_dxc_file_store(s->path, data, sizeof data)) ++s->failures;
+    return NULL;
+}
+
+static void test_concurrent_store(void)
+{
+    char dir[] = "/tmp/madeira-dxc-concurrent-XXXXXX", path[256];
+    pthread_t threads[4];
+    struct concurrent_store stores[4];
+    unsigned char data[65536];
+    CHECK(mkdtemp(dir) != NULL, "concurrent store directory");
+    snprintf(path, sizeof path, "%s/entry.mdxc", dir);
+    for (unsigned i = 0; i < 4; ++i) {
+        stores[i] = (struct concurrent_store){ path, (unsigned char)('A' + i), 0 };
+        if (pthread_create(&threads[i], NULL, store_repeatedly, &stores[i])) abort();
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+        pthread_join(threads[i], NULL);
+        CHECK(stores[i].failures == 0, "concurrent writer %u had %d failures", i, stores[i].failures);
+    }
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    size_t bytes = 0;
+    int valid_size = fd >= 0 && fstat(fd, &st) == 0 && st.st_size == (off_t)sizeof data;
+    while (valid_size && bytes < sizeof data) {
+        ssize_t n = read(fd, data + bytes, sizeof data - bytes);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        bytes += (size_t)n;
+    }
+    if (fd >= 0) close(fd);
+    int whole = valid_size && bytes == sizeof data && data[0] >= 'A' && data[0] <= 'D';
+    for (size_t i = 1; whole && i < sizeof data; ++i) whole = data[i] == data[0];
+    CHECK(whole, "concurrent store left one complete writer's data");
+    unlink(path);
+    rmdir(dir);
+}
+
 int main(void)
 {
     test_key();
     test_entry();
     test_prune();
+    test_concurrent_store();
     printf("[dxil-cache-test] ml1990 %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
