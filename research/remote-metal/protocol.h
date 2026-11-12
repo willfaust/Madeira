@@ -228,6 +228,8 @@ enum rm_op {
     RM_OP_LIBRARY_SOURCE,
     RM_OP_NEW_INDIRECT_COMMAND_BUFFER,
     RM_OP_NEW_TILE_PIPELINE,
+    RM_OP_TEXTURE_READ_LAYOUT,
+    RM_OP_TEXTURE_READ_REGION,
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
@@ -238,6 +240,8 @@ struct rm_counter_resolve { uint64_t buffer; uint32_t start, count; uint64_t dat
 struct rm_blit_samples { uint64_t cmdbuf; uint32_t count, reserved; };
 struct rm_library_source { uint64_t device, length; };
 struct rm_new_icb { uint64_t device, count, options; };
+struct rm_texture_read_layout { uint32_t block_width, block_height, block_bytes, reserved; };
+struct rm_texture_read_region { uint64_t texture, x, y, z, width, height, level, slice; };
 struct rm_library_source_result { uint64_t library; uint32_t error_length, reserved; };
 #define RM_LIBRARY_ERROR_MAX 4096u
 struct rm_sample_attachment { uint64_t buffer, start, end; };

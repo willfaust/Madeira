@@ -287,6 +287,7 @@ jobs:
           python3 tests/host/check-remote-library-source.py
           python3 tests/host/check-remote-icb.py
           python3 tests/host/check-remote-tile.py
+          python3 tests/host/check-remote-texture-read.py
       - name: Check x87 provenance handling
         run: |
           python3 FEX/unittests/host/check-x87-provenance.py

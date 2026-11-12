@@ -640,6 +640,94 @@ static MTLPixelFormat rm_fmt(enum WMTPixelFormat f) {
     return (MTLPixelFormat)ORIGINAL_FORMAT(f);
 }
 
+
+/* Block dimensions and byte sizes match the formats DXMT can expose to D3D. */
+static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *layout) {
+    memset(layout,0,sizeof(*layout));
+    switch ((enum WMTPixelFormat)format) {
+    case WMTPixelFormatA8Unorm:
+    case WMTPixelFormatR8Unorm:
+    case WMTPixelFormatR8Unorm_sRGB:
+    case WMTPixelFormatR8Snorm:
+    case WMTPixelFormatR8Uint:
+    case WMTPixelFormatR8Sint:
+        *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
+    case WMTPixelFormatR16Unorm:
+    case WMTPixelFormatR16Snorm:
+    case WMTPixelFormatR16Uint:
+    case WMTPixelFormatR16Sint:
+    case WMTPixelFormatR16Float:
+    case WMTPixelFormatRG8Unorm:
+    case WMTPixelFormatRG8Unorm_sRGB:
+    case WMTPixelFormatRG8Snorm:
+    case WMTPixelFormatRG8Uint:
+    case WMTPixelFormatRG8Sint:
+    case WMTPixelFormatB5G6R5Unorm:
+    case WMTPixelFormatA1BGR5Unorm:
+    case WMTPixelFormatABGR4Unorm:
+    case WMTPixelFormatBGR5A1Unorm:
+        *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
+    case WMTPixelFormatR32Uint:
+    case WMTPixelFormatR32Sint:
+    case WMTPixelFormatR32Float:
+    case WMTPixelFormatRG16Unorm:
+    case WMTPixelFormatRG16Snorm:
+    case WMTPixelFormatRG16Uint:
+    case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRG16Float:
+    case WMTPixelFormatRGBA8Unorm:
+    case WMTPixelFormatRGBA8Unorm_sRGB:
+    case WMTPixelFormatRGBA8Snorm:
+    case WMTPixelFormatRGBA8Uint:
+    case WMTPixelFormatRGBA8Sint:
+    case WMTPixelFormatBGRA8Unorm:
+    case WMTPixelFormatBGRA8Unorm_sRGB:
+    case WMTPixelFormatRGB10A2Unorm:
+    case WMTPixelFormatRGB10A2Uint:
+    case WMTPixelFormatRG11B10Float:
+    case WMTPixelFormatRGB9E5Float:
+    case WMTPixelFormatBGR10A2Unorm:
+    case WMTPixelFormatBGR10_XR:
+    case WMTPixelFormatBGR10_XR_sRGB:
+        *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
+    case WMTPixelFormatRG32Uint:
+    case WMTPixelFormatRG32Sint:
+    case WMTPixelFormatRG32Float:
+    case WMTPixelFormatRGBA16Unorm:
+    case WMTPixelFormatRGBA16Snorm:
+    case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA16Sint:
+    case WMTPixelFormatRGBA16Float:
+    case WMTPixelFormatBGRA10_XR:
+    case WMTPixelFormatBGRA10_XR_sRGB:
+        *layout=(struct rm_texture_read_layout){1,1,8,0}; return 1;
+    case WMTPixelFormatBC1_RGBA:
+    case WMTPixelFormatBC1_RGBA_sRGB:
+    case WMTPixelFormatBC4_RUnorm:
+    case WMTPixelFormatBC4_RSnorm:
+        *layout=(struct rm_texture_read_layout){4,4,8,0}; return 1;
+    case WMTPixelFormatRGBA32Uint:
+    case WMTPixelFormatRGBA32Sint:
+    case WMTPixelFormatRGBA32Float:
+        *layout=(struct rm_texture_read_layout){1,1,16,0}; return 1;
+    case WMTPixelFormatBC2_RGBA:
+    case WMTPixelFormatBC2_RGBA_sRGB:
+    case WMTPixelFormatBC3_RGBA:
+    case WMTPixelFormatBC3_RGBA_sRGB:
+    case WMTPixelFormatBC5_RGUnorm:
+    case WMTPixelFormatBC5_RGSnorm:
+    case WMTPixelFormatBC6H_RGBFloat:
+    case WMTPixelFormatBC6H_RGBUfloat:
+    case WMTPixelFormatBC7_RGBAUnorm:
+    case WMTPixelFormatBC7_RGBAUnorm_sRGB:
+        *layout=(struct rm_texture_read_layout){4,4,16,0}; return 1;
+    case WMTPixelFormatDepth16Unorm: *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
+    case WMTPixelFormatDepth32Float: *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
+    case WMTPixelFormatStencil8: *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
+    default: return 0;
+    }
+}
+
 /* Replay a validated packed batch into an EXISTING encoder.
  *
  * Lifted verbatim from the single-shot submit path so both callers run the same
@@ -2030,6 +2118,56 @@ static void serve(int fd) {
             if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
+        }
+        case RM_OP_TEXTURE_READ_LAYOUT: {
+            if (h.payload_len != sizeof(struct rm_arg_handle)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_arg_handle *a=(const void *)payload;
+            id object=rm_resolve(a->handle,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            struct rm_texture_read_layout layout;
+            if (!rm_read_layout([(id<MTLTexture>)object pixelFormat],&layout)) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+            reply(fd,&h,RM_OK,&layout,sizeof(layout)); break;
+        }
+        case RM_OP_TEXTURE_READ_REGION: {
+            if (h.payload_len != sizeof(struct rm_texture_read_region)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_region *a=(const void *)payload;
+            id object=rm_resolve(a->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || texture.sampleCount != 1 ||
+                texture.storageMode == MTLStorageModePrivate || texture.storageMode == MTLStorageModeMemoryless ||
+                a->level >= texture.mipmapLevelCount || a->level >= 64 || !a->width || !a->height) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> a->level),
+                     hh=MAX(1ull,(uint64_t)texture.height >> a->level),
+                     dd=MAX(1ull,(uint64_t)texture.depth >> a->level);
+            uint64_t slices=(uint64_t)texture.arrayLength;
+            if (texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray) slices*=6;
+            if (a->x >= w || a->y >= hh || a->z >= dd || a->width > w-a->x || a->height > hh-a->y ||
+                a->slice >= slices || a->x % l.block_width || a->y % l.block_height ||
+                (a->width % l.block_width && a->width != w-a->x) ||
+                (a->height % l.block_height && a->height != hh-a->y)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            uint64_t columns=(a->width-1)/l.block_width+1;
+            uint64_t rows=(a->height-1)/l.block_height+1;
+            if (columns > RM_CHUNK_BYTES/l.block_bytes) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            uint64_t row_bytes=columns*l.block_bytes;
+            if (!row_bytes || rows > RM_CHUNK_BYTES/row_bytes) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            size_t length=(size_t)(row_bytes*rows); void *data=calloc(1,length);
+            if (!data) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            @try {
+                [texture getBytes:data bytesPerRow:row_bytes bytesPerImage:length
+                      fromRegion:MTLRegionMake3D(a->x,a->y,a->z,a->width,a->height,1)
+                     mipmapLevel:a->level slice:a->slice];
+                reply(fd,&h,RM_OK,data,(uint32_t)length);
+            } @finally { free(data); }
+            break;
         }
         case RM_OP_NEW_TILE_PIPELINE: {
             if (h.payload_len < sizeof(struct rm_wmt_info) + sizeof(struct WMTTileRenderPipelineInfo)) {
