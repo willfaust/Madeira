@@ -146,3 +146,44 @@ with tempfile.TemporaryDirectory(prefix='madeira-residency-host-') as tmp:
                     '-framework', 'Metal', '-o', str(exe)], input=objc + case + objc_end, text=True, check=True)
     subprocess.run([str(exe)], check=True)
 print('remote host residency batches validate before mutation')
+
+# Exercise the same handler with a real Metal device when one is available.
+real = objc.replace('static FakeSet *test_set;', 'static id<MTLResidencySet> test_set;').replace(
+    'static FakeAllocation *test_alloc;', 'static id<MTLAllocation> test_alloc;')
+real_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+  if (!d) return 77;
+  if (@available(macOS 15.0, *)) {
+    MTLResidencySetDescriptor *desc = [MTLResidencySetDescriptor new]; NSError *error = nil;
+    test_set = [d newResidencySetWithDescriptor:desc error:&error];
+    test_alloc = [d newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    if (!test_set || !test_alloc) return 77;
+    struct { struct rm_residency_batch h; uint64_t entries[2]; } p = {{1, RM_RESIDENCY_ADD, 2}, {2, 99}};
+    invoke(&p, sizeof p); assert(reply_status == RM_ERR_BAD_HANDLE && test_set.allocationCount == 0);
+    p.h.count = 1; invoke(&p, sizeof p.h + 8); assert(reply_status == RM_OK && test_set.allocationCount == 1);
+    [test_set commit];
+    p.h.action = RM_RESIDENCY_REMOVE; invoke(&p, sizeof p.h + 8);
+    assert(reply_status == RM_OK); [test_set commit]; assert(test_set.allocationCount == 0);
+    p.h.action = RM_RESIDENCY_ADD; invoke(&p, sizeof p.h + 8); assert(test_set.allocationCount == 1);
+    p.h.action = RM_RESIDENCY_REMOVE_ALL; p.h.count = 0; invoke(&p, sizeof p.h);
+    assert(reply_status == RM_OK); [test_set commit]; assert(test_set.allocationCount == 0);
+    return 0;
+  }
+  return 77;
+} }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-residency-metal-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-fobjc-arc', '-Wno-protocol',
+                    '-Wno-objc-protocol-property-synthesis', '-Wno-mismatched-parameter-types', '-I',
+                    str(root / 'research/remote-metal'), '-x', 'objective-c', '-', '-framework', 'Foundation',
+                    '-framework', 'Metal', '-o', str(exe)], input=real + case + real_end, text=True, check=True)
+    result = subprocess.run([str(exe)], check=False)
+    if result.returncode == 77:
+        print('real Metal residency test skipped: no compatible device')
+    else:
+        result.check_returncode()
+        print('real Metal residency add, remove and clear pass')
