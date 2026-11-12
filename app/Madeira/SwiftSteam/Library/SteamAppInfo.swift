@@ -9,7 +9,7 @@
 import Foundation
 
 /// App metadata parsed from Steam's product info (PICS).
-struct SteamAppInfo {
+struct SteamAppInfo: Sendable {
     let appID: UInt32
     var name: String = ""
     var type: AppType = .game
@@ -77,7 +77,7 @@ struct SteamAppInfo {
 
     /// One `ufs.savefiles` entry: `root` names a folder ("WinAppDataLocalLow",
     /// "GameInstall", ...), `path` a subfolder of it, `pattern` a wildcard.
-    struct SaveFile: Equatable {
+    struct SaveFile: Equatable, Sendable {
         var root: String
         var path: String
         var pattern: String
@@ -88,20 +88,20 @@ struct SteamAppInfo {
 
     /// One `ufs.rootoverrides` entry: on `os`, files the cloud lists under
     /// `root` are kept under `useInstead` + `addPath`.
-    struct RootOverride: Equatable {
+    struct RootOverride: Equatable, Sendable {
         var root: String
         var os: String
         var useInstead: String
         var addPath: String
     }
 
-    struct SharedOwner: Equatable {
+    struct SharedOwner: Equatable, Sendable {
         var name: String
         var installDir: String
         var buildID: UInt32
     }
 
-    enum AppType: String {
+    enum AppType: String, Sendable {
         case game = "Game"
         case dlc = "DLC"
         case tool = "Tool"
@@ -123,7 +123,7 @@ struct SteamAppInfo {
         }
     }
 
-    struct DepotInfo {
+    struct DepotInfo: Sendable {
         var depotID: UInt32
         var name: String = ""
         var maxSize: UInt64 = 0

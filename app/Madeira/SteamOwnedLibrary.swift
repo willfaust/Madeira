@@ -59,7 +59,7 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// Game details › Steam › Version; nil in older caches.
     var branches: [SteamAppInfo.Branch]?
 
-    init(_ info: SteamAppInfo, ownedDLC: [UInt32: SteamAppInfo] = [:]) {
+    init(_ info: SteamAppInfo, ownedDLC: SteamOwnedDLC.Index = .init(owned: [:])) {
         id = Int(info.appID)
         name = info.name
         installDir = info.installDir
@@ -136,19 +136,35 @@ struct SteamOwnedDLC: Codable, Identifiable, Hashable, Sendable {
     var downloadBytes: UInt64
     var installBytes: UInt64
 
-    /// The owned DLC of a game: owned DLC apps whose parent is the game, or
-    /// which the game lists or its depots name; by name, at most 1024.
-    static func list(for game: SteamAppInfo, owned: [UInt32: SteamAppInfo]) -> [SteamOwnedDLC] {
-        let known = Set(game.knownDLC)
-        let ids = owned.values.filter { $0.type == .dlc && ($0.parentID == game.appID || known.contains($0.appID)) }
-            .map(\.appID).filter { $0 != game.appID }
+    /// Build once per owned-library refresh, rather than scanning every DLC for
+    /// each game. Known IDs still associate DLC whose parent is absent or differs.
+    struct Index {
+        let owned: [UInt32: SteamAppInfo]
+        let byParent: [UInt32: [UInt32]]
+
+        init(owned: [UInt32: SteamAppInfo]) {
+            self.owned = owned
+            var parents: [UInt32: [UInt32]] = [:]
+            for info in owned.values where info.type == .dlc {
+                if let parent = info.parentID { parents[parent, default: []].append(info.appID) }
+            }
+            byParent = parents
+        }
+    }
+
+    /// The owned DLC of a game: by parent or known ID, deduplicated, at most 1024.
+    static func list(for game: SteamAppInfo, owned index: Index) -> [SteamOwnedDLC] {
+        let owned = index.owned
+        var ids = Set(index.byParent[game.appID] ?? [])
+        for id in game.knownDLC where owned[id]?.type == .dlc { ids.insert(id) }
+        ids.remove(game.appID)
         func total(_ depots: [SteamAppInfo.DepotInfo], _ bytes: (SteamAppInfo.DepotInfo) -> UInt64) -> UInt64 {
             depots.reduce(0) { sum, depot in
                 let (next, overflow) = sum.addingReportingOverflow(bytes(depot))
                 return overflow ? UInt64.max : next
             }
         }
-        return ids.prefix(1024).map { id in
+        return ids.sorted().prefix(1024).map { id in
             let depots = game.dlcDepots(id)
             let download = total(depots) { $0.publicDownloadBytes > 0 ? $0.publicDownloadBytes : $0.maxSize }
             let install = total(depots) { $0.publicSizeBytes > 0 ? $0.publicSizeBytes : ($0.publicDownloadBytes > 0 ? $0.publicDownloadBytes : $0.maxSize) }
@@ -329,6 +345,7 @@ final class SteamOwnedLibrary: ObservableObject {
     private lazy var fetcher = SteamLibraryFetcher(session: session)
     private lazy var downloader = DepotDownloader(session: session)
     private var started = false
+    private var loadingCache = false
     private var lastLibraryRefreshAttempt: Date?
     /// Which account the cached list belongs to: a SHA-256 of the account name,
     /// so the cache file holds no name.
@@ -367,7 +384,9 @@ final class SteamOwnedLibrary: ObservableObject {
     }
     private static var cacheURL: URL { supportFolder.appendingPathComponent("steam-library.json") }
     private static var playtimeURL: URL { supportFolder.appendingPathComponent("steam-playtime.json") }
-    private struct Cache: Codable { var version: Int; var updated: Date; var account: String; var games: [SteamOwnedGame] }
+    struct Cache: Codable, Sendable { var version: Int; var updated: Date; var account: String; var games: [SteamOwnedGame] }
+    private let cacheWriter = SteamLibraryCacheWriter()
+    private var accountGeneration = 0
 
     // MARK: Lifecycle
 
@@ -381,9 +400,17 @@ final class SteamOwnedLibrary: ObservableObject {
         }
         SteamDownloadBackground.shared.attach(self)
         signedIn = SteamSignIn.isSignedIn
-        if signedIn { loadCaches() }
-        SteamLog.event("[steam-library] start signed-in=\(signedIn ? 1 : 0) cached=\(owned.count)")
-        if signedIn { refreshIfStale() }
+        cachedAccount = Self.accountKey(SteamSignIn.accountName)
+        if signedIn {
+            loadingCache = true
+            Task {
+                await loadCaches()
+                loadingCache = false
+                SteamLog.event("[steam-library] cache loaded=\(owned.count)")
+                if signedIn { refreshIfStale() }
+            }
+        }
+        SteamLog.event("[steam-library] start signed-in=\(signedIn ? 1 : 0)")
     }
 
     private func refreshIfStale() {
@@ -398,7 +425,7 @@ final class SteamOwnedLibrary: ObservableObject {
     /// Reserve the attempt before scheduling it, so repeated activation callbacks
     /// cannot queue more requests while the first task is waiting to run.
     func refreshAfterForeground() {
-        guard Self.enabled, signedIn, !refreshing, !inSession else { return }
+        guard Self.enabled, signedIn, !loadingCache, !refreshing, !inSession else { return }
         let now = Date()
         guard now.timeIntervalSince(libraryUpdated ?? .distantPast) > 6 * 3600,
               now.timeIntervalSince(lastLibraryRefreshAttempt ?? .distantPast) >= 60 else { return }
@@ -410,6 +437,7 @@ final class SteamOwnedLibrary: ObservableObject {
     private func signInChanged() {
         let now = SteamSignIn.isSignedIn
         guard now != signedIn || (now && Self.accountKey(SteamSignIn.accountName) != cachedAccount) else { return }
+        accountGeneration &+= 1
         signedIn = now
         if !now {
             for id in Array(downloads.keys) { pause(id) }
@@ -418,29 +446,36 @@ final class SteamOwnedLibrary: ObservableObject {
             owned = []; libraryUpdated = nil; playtime = [:]; downloads = [:]
             SteamLog.event("[steam-library] signed out: list cleared")
         } else {
+            cachedAccount = Self.accountKey(SteamSignIn.accountName)
             owned = []; libraryUpdated = nil; playtime = [:]
             Task { await refreshLibrary(interactive: true) }
         }
     }
 
-    private func loadCaches() {
+    private func loadCaches() async {
         let account = Self.accountKey(SteamSignIn.accountName)
-        cachedAccount = account
-        if let data = try? Data(contentsOf: Self.cacheURL), data.count <= 64 << 20,
-           let cache = try? JSONDecoder().decode(Cache.self, from: data), cache.version == 2, cache.account == account {
-            owned = cache.games; libraryUpdated = cache.updated
-        }
-        if !owned.isEmpty, let data = try? Data(contentsOf: Self.playtimeURL), data.count <= 16 << 20,
-           let cached = try? JSONDecoder().decode([Int: SteamPlaytime].self, from: data) {
-            playtime = cached
-        }
+        let generation = accountGeneration, revision = ownedRevision
+        let cacheURL = Self.cacheURL, playtimeURL = Self.playtimeURL
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (Cache?, [Int: SteamPlaytime]) in
+            guard let data = try? Data(contentsOf: cacheURL), data.count <= 64 << 20,
+                  let cache = try? JSONDecoder().decode(Cache.self, from: data),
+                  cache.version == 2, cache.account == account else { return (nil, [:]) }
+            let playtime: [Int: SteamPlaytime]
+            if let data = try? Data(contentsOf: playtimeURL), data.count <= 16 << 20,
+               let cached = try? JSONDecoder().decode([Int: SteamPlaytime].self, from: data) {
+                playtime = cached
+            } else { playtime = [:] }
+            return (cache, playtime)
+        }.value
+        guard signedIn, accountGeneration == generation, ownedRevision == revision,
+              Self.accountKey(SteamSignIn.accountName) == account, let cache = loaded.0 else { return }
+        owned = cache.games; libraryUpdated = cache.updated; playtime = loaded.1
     }
 
     private func clearCaches() {
         cachedAccount = nil
         DockOffline.clear()   // the offline notes belonged to that account
-        try? FileManager.default.removeItem(at: Self.cacheURL)
-        try? FileManager.default.removeItem(at: Self.playtimeURL)
+        cacheWriter.clear(cacheURL: Self.cacheURL, playtimeURL: Self.playtimeURL)
     }
 
     // MARK: Library
@@ -452,13 +487,25 @@ final class SteamOwnedLibrary: ObservableObject {
         guard Self.enabled, signedIn, !refreshing, !inSession else { return }
         lastLibraryRefreshAttempt = Date()
         refreshing = true
-        defer { refreshing = false }
+        let generation = accountGeneration
+        defer {
+            refreshing = false
+            if signedIn, generation != accountGeneration {
+                Task { await refreshLibrary(interactive: true) }
+            }
+        }
         do {
             let apps = try await fetcher.fetchOwnedApps()
+            guard signedIn, generation == accountGeneration else { return }
             var ownedDLC: [UInt32: SteamAppInfo] = [:]
             if Self.dlcEnabled { for dlc in fetcher.ownedDLC { ownedDLC[dlc.appID] = dlc } }
-            let games = apps.filter(\.installableOnWindows).map { SteamOwnedGame($0, ownedDLC: ownedDLC) }
-                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            let dlcSnapshot = ownedDLC
+            let games = await Task.detached(priority: .userInitiated) {
+                let dlcIndex = SteamOwnedDLC.Index(owned: dlcSnapshot)
+                return apps.filter(\.installableOnWindows).map { SteamOwnedGame($0, ownedDLC: dlcIndex) }
+                    .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            }.value
+            guard signedIn, generation == accountGeneration else { return }
             owned = games
             libraryUpdated = Date()
             cachedAccount = Self.accountKey(SteamSignIn.accountName)
@@ -466,15 +513,14 @@ final class SteamOwnedLibrary: ObservableObject {
             SteamLog.event("[steam-library] owned apps=\(apps.count) windows-installable=\(games.count) dlc=\(ownedDLC.count)")
             await refreshPlaytime()
         } catch {
+            guard generation == accountGeneration else { return }
             handleSessionError(error, context: "library", report: interactive)
         }
     }
 
     private func writeCache() {
         guard let account = cachedAccount, let updated = libraryUpdated else { return }
-        try? FileManager.default.createDirectory(at: Self.supportFolder, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(Cache(version: 2, updated: updated, account: account, games: owned))
-            .write(to: Self.cacheURL, options: .atomic)
+        cacheWriter.write(Cache(version: 2, updated: updated, account: account, games: owned), to: Self.cacheURL)
     }
 
     /// DLC names by app ID, asked of Steam once per DLC while the app runs.
@@ -567,11 +613,12 @@ final class SteamOwnedLibrary: ObservableObject {
 
     func refreshPlaytime() async {
         guard Self.enabled, signedIn, !inSession else { return }
+        let generation = accountGeneration
         do {
             let parsed = try SteamPlaytime.parse(try await requestOwnedGamesPlaytime())
+            guard signedIn, generation == accountGeneration else { return }
             playtime = parsed
-            try? FileManager.default.createDirectory(at: Self.supportFolder, withIntermediateDirectories: true)
-            try? JSONEncoder().encode(parsed).write(to: Self.playtimeURL, options: .atomic)
+            cacheWriter.writePlaytime(parsed, to: Self.playtimeURL)
             SteamLog.event("[steam-playtime] apps=\(parsed.count)")
             await auditCloudSaves()
         } catch {
@@ -1497,3 +1544,51 @@ final class SteamOwnedLibrary: ObservableObject {
 
 /// The external drive Steam downloads go to is not connected.
 struct SteamDriveMissing: Error { let name: String }
+
+/// Ordered, coalesced cache snapshots. Clearing is ordered after any in-flight
+/// write so sign-out cannot be undone by an older queued snapshot.
+final class SteamLibraryCacheWriter: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "madeira.steam-library-writer", qos: .utility)
+    private let lock = NSLock()
+    private var latest: (SteamOwnedLibrary.Cache, URL)?
+    private var generation = 0
+
+    init() {
+        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [queue] _ in
+            queue.sync {}
+        }
+    }
+
+    func write(_ cache: SteamOwnedLibrary.Cache, to url: URL) {
+        lock.lock()
+        let idle = latest == nil
+        latest = (cache, url)
+        let generation = generation
+        lock.unlock()
+        guard idle else { return }
+        queue.async { [self] in
+            lock.lock()
+            guard self.generation == generation else { lock.unlock(); return }
+            let job = latest; latest = nil
+            lock.unlock()
+            guard let (cache, url) = job else { return }
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(cache).write(to: url, options: .atomic)
+        }
+    }
+
+    func writePlaytime(_ playtime: [Int: SteamPlaytime], to url: URL) {
+        queue.async {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(playtime).write(to: url, options: .atomic)
+        }
+    }
+
+    func clear(cacheURL: URL, playtimeURL: URL) {
+        lock.lock(); latest = nil; generation &+= 1; lock.unlock()
+        queue.async {
+            try? FileManager.default.removeItem(at: cacheURL)
+            try? FileManager.default.removeItem(at: playtimeURL)
+        }
+    }
+}

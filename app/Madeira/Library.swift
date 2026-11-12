@@ -3213,7 +3213,7 @@ struct LibraryGroupedGames<LocalCell: View>: View {
         if SteamGamesSection.shown {
             let enabled = SteamOwnedLibrary.enabled
             let downloading = Set(steam.downloads.keys)
-            for item in SteamGamesRules.items(installed: steamGames.games, owned: enabled ? steam.owned : [], search: query) {
+            for item in LibraryGridSteamItems.items(installed: steamGames.games, owned: enabled ? steam.owned : [], search: query) {
                 let installed = item.installed != nil || downloading.contains(item.id)
                 guard installed || (enabled && steam.signedIn) else { continue }
                 let recorded = steamEntries[item.id]

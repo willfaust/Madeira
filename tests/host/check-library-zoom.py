@@ -69,10 +69,13 @@ for rule in ['LibraryGridSteamItems.items(installed: model.games, owned: owned, 
              'SteamGamesRules.showsSignIn(library: libraryEnabled, signedIn: account.signedIn)']:
     require(rule in page, f'page model uses the SwiftUI page\'s rule: {rule[:60]}')
 steam_section = (app / 'SteamGames.swift').read_text()
+require('static var hasInstalled: Bool { LibraryGridSteamItems.hasInstalled }' in steam_section
+        and 'static var shown: Bool { LibraryGridSteamItems.shown }' in steam_section,
+        'both library layouts use the same memoized section rules')
 for rule in ['return SteamGamesRules.showsSection(dock: MadeiraDock.enabled, library: library,',
              'signedIn: library && account.signedIn, count: total)',
              'return !groups.installed.isEmpty || !groups.downloading.isEmpty']:
-    require(rule in page and rule in steam_section, f'LibraryGridSteamItems states SteamGamesSection\'s rule: {rule[:50]}')
+    require(rule in page, f'LibraryGridSteamItems keeps the section rule: {rule[:50]}')
 require('SteamGamesSection.shown' not in between(page, 'struct LibraryGridPageModel', '// MARK: Labels'),
         'the page build reads the section rules through the memo (one items() per change)')
 label_text = between(levels, 'struct LibraryCardLabel: Hashable {', 'final class LibraryLabelBitmaps')

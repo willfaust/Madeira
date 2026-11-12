@@ -4,6 +4,7 @@
 """Execute the production foreground refresh gate with synthetic session state."""
 from pathlib import Path
 import subprocess
+import os
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -28,6 +29,7 @@ assert refresh.index('guard Self.enabled') < refresh.index('lastLibraryRefreshAt
 swift = '''import Foundation
 @MainActor final class Library {
     static var enabled = true
+    var loadingCache = false
     var signedIn = true
     var refreshing = false
     var inSession = false
@@ -73,6 +75,21 @@ swift = '''import Foundation
         library.refreshAfterForeground()
         await settle()
         precondition(library.attempts == 4, "stale cache refreshes")
+        let warming = Library()
+        warming.loadingCache = true
+        warming.refreshAfterForeground()
+        await settle()
+        precondition(warming.attempts == 0 && warming.lastLibraryRefreshAttempt == nil,
+                     "activation cannot race the initial cache read into a full fetch")
+        warming.libraryUpdated = Date()
+        warming.loadingCache = false
+        warming.refreshAfterForeground()
+        await settle()
+        precondition(warming.attempts == 0, "fresh cache avoids the network after the read")
+        warming.libraryUpdated = nil
+        warming.refreshAfterForeground()
+        await settle()
+        precondition(warming.attempts == 1, "missing/stale cache still fetches after the read")
         for gate in 0..<4 {
             let blocked = Library()
             if gate == 0 { Library.enabled = false }
@@ -89,11 +106,15 @@ swift = '''import Foundation
     }
 }
 '''
-with tempfile.TemporaryDirectory(prefix='madeira-steam-retry-') as tmp:
+private_root = Path.home() / 'tmp'
+private_root.mkdir(mode=0o700, exist_ok=True)
+private_root.chmod(0o700)
+with tempfile.TemporaryDirectory(prefix='pi-steam-retry.', dir=private_root) as tmp:
+    env = dict(os.environ, TMPDIR=tmp, TMP=tmp, TEMP=tmp)
     directory = Path(tmp)
     program = directory / 'retry.swift'
     executable = directory / 'retry'
     program.write_text(swift)
-    subprocess.run(['swiftc', '-j', '1', '-parse-as-library', str(program), '-o', str(executable)], check=True)
-    subprocess.run([str(executable)], check=True)
+    subprocess.run(['swiftc', '-j', '1', '-parse-as-library', str(program), '-o', str(executable)], check=True, env=env)
+    subprocess.run([str(executable)], check=True, env=env)
 print('check-steam-library-retry: PASS')

@@ -392,18 +392,19 @@ enum SteamDirectStart {
         scanning = true
         let drive = MadeiraDock.drive
         Task.detached(priority: .utility) {
-            let found = MadeiraDock.games(drive: drive)
+            let discovery = MadeiraDock.discovery(drive: drive)
+            let found = discovery.games
             var builds: [Int: Int] = [:], languages: [Int: String] = [:], depots: [Int: Set<Int>] = [:]
             var dlc: [Int: [Int: Int64]] = [:], branches: [Int: String] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
                 let steamApps = drive.appendingPathComponent(game.library, isDirectory: true)
-                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: steamApps) {
-                    builds[game.id] = build
-                }
-                languages[game.id] = SteamInstallFiles.language(appID: game.id, steamApps: steamApps)
-                depots[game.id] = SteamInstallFiles.depots(appID: game.id, steamApps: steamApps)
-                dlc[game.id] = SteamInstallFiles.installedDLC(appID: game.id, steamApps: steamApps)
-                branches[game.id] = SteamInstallFiles.betaKey(appID: game.id, steamApps: steamApps)
+                let record = discovery.records[game.id].map { SteamInstallFiles.Metadata(state: $0) }
+                    ?? SteamInstallFiles.metadata(appID: game.id, steamApps: steamApps)
+                builds[game.id] = record?.buildID
+                languages[game.id] = record?.language
+                depots[game.id] = record?.depots ?? []
+                dlc[game.id] = record?.installedDLC ?? [:]
+                branches[game.id] = record?.betaKey
             }
             let recorded = builds, recordedLanguages = languages, recordedDepots = depots, recordedDLC = dlc
             let recordedBranches = branches
@@ -480,21 +481,9 @@ struct SteamGamesSection: View {
     /// True when the account has installed or downloading games: the library
     /// then shows them first and its own games after; otherwise its own games
     /// come first and the Steam section (sign-in, Not installed) follows.
-    @MainActor static var hasInstalled: Bool {
-        let library = SteamOwnedLibrary.enabled, account = SteamOwnedLibrary.shared
-        let owned = library ? account.owned : []
-        let items = SteamGamesRules.items(installed: SteamGamesModel.shared.games, owned: owned, search: "")
-        let groups = SteamGamesRules.groups(items, downloading: Set(account.downloads.keys))
-        return !groups.installed.isEmpty || !groups.downloading.isEmpty
-    }
+    @MainActor static var hasInstalled: Bool { LibraryGridSteamItems.hasInstalled }
 
-    @MainActor static var shown: Bool {
-        let library = SteamOwnedLibrary.enabled, account = SteamOwnedLibrary.shared
-        let owned = library ? account.owned : []
-        let total = SteamGamesRules.items(installed: SteamGamesModel.shared.games, owned: owned, search: "").count
-        return SteamGamesRules.showsSection(dock: MadeiraDock.enabled, library: library,
-                                            signedIn: library && account.signedIn, count: total)
-    }
+    @MainActor static var shown: Bool { LibraryGridSteamItems.shown }
 
     /// Pull to refresh on the library: the install records again and, when
     /// signed in, the account's library.
@@ -535,7 +524,7 @@ struct SteamGamesSection: View {
     var body: some View {
         let owned = libraryEnabled ? steam.owned : []
         let signedIn = libraryEnabled && steam.signedIn
-        let items = SteamGamesRules.items(installed: model.games, owned: owned, search: search)
+        let items = LibraryGridSteamItems.items(installed: model.games, owned: owned, search: search)
         let groups = SteamGamesRules.groups(items, downloading: Set(steam.downloads.keys))
         let installed = SteamGamesRules.sorted(groups.installed, by: sort, recorded: recorded)
         let collapsible = Self.collapsible
@@ -1164,7 +1153,7 @@ struct SteamGameSheet: View {
 
     var body: some View {
         let owned = SteamOwnedLibrary.enabled ? steam.owned : []
-        let item = SteamGamesRules.items(installed: games.games, owned: owned, search: "").first { $0.id == appID }
+        let item = LibraryGridSteamItems.items(installed: games.games, owned: owned, search: "").first { $0.id == appID }
         NavigationStack {
             Form {
                 if let item {
