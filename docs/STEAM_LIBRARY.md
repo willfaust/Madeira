@@ -161,8 +161,9 @@ account that owns the depot, so ownership is Steam's decision, not Madeira's.
    eight tasks. A chunk is decrypted (AES-256, the IV first), decompressed
    (zstd, LZMA or zip, whichever container Steam served), checked against its
    size and Steam's Adler-32, and written in place. A failed chunk is retried on
-   another content server; servers that keep failing move to the back of the
-   rotation. Content servers come from Valve's directory and must be Valve's
+   another content server; a server that has failed three times more often than
+   it has recovered moves to the back of the rotation, and the others share the
+   chunks evenly. Content servers come from Valve's directory and must be Valve's
    own hosts, over HTTPS.
 4. Finished chunks are journaled under `steamapps/downloading/<appid>`. An
    interrupted, paused or failed install resumes without fetching them again,
@@ -384,6 +385,9 @@ In `Documents/madeira.cfg`, all on by default:
   permission request.
 - `env.MADEIRA_STEAM_DLC = 0`: no owned DLC is listed or downloaded (above,
   "DLC").
+- `env.MADEIRA_STEAM_CDN_ROTATE = 0`: content servers are ordered by failure
+  count first, as before: one failure sends a server behind every server with
+  none, so a long download can end up on one server.
 
 `env.MADEIRA_STEAM_TRACE = 1` adds protocol trace lines (message names and
 result codes, never payloads or credentials).
