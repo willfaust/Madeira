@@ -215,6 +215,7 @@ enum rm_op {
     RM_OP_RESIDENCY_COMMIT,      /* set -> status                                */
     RM_OP_QUEUE_ADD_RESIDENCY,   /* queue, set -> status                         */
     RM_OP_NEW_GEOM_PSO_INFO,     /* ml927: device, WMTMeshRenderPipelineInfo + WMTGeometryEmulationInfo -> handle (converter geometry emulation) */
+    RM_OP_RESIDENCY_BATCH,       /* validated atomic add/remove/all; action 0 probes support */
 };
 
 struct rm_buf_texture { uint64_t buffer; uint64_t offset; uint64_t bytes_per_row; };
@@ -480,6 +481,18 @@ struct rm_hdr {
 
 struct rm_arg_handle       { uint64_t handle; };
 struct rm_arg_handle_u64   { uint64_t handle; uint64_t arg; };
+
+#define RM_RESIDENCY_BATCH_MAX 65536u
+enum rm_residency_action { RM_RESIDENCY_PROBE, RM_RESIDENCY_ADD, RM_RESIDENCY_REMOVE, RM_RESIDENCY_REMOVE_ALL };
+struct rm_residency_batch { uint64_t set; uint32_t action; uint32_t count; /* uint64_t handles follow */ };
+static inline int rm_residency_batch_valid(const struct rm_residency_batch *a, uint32_t len) {
+    if (len < sizeof(*a) || a->count > RM_RESIDENCY_BATCH_MAX ||
+        len != sizeof(*a) + (uint64_t)a->count * sizeof(uint64_t)) return 0;
+    if (a->action == RM_RESIDENCY_PROBE) return !a->set && !a->count;
+    if (!a->set) return 0;
+    if (a->action == RM_RESIDENCY_REMOVE_ALL) return !a->count;
+    return a->action == RM_RESIDENCY_ADD || a->action == RM_RESIDENCY_REMOVE;
+}
 struct rm_ret_u64          { uint64_t value; };
 struct rm_ret_handle       { uint64_t handle; };
 

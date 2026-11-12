@@ -2224,6 +2224,44 @@ static void serve(int fd) {
             fprintf(stderr, "[rmetald] newResidencySet(capacity %llu) -> %s\n", (unsigned long long)a->arg, set ? "ok" : "nil");
             reply(fd, &h, set ? RM_OK : RM_ERR_WRONG_CLASS, &r, sizeof r); break;
         }
+        case RM_OP_RESIDENCY_BATCH: {
+            const struct rm_residency_batch *a = (const void *)payload;
+            if (!rm_residency_batch_valid(a, h.payload_len)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            if (@available(macOS 15.0, *)) {
+                if (a->action == RM_RESIDENCY_PROBE) { reply(fd, &h, RM_OK, NULL, 0); break; }
+                id set = rm_resolve(a->set, &err);
+                if (err != RM_OK || ![set conformsToProtocol:@protocol(MTLResidencySet)]) {
+                    reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+                }
+                if (a->action == RM_RESIDENCY_REMOVE_ALL) {
+                    [(id<MTLResidencySet>)set removeAllAllocations];
+                    reply(fd, &h, RM_OK, NULL, 0); break;
+                }
+                id<MTLAllocation> __unsafe_unretained *items = a->count ? (id<MTLAllocation> __unsafe_unretained *)calloc(a->count, sizeof(*items)) : NULL;
+                if (a->count && !items) { reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break; }
+                const uint64_t *handles = (const void *)(a + 1);
+                for (uint32_t i = 0; i < a->count; ++i) {
+                    id allocation = rm_resolve(handles[i], &err);
+                    if (err != RM_OK || ![allocation conformsToProtocol:@protocol(MTLAllocation)]) {
+                        if (err == RM_OK) err = RM_ERR_WRONG_CLASS;
+                        break;
+                    }
+                    items[i] = allocation;
+                }
+                @try {
+                    if (err == RM_OK && a->count) {
+                        if (a->action == RM_RESIDENCY_ADD)
+                            [(id<MTLResidencySet>)set addAllocations:items count:a->count];
+                        else
+                            [(id<MTLResidencySet>)set removeAllocations:items count:a->count];
+                    }
+                } @finally { free(items); }
+                reply(fd, &h, err, NULL, 0); break;
+            }
+            reply(fd, &h, RM_ERR_BAD_OPCODE, NULL, 0); break;
+        }
         case RM_OP_RESIDENCY_ADD: {
             struct rm_arg_handle_u64 *a = (void *)payload;
             if (h.payload_len < sizeof *a) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
