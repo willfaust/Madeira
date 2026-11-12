@@ -297,6 +297,11 @@ final class SteamOwnedLibrary: ObservableObject {
     /// Owned DLC is listed and downloaded with its game (SteamDLC); off with
     /// `env.MADEIRA_STEAM_DLC = 0`, when downloads take no DLC as before.
     static var dlcEnabled: Bool { SteamSignIn.flag("MADEIRA_STEAM_DLC", default: true) }
+    /// On by default. env.MADEIRA_STEAM_CDN_ROTATE = 0 restores ordering the
+    /// content servers by failure count first: one failure sends a server behind
+    /// every server with none, so downloads narrow to the servers that have not
+    /// failed. Read once, when the downloader is created.
+    static var cdnRotationEnabled: Bool { SteamSignIn.flag("MADEIRA_STEAM_CDN_ROTATE", default: true) }
 
     @Published private(set) var signedIn = false
     @Published private(set) var owned: [SteamOwnedGame] = [] { didSet { ownedRevision &+= 1 } }
@@ -327,7 +332,11 @@ final class SteamOwnedLibrary: ObservableObject {
     private lazy var gate = SteamConnectionGate(close: { [session] in await session.suspend() },
                                                 reopen: { [session] in session.resume() })
     private lazy var fetcher = SteamLibraryFetcher(session: session)
-    private lazy var downloader = DepotDownloader(session: session)
+    private lazy var downloader: DepotDownloader = {
+        let downloader = DepotDownloader(session: session)
+        downloader.rotatesContentServers = Self.cdnRotationEnabled
+        return downloader
+    }()
     private var started = false
     private var lastLibraryRefreshAttempt: Date?
     /// Which account the cached list belongs to: a SHA-256 of the account name,
