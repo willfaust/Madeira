@@ -32,6 +32,7 @@ jobs:
           python3 tests/host/check-build-inputs.py
           python3 tests/host/check-ci-component-keys.py
           python3 tests/host/check-ffmpeg-source-reuse.py
+          python3 tests/host/check-shader-headers.py
           python3 tests/host/check-ci-llvm-cache.py
           python3 tests/host/check-clean-bootstrap.py
           python3 tests/host/check-app-link-inputs.py
