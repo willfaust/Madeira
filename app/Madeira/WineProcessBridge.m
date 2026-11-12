@@ -2770,6 +2770,7 @@ static void *wine_process_thread(void *arg) {
         unsetenv("MADEIRA_POOL_CARVE_MERGE"); unsetenv("MADEIRA_POOL_CODE_FOREGROUND"); unsetenv("MADEIRA_GAME_FOLDER");
         unsetenv("MADEIRA_APC_BUSY_QUEUE");    /* the Dock sets it for a Ubisoft game's session (ContentView.startDock) */
         unsetenv("MADEIRA_KILL_REAP"); unsetenv("MADEIRA_UBI_CEF");   /* a game's teardown rule, and its 0, are its own */
+        unsetenv("MADEIRA_SLEEP_KERNEL_APC"); unsetenv("MADEIRA_WOA_RECHECK");   /* a game's sleep and wait rules are its own */
         unsetenv("DXMT_ENABLE_NVEXT"); unsetenv("DXMT_WSI_MONITOR_IDENTITY"); unsetenv("DXMT_WSI_MODE_TABLE");
         unsetenv("MADEIRA_GPU_VENDOR"); unsetenv("MADEIRA_GPU_DEVICE"); unsetenv("MADEIRA_GPU_NAME");
         /* madeira-bcd: the server's per-launch switches end with the session */
