@@ -7788,6 +7788,10 @@ struct reserved_area
      * only heads placed by ios_thin_reserve may map here. Same exclusions as
      * fex_only, and generic placement never searches it. */
     unsigned int thin_only;
+    /* x64-hook-zone: FIXED_ONLY. A 64-bit process's hook zone (see ios_hook_zone_map_image):
+     * nothing generic places here, a request for a fixed address inside it maps, as free memory does on
+     * Windows. Never merged, never released by virtual_release_address_space, kept across a split. */
+    unsigned int fixed_only;
 };
 
 static struct list reserved_areas = LIST_INIT(reserved_areas);
@@ -9449,7 +9453,7 @@ static void mmap_add_reserved_area( void *addr, SIZE_T size )
          * enough for the merge below to swallow it, and the type would vanish
          * with no diagnostic -- after which generic placement could allocate
          * inside the arena. Skipping keeps the insert position correct. */
-        if (area->fex_only || area->thin_only) continue;
+        if (area->fex_only || area->thin_only || area->fixed_only) continue;
         if (area_end < addr) continue;
         if (area->base > addr)
         {
@@ -9465,9 +9469,9 @@ static void mmap_add_reserved_area( void *addr, SIZE_T size )
             void *next_end = (char *)area_next->base + area_next->size;
 
             if (area_next->base > end) break;
-            /* nor swallow a FEX or thin area that follows (ml799's rule one step on): the generic area stops
-             * at it, and any part of the new range above it is added on its own */
-            if (area_next->fex_only || area_next->thin_only)
+            /* nor swallow a FEX, thin or fixed-only area that follows (ml799's rule one step on): the generic area
+             * stops at it, and any part of the new range above it is added on its own */
+            if (area_next->fex_only || area_next->thin_only || area_next->fixed_only)
             {
                 area->size = (char *)area_next->base - (char *)area->base;
                 if ((char *)end > (char *)next_end) mmap_add_reserved_area( next_end, (char *)end - (char *)next_end );
@@ -9491,6 +9495,7 @@ static void mmap_add_reserved_area( void *addr, SIZE_T size )
         area->size = size;
         area->fex_only = 0;
         area->thin_only = 0;
+        area->fixed_only = 0;
         list_add_before( ptr, &area->entry );
     }
 }
@@ -9533,10 +9538,33 @@ static int mmap_add_fex_reserved_area( void *addr, SIZE_T size )
     area->size = size;
     area->fex_only = 1;
     area->thin_only = 0;
+    area->fixed_only = 0;
     list_add_before( ptr, &area->entry );
     ERR( "[fex-arena] ml799 registered FEX_ONLY reserved area %p..%p (%llu MB) -- generic "
          "placement cannot allocate here\n", addr, (char *)addr + size,
          (unsigned long long)(size >> 20) );
+    return 1;
+}
+
+/* x64-hook-zone: like mmap_add_fex_reserved_area (never merged, an overlap is refused), for a FIXED_ONLY zone. */
+static int mmap_add_fixed_only_area( void *addr, SIZE_T size )
+{
+    struct reserved_area *area;
+    struct list *ptr;
+
+    LIST_FOR_EACH( ptr, &reserved_areas )
+    {
+        area = LIST_ENTRY( ptr, struct reserved_area, entry );
+        if (area->base >= (void *)((char *)addr + size)) break;
+        if ((char *)area->base + area->size > (char *)addr) return 0;
+    }
+    if (!(area = malloc( sizeof(*area) ))) return 0;
+    area->base = addr;
+    area->size = size;
+    area->fex_only = 0;
+    area->thin_only = 0;
+    area->fixed_only = 1;
+    list_add_before( ptr, &area->entry );
     return 1;
 }
 
@@ -9591,6 +9619,7 @@ static void mmap_remove_reserved_area( void *addr, SIZE_T size )
                          * generic would quietly open the arena to everything. */
                         new_area->fex_only = area->fex_only;
                         new_area->thin_only = area->thin_only;
+                        new_area->fixed_only = area->fixed_only;
                         list_add_after( ptr, &new_area->entry );
                     }
                     area->size = (char *)addr - (char *)area->base;
@@ -13539,6 +13568,7 @@ static void clear_arm64ec_range( const void *addr, size_t size );
  * aliases (FEX CodeBuffers) in freed ranges are cleared; EC bitmap bits
  * are cleared so a reused range starts with a clean call-routing slate. */
 static void ios_sc_grants_owner_died( void *peb );
+static void ios_hook_zone_owner_died( void *peb );   /* x64-hook-zone */
 
 void ios_jit_reclaim_process( void *peb )
 {
@@ -13549,6 +13579,7 @@ void ios_jit_reclaim_process( void *peb )
 
     /* madeira-bcd: its Social Club reservations go when the next helper asks */
     ios_sc_grants_owner_died( peb );
+    ios_hook_zone_owner_died( peb );   /* x64-hook-zone: its zone goes too */
     if (!peb || !rx_base) return;
 
     /* The alias-push callback lives in the emulator of the LAST process that
@@ -21560,6 +21591,7 @@ static void *map_reserved_area_once( void *limit_low, void *limit_high, void *ct
                 continue;
             }
             if (area->thin_only) continue;   /* Madeira: thin heads are placed at fixed slots */
+            if (area->fixed_only) continue;   /* x64-hook-zone: fixed requests only */
             if (!ios_wow_reserved_area_open( start, end, limit_low, limit_high )) continue;   /* ml2020: a window is its process's */
             if (start >= limit_high) continue;
             if (end <= limit_low) return NULL;
@@ -21601,6 +21633,7 @@ static void *map_reserved_area_once( void *limit_low, void *limit_high, void *ct
                 continue;
             }
             if (area->thin_only) continue;   /* Madeira: thin heads are placed at fixed slots */
+            if (area->fixed_only) continue;   /* x64-hook-zone: fixed requests only */
             if (!ios_wow_reserved_area_open( start, end, limit_low, limit_high )) continue;   /* ml2020: a window is its process's */
             if (start >= limit_high) return NULL;
             if (end <= limit_low) continue;
@@ -26836,6 +26869,159 @@ static unsigned int get_mapping_info( HANDLE handle, ACCESS_MASK access, unsigne
  *
  * Map a view for a PE image at an appropriate address.
  */
+#ifdef WINE_IOS
+/* x64-hook-zone: free address space above a 64-bit process's ntdll, for hook code
+ * (env.MADEIRA_X64_HOOK_ZONE = 1; default off).
+ *
+ * A hook's jmp rel32 needs its trampoline within 2 GB of the hooked function, and hook libraries look for free memory next
+ * to it (Far Cry 4's FC64.dll asks for fixed 4 KB pages upward from ntdll!NtProtectVirtualMemory). On Windows each process
+ * has its own address space; here every pseudo-process shares one and 64-bit images pack top-down, so above a process's
+ * ntdll lie only other processes' views. With the switch, a 64-bit process's ntdll (load_ntdll; an x64 child's,
+ * ios_load_child_ec_ntdll) is placed with a 16 MB FIXED_ONLY reserved area directly above it: generic placement never uses
+ * it, a fixed request inside it maps, VirtualQuery calls it free. The process's later images go below it while there is
+ * room there (ios_hook_zone_ceiling), so an upward search from any of its modules meets it. It is released when the
+ * process ends (ios_hook_zone_owner_died). */
+#define IOS_HOOK_ZONE_SIZE (16u << 20)
+
+/* x64-hook-zone-test:begin (tests/host/check-x64-hook-zone.py compiles this region) */
+#define IOS_HOOK_ZONES 64
+struct ios_hook_zone
+{
+    int used;
+    const void *owner;       /* the process's PEB; NULL: the session's own process (its PEB does not exist yet) */
+    ULONG_PTR base, size;    /* the zone, directly above that process's ntdll */
+};
+
+/* owner's zone: the entry registered with its PEB, else (owner being the session's own process) the entry registered
+ * before that PEB existed. The exact entry wins, so a child is never given the session's zone. */
+static struct ios_hook_zone *ios_hook_zone_find( struct ios_hook_zone *t, const void *owner, const void *session_peb )
+{
+    unsigned i;
+
+    if (!owner) return NULL;   /* no process: no zone (NULL in the table is the session's own process) */
+    for (i = 0; i < IOS_HOOK_ZONES; i++)
+        if (t[i].used && t[i].owner == owner) return &t[i];
+    if (owner != session_peb) return NULL;
+    for (i = 0; i < IOS_HOOK_ZONES; i++)
+        if (t[i].used && !t[i].owner) return &t[i];
+    return NULL;
+}
+
+static int ios_hook_zone_add( struct ios_hook_zone *t, const void *owner, ULONG_PTR base, ULONG_PTR size )
+{
+    unsigned i;
+
+    for (i = 0; i < IOS_HOOK_ZONES; i++)
+        if (!t[i].used)
+        {
+            t[i].used = 1;
+            t[i].owner = owner;
+            t[i].base = base;
+            t[i].size = size;
+            return 1;
+        }
+    return 0;
+}
+
+/* The highest address (inclusive) an image of the zone's process may use: below its zone, unless that leaves nothing. */
+static ULONG_PTR ios_hook_zone_limit( const struct ios_hook_zone *z, ULONG_PTR limit_low, ULONG_PTR limit_high )
+{
+    if (!z || z->base - 1 >= limit_high || z->base - 1 <= limit_low) return limit_high;
+    return z->base - 1;
+}
+/* x64-hook-zone-test:end */
+
+static struct ios_hook_zone ios_hook_zones[IOS_HOOK_ZONES];
+static __thread int ios_hook_zone_pending;            /* the next image this thread maps is a 64-bit process's ntdll */
+static __thread const void *ios_hook_zone_pending_owner;
+
+/* The zone's size for the ntdll being mapped now: read at each 64-bit process start, so the switch is the session's own. */
+static SIZE_T ios_hook_zone_bytes(void)
+{
+    const char *e = getenv( "MADEIRA_X64_HOOK_ZONE" );
+
+    return (e && e[0] == '1' && !e[1]) ? IOS_HOOK_ZONE_SIZE : 0;
+}
+
+/* loader_ios.c, around the ntdll load: on = 1 for the next image this thread maps; child_peb NULL: the session's own process. */
+void ios_hook_zone_request( int on, const void *child_peb )
+{
+    ios_hook_zone_pending = on;
+    ios_hook_zone_pending_owner = child_peb;
+}
+
+/* map_image_view, virtual_mutex held: the calling process's images go below its zone. */
+static ULONG_PTR ios_hook_zone_ceiling( ULONG_PTR limit_low, ULONG_PTR limit_high )
+{
+    const void *cur = ios_jit_current_peb();
+
+    if (!cur) return limit_high;
+    return ios_hook_zone_limit( ios_hook_zone_find( ios_hook_zones, cur, ios_session_peb ), limit_low, limit_high );
+}
+
+/* map_image_view, virtual_mutex held: map a 64-bit process's ntdll (size bytes) top-down in [limit_low, limit_high]
+ * with the zone directly above it. STATUS_SUCCESS: mapped, with its zone unless registering the zone failed; anything
+ * else: nothing changed, the caller places the image the usual way. */
+static NTSTATUS ios_hook_zone_map_image( struct file_view **view_ret, SIZE_T size, unsigned int vprot,
+                                         ULONG_PTR limit_low, ULONG_PTR limit_high, const void *owner )
+{
+    static unsigned log_n;
+    SIZE_T zone = ios_hook_zone_bytes(), image = ROUND_SIZE( 0, size, granularity_mask );
+    char *start = (char *)max( limit_low, (ULONG_PTR)address_space_start ), *end = (char *)limit_high + 1;
+    char *ptr, *zone_base;
+    NTSTATUS status;
+
+    if (!zone || !limit_high) return STATUS_NOT_SUPPORTED;
+    if (owner) ios_hook_zone_owner_died( (void *)owner );   /* a zone left by an earlier process with this PEB */
+    if (!(ptr = map_free_area( start, end, image + zone, 1, PROT_NONE, granularity_mask )))
+    {
+        if (log_n++ < 16)
+            dprintf( 2, "[hook-zone] no room for ntdll (0x%lx) plus %lu MB in %p..%p; ntdll is placed as "
+                        "before, without a hook zone\n", (unsigned long)size, (unsigned long)(zone >> 20), start, end );
+        return STATUS_NO_MEMORY;
+    }
+    zone_base = ptr + image;
+    munmap( ptr, image );   /* the image part: map_view maps it fixed next (virtual_mutex is held; a race loses only the zone) */
+    status = map_view( view_ret, ptr, size, 0, vprot, limit_low, limit_high, 0 );
+    if (status || !mmap_add_fixed_only_area( zone_base, zone ) ||
+        !ios_hook_zone_add( ios_hook_zones, owner, (ULONG_PTR)zone_base, zone ))
+    {
+        struct reserved_area *area;
+
+        LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
+            if (area->fixed_only && area->base == zone_base) { mmap_remove_reserved_area( zone_base, zone ); break; }
+        munmap( zone_base, zone );
+        if (log_n++ < 16)
+            dprintf( 2, "[hook-zone] ntdll at %p %s; no hook zone\n", ptr,
+                     status ? "could not be mapped below the zone, placed as before" : "mapped, but the zone was not registered" );
+        return status ? status : STATUS_SUCCESS;
+    }
+    if (log_n++ < 32)
+        dprintf( 2, "[hook-zone] ntdll at %p+0x%lx (%s), %lu MB free above it for hook code: %p..%p\n",
+                 ptr, (unsigned long)size,
+                 owner ? "a 64-bit child" : "the session's process", (unsigned long)(zone >> 20), zone_base, zone_base + zone );
+    return STATUS_SUCCESS;
+}
+
+/* ios_jit_reclaim_process: the dead process's zone goes; a view still inside it (a trampoline) stays mapped. */
+static void ios_hook_zone_owner_died( void *dead_peb )
+{
+    struct ios_hook_zone *z;
+    sigset_t sigset;
+
+    if (!dead_peb) return;
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if ((z = ios_hook_zone_find( ios_hook_zones, dead_peb, NULL )) && z->owner == dead_peb)
+    {
+        dprintf( 2, "[hook-zone] process %p ended, its hook zone %p..%p is released\n",
+                 dead_peb, (void *)z->base, (void *)(z->base + z->size) );
+        remove_reserved_area( (void *)z->base, z->size );
+        z->used = 0;
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+}
+#endif
+
 static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_info *image_info, SIZE_T size,
                                 ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type,
                                 BOOL is_builtin )
@@ -26855,11 +27041,18 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
      * delta there. */
     ULONG_PTR wow_base = ios_wow_base();
     BOOL wow_image = wow_base && !is_machine_64bit( image_info->machine );
+    /* x64-hook-zone: this image is a 64-bit process's ntdll (loader_ios.c asked); the request is used up here */
+    int hook_zone = ios_hook_zone_pending && !wow_image;
+    const void *hook_zone_owner = ios_hook_zone_pending_owner;
+    ULONG_PTR zone_high;
 #else
     const ULONG_PTR wow_base = 0;
     const BOOL wow_image = FALSE;
 #endif
 
+#ifdef WINE_IOS
+    ios_hook_zone_pending = 0;
+#endif
     if (wow_image)
     {
 #ifdef WINE_IOS
@@ -27003,6 +27196,15 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
         }
     }
 
+#ifdef WINE_IOS
+    /* x64-hook-zone: a 64-bit process's ntdll, with free room above it for hook code; the process's other
+     * images below its zone while there is room there (the preferred base above was tried as it was) */
+    zone_high = limit_high;
+    if (!wow_image) limit_high = ios_hook_zone_ceiling( limit_low, limit_high );
+    if (hook_zone && !ios_hook_zone_map_image( view_ret, size, vprot, limit_low, limit_high, hook_zone_owner ))
+        return STATUS_SUCCESS;
+#endif
+
     /* then some appropriate address range */
 
     if (wow_image)
@@ -27028,7 +27230,14 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
 
     /* then any suitable address */
 
+#ifdef WINE_IOS
+    status = map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, limit_high, 0 );
+    if (status && limit_high != zone_high)   /* x64-hook-zone: no room below the zone: anywhere, as before */
+        status = map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, zone_high, 0 );
+    return status;
+#else
     return map_view( view_ret, NULL, size, top_down ? MEM_TOP_DOWN : 0, vprot, limit_low, limit_high, 0 );
+#endif
 }
 
 
@@ -27384,7 +27593,7 @@ static void *alloc_virtual_heap( SIZE_T size )
          * must not widen address_space_limit to the arena's top: that number
          * feeds placement decisions elsewhere, and stretching it to cover a
          * range nothing generic may use would misreport the usable space. */
-        if (area->fex_only || area->thin_only) continue;
+        if (area->fex_only || area->thin_only || area->fixed_only) continue;
         if (is_beyond_limit( base, area->size, address_space_limit ))
             address_space_limit = host_addr_space_limit = end;
         if (is_win64 && base < (void *)0x80000000) break;
@@ -30704,7 +30913,7 @@ static void free_reserved_memory( char *base, char *limit )
              * lifetime, and the 0x80000000..address_space_limit call below
              * spans it -- releasing it here would hand the emulator's address
              * space back to general use mid-run, silently. */
-            if (area->fex_only || area->thin_only) continue;
+            if (area->fex_only || area->thin_only || area->fixed_only) continue;
             if (area_end <= base) continue;
             if (area_base >= limit) return;
             if (area_base < base) area_base = base;
@@ -30908,6 +31117,7 @@ static int mmap_add_thin_reserved_area( void *addr, SIZE_T size )
     area->size = size;
     area->fex_only = 0;
     area->thin_only = 1;
+    area->fixed_only = 0;
     list_add_before( ptr, &area->entry );
     return 1;
 }

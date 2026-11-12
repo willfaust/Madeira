@@ -787,6 +787,15 @@ OVERLAY = {
                         "32- and 64-bit games alike."},
     "env.MADEIRA_PROMOTE": {"title": "Hold the display at its maximum rate"},
     # madeira-bcd: GTA V Enhanced's Social Club (StikJITHelper.swift, process_ios.c, virtual_ios.c).
+    # The 64-bit hook zone (build/ntdll-unix/virtual_ios.c and loader_ios.c; Far Cry 4).
+    "env.MADEIRA_X64_HOOK_ZONE": {"category": "Memory & JIT pool", "kind": "bool", "default": "0",
+                "title": "Free room above a 64-bit program's ntdll for hook code",
+                "note": "Default off. 1: each 64-bit program keeps 16 MB of address space directly above its ntdll free "
+                        "for requests at a fixed address, and its other DLLs load below, so a hook that needs its target "
+                        "within 2 GB of the function finds room there, as on Windows (Far Cry 4's FC64.dll otherwise quits "
+                        "with 'Error at hooking'). Set it in the game's own file; read when each 64-bit program starts; "
+                        "logged as [hook-zone].",
+                "sources": ["build/ntdll-unix/virtual_ios.c"]},
     "pool-split": {"category": "Memory & JIT pool", "title": "Split JIT pool around the main thread's stack",
                 "kind": "bool", "default": "0",
                 "note": "1: when the pool would shrink below its size (pool, 896 MB by default) because the main "
