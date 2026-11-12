@@ -219,9 +219,12 @@ enum rm_op {
     RM_OP_COMMAND_BUFFER_PROPERTY, /* command buffer timestamp in nanoseconds */
     RM_OP_HEAP_BUFFER_SIZE,        /* device, buffer size and options -> size and alignment */
     RM_OP_HEAP_TEXTURE_SIZE,       /* device, texture descriptor -> size and alignment */
+    RM_OP_HEAP_CREATE,             /* device, heap descriptor -> heap handle */
+    RM_OP_HEAP_NEW_PRIVATE_BUFFER, /* heap, offset, buffer descriptor -> buffer */
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
+struct rm_heap_new_buffer { uint64_t heap, offset, length, options; };
 struct rm_size_and_align { uint64_t size, align; };
 
 struct rm_buf_texture { uint64_t buffer; uint64_t offset; uint64_t bytes_per_row; };

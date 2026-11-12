@@ -279,8 +279,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Check remote residency protocol
-        run: python3 tests/host/check-remote-residency.py
+      - name: Check remote Metal protocol
+        run: |
+          python3 tests/host/check-remote-residency.py
+          python3 tests/host/check-remote-heaps.py
       - name: Check x87 provenance handling
         run: |
           python3 FEX/unittests/host/check-x87-provenance.py

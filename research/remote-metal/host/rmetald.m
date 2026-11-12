@@ -2031,6 +2031,45 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_HEAP_CREATE: {
+            if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTHeapInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_wmt_info *a = (const void *)payload;
+            if (a->info_len != sizeof(struct WMTHeapInfo) || a->extra_count) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            id device = rm_resolve(a->owner, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTHeapInfo *i = (const void *)(a + 1);
+            MTLHeapDescriptor *desc = [[MTLHeapDescriptor alloc] init];
+            desc.size = i->size; desc.resourceOptions = (MTLResourceOptions)i->options;
+            desc.type = (MTLHeapType)i->type; desc.sparsePageSize = (MTLSparsePageSize)i->sparse_page_size;
+            id<MTLHeap> heap = [(id<MTLDevice>)device newHeapWithDescriptor:desc];
+            struct rm_ret_handle result = {rm_intern(heap)};
+            reply(fd, &h, heap ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
+        case RM_OP_HEAP_NEW_PRIVATE_BUFFER: {
+            if (h.payload_len != sizeof(struct rm_heap_new_buffer)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_new_buffer *a = (const void *)payload;
+            id object = rm_resolve(a->heap, &err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLHeap)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            id<MTLHeap> heap = object;
+            if (heap.storageMode != MTLStorageModePrivate) {
+                reply(fd, &h, RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            id<MTLBuffer> buffer = a->offset == UINT64_MAX
+                ? [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options]
+                : [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options offset:a->offset];
+            struct rm_ret_handle_u64 result = {rm_intern(buffer), buffer ? buffer.gpuAddress : 0};
+            reply(fd, &h, buffer ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
         case RM_OP_HEAP_TEXTURE_SIZE: {
             if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTTextureInfo)) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
