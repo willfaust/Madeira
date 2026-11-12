@@ -335,18 +335,31 @@ static void ios_fdt_autopsy( const char *what, int fd, int ret, int err )
                    e ? e->gen : 0, e ? ios_fdt_names[e->prev_kind] : "oob");
 }
 
+/* A slot is free while its PEB is NULL (an exited child clears it). The table used to hand out a new index for every child and
+ * never take one back, so the 65th child a launch ever started (a launcher that spawns a helper a minute) had no master socket,
+ * however few were alive. Now the first free slot is taken: ios_proc_socket_count is the high-water mark the lock-free readers
+ * scan up to. A slot is claimed with IOS_PROC_SLOT_CLAIMED, which is never a PEB, so two registrations cannot take one slot and a
+ * reader never sees a slot whose fd is not yet written. An exiting child closes its fd before it clears its PEB, so a reused
+ * slot's fd is never one the old owner still reads. */
+#define IOS_PROC_SLOT_CLAIMED ((void *)1)
+
 static void ios_register_proc_socket(void *peb_id, int fd)
 {
-    int idx = __sync_fetch_and_add(&ios_proc_socket_count, 1);
+    int idx, n;
+    for (idx = 0; idx < IOS_MAX_PROC_SOCKETS; idx++)
+        if (ios_proc_sockets[idx].peb == NULL &&
+            __sync_bool_compare_and_swap( &ios_proc_sockets[idx].peb, NULL, IOS_PROC_SLOT_CLAIMED )) break;
     if (idx >= IOS_MAX_PROC_SOCKETS)
     {
-        wine_log_write("[Wine child] proc-socket table FULL (%d)!", idx);
+        wine_log_write("[Wine child] proc-socket table FULL: %d live child processes!", IOS_MAX_PROC_SOCKETS);
         return;
     }
     ios_fdt_reg( fd, FDT_MASTER, peb_id );
     ios_proc_sockets[idx].fd = fd;
     ios_proc_sockets[idx].exiting = FALSE;
     { int d; for (d = 0; d < IOS_DEAD_PEB_MAX; d++) if (ios_dead_pebs[d] == peb_id) ios_dead_pebs[d] = NULL; }
+    while ((n = ios_proc_socket_count) < idx + 1)
+        if (__sync_bool_compare_and_swap( &ios_proc_socket_count, n, idx + 1 )) break;
     __sync_synchronize();
     ios_proc_sockets[idx].peb = peb_id;
 }
