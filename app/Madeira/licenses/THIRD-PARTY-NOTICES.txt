@@ -20,8 +20,10 @@ Statically linked into the application binary:
 - FEX-Emu (fork): MIT (FEX-MIT.txt); Madeira's modifications GPL-3.0-or-later
   with the exception. rpmalloc (fork): 0BSD (rpmalloc-0BSD.txt); Madeira's
   modifications GPL-3.0-or-later with the exception.
-- DXMT (fork): MIT (DXMT-MIT.txt); Madeira's modifications GPL-3.0-or-later
-  with the exception. Bundled LLVM: Apache-2.0 with LLVM exception
+- DXMT (fork): upstream through v0.80 is MIT (DXMT-MIT.txt); later upstream
+  code is LGPL-2.1-or-later (LGPL-2.1.txt), Copyright (c) 2023-2026 Feifan He
+  for CodeWeavers. Madeira's modifications are GPL-3.0-or-later with the
+  exception. Bundled LLVM: Apache-2.0 with LLVM exception
   (LLVM-Apache-2.0-with-exception.txt).
   DXMT's Direct3D 9 frontend and DXSO shader translator, written by David
   Acevedo and imported from dacevedo12/dxmt tag v0.4-d3d9 (that tree's

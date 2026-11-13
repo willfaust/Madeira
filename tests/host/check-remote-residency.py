@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Exercise the production residency encoder and wire validation."""
+from pathlib import Path
+import os
+import subprocess
+import tempfile
+
+root = Path(__file__).resolve().parents[2]
+dxmt = Path(os.environ.get('DXMT_SOURCE', root / 'dxmt'))
+source = (dxmt / 'src/winemetal/unix/winemetal_unix.c').read_text()
+start = source.index('static NTSTATUS\nwmt_remote_residency_batch(')
+end = source.index('\n\nstatic NTSTATUS\n_MTLDevice_newResidencySet', start)
+helper = source[start:end]
+start = source.index('#define WMT_WOW64_POINTER_WRAPPER(name, type, field)')
+end = source.index('\n\nWMT_WOW64_POINTER_WRAPPER(', start)
+wrapper = source[start:end]
+prelude = r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "protocol.h"
+typedef uint64_t obj_handle_t;
+typedef uint32_t NTSTATUS;
+#define STATUS_INVALID_PARAMETER 0xc000000du
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+#define STATUS_SUCCESS 0u
+static uint32_t calls, response;
+static uint32_t wmtr_call(uint16_t op, const void *data, uint32_t length,
+                          void *out, uint32_t outlen, uint32_t *got) {
+  (void)out; (void)outlen; (void)got;
+  assert(op == RM_OP_RESIDENCY_BATCH);
+  const struct rm_residency_batch *p = data;
+  assert(rm_residency_batch_valid(p, length));
+  if (p->count) {
+    const uint64_t *v = (const uint64_t *)(p + 1);
+    assert(p->count == 2 && v[0] == 0x8000000000000011ULL && v[1] == 0x8000000000000022ULL);
+  }
+  calls++;
+  return response;
+}
+'''
+wow = r'''
+static unsigned char guest[256];
+static void *UInt32ToPtr(uint32_t address) { return address ? guest + address : NULL; }
+struct fake_ptr { void *ptr; };
+struct args { uint64_t set; struct fake_ptr allocations; uint64_t count; };
+static NTSTATUS add(void *ptr) {
+  struct args *a = ptr;
+  return wmt_remote_residency_batch(a->set, RM_RESIDENCY_ADD, a->allocations.ptr, a->count);
+}
+''' + wrapper + r'''
+WMT_WOW64_POINTER_WRAPPER(add, args, allocations)
+'''
+main = r'''
+int main(void) {
+  obj_handle_t v[2] = {0x8000000000000011ULL, 0x8000000000000022ULL};
+  assert(wmt_remote_residency_batch(0, RM_RESIDENCY_PROBE, NULL, 0) == STATUS_SUCCESS);
+  assert(wmt_remote_residency_batch(9, RM_RESIDENCY_ADD, v, 2) == STATUS_SUCCESS);
+  assert(wmt_remote_residency_batch(9, RM_RESIDENCY_REMOVE, v, 2) == STATUS_SUCCESS);
+  assert(wmt_remote_residency_batch(9, RM_RESIDENCY_REMOVE_ALL, NULL, 0) == STATUS_SUCCESS);
+  assert(wmt_remote_residency_batch(9, RM_RESIDENCY_ADD, NULL, 2) == STATUS_INVALID_PARAMETER);
+  assert(wmt_remote_residency_batch(9, RM_RESIDENCY_ADD, v, UINT64_MAX) == STATUS_INVALID_PARAMETER);
+  assert(calls == 4);
+  memcpy(guest + 8, v, sizeof v);
+  struct args shifted = {9, {(void *)(uintptr_t)8}, 2};
+  assert(add_wow64(&shifted) == STATUS_SUCCESS && shifted.allocations.ptr == (void *)(uintptr_t)8);
+  assert(calls == 5);
+  response = RM_ERR_BAD_OPCODE;
+  assert(wmt_remote_residency_batch(0, RM_RESIDENCY_PROBE, NULL, 0) == STATUS_UNSUCCESSFUL);
+  struct rm_residency_batch p = {9, RM_RESIDENCY_ADD, 2};
+  assert(!rm_residency_batch_valid(&p, sizeof p));
+  p.count = UINT32_MAX; assert(!rm_residency_batch_valid(&p, sizeof p));
+  p.count = 0; p.action = 99; assert(!rm_residency_batch_valid(&p, sizeof p));
+  p.action = RM_RESIDENCY_PROBE; assert(!rm_residency_batch_valid(&p, sizeof p));
+  p.set = 0; assert(rm_residency_batch_valid(&p, sizeof p));
+}
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-residency-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['clang', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I',
+                    str(root / 'research/remote-metal'), '-x', 'c', '-', '-o', str(exe)],
+                   input=prelude + helper + wow + main, text=True, check=True)
+    subprocess.run([str(exe)], check=True)
+print('remote residency wire validation and encoding pass')
+
+# Run the actual host case against fake Metal objects. It validates all handles
+# before mutating a set, so one invalid entry cannot apply a partial batch.
+host = (root / 'research/remote-metal/host/rmetald.m').read_text()
+start = host.index('        case RM_OP_RESIDENCY_BATCH: {')
+end = host.index('        case RM_OP_RESIDENCY_ADD: {', start)
+case = host[start:end]
+objc = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include <stdlib.h>
+#include "protocol.h"
+@interface FakeAllocation : NSObject <MTLAllocation> @end
+@implementation FakeAllocation @end
+@interface FakeSet : NSObject <MTLResidencySet>
+@property unsigned adds;
+@property unsigned removes;
+@property unsigned clears;
+@end
+@implementation FakeSet
+- (void)addAllocations:(id<MTLAllocation> const *)a count:(NSUInteger)n { (void)a; self.adds += n; }
+- (void)removeAllocations:(id<MTLAllocation> const *)a count:(NSUInteger)n { (void)a; self.removes += n; }
+- (void)removeAllAllocations { self.clears++; }
+@end
+static FakeSet *test_set;
+static FakeAllocation *test_alloc;
+static unsigned reply_status;
+static id rm_resolve(uint64_t x, uint32_t *err) {
+  *err = RM_OK;
+  if (x == 1) return test_set;
+  if (x == 2) return test_alloc;
+  *err = RM_ERR_BAD_HANDLE; return nil;
+}
+static void reply(int fd, const struct rm_hdr *h, uint32_t status, const void *v, uint32_t len) {
+  (void)fd; (void)h; (void)v; (void)len; reply_status = status;
+}
+static void invoke(void *payload, uint32_t length) {
+  struct rm_hdr h = { .payload_len = length }; uint32_t err = RM_OK; int fd = 0;
+  switch (RM_OP_RESIDENCY_BATCH) {
+'''
+objc_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  test_set = [FakeSet new]; test_alloc = [FakeAllocation new];
+  struct { struct rm_residency_batch h; uint64_t entries[2]; } p = {{1, RM_RESIDENCY_ADD, 2}, {2, 99}};
+  invoke(&p, sizeof p); assert(reply_status == RM_ERR_BAD_HANDLE && test_set.adds == 0);
+  p.entries[1] = 2; invoke(&p, sizeof p); assert(reply_status == RM_OK && test_set.adds == 2);
+  p.h.action = RM_RESIDENCY_REMOVE; invoke(&p, sizeof p); assert(reply_status == RM_OK && test_set.removes == 2);
+  p.h.action = RM_RESIDENCY_REMOVE_ALL; p.h.count = 0; invoke(&p, sizeof p.h);
+  assert(reply_status == RM_OK && test_set.clears == 1);
+  p.h.action = RM_RESIDENCY_PROBE; p.h.set = 0; invoke(&p, sizeof p.h); assert(reply_status == RM_OK);
+  p.h.count = 100; invoke(&p, sizeof p.h); assert(reply_status == RM_ERR_SHORT_PAYLOAD);
+} }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-residency-host-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-fobjc-arc', '-Wno-protocol', '-Wno-objc-protocol-property-synthesis', '-Wno-mismatched-parameter-types', '-I',
+                    str(root / 'research/remote-metal'), '-x', 'objective-c', '-', '-framework', 'Foundation',
+                    '-framework', 'Metal', '-o', str(exe)], input=objc + case + objc_end, text=True, check=True)
+    subprocess.run([str(exe)], check=True)
+print('remote host residency batches validate before mutation')
+
+# Exercise the same handler with a real Metal device when one is available.
+real = objc.replace('static FakeSet *test_set;', 'static id<MTLResidencySet> test_set;').replace(
+    'static FakeAllocation *test_alloc;', 'static id<MTLAllocation> test_alloc;')
+real_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  id<MTLDevice> d = MTLCreateSystemDefaultDevice();
+  if (!d) return 77;
+  if (@available(macOS 15.0, *)) {
+    MTLResidencySetDescriptor *desc = [MTLResidencySetDescriptor new]; NSError *error = nil;
+    test_set = [d newResidencySetWithDescriptor:desc error:&error];
+    test_alloc = [d newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    if (!test_set || !test_alloc) return 77;
+    struct { struct rm_residency_batch h; uint64_t entries[2]; } p = {{1, RM_RESIDENCY_ADD, 2}, {2, 99}};
+    invoke(&p, sizeof p); assert(reply_status == RM_ERR_BAD_HANDLE && test_set.allocationCount == 0);
+    p.h.count = 1; invoke(&p, sizeof p.h + 8); assert(reply_status == RM_OK && test_set.allocationCount == 1);
+    [test_set commit];
+    p.h.action = RM_RESIDENCY_REMOVE; invoke(&p, sizeof p.h + 8);
+    assert(reply_status == RM_OK); [test_set commit]; assert(test_set.allocationCount == 0);
+    p.h.action = RM_RESIDENCY_ADD; invoke(&p, sizeof p.h + 8); assert(test_set.allocationCount == 1);
+    p.h.action = RM_RESIDENCY_REMOVE_ALL; p.h.count = 0; invoke(&p, sizeof p.h);
+    assert(reply_status == RM_OK); [test_set commit]; assert(test_set.allocationCount == 0);
+    return 0;
+  }
+  return 77;
+} }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-residency-metal-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-fobjc-arc', '-Wno-protocol',
+                    '-Wno-objc-protocol-property-synthesis', '-Wno-mismatched-parameter-types', '-I',
+                    str(root / 'research/remote-metal'), '-x', 'objective-c', '-', '-framework', 'Foundation',
+                    '-framework', 'Metal', '-o', str(exe)], input=real + case + real_end, text=True, check=True)
+    result = subprocess.run([str(exe)], check=False)
+    if result.returncode == 77:
+        print('real Metal residency test skipped: no compatible device')
+    else:
+        result.check_returncode()
+        print('real Metal residency add, remove and clear pass')
+
+# Exercise the command-buffer timing RPC using a real local Metal command buffer.
+start = host.index('        case RM_OP_COMMAND_BUFFER_PROPERTY: {')
+end = host.index('        case RM_OP_CMDBUF_STATUS: {', start)
+property_case = host[start:end]
+property_source = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+#include "winemetal.h"
+static id<MTLCommandBuffer> command_buffer;
+static uint32_t reply_status;
+static uint64_t value;
+static id rm_resolve(uint64_t h, uint32_t *err) {
+  *err = h == 1 ? RM_OK : RM_ERR_BAD_HANDLE;
+  return h == 1 ? command_buffer : nil;
+}
+static void reply(int fd, const struct rm_hdr *h, uint32_t status, const void *p, uint32_t n) {
+  (void)fd; (void)h; reply_status = status; value = 0;
+  if (p && n == sizeof(struct rm_ret_u64)) value = ((const struct rm_ret_u64 *)p)->value;
+}
+static void invoke(void *payload, uint32_t n) {
+  struct rm_hdr h = {.payload_len = n}; uint32_t err = RM_OK; int fd = 0;
+  switch (RM_OP_COMMAND_BUFFER_PROPERTY) {
+'''
+property_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  id<MTLDevice> d = MTLCreateSystemDefaultDevice(); if (!d) return 77;
+  id<MTLCommandQueue> q = [d newCommandQueue]; command_buffer = [q commandBuffer];
+  if (!command_buffer) return 77;
+  struct rm_arg_handle_u64 a = {1, WMTCommandBufferPropertyGPUStartTime};
+  invoke(&a, sizeof a); assert(reply_status == RM_OK && value == 0);
+  [command_buffer commit]; [command_buffer waitUntilCompleted];
+  a.arg = WMTCommandBufferPropertyGPUEndTime; invoke(&a, sizeof a);
+  assert(reply_status == RM_OK && value == (uint64_t)(command_buffer.GPUEndTime * 1000000000.0));
+  a.handle = 9; invoke(&a, sizeof a); assert(reply_status == RM_ERR_BAD_HANDLE);
+  invoke(&a, sizeof a - 1); assert(reply_status == RM_ERR_SHORT_PAYLOAD);
+  return 0;
+} }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-remote-property-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-fobjc-arc', '-I',
+                    str(root / 'research/remote-metal'), '-I', str(dxmt / 'src/winemetal'),
+                    '-x', 'objective-c', '-', '-framework', 'Foundation', '-framework', 'Metal', '-o', str(exe)],
+                   input=property_source + property_case + property_end, text=True, check=True)
+    result = subprocess.run([str(exe)], check=False)
+    if result.returncode == 77:
+        print('real Metal command-buffer property test skipped: no compatible device')
+    else:
+        result.check_returncode()
+        print('real Metal command-buffer property test passed')
+
+# Test the production guest handler, including an older host's bad-opcode reply.
+start = source.index('static NTSTATUS\n_MTLCommandBuffer_property(')
+end = source.index('\n\nstatic NTSTATUS\n_MTLDevice_newTileRenderPipelineState', start)
+property_handler = source[start:end]
+guest_property = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+#include "winemetal.h"
+typedef uint32_t NTSTATUS;
+#define STATUS_SUCCESS 0u
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+struct unixcall_generic_obj_uint64_uint64_ret { uint64_t handle, arg, ret; };
+static uint32_t response;
+static int wmtr_enabled(void) { return 1; }
+static uint32_t wmtr_call(uint16_t op, const void *arg, uint32_t size, void *out, uint32_t cap, uint32_t *got) {
+  (void)got; assert(op == RM_OP_COMMAND_BUFFER_PROPERTY && size == sizeof(struct rm_arg_handle_u64));
+  const struct rm_arg_handle_u64 *a = arg; assert(a->handle == 77 && a->arg == 2);
+  assert(cap == sizeof(struct rm_ret_u64));
+  ((struct rm_ret_u64 *)out)->value = response == RM_OK ? 1234 : 0;
+  return response;
+}
+'''
+guest_end = r'''
+int main(void) {
+  struct unixcall_generic_obj_uint64_uint64_ret a = {77, 2, 999};
+  assert(_MTLCommandBuffer_property(&a) == STATUS_SUCCESS && a.ret == 1234);
+  response = RM_ERR_BAD_OPCODE; a.ret = 999;
+  assert(_MTLCommandBuffer_property(&a) == STATUS_UNSUCCESSFUL && a.ret == 0);
+}
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-remote-property-guest-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-I',
+                    str(root / 'research/remote-metal'), '-I', str(dxmt / 'src/winemetal'),
+                    '-x', 'objective-c', '-', '-framework', 'Foundation', '-framework', 'Metal', '-o', str(exe)],
+                   input=guest_property + property_handler + guest_end, text=True, check=True)
+    subprocess.run([str(exe)], check=True)
+print('remote command-buffer guest handler passes')
+
+# Run the heap-size handler with real Metal and reject malformed/invalid requests.
+start = host.index('        case RM_OP_HEAP_BUFFER_SIZE: {')
+end = host.index('        case RM_OP_COMMAND_BUFFER_PROPERTY: {', start)
+heap_case = host[start:end]
+heap_host = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+static id<MTLDevice> device; static uint32_t result; static struct rm_size_and_align answer;
+static id rm_resolve(uint64_t handle, uint32_t *err) {
+  *err = handle == 1 ? RM_OK : RM_ERR_BAD_HANDLE; return handle == 1 ? device : nil;
+}
+static void reply(int fd, const struct rm_hdr *h, uint32_t code, const void *data, uint32_t length) {
+  (void)fd; (void)h; result=code;
+  if (length == sizeof(answer)) answer=*(const struct rm_size_and_align *)data;
+}
+static void invoke(void *payload, uint32_t length) {
+  struct rm_hdr h = {.payload_len=length}; uint32_t err=RM_OK; int fd=0;
+  switch (RM_OP_HEAP_BUFFER_SIZE) {
+'''
+heap_end = r'''
+  }
+}
+int main(void) { @autoreleasepool {
+  device=MTLCreateSystemDefaultDevice(); if (!device) return 77;
+  struct rm_heap_buffer_size a={1,4096,MTLResourceStorageModePrivate};
+  invoke(&a,sizeof(a)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
+  a.device=2; invoke(&a,sizeof(a)); assert(result==RM_ERR_BAD_HANDLE);
+  a.device=1; invoke(&a,sizeof(a)); MTLSizeAndAlign expected=[device heapBufferSizeAndAlignWithLength:4096 options:MTLResourceStorageModePrivate];
+  assert(result==RM_OK && answer.size==expected.size && answer.align==expected.align);
+} return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-host-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-fobjc-arc','-I',str(root/'research/remote-metal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],
+                   input=heap_host+heap_case+heap_end,text=True,check=True)
+    result=subprocess.run([str(exe)],check=False)
+    if result.returncode == 77:
+        print('real Metal heap-size test skipped: no compatible device')
+    else:
+        result.check_returncode(); print('remote Metal heap-size handler passes')
+
+start = source.index('static NTSTATUS\n_MTLDevice_heapBufferSizeAndAlign(')
+end = source.index('\n\nstatic NTSTATUS\n_MTLDevice_heapTextureSizeAndAlign', start)
+heap_client = source[start:end]
+client_pre = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+typedef uint32_t NTSTATUS;
+#define STATUS_SUCCESS 0u
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+#define STATUS_INVALID_PARAMETER 0xc000000du
+struct unixcall_mtldevice_heapbuffersizeandalign { uint64_t device,length; uint32_t options,ret_size,ret_align; };
+static uint32_t status; static uint64_t size_result=8192, align_result=256;
+static int wmtr_enabled(void) { return 1; }
+static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t outlen,uint32_t *got) {
+  (void)got; assert(op==RM_OP_HEAP_BUFFER_SIZE && len==sizeof(struct rm_heap_buffer_size));
+  assert(outlen==sizeof(struct rm_size_and_align));
+  const struct rm_heap_buffer_size *a=arg; assert(a->device==3 && a->length==4096 && a->options==32);
+  *(struct rm_size_and_align *)out=(struct rm_size_and_align){size_result,align_result}; return status;
+}
+'''
+client_end = r'''
+int main(void) { @autoreleasepool {
+  struct unixcall_mtldevice_heapbuffersizeandalign p={3,4096,32,0,0};
+  assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_SUCCESS && p.ret_size==8192 && p.ret_align==256);
+  status=RM_ERR_BAD_OPCODE; assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_UNSUCCESSFUL && !p.ret_size && !p.ret_align);
+  status=RM_OK; size_result=(uint64_t)UINT32_MAX+1; assert(_MTLDevice_heapBufferSizeAndAlign(&p)==STATUS_INVALID_PARAMETER && !p.ret_size && !p.ret_align);
+} return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-client-') as tmp:
+    exe = Path(tmp) / 'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],
+                   input=client_pre+heap_client+client_end,text=True,check=True)
+    subprocess.run([str(exe)],check=True)
+print('remote Metal heap-size client passes')
+
+# Check descriptor transport and the 32-bit wrapper for remote texture heap sizes.
+start = host.index('        case RM_OP_HEAP_TEXTURE_SIZE: {')
+end = host.index('        case RM_OP_HEAP_BUFFER_SIZE: {', start)
+texture_case = host[start:end]
+texture_host = r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include "protocol.h"
+#include "winemetal.h"
+static id<MTLDevice> device; static uint32_t result; static struct rm_size_and_align answer;
+static MTLPixelFormat rm_fmt(enum WMTPixelFormat value) { return (MTLPixelFormat)value; }
+static id rm_resolve(uint64_t handle,uint32_t *err) { *err=handle==1?RM_OK:RM_ERR_BAD_HANDLE; return handle==1?device:nil; }
+static void reply(int fd,const struct rm_hdr *h,uint32_t code,const void *data,uint32_t length) {
+  (void)fd; (void)h; result=code; if(length==sizeof(answer)) answer=*(const struct rm_size_and_align *)data;
+}
+static void invoke(void *payload,uint32_t length) { struct rm_hdr h={.payload_len=length}; uint32_t err=RM_OK; int fd=0;
+ switch(RM_OP_HEAP_TEXTURE_SIZE) {
+'''
+texture_end = r'''
+ } }
+int main(void) { @autoreleasepool {
+  device=MTLCreateSystemDefaultDevice(); if(!device) return 77;
+  struct { struct rm_wmt_info header; struct WMTTextureInfo info; } p={0};
+  p.header=(struct rm_wmt_info){1,sizeof(p.info),0};
+  p.info.pixel_format=(enum WMTPixelFormat)MTLPixelFormatRGBA8Unorm; p.info.width=64; p.info.height=32;
+  p.info.depth=1; p.info.array_length=1; p.info.type=(enum WMTTextureType)MTLTextureType2D;
+  p.info.mipmap_level_count=1; p.info.sample_count=1; p.info.usage=(enum WMTTextureUsage)MTLTextureUsageShaderRead;
+  p.info.options=(enum WMTResourceOptions)MTLResourceStorageModePrivate;
+  invoke(&p,sizeof(p)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
+  p.header.info_len=0; invoke(&p,sizeof(p)); assert(result==RM_ERR_SHORT_PAYLOAD);
+  p.header.info_len=sizeof(p.info); p.header.owner=2; invoke(&p,sizeof(p)); assert(result==RM_ERR_BAD_HANDLE);
+  p.header.owner=1; invoke(&p,sizeof(p));
+  MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:32 mipmapped:NO];
+  d.usage=MTLTextureUsageShaderRead; d.resourceOptions=MTLResourceStorageModePrivate;
+  MTLSizeAndAlign expected=[device heapTextureSizeAndAlignWithDescriptor:d];
+  assert(result==RM_OK && answer.size==expected.size && answer.align==expected.align);
+ } return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-texture-') as tmp:
+    exe=Path(tmp)/'test'
+    subprocess.run(['xcrun','-sdk','macosx','clang','-fobjc-arc','-I',str(root/'research/remote-metal'),
+                    '-I',str(dxmt/'src/winemetal'),'-x','objective-c','-','-framework','Foundation',
+                    '-framework','Metal','-o',str(exe)],input=texture_host+texture_case+texture_end,text=True,check=True)
+    result=subprocess.run([str(exe)],check=False)
+    if result.returncode == 77: print('real Metal texture heap-size test skipped: no compatible device')
+    else: result.check_returncode(); print('remote Metal texture heap-size handler passes')
+start=source.index('static NTSTATUS\n_MTLDevice_heapTextureSizeAndAlign(')
+end=source.index('\n\nstatic NTSTATUS\n_MTLHeap_newBuffer',start)
+texture_client=source[start:end]
+texture_client_pre=r'''
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <assert.h>
+#include <string.h>
+#include "protocol.h"
+#include "winemetal.h"
+typedef uint32_t NTSTATUS;
+#define STATUS_SUCCESS 0u
+#define STATUS_UNSUCCESSFUL 0xc0000001u
+#define STATUS_INVALID_PARAMETER 0xc000000du
+struct unixcall_mtldevice_heaptexturesizeandalign { uint64_t device; struct WMTMemoryPointer info; uint32_t ret_size,ret_align; };
+static unsigned char guest[1024];
+static void *UInt32ToPtr(uint32_t p) { return p ? guest+p : NULL; }
+static int wmtr_enabled(void) { return 1; }
+static uint32_t response;
+static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t outlen,uint32_t *got) {
+  (void)got; assert(op==RM_OP_HEAP_TEXTURE_SIZE && len==sizeof(struct rm_wmt_info)+sizeof(struct WMTTextureInfo));
+  assert(outlen==sizeof(struct rm_size_and_align));
+  const struct rm_wmt_info *h=arg; const struct WMTTextureInfo *i=(const void *)(h+1);
+  assert(h->owner==3 && h->info_len==sizeof(*i) && i->width==64);
+  *(struct rm_size_and_align *)out=(struct rm_size_and_align){4096,256}; return response;
+}
+static void fill_texture_descriptor(MTLTextureDescriptor *d,struct WMTTextureInfo *i) { (void)d; (void)i; }
+'''
+texture_client_end=r'''
+int main(void) { @autoreleasepool {
+  struct WMTTextureInfo *i=(void *)(guest+16); i->width=64;
+  struct unixcall_mtldevice_heaptexturesizeandalign p={0}; p.device=3; p.info.ptr=(void *)(uintptr_t)16;
+  assert(_MTLDevice_heapTextureSizeAndAlign_wow64(&p)==STATUS_SUCCESS);
+  assert(p.ret_size==4096 && p.ret_align==256 && p.info.ptr==(void *)(uintptr_t)16);
+  response=RM_ERR_BAD_OPCODE; assert(_MTLDevice_heapTextureSizeAndAlign_wow64(&p)==STATUS_UNSUCCESSFUL && !p.ret_size && !p.ret_align);
+ } return 0; }
+'''
+with tempfile.TemporaryDirectory(prefix='madeira-heap-texture-client-') as tmp:
+    exe=Path(tmp)/'test'
+    text=texture_client_pre+texture_client+'\n'+wrapper+'\nWMT_WOW64_POINTER_WRAPPER(_MTLDevice_heapTextureSizeAndAlign, unixcall_mtldevice_heaptexturesizeandalign, info)\n'+texture_client_end
+    subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),
+                    '-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],input=text,text=True,check=True)
+    subprocess.run([str(exe)],check=True)
+print('remote Metal texture heap-size client and 32-bit wrapper pass')

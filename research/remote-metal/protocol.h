@@ -215,7 +215,44 @@ enum rm_op {
     RM_OP_RESIDENCY_COMMIT,      /* set -> status                                */
     RM_OP_QUEUE_ADD_RESIDENCY,   /* queue, set -> status                         */
     RM_OP_NEW_GEOM_PSO_INFO,     /* ml927: device, WMTMeshRenderPipelineInfo + WMTGeometryEmulationInfo -> handle (converter geometry emulation) */
+    RM_OP_RESIDENCY_BATCH,       /* validated add/remove/all; action 0 probes support */
+    RM_OP_COMMAND_BUFFER_PROPERTY, /* command buffer timestamp in nanoseconds */
+    RM_OP_HEAP_BUFFER_SIZE,        /* device, buffer size and options -> size and alignment */
+    RM_OP_HEAP_TEXTURE_SIZE,       /* device, texture descriptor -> size and alignment */
+    RM_OP_HEAP_CREATE,             /* device, heap descriptor -> heap handle */
+    RM_OP_HEAP_NEW_PRIVATE_BUFFER, /* heap, offset, buffer descriptor -> buffer */
+    RM_OP_HEAP_NEW_TEXTURE,       /* heap, offset, texture descriptor -> texture */
+    RM_OP_COUNTER_NEW_TIMESTAMP,
+    RM_OP_COUNTER_RESOLVE,
+    RM_OP_BLIT_WITH_SAMPLES,
+    RM_OP_LIBRARY_SOURCE,
+    RM_OP_NEW_INDIRECT_COMMAND_BUFFER,
+    RM_OP_NEW_TILE_PIPELINE,
+    RM_OP_TEXTURE_READ_LAYOUT,
+    RM_OP_TEXTURE_READ_REGION,
+    RM_OP_TEXTURE_READ_PVRTC,
+    RM_OP_TEXTURE_READ_PVRTC_MASKED, /* value bytes followed by a byte write mask */
+    RM_OP_TEXTURE_READ_MASKED,       /* one row of values followed by a byte write mask */
 };
+
+struct rm_heap_buffer_size { uint64_t device, length, options; };
+struct rm_heap_new_buffer { uint64_t heap, offset, length, options; };
+struct rm_heap_new_texture { uint64_t heap, offset; };
+struct rm_counter_new { uint64_t device; uint32_t count, shared; };
+struct rm_counter_resolve { uint64_t buffer; uint32_t start, count; uint64_t data_length; };
+struct rm_blit_samples { uint64_t cmdbuf; uint32_t count, reserved; };
+struct rm_library_source { uint64_t device, length; };
+struct rm_new_icb { uint64_t device, count, options; };
+struct rm_texture_read_layout { uint32_t block_width, block_height, block_bytes, reserved; };
+#define RM_TEXTURE_READ_PVRTC 1u
+#define RM_TEXTURE_READ_MASKED 2u
+struct rm_texture_read_region { uint64_t texture, x, y, z, width, height, level, slice; };
+struct rm_texture_read_pvrtc { struct rm_texture_read_region region; uint64_t offset, length; };
+struct rm_library_source_result { uint64_t library; uint32_t error_length, reserved; };
+#define RM_LIBRARY_ERROR_MAX 4096u
+struct rm_sample_attachment { uint64_t buffer, start, end; };
+#define RM_MAX_BLIT_SAMPLES 4u
+struct rm_size_and_align { uint64_t size, align; };
 
 struct rm_buf_texture { uint64_t buffer; uint64_t offset; uint64_t bytes_per_row; };
 
@@ -254,7 +291,8 @@ struct rm_os_version { uint32_t major, minor, patch, pad; };
 #define RM_CHUNK_BYTES (8u << 20)   /* per-message ceiling for a range */
 
 struct rm_buffer_create { uint64_t device; uint64_t length; uint32_t options; uint32_t pad; };
-struct rm_buffer_range  { uint64_t handle; uint64_t offset; uint64_t length; };
+/* Multi-upload descriptors follow variable-length data and may be unaligned. */
+struct __attribute__((packed)) rm_buffer_range  { uint64_t handle; uint64_t offset; uint64_t length; };
 
 /* ml821 coalesced upload. Layout is: this header, then `data_bytes` of packed
  * payload, then `count` rm_buffer_range descriptors whose lengths sum to
@@ -480,6 +518,18 @@ struct rm_hdr {
 
 struct rm_arg_handle       { uint64_t handle; };
 struct rm_arg_handle_u64   { uint64_t handle; uint64_t arg; };
+
+#define RM_RESIDENCY_BATCH_MAX 65536u
+enum rm_residency_action { RM_RESIDENCY_PROBE, RM_RESIDENCY_ADD, RM_RESIDENCY_REMOVE, RM_RESIDENCY_REMOVE_ALL };
+struct rm_residency_batch { uint64_t set; uint32_t action; uint32_t count; /* uint64_t handles follow */ };
+static inline int rm_residency_batch_valid(const struct rm_residency_batch *a, uint32_t len) {
+    if (len < sizeof(*a) || a->count > RM_RESIDENCY_BATCH_MAX ||
+        len != sizeof(*a) + (uint64_t)a->count * sizeof(uint64_t)) return 0;
+    if (a->action == RM_RESIDENCY_PROBE) return !a->set && !a->count;
+    if (!a->set) return 0;
+    if (a->action == RM_RESIDENCY_REMOVE_ALL) return !a->count;
+    return a->action == RM_RESIDENCY_ADD || a->action == RM_RESIDENCY_REMOVE;
+}
 struct rm_ret_u64          { uint64_t value; };
 struct rm_ret_handle       { uint64_t handle; };
 

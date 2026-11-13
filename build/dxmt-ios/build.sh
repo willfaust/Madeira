@@ -218,13 +218,19 @@ for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
            dxbc_converter_basicblock.cpp dxbc_converter_cfg.cpp \
            dxbc_instructions.cpp dxbc_signature.cpp metallib_writer.cpp \
+           dxbc_binding_sm50.cpp dxbc_binding_rootsig.cpp \
+           dxil_converter.cpp dxil_metadata.cpp dxil_metadata_reader.cpp \
            dxso_compile.cpp ffp_compile.cpp; do
     name=$(basename "$cpp" .cpp)
     compile_cxx "$DXMT_SRC/airconv/$cpp" "$name"
 done
 compile_cxx "$DXMT_SRC/airconv/nt/air_builder.cpp" air_builder
 compile_cxx "$DXMT_SRC/airconv/nt/dxbc_converter_base.cpp" dxbc_converter_base
+compile_cxx "$DXMT_SRC/airconv/nt/dxbc_io_helper.cpp" dxbc_io_helper
+compile_cxx "$DXMT_SRC/airconv/nt/dxil_converter_base.cpp" dxil_converter_base
+compile_cxx "$DXMT_SRC/airconv/nt/air_vertex_puller.cpp" air_vertex_puller
 compile_cxx "$DXMT_SRC/airconv/transforms/lower_16bit_texread.cpp" lower_16bit_texread
+compile_cxx "$DXMT_SRC/airconv/transforms/simdgroup_implicit_membarrier.cpp" simdgroup_implicit_membarrier
 
 echo "=== DXBCParser (uses exceptions — override) ==="
 for cpp in BlobContainer.cpp DXBCUtils.cpp ShaderBinary.cpp; do
@@ -286,7 +292,7 @@ echo "=== MADEIRA: dxmt_madeira_native -- util ==="
 # it selects std::atomic wait/notify, which is already __ulock_wait -- but the
 # selection is a runtime branch so that both halves compile the same code, and
 # a runtime branch still needs the object.
-for cpp in util_env.cpp util_string.cpp util_bloom.cpp util_futex.cpp thread.cpp \
+for cpp in util_env.cpp util_string.cpp util_bloom.cpp util_futex.cpp util_md5.cpp thread.cpp \
            com/com_guid.cpp com/com_private_data.cpp config/config.cpp log/log.cpp \
            sha1/sha1_util.cpp \
            wsi_monitor_headless.cpp wsi_window_madeira.cpp wsi_platform_madeira.cpp; do
@@ -312,7 +318,8 @@ for cpp in dxmt_format.cpp dxmt_names.cpp dxmt_command_queue.cpp dxmt_command.cp
            dxmt_texture.cpp dxmt_context.cpp dxmt_dynamic.cpp dxmt_staging.cpp \
            dxmt_hud_state.cpp dxmt_allocation.cpp dxmt_presenter.cpp dxmt_sampler.cpp \
            dxmt_resource_initializer.cpp dxmt_mem_census.cpp dxmt_bcn.cpp \
-           dxmt_shader_cache.cpp; do
+           dxmt_shader_cache.cpp dxmt_scaler.cpp dxmt_subresource.cpp \
+           dxmt_deptrack.cpp dxmt_counter.cpp dxmt_fence.cpp dxmt_keyed_mutex.cpp; do
     name=$(basename "$cpp" .cpp)
     compile_madeira_cxx "$DXMT_SRC/dxmt/$cpp" "$name"
 done
@@ -339,7 +346,10 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
-    echo "See .err files in $OBJ_DIR/"
+    for name in $FAILED_FILES; do
+        echo "=== $name compiler diagnostics ===" >&2
+        cat "$OBJ_DIR/$name.err" >&2
+    done
     exit 1
 fi
 

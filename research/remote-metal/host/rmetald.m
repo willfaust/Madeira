@@ -25,7 +25,7 @@
 /* The guest sends WMT*Info structs verbatim, so the host must read them with
  * the SAME declarations. Both sides compile this header. */
 #define WINEMETAL_API
-#include "../../dxmt/src/winemetal/winemetal.h"
+#include "../../../dxmt/src/winemetal/winemetal.h"
 
 /* ---- handle table ------------------------------------------------------ */
 
@@ -640,6 +640,149 @@ static MTLPixelFormat rm_fmt(enum WMTPixelFormat f) {
     return (MTLPixelFormat)ORIGINAL_FORMAT(f);
 }
 
+
+/* Block dimensions and byte sizes for remote CPU texture reads. */
+static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *layout) {
+    memset(layout,0,sizeof(*layout));
+    switch ((enum WMTPixelFormat)format) {
+    case WMTPixelFormatA8Unorm:
+    case WMTPixelFormatR8Unorm:
+    case WMTPixelFormatR8Unorm_sRGB:
+    case WMTPixelFormatR8Snorm:
+    case WMTPixelFormatR8Uint:
+    case WMTPixelFormatR8Sint:
+        *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
+    case WMTPixelFormatR16Unorm:
+    case WMTPixelFormatR16Snorm:
+    case WMTPixelFormatR16Uint:
+    case WMTPixelFormatR16Sint:
+    case WMTPixelFormatR16Float:
+    case WMTPixelFormatRG8Unorm:
+    case WMTPixelFormatRG8Unorm_sRGB:
+    case WMTPixelFormatRG8Snorm:
+    case WMTPixelFormatRG8Uint:
+    case WMTPixelFormatRG8Sint:
+    case WMTPixelFormatB5G6R5Unorm:
+    case WMTPixelFormatA1BGR5Unorm:
+    case WMTPixelFormatABGR4Unorm:
+    case WMTPixelFormatBGR5A1Unorm:
+        *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
+    case WMTPixelFormatR32Uint:
+    case WMTPixelFormatR32Sint:
+    case WMTPixelFormatR32Float:
+    case WMTPixelFormatRG16Unorm:
+    case WMTPixelFormatRG16Snorm:
+    case WMTPixelFormatRG16Uint:
+    case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRG16Float:
+    case WMTPixelFormatRGBA8Unorm:
+    case WMTPixelFormatRGBA8Unorm_sRGB:
+    case WMTPixelFormatRGBA8Snorm:
+    case WMTPixelFormatRGBA8Uint:
+    case WMTPixelFormatRGBA8Sint:
+    case WMTPixelFormatBGRA8Unorm:
+    case WMTPixelFormatBGRA8Unorm_sRGB:
+    case WMTPixelFormatRGB10A2Unorm:
+    case WMTPixelFormatRGB10A2Uint:
+    case WMTPixelFormatRG11B10Float:
+    case WMTPixelFormatRGB9E5Float:
+    case WMTPixelFormatBGR10A2Unorm:
+    case WMTPixelFormatBGR10_XR:
+    case WMTPixelFormatBGR10_XR_sRGB:
+        *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
+    case WMTPixelFormatRG32Uint:
+    case WMTPixelFormatRG32Sint:
+    case WMTPixelFormatRG32Float:
+    case WMTPixelFormatRGBA16Unorm:
+    case WMTPixelFormatRGBA16Snorm:
+    case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA16Sint:
+    case WMTPixelFormatRGBA16Float:
+    case WMTPixelFormatBGRA10_XR:
+    case WMTPixelFormatBGRA10_XR_sRGB:
+        *layout=(struct rm_texture_read_layout){1,1,8,0}; return 1;
+    case WMTPixelFormatBC1_RGBA:
+    case WMTPixelFormatBC1_RGBA_sRGB:
+    case WMTPixelFormatBC4_RUnorm:
+    case WMTPixelFormatBC4_RSnorm:
+    case WMTPixelFormatEAC_R11Unorm:
+    case WMTPixelFormatEAC_R11Snorm:
+    case WMTPixelFormatETC2_RGB8:
+    case WMTPixelFormatETC2_RGB8_sRGB:
+    case WMTPixelFormatETC2_RGB8A1:
+    case WMTPixelFormatETC2_RGB8A1_sRGB:
+        *layout=(struct rm_texture_read_layout){4,4,8,0}; return 1;
+    case WMTPixelFormatRGBA32Uint:
+    case WMTPixelFormatRGBA32Sint:
+    case WMTPixelFormatRGBA32Float:
+        *layout=(struct rm_texture_read_layout){1,1,16,0}; return 1;
+    case WMTPixelFormatBC2_RGBA:
+    case WMTPixelFormatBC2_RGBA_sRGB:
+    case WMTPixelFormatBC3_RGBA:
+    case WMTPixelFormatBC3_RGBA_sRGB:
+    case WMTPixelFormatBC5_RGUnorm:
+    case WMTPixelFormatBC5_RGSnorm:
+    case WMTPixelFormatBC6H_RGBFloat:
+    case WMTPixelFormatBC6H_RGBUfloat:
+    case WMTPixelFormatBC7_RGBAUnorm:
+    case WMTPixelFormatBC7_RGBAUnorm_sRGB:
+    case WMTPixelFormatEAC_RG11Unorm:
+    case WMTPixelFormatEAC_RG11Snorm:
+    case WMTPixelFormatEAC_RGBA8:
+    case WMTPixelFormatEAC_RGBA8_sRGB:
+        *layout=(struct rm_texture_read_layout){4,4,16,0}; return 1;
+#define ASTC_LAYOUT(w,h) \
+    case WMTPixelFormatASTC_##w##x##h##_sRGB: \
+    case WMTPixelFormatASTC_##w##x##h##_LDR: \
+    case WMTPixelFormatASTC_##w##x##h##_HDR: \
+        *layout=(struct rm_texture_read_layout){w,h,16,0}; return 1;
+    ASTC_LAYOUT(4,4) ASTC_LAYOUT(5,4) ASTC_LAYOUT(5,5) ASTC_LAYOUT(6,5)
+    ASTC_LAYOUT(6,6) ASTC_LAYOUT(8,5) ASTC_LAYOUT(8,6) ASTC_LAYOUT(8,8)
+    ASTC_LAYOUT(10,5) ASTC_LAYOUT(10,6) ASTC_LAYOUT(10,8) ASTC_LAYOUT(10,10)
+    ASTC_LAYOUT(12,10) ASTC_LAYOUT(12,12)
+#undef ASTC_LAYOUT
+    case WMTPixelFormatGBGR422:
+    case WMTPixelFormatBGRG422:
+        *layout=(struct rm_texture_read_layout){2,1,4,0}; return 1;
+    case WMTPixelFormatPVRTC_RGB_2BPP:
+    case WMTPixelFormatPVRTC_RGB_2BPP_sRGB:
+    case WMTPixelFormatPVRTC_RGBA_2BPP:
+    case WMTPixelFormatPVRTC_RGBA_2BPP_sRGB:
+        *layout=(struct rm_texture_read_layout){8,4,8,RM_TEXTURE_READ_PVRTC}; return 1;
+    case WMTPixelFormatPVRTC_RGB_4BPP:
+    case WMTPixelFormatPVRTC_RGB_4BPP_sRGB:
+    case WMTPixelFormatPVRTC_RGBA_4BPP:
+    case WMTPixelFormatPVRTC_RGBA_4BPP_sRGB:
+        *layout=(struct rm_texture_read_layout){4,4,8,RM_TEXTURE_READ_PVRTC}; return 1;
+    case WMTPixelFormatDepth32Float_Stencil8:
+    case WMTPixelFormatX32_Stencil8: *layout=(struct rm_texture_read_layout){1,1,8,RM_TEXTURE_READ_MASKED}; return 1;
+    case WMTPixelFormatDepth24Unorm_Stencil8:
+    case WMTPixelFormatX24_Stencil8: *layout=(struct rm_texture_read_layout){1,1,4,RM_TEXTURE_READ_MASKED}; return 1;
+    case WMTPixelFormatDepth16Unorm: *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
+    case WMTPixelFormatDepth32Float: *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
+    case WMTPixelFormatStencil8: *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
+    default: return 0;
+    }
+}
+
+/* Metal exposes different packed depth/stencil byte footprints on different GPUs. */
+static int rm_masked_pixel_stride(id<MTLTexture> texture, unsigned max_bytes) {
+    if (texture.sampleCount != 1 || texture.storageMode == MTLStorageModePrivate ||
+        texture.storageMode == MTLStorageModeMemoryless || !texture.width) return 0;
+    uint8_t zero[64], ones[64]; int last[2] = {-1,-1};
+    unsigned samples = texture.width > 1 ? 2 : 1;
+    for (unsigned n=1; n<=samples; n++) {
+        memset(zero,0,sizeof(zero)); memset(ones,0xff,sizeof(ones));
+        [texture getBytes:zero bytesPerRow:32 bytesPerImage:32 fromRegion:MTLRegionMake2D(0,0,n,1) mipmapLevel:0 slice:0];
+        [texture getBytes:ones bytesPerRow:32 bytesPerImage:32 fromRegion:MTLRegionMake2D(0,0,n,1) mipmapLevel:0 slice:0];
+        for (unsigned i=0; i<n*max_bytes; i++) if (zero[i]==ones[i]) last[n-1]=(int)i;
+    }
+    if (last[0] < 0) return 0;
+    if (samples==1) return (int)max_bytes;
+    int stride=last[1]-last[0];
+    return stride>0 && stride<=max_bytes && last[0]<stride ? stride : 0;
+}
+
 /* Replay a validated packed batch into an EXISTING encoder.
  *
  * Lifted verbatim from the single-shot submit path so both callers run the same
@@ -1017,18 +1160,27 @@ static void serve(int fd) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             uint32_t n = ((const struct rm_buffer_multi *)payload)->count;
             uint32_t st = RM_OK; uint64_t at = 0;
+            id<MTLBuffer> buffers[RM_MULTI_MAX_RANGES] = {0};
             for (uint32_t i = 0; i < n; i++) {
                 id o = rm_resolve(r[i].handle, &err);
                 if (err != RM_OK) { st = err; break; }
+                if (![o conformsToProtocol:@protocol(MTLBuffer)] || ![(id<MTLBuffer>)o contents]) {
+                    st = RM_ERR_WRONG_CLASS; break;
+                }
                 id<MTLBuffer> b = o;
-                if ((uint64_t)r[i].offset + r[i].length > (uint64_t)b.length) {
+                if (r[i].offset > (uint64_t)b.length || r[i].length > (uint64_t)b.length-r[i].offset) {
                     fprintf(stderr, "[rmetald] coalesced upload out of range: off %llu len %llu "
                                     "into %llu\n", (unsigned long long)r[i].offset,
                             (unsigned long long)r[i].length, (unsigned long long)b.length);
                     st = RM_ERR_SHORT_PAYLOAD; break;
                 }
-                memcpy((uint8_t *)b.contents + r[i].offset, data + at, (size_t)r[i].length);
-                at += r[i].length;
+                buffers[i] = b;
+            }
+            if (st == RM_OK) for (uint32_t i=0; i<n; i++) {
+                memcpy((uint8_t *)buffers[i].contents+r[i].offset,data+at,(size_t)r[i].length);
+                if (buffers[i].storageMode == MTLStorageModeManaged)
+                    [buffers[i] didModifyRange:NSMakeRange(r[i].offset,r[i].length)];
+                at+=r[i].length;
             }
             reply(fd, &h, st, NULL, 0); break;
         }
@@ -1474,9 +1626,12 @@ static void serve(int fd) {
             struct rm_buffer_range *a = (void *)payload;
             if (h.payload_len < sizeof *a) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             id o = rm_resolve(a->handle, &err); if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            if (![o conformsToProtocol:@protocol(MTLBuffer)] || ![(id<MTLBuffer>)o contents]) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
             id<MTLBuffer> b = o;
             if (a->length > RM_CHUNK_BYTES ||
-                (uint64_t)a->offset + a->length > (uint64_t)b.length) {
+                a->offset > (uint64_t)b.length || a->length > (uint64_t)b.length - a->offset) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
             }
             reply(fd, &h, RM_OK, (const uint8_t *)b.contents + a->offset, (uint32_t)a->length);
@@ -2031,6 +2186,457 @@ static void serve(int fd) {
             [(id<MTLCommandBuffer>)o waitUntilCompleted];
             reply(fd, &h, RM_OK, NULL, 0); break;
         }
+        case RM_OP_TEXTURE_READ_LAYOUT: {
+            if (h.payload_len != sizeof(struct rm_arg_handle)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_arg_handle *a=(const void *)payload;
+            id object=rm_resolve(a->handle,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            struct rm_texture_read_layout layout;
+            if (!rm_read_layout([(id<MTLTexture>)object pixelFormat],&layout)) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+            if (layout.reserved == RM_TEXTURE_READ_MASKED) {
+                int stride=rm_masked_pixel_stride(object,layout.block_bytes);
+                if (!stride) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+                layout.block_bytes=(uint32_t)stride;
+            }
+            reply(fd,&h,RM_OK,&layout,sizeof(layout)); break;
+        }
+        case RM_OP_TEXTURE_READ_MASKED: {
+            if (h.payload_len != sizeof(struct rm_texture_read_region)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_region *a=(const void *)payload;
+            id object=rm_resolve(a->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved != RM_TEXTURE_READ_MASKED ||
+                a->level >= texture.mipmapLevelCount || a->level >= 64 || a->height != 1 || !a->width) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            int stride=rm_masked_pixel_stride(texture,l.block_bytes);
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> a->level), hh=MAX(1ull,(uint64_t)texture.height >> a->level),
+                     dd=MAX(1ull,(uint64_t)texture.depth >> a->level), slices=texture.arrayLength;
+            if (texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray) slices*=6;
+            if (!stride || a->x>=w || a->width>w-a->x || a->y>=hh || a->z>=dd || a->slice>=slices ||
+                a->width > RM_CHUNK_BYTES/(2u*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            size_t alloc=(size_t)(a->width*l.block_bytes), count=(size_t)(a->width*(unsigned)stride);
+            uint8_t *zero=calloc(1,alloc), *ones=malloc(alloc), *out=malloc(count*2);
+            if (!zero || !ones || !out) { free(zero); free(ones); free(out); reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            @try {
+                memset(ones,0xff,alloc);
+                MTLRegion region=MTLRegionMake3D(a->x,a->y,a->z,a->width,1,1);
+                [texture getBytes:zero bytesPerRow:alloc bytesPerImage:alloc fromRegion:region mipmapLevel:a->level slice:a->slice];
+                [texture getBytes:ones bytesPerRow:alloc bytesPerImage:alloc fromRegion:region mipmapLevel:a->level slice:a->slice];
+                for (size_t i=0;i<count;i++) { out[i]=zero[i]; out[count+i]=(zero[i]==ones[i]); }
+                reply(fd,&h,RM_OK,out,(uint32_t)(count*2));
+            } @finally { free(zero); free(ones); free(out); }
+            break;
+        }
+        case RM_OP_TEXTURE_READ_REGION: {
+            if (h.payload_len != sizeof(struct rm_texture_read_region)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_region *a=(const void *)payload;
+            id object=rm_resolve(a->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved || texture.sampleCount != 1 ||
+                texture.storageMode == MTLStorageModePrivate || texture.storageMode == MTLStorageModeMemoryless ||
+                a->level >= texture.mipmapLevelCount || a->level >= 64 || !a->width || !a->height) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> a->level),
+                     hh=MAX(1ull,(uint64_t)texture.height >> a->level),
+                     dd=MAX(1ull,(uint64_t)texture.depth >> a->level);
+            uint64_t slices=(uint64_t)texture.arrayLength;
+            if (texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray) slices*=6;
+            if (a->x >= w || a->y >= hh || a->z >= dd || a->width > w-a->x || a->height > hh-a->y ||
+                a->slice >= slices || a->x % l.block_width || a->y % l.block_height ||
+                (a->width % l.block_width && a->width != w-a->x) ||
+                (a->height % l.block_height && a->height != hh-a->y)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            uint64_t columns=(a->width-1)/l.block_width+1;
+            uint64_t rows=(a->height-1)/l.block_height+1;
+            if (columns > RM_CHUNK_BYTES/l.block_bytes) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            uint64_t row_bytes=columns*l.block_bytes;
+            if (!row_bytes || rows > RM_CHUNK_BYTES/row_bytes) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            size_t length=(size_t)(row_bytes*rows); void *data=calloc(1,length);
+            if (!data) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            @try {
+                [texture getBytes:data bytesPerRow:row_bytes bytesPerImage:length
+                      fromRegion:MTLRegionMake3D(a->x,a->y,a->z,a->width,a->height,1)
+                     mipmapLevel:a->level slice:a->slice];
+                reply(fd,&h,RM_OK,data,(uint32_t)length);
+            } @finally { free(data); }
+            break;
+        }
+        case RM_OP_TEXTURE_READ_PVRTC:
+        case RM_OP_TEXTURE_READ_PVRTC_MASKED: {
+            if (h.payload_len != sizeof(struct rm_texture_read_pvrtc)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_pvrtc *a=(const void *)payload;
+            const struct rm_texture_read_region *r=&a->region;
+            id object=rm_resolve(r->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved != RM_TEXTURE_READ_PVRTC ||
+                texture.textureType != MTLTextureType2D || texture.sampleCount != 1 ||
+                texture.storageMode == MTLStorageModePrivate || texture.storageMode == MTLStorageModeMemoryless ||
+                r->level >= texture.mipmapLevelCount || r->level >= 64 || r->slice || r->x || r->y || r->z) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> r->level), hh=MAX(1ull,(uint64_t)texture.height >> r->level);
+            uint64_t cols=(w-1)/l.block_width+1, rows=(hh-1)/l.block_height+1;
+            if (r->width != w || r->height != hh || cols > RM_MAX_PAYLOAD/l.block_bytes ||
+                rows > RM_MAX_PAYLOAD/(cols*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            uint64_t total=cols*rows*l.block_bytes;
+            uint64_t alloc_cols=MAX(2ull,cols), alloc_rows=MAX(2ull,rows);
+            if (alloc_cols > RM_MAX_PAYLOAD/l.block_bytes || alloc_rows > RM_MAX_PAYLOAD/(alloc_cols*l.block_bytes)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            int masked = h.opcode == RM_OP_TEXTURE_READ_PVRTC_MASKED;
+            size_t alloc_size=(size_t)(alloc_cols*alloc_rows*l.block_bytes);
+            if (masked) total=alloc_size;
+            if (!a->length || a->length > (masked ? RM_CHUNK_BYTES/2 : RM_CHUNK_BYTES) ||
+                a->offset > total || a->length > total-a->offset) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            uint8_t *data=calloc(1,alloc_size), *probe=masked ? malloc(alloc_size) : NULL;
+            uint8_t *out=masked ? malloc((size_t)a->length*2) : NULL;
+            if (!data || (masked && (!probe || !out))) {
+                free(data); free(probe); free(out); reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            @try {
+                [texture getBytes:data bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)
+                     mipmapLevel:r->level slice:0];
+                if (masked) {
+                    memset(probe,0xff,alloc_size);
+                    [texture getBytes:probe bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)
+                         mipmapLevel:r->level slice:0];
+                    for (size_t i=0; i<a->length; i++) {
+                        out[i]=data[a->offset+i];
+                        out[a->length+i]=(data[a->offset+i]==probe[a->offset+i]);
+                    }
+                    reply(fd,&h,RM_OK,out,(uint32_t)a->length*2);
+                } else reply(fd,&h,RM_OK,data+a->offset,(uint32_t)a->length);
+            } @finally { free(data); free(probe); free(out); }
+            break;
+        }
+        case RM_OP_NEW_TILE_PIPELINE: {
+            if (h.payload_len < sizeof(struct rm_wmt_info) + sizeof(struct WMTTileRenderPipelineInfo)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct rm_wmt_info *a=(const void *)payload;
+            if (a->info_len != sizeof(struct WMTTileRenderPipelineInfo) || a->extra_count > 255 ||
+                h.payload_len != sizeof(*a) + sizeof(struct WMTTileRenderPipelineInfo) + (uint64_t)a->extra_count * sizeof(uint64_t)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct WMTTileRenderPipelineInfo *i=(const void *)(a+1);
+            if (i->num_binary_archives_for_lookup != a->extra_count || i->binary_archives_for_lookup.ptr) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id device=rm_resolve(a->owner,&err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id function=nil, archive=nil;
+            if (i->tile_function) {
+                function=rm_resolve(i->tile_function,&err);
+                if (err == RM_OK && ![function conformsToProtocol:@protocol(MTLFunction)]) err=RM_ERR_WRONG_CLASS;
+            }
+            if (err == RM_OK && i->binary_archive_for_serialization) {
+                archive=rm_resolve(i->binary_archive_for_serialization,&err);
+                if (err == RM_OK && ![archive conformsToProtocol:@protocol(MTLBinaryArchive)]) err=RM_ERR_WRONG_CLASS;
+            }
+            NSMutableArray *archives=[NSMutableArray arrayWithCapacity:a->extra_count];
+            const uint64_t *handles=(const void *)(i+1);
+            for (uint32_t n=0; err==RM_OK && n<a->extra_count; ++n) {
+                id item=rm_resolve(handles[n],&err);
+                if (err == RM_OK && ![item conformsToProtocol:@protocol(MTLBinaryArchive)]) err=RM_ERR_WRONG_CLASS;
+                if (err == RM_OK) [archives addObject:item];
+            }
+            if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            MTLTileRenderPipelineDescriptor *desc=[MTLTileRenderPipelineDescriptor new];
+            for (unsigned n=0;n<8;++n) desc.colorAttachments[n].pixelFormat=rm_fmt(i->color_formats[n]);
+            for (unsigned n=0;n<31;++n) if (i->immutable_tile_buffers & (1u<<n)) desc.tileBuffers[n].mutability=MTLMutabilityImmutable;
+            desc.rasterSampleCount=i->raster_sample_count; desc.threadgroupSizeMatchesTileSize=i->tgsize_matches_tile_size;
+            desc.tileFunction=function;
+            MTLPipelineOption options=MTLPipelineOptionNone;
+            if (@available(macOS 15.0, *)) {
+                if (archives.count) desc.binaryArchives=archives;
+                if (i->fail_on_binary_archive_miss) options=MTLPipelineOptionFailOnBinaryArchiveMiss;
+            }
+            NSError *error=nil;
+            id<MTLRenderPipelineState> pipeline=[(id<MTLDevice>)device newRenderPipelineStateWithTileDescriptor:desc
+                                                       options:options reflection:nil error:&error];
+            if (@available(macOS 15.0, *)) {
+                if (!error && archive) [(id<MTLBinaryArchive>)archive addTileRenderPipelineFunctionsWithDescriptor:desc error:&error];
+            }
+            NSData *messageBytes=[(error.localizedDescription ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+            uint32_t n=(uint32_t)MIN(messageBytes.length,RM_LIBRARY_ERROR_MAX);
+            struct { struct rm_library_source_result header; uint8_t text[RM_LIBRARY_ERROR_MAX]; } result={0};
+            result.header.library=rm_intern(pipeline); result.header.error_length=n;
+            if (n) memcpy(result.text,messageBytes.bytes,n);
+            reply(fd,&h,RM_OK,&result,(uint32_t)(sizeof(result.header)+n)); break;
+        }
+        case RM_OP_NEW_INDIRECT_COMMAND_BUFFER: {
+            if (h.payload_len != sizeof(struct rm_new_icb) + sizeof(struct WMTIndirectCommandBufferInfo)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            const struct rm_new_icb *a=(const void *)payload;
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            const struct WMTIndirectCommandBufferInfo *i=(const void *)(a+1);
+            MTLIndirectCommandBufferDescriptor *d=[MTLIndirectCommandBufferDescriptor new];
+            d.commandTypes=(MTLIndirectCommandType)i->type;
+            d.maxFragmentBufferBindCount=i->max_fragment_buffer_binding;
+            d.maxKernelBufferBindCount=i->max_kernel_buffer_binding;
+            d.maxKernelThreadgroupMemoryBindCount=i->max_kernel_threadgroup_memory_binding;
+            d.maxMeshBufferBindCount=i->max_mesh_buffer_binding;
+            d.maxObjectBufferBindCount=i->max_object_buffer_binding;
+            d.maxObjectThreadgroupMemoryBindCount=i->max_object_threadgroup_memory_binding;
+            d.maxVertexBufferBindCount=i->max_vertex_buffer_binding;
+            d.inheritBuffers=i->inherit_buffers; d.inheritPipelineState=i->inherit_pso;
+            d.supportDynamicAttributeStride=i->support_dynamic_attribute_stride; d.supportRayTracing=i->support_ray_tracing;
+            id<MTLIndirectCommandBuffer> buffer=[(id<MTLDevice>)object newIndirectCommandBufferWithDescriptor:d
+                maxCommandCount:(NSUInteger)a->count options:(MTLResourceOptions)a->options];
+            struct rm_ret_handle_u64 result={rm_intern(buffer),buffer ? buffer.gpuResourceID._impl : 0};
+            reply(fd,&h,buffer ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
+        case RM_OP_LIBRARY_SOURCE: {
+            if (h.payload_len < sizeof(struct rm_library_source)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_library_source *a=(const void *)payload;
+            if (a->length > RM_CHUNK_BYTES || h.payload_len != sizeof(*a) + a->length) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            NSString *source=[[NSString alloc] initWithBytes:a+1 length:(NSUInteger)a->length encoding:NSASCIIStringEncoding];
+            NSError *error=nil; id<MTLLibrary> library=nil;
+            if (source) {
+                MTLCompileOptions *options=[MTLCompileOptions new]; options.languageVersion=MTLLanguageVersion3_1;
+                library=[(id<MTLDevice>)object newLibraryWithSource:source options:options error:&error];
+            }
+            NSString *message=error.localizedDescription ?: (source ? @"" : @"Invalid ASCII shader source");
+            NSData *messageBytes=[message dataUsingEncoding:NSUTF8StringEncoding];
+            uint32_t n=(uint32_t)MIN(messageBytes.length,RM_LIBRARY_ERROR_MAX);
+            struct { struct rm_library_source_result header; uint8_t text[RM_LIBRARY_ERROR_MAX]; } result={0};
+            result.header.library=rm_intern(library); result.header.error_length=n;
+            if (n) memcpy(result.text,messageBytes.bytes,n);
+            reply(fd,&h,RM_OK,&result,(uint32_t)(sizeof(result.header)+n)); break;
+        }
+        case RM_OP_COUNTER_NEW_TIMESTAMP: {
+            if (h.payload_len != sizeof(struct rm_counter_new)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_counter_new *a=(const void *)payload;
+            id object=rm_resolve(a->device,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLDevice> device=object; id<MTLCounterSet> timestamp=nil;
+            for (id<MTLCounterSet> set in device.counterSets) {
+                if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) { timestamp=set; break; }
+            }
+            if (!timestamp) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+            MTLCounterSampleBufferDescriptor *desc=[MTLCounterSampleBufferDescriptor new];
+            desc.counterSet=timestamp; desc.sampleCount=a->count;
+            desc.storageMode=a->shared ? MTLStorageModeShared : MTLStorageModePrivate;
+            NSError *error=nil; id<MTLCounterSampleBuffer> buffer=[device newCounterSampleBufferWithDescriptor:desc error:&error];
+            struct rm_ret_handle result={rm_intern(buffer)};
+            reply(fd,&h,buffer ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
+        case RM_OP_COUNTER_RESOLVE: {
+            if (h.payload_len != sizeof(struct rm_counter_resolve)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_counter_resolve *a=(const void *)payload;
+            if (a->data_length > RM_CHUNK_BYTES) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            id object=rm_resolve(a->buffer,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLCounterSampleBuffer)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLCounterSampleBuffer> buffer=object;
+            if (a->start > buffer.sampleCount || a->count > buffer.sampleCount - a->start) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            NSData *data=[buffer resolveCounterRange:NSMakeRange(a->start,a->count)];
+            if (!data || a->data_length > data.length) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            reply(fd,&h,RM_OK,data.bytes,(uint32_t)a->data_length); break;
+        }
+        case RM_OP_BLIT_WITH_SAMPLES: {
+            if (h.payload_len < sizeof(struct rm_blit_samples)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_blit_samples *a=(const void *)payload;
+            if (a->reserved || a->count > RM_MAX_BLIT_SAMPLES ||
+                h.payload_len != sizeof(*a) + (uint64_t)a->count * sizeof(struct rm_sample_attachment)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            id object=rm_resolve(a->cmdbuf,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLCommandBuffer)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            const struct rm_sample_attachment *attachments=(const void *)(a+1);
+            id<MTLCounterSampleBuffer> buffers[RM_MAX_BLIT_SAMPLES]={0};
+            for (uint32_t i=0; i<a->count; ++i) {
+                if (!attachments[i].buffer) continue;
+                id candidate=rm_resolve(attachments[i].buffer,&err);
+                if (err != RM_OK || ![candidate conformsToProtocol:@protocol(MTLCounterSampleBuffer)]) {
+                    if (err == RM_OK) err=RM_ERR_WRONG_CLASS; break;
+                }
+                buffers[i]=candidate;
+            }
+            if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            MTLBlitPassDescriptor *desc=[MTLBlitPassDescriptor new];
+            for (uint32_t i=0; i<a->count; ++i) {
+                desc.sampleBufferAttachments[i].sampleBuffer=buffers[i];
+                desc.sampleBufferAttachments[i].startOfEncoderSampleIndex=attachments[i].start;
+                desc.sampleBufferAttachments[i].endOfEncoderSampleIndex=attachments[i].end;
+            }
+            rm_enc_end_open_on_cb(object, "blit");
+            id<MTLBlitCommandEncoder> encoder=[(id<MTLCommandBuffer>)object blitCommandEncoderWithDescriptor:desc];
+            if (encoder) encoder.label=[NSString stringWithFormat:@"enc#%lu blit",(unsigned long)++g_enc_seq];
+            rm_enc_opened(encoder,object);
+            struct rm_ret_handle result={rm_intern(encoder)};
+            reply(fd,&h,encoder ? RM_OK : RM_ERR_WRONG_CLASS,&result,sizeof(result)); break;
+        }
+        case RM_OP_HEAP_NEW_TEXTURE: {
+            if (h.payload_len != sizeof(struct rm_heap_new_texture) + sizeof(struct WMTTextureInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_new_texture *a = (const void *)payload;
+            id object = rm_resolve(a->heap, &err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLHeap)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTTextureInfo *i = (const void *)(a + 1);
+            MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+            d.pixelFormat = rm_fmt(i->pixel_format);
+            d.width = i->width; d.height = i->height; d.depth = i->depth;
+            d.arrayLength = i->array_length; d.textureType = (MTLTextureType)i->type;
+            d.mipmapLevelCount = i->mipmap_level_count; d.sampleCount = i->sample_count;
+            d.usage = (MTLTextureUsage)i->usage; d.resourceOptions = (MTLResourceOptions)i->options;
+            id<MTLHeap> heap = object;
+            if (a->offset != UINT64_MAX) {
+                MTLSizeAndAlign sa = [heap.device heapTextureSizeAndAlignWithDescriptor:d];
+                if (heap.type != MTLHeapTypePlacement || !sa.size || !sa.align || a->offset % sa.align ||
+                    a->offset > heap.size || sa.size > heap.size - a->offset) {
+                    reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+                }
+            }
+            id<MTLTexture> texture = a->offset == UINT64_MAX ? [heap newTextureWithDescriptor:d]
+                : [heap newTextureWithDescriptor:d offset:a->offset];
+            struct rm_ret_handle_u64 result = {rm_intern(texture), texture ? texture.gpuResourceID._impl : 0};
+            reply(fd, &h, texture ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
+        case RM_OP_HEAP_CREATE: {
+            if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTHeapInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_wmt_info *a = (const void *)payload;
+            if (a->info_len != sizeof(struct WMTHeapInfo) || a->extra_count) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            id device = rm_resolve(a->owner, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTHeapInfo *i = (const void *)(a + 1);
+            MTLHeapDescriptor *desc = [[MTLHeapDescriptor alloc] init];
+            desc.size = i->size; desc.resourceOptions = (MTLResourceOptions)i->options;
+            desc.type = (MTLHeapType)i->type; desc.sparsePageSize = (MTLSparsePageSize)i->sparse_page_size;
+            id<MTLHeap> heap = [(id<MTLDevice>)device newHeapWithDescriptor:desc];
+            struct rm_ret_handle result = {rm_intern(heap)};
+            reply(fd, &h, heap ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
+        case RM_OP_HEAP_NEW_PRIVATE_BUFFER: {
+            if (h.payload_len != sizeof(struct rm_heap_new_buffer)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_new_buffer *a = (const void *)payload;
+            id object = rm_resolve(a->heap, &err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLHeap)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            id<MTLHeap> heap = object;
+            if (heap.storageMode != MTLStorageModePrivate && heap.storageMode != MTLStorageModeShared) {
+                reply(fd, &h, RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            if (!a->length || ((a->options & 0x30) >> 4) != heap.storageMode) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            if (a->offset != UINT64_MAX) {
+                MTLSizeAndAlign sa = [heap.device heapBufferSizeAndAlignWithLength:a->length options:(MTLResourceOptions)a->options];
+                if (heap.type != MTLHeapTypePlacement || !sa.size || !sa.align || a->offset % sa.align ||
+                    a->offset > heap.size || sa.size > heap.size - a->offset) {
+                    reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+                }
+            }
+            id<MTLBuffer> buffer = a->offset == UINT64_MAX
+                ? [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options]
+                : [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options offset:a->offset];
+            if (buffer && heap.storageMode == MTLStorageModeShared && !buffer.contents) buffer = nil;
+            struct rm_ret_handle_u64 result = {rm_intern(buffer), buffer ? buffer.gpuAddress : 0};
+            reply(fd, &h, buffer ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
+        }
+        case RM_OP_HEAP_TEXTURE_SIZE: {
+            if (h.payload_len != sizeof(struct rm_wmt_info) + sizeof(struct WMTTextureInfo)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_wmt_info *a = (const void *)payload;
+            if (a->info_len != sizeof(struct WMTTextureInfo) || a->extra_count) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            id device = rm_resolve(a->owner, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            const struct WMTTextureInfo *i = (const void *)(a + 1);
+            MTLTextureDescriptor *d = [[MTLTextureDescriptor alloc] init];
+            d.pixelFormat = rm_fmt(i->pixel_format);
+            d.width = i->width; d.height = i->height; d.depth = i->depth;
+            d.arrayLength = i->array_length; d.textureType = (MTLTextureType)i->type;
+            d.mipmapLevelCount = i->mipmap_level_count; d.sampleCount = i->sample_count;
+            d.usage = (MTLTextureUsage)i->usage; d.resourceOptions = (MTLResourceOptions)i->options;
+            MTLSizeAndAlign value = [(id<MTLDevice>)device heapTextureSizeAndAlignWithDescriptor:d];
+            struct rm_size_and_align result = {value.size, value.align};
+            reply(fd, &h, RM_OK, &result, sizeof(result)); break;
+        }
+        case RM_OP_HEAP_BUFFER_SIZE: {
+            if (h.payload_len != sizeof(struct rm_heap_buffer_size)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_heap_buffer_size *a = (const void *)payload;
+            id device = rm_resolve(a->device, &err);
+            if (err != RM_OK || ![device conformsToProtocol:@protocol(MTLDevice)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            MTLSizeAndAlign value = [(id<MTLDevice>)device heapBufferSizeAndAlignWithLength:(NSUInteger)a->length
+                                                                                  options:(MTLResourceOptions)a->options];
+            struct rm_size_and_align result = {value.size, value.align};
+            reply(fd, &h, RM_OK, &result, sizeof(result)); break;
+        }
+        case RM_OP_COMMAND_BUFFER_PROPERTY: {
+            if (h.payload_len != sizeof(struct rm_arg_handle_u64)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            const struct rm_arg_handle_u64 *a = (const void *)payload;
+            id cb = rm_resolve(a->handle, &err);
+            if (err != RM_OK || ![cb conformsToProtocol:@protocol(MTLCommandBuffer)]) {
+                reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            double seconds = 0;
+            switch (a->arg) {
+            case WMTCommandBufferPropertyKernelStartTime: seconds = [(id<MTLCommandBuffer>)cb kernelStartTime]; break;
+            case WMTCommandBufferPropertyKernelEndTime: seconds = [(id<MTLCommandBuffer>)cb kernelEndTime]; break;
+            case WMTCommandBufferPropertyGPUStartTime: seconds = [(id<MTLCommandBuffer>)cb GPUStartTime]; break;
+            case WMTCommandBufferPropertyGPUEndTime: seconds = [(id<MTLCommandBuffer>)cb GPUEndTime]; break;
+            }
+            struct rm_ret_u64 r = {(uint64_t)(seconds * 1000000000.0)};
+            reply(fd, &h, RM_OK, &r, sizeof(r)); break;
+        }
         case RM_OP_CMDBUF_STATUS: {
             id o = rm_resolve(((struct rm_arg_handle *)payload)->handle, &err);
             if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
@@ -2223,6 +2829,44 @@ static void serve(int fd) {
             struct rm_ret_handle r = { rm_intern(set) };
             fprintf(stderr, "[rmetald] newResidencySet(capacity %llu) -> %s\n", (unsigned long long)a->arg, set ? "ok" : "nil");
             reply(fd, &h, set ? RM_OK : RM_ERR_WRONG_CLASS, &r, sizeof r); break;
+        }
+        case RM_OP_RESIDENCY_BATCH: {
+            const struct rm_residency_batch *a = (const void *)payload;
+            if (!rm_residency_batch_valid(a, h.payload_len)) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            if (@available(macOS 15.0, *)) {
+                if (a->action == RM_RESIDENCY_PROBE) { reply(fd, &h, RM_OK, NULL, 0); break; }
+                id set = rm_resolve(a->set, &err);
+                if (err != RM_OK || ![set conformsToProtocol:@protocol(MTLResidencySet)]) {
+                    reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
+                }
+                if (a->action == RM_RESIDENCY_REMOVE_ALL) {
+                    [(id<MTLResidencySet>)set removeAllAllocations];
+                    reply(fd, &h, RM_OK, NULL, 0); break;
+                }
+                id<MTLAllocation> __unsafe_unretained *items = a->count ? (id<MTLAllocation> __unsafe_unretained *)calloc(a->count, sizeof(*items)) : NULL;
+                if (a->count && !items) { reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break; }
+                const uint64_t *handles = (const void *)(a + 1);
+                for (uint32_t i = 0; i < a->count; ++i) {
+                    id allocation = rm_resolve(handles[i], &err);
+                    if (err != RM_OK || ![allocation conformsToProtocol:@protocol(MTLAllocation)]) {
+                        if (err == RM_OK) err = RM_ERR_WRONG_CLASS;
+                        break;
+                    }
+                    items[i] = allocation;
+                }
+                @try {
+                    if (err == RM_OK && a->count) {
+                        if (a->action == RM_RESIDENCY_ADD)
+                            [(id<MTLResidencySet>)set addAllocations:items count:a->count];
+                        else
+                            [(id<MTLResidencySet>)set removeAllocations:items count:a->count];
+                    }
+                } @finally { free(items); }
+                reply(fd, &h, err, NULL, 0); break;
+            }
+            reply(fd, &h, RM_ERR_BAD_OPCODE, NULL, 0); break;
         }
         case RM_OP_RESIDENCY_ADD: {
             struct rm_arg_handle_u64 *a = (void *)payload;
@@ -2646,14 +3290,15 @@ static void serve(int fd) {
                                     "(status %u)\n", (unsigned long long)a->handle, err);
                 reply(fd,&h,err,NULL,0); break;
             }
+            if (![o conformsToProtocol:@protocol(MTLBuffer)]) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
             id<MTLBuffer> b = o;
             uint64_t have = h.payload_len - sizeof *a;
-            if (a->offset + a->length > b.length || a->length > have) {
+            if (a->offset > b.length || a->length > b.length - a->offset || a->length > have) {
                 fprintf(stderr, "[rmetald] buffer upload out of range: off %llu len %llu into %llu\n",
                         (unsigned long long)a->offset, (unsigned long long)a->length,
                         (unsigned long long)b.length);
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
-            if (b.storageMode == MTLStorageModePrivate) {
+            if (b.storageMode == MTLStorageModePrivate || !b.contents) {
                 /* Silent before: the guest saw a failed upload with no reason
                  * on this side, which is the hardest kind of gap to chase. */
                 static unsigned told;

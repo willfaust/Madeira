@@ -5,6 +5,11 @@ on:
     branches: [main, 'codex/pr-build-*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      x87_only:
+        description: Run FEX x87 assembly tests only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +24,7 @@ concurrency:
 
 jobs:
   plan:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.x87_only }}
     runs-on: xcode-27
     outputs:
       ipa: ${{ steps.key.outputs.ipa }}
@@ -32,6 +38,7 @@ jobs:
           python3 tests/host/check-build-inputs.py
           python3 tests/host/check-ci-component-keys.py
           python3 tests/host/check-ffmpeg-source-reuse.py
+          python3 tests/host/check-shader-headers.py
           cc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -pthread -I madeira-d3d12/src madeira-d3d12/tests/native/dxil_cache_test.c -o "$RUNNER_TEMP/dxil-cache-test"
           "$RUNNER_TEMP/dxil-cache-test"
           python3 tests/host/check-ci-llvm-cache.py
@@ -272,6 +279,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Check remote Metal protocol
+        run: |
+          python3 tests/host/check-remote-residency.py
+          python3 tests/host/check-remote-heaps.py
+          python3 tests/host/check-remote-shared-heaps.py
+          python3 tests/host/check-remote-counters.py
+          python3 tests/host/check-remote-library-source.py
+          python3 tests/host/check-remote-icb.py
+          python3 tests/host/check-remote-tile.py
+          python3 tests/host/check-remote-texture-read.py
+      - name: Check x87 provenance handling
+        run: |
+          python3 FEX/unittests/host/check-x87-provenance.py
+          python3 FEX/unittests/host/check-x87-state-save.py
       - id: sdk
         run: bash tools/build/ci-input-key.sh
       - id: cache-llvm
@@ -409,3 +430,32 @@ jobs:
           if-no-files-found: error
           overwrite: true
           compression-level: 0
+
+  x87-assembly:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.x87_only }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Set up FEX and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build nasm libssl-dev pkg-config
+          git submodule update --init --depth 1 FEX
+          git -C FEX submodule update --init --depth 1 External/Catch2 External/fmt External/range-v3 External/rpmalloc External/unordered_dense External/vixl External/xxhash External/jemalloc_glibc External/drm-headers External/Vulkan-Headers Source/Common/cpp-optparse
+      - name: Build test harness and fixtures
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S FEX -B "$RUNNER_TEMP/fex-x87" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=ON -DBUILD_FEXCONFIG=OFF -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF
+          targets=(TestHarnessRunner x87_context_test)
+          for fixture in FEX/unittests/ASM/X87_F64/FILD_FISTP_I64_*F64.asm; do
+            name="${fixture#FEX/}"
+            targets+=("${name}.bin" "${name}.config.bin")
+          done
+          cmake --build "$RUNNER_TEMP/fex-x87" --target "${targets[@]}" --parallel 4
+      - name: Run x87 integer transfer tests
+        run: ctest --test-dir "$RUNNER_TEMP/fex-x87" --no-tests=error --output-on-failure -R 'FILD_FISTP_I64_.*F64.asm|^x87_context_test$'
