@@ -340,6 +340,7 @@ enum MadeiraDock {
         "session-offline-entitled", "session-offline-listed", "session-offline-timeout-state",
         "session-offline-fallback", "session-offline-ready",
         "launch-user-arguments-bytes", "launch-user-arguments-invalid",
+        "launch-game-running", "friends-available", "friends-own-state", "friends-signin-available", "friends-signin", "friends-requested", "friends-own-game", "friends-total", "friends-valid-ids", "friends-named", "friends-playing", "friends-seconds", "friends-count", "friends-cmd-seq", "friends-cmd-result",
         "launch-client-error", "launch-option-index", "launch-option-invalid", "launch-option-missing",
         "launch-update-wait", "launch-update-retry", "launch-update-ready",
         "launch-config-wait", "launch-config-gave-up", "launch-session-wait", "launch-session-gave-up",
@@ -351,8 +352,13 @@ enum MadeiraDock {
     /// The host's report rounds (madeira-dock src/main.c).
     static let reportRounds: Set<String> = ["ml1820", "ml1830", "ml1860", "ml1870", "ml1970", "ml1990", "ml2000", "ml2011", "ml2015", "ml2016", "ml2020"]
 
+    /// The largest report read. Dock bounds its friends lines, but a long session
+    /// still writes more than the old 32 KB, and a report past the cap would hide
+    /// probe-result at game end.
+    static let reportCap = 1 << 20
+
     static func parseReport(_ data: Data) -> Report {
-        guard data.count <= 32768, let text = String(data: data, encoding: .utf8) else { return Report() }
+        guard data.count <= reportCap, let text = String(data: data, encoding: .utf8) else { return Report() }
         var report = Report()
         // Ignore a partial final line until the writer completes and flushes it.
         for line in text.replacingOccurrences(of: "\r\n", with: "\n")
@@ -386,7 +392,7 @@ enum MadeiraDock {
         let url = drive.appendingPathComponent("madeira-dock.txt")
         guard let file = try? FileHandle(forReadingFrom: url) else { return lastReport }
         defer { try? file.close() }
-        guard let data = try? file.read(upToCount: 32769), data.count <= 32768 else { return lastReport }
+        guard let data = try? file.read(upToCount: reportCap + 1), data.count <= reportCap else { return lastReport }
         let report = parseReport(data)
         for key in report.fields.keys.sorted() where report.fields[key] != lastReport.fields[key] {
             SteamLog.event("[dock-report] \(key)=\(report.fields[key]!)")
@@ -415,6 +421,9 @@ enum MadeiraDock {
         if let url = transferURL { try? FileManager.default.removeItem(at: url) }
         unsetenv("MADEIRA_DOCK_AUTH_FILE")
         unsetenv("MADEIRA_DOCK_OFFLINE")
+        // The friends feed and command too: a host that did not end cleanly
+        // leaves them, and a later session must not show its list.
+        DockFriends.shared.endSession()
     }
 
     /// Writes the one-use transfer to protected Application Support storage
@@ -455,6 +464,7 @@ enum MadeiraDock {
             setenv(key, "1", 1)
         }
         setenv("MADEIRA_STEAM_HOST_APPID", String(game.id), 1)
+        setenv("MADEIRA_DOCK_PERSONA_STATE", String(SteamOnlineStatus.current.rawValue), 1)
         setenv("MADEIRA_STEAM_HOST_LAUNCH_OPTION", String(launchOption), 1)
         setenv("MADEIRA_STEAM_HOST_CLIENT_DIR", SteamRuntimeFiles.windowsRoot, 1)
         setenv("MADEIRA_STEAM_HOST_EXPECTED_INSTALL", game.windowsInstallPath, 1)
@@ -626,4 +636,18 @@ enum DockOffline {
         NotificationCenter.default.post(name: changed, object: nil)
     }
     static let changed = Notification.Name("MadeiraDockOfflineChanged")
+}
+
+/// The Steam status Dock signs in to Friends with (Settings › Steam › Status),
+/// passed to Dock as MADEIRA_DOCK_PERSONA_STATE; the raw value is Steam's
+/// persona state. Offline, the default, leaves Friends off for the session:
+/// Dock then sends Steam nothing of its own (madeira-dock README, "Friends").
+enum SteamOnlineStatus: Int, CaseIterable, Identifiable {
+    case online = 1, away = 3, invisible = 7, offline = 0
+    var id: Int { rawValue }
+    private static let key = "steamOnlineStatus"
+    static var current: SteamOnlineStatus {
+        get { (UserDefaults.standard.object(forKey: key) as? Int).flatMap(SteamOnlineStatus.init(rawValue:)) ?? .offline }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
+    }
 }
