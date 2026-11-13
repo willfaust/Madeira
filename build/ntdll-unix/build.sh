@@ -233,6 +233,8 @@ else
     FAILED_FILES="$FAILED_FILES wg_parser_apple_ios"
 fi
 
+compile_one "$BUILD_DIR/signed_pe_ios.c" "signed_pe_ios"
+
 for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
     name=$(basename "$src" .c)
 
@@ -293,7 +295,7 @@ fi
 
 echo ""
 echo "=== Building libntdll_unix.a ==="
-ar rcs "$OBJ_DIR/libntdll_unix.a" \
+ar rcs "$OBJ_DIR/libntdll_unix.a" "$OBJ_DIR/signed_pe_ios.o" \
     "$OBJ_DIR/audio_null_ios.o" "$OBJ_DIR/madsync.o" "$OBJ_DIR/nsi_unixlib_ios.o" \
     "$OBJ_DIR/nsi_network_ios.o" "$OBJ_DIR/nsi_ndis.o" "$OBJ_DIR/nsi_ip.o" \
     "$OBJ_DIR/gnutls_symtab_ios.o" "$OBJ_DIR/ws2_32_unixlib.o" \

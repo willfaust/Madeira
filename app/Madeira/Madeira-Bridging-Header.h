@@ -1,4 +1,7 @@
 #import "JITAllocator.h"
+#import "SignedCodeProbe.h"
+#import "SignedFEX.h"
+#import "SignedWine.h"
 #import "FEXBridge.h"
 #import "WineServerBridge.h"
 #import "WineProcessBridge.h"
