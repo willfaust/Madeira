@@ -231,6 +231,8 @@ enum rm_op {
     RM_OP_TEXTURE_READ_LAYOUT,
     RM_OP_TEXTURE_READ_REGION,
     RM_OP_TEXTURE_READ_PVRTC,
+    RM_OP_TEXTURE_READ_PVRTC_MASKED, /* value bytes followed by a byte write mask */
+    RM_OP_TEXTURE_READ_MASKED,       /* one row of values followed by a byte write mask */
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
@@ -243,6 +245,7 @@ struct rm_library_source { uint64_t device, length; };
 struct rm_new_icb { uint64_t device, count, options; };
 struct rm_texture_read_layout { uint32_t block_width, block_height, block_bytes, reserved; };
 #define RM_TEXTURE_READ_PVRTC 1u
+#define RM_TEXTURE_READ_MASKED 2u
 struct rm_texture_read_region { uint64_t texture, x, y, z, width, height, level, slice; };
 struct rm_texture_read_pvrtc { struct rm_texture_read_region region; uint64_t offset, length; };
 struct rm_library_source_result { uint64_t library; uint32_t error_length, reserved; };

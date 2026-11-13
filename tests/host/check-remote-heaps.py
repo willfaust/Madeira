@@ -15,6 +15,7 @@ pre=r'''
 #import <Metal/Metal.h>
 #include <assert.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #include "protocol.h"
 #include "winemetal.h"
 static id objects[16]; static unsigned count=1; static uint32_t result; static uint64_t returned;
@@ -68,6 +69,9 @@ int main(void) { @autoreleasepool {
   struct { struct rm_buffer_range range; uint8_t data[8]; } u={{ch,UINT64_MAX,2},{0}};
   invoke(RM_OP_BUFFER_UPLOAD,&u,sizeof(u));assert(result==RM_ERR_SHORT_PAYLOAD);
  }
+ shared.type=MTLHeapTypeAutomatic;s=[d newHeapWithDescriptor:shared];
+ if(s) { b.heap=rm_intern(s);b.offset=UINT64_MAX;b.options=MTLResourceStorageModeShared;
+  invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b));assert(result==RM_OK && [objects[returned] contents]); }
  } return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-private-heap-') as t:
@@ -95,6 +99,7 @@ client=r'''
 #import <Metal/Metal.h>
 #include <assert.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #include "protocol.h"
 #include "winemetal.h"
 typedef uint64_t obj_handle_t; typedef uint32_t NTSTATUS;
@@ -119,7 +124,8 @@ static void *UInt32ToPtr(uint32_t p) { return p?guest+p:NULL; }
 static int remote_enabled = 1;
 static int wmtr_enabled(void) { return remote_enabled; }
 static int wmtr_heap_register(uint64_t h,uint64_t size) { (void)h;(void)size;return 0; }
-static void *wmtr_heap_native_pointer(uint64_t h,uint64_t off,uint64_t n) { return h==17 && !off && n==4096 ? guest+32768 : NULL; }
+static pthread_mutex_t wmtr_heap_creation_lock=PTHREAD_MUTEX_INITIALIZER;
+static void *wmtr_heap_native_pointer(uint64_t h,uint64_t *off,uint64_t n) { return h==17 && !*off && n==4096 ? guest+32768 : NULL; }
 static int wmtr_heap_flush(void) { return 0; }
 static int wmtr_heap_sync(void) { return 0; }
 static int wmtr_heap_attach(uint64_t h,uint64_t heap,uint64_t off,void *ptr,uint64_t len) { (void)h;(void)heap;(void)off;(void)ptr;(void)len;return 0; }
@@ -176,6 +182,8 @@ int main(void) { @autoreleasepool {
  status=RM_ERR_BAD_OPCODE;info->memory.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_UNSUCCESSFUL && b.ret==0 && registered==3);
  status=0;info->options=WMTResourceStorageModeShared;info->memory.ptr=(void *)(uintptr_t)32768;b.offset=0;
  assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_SUCCESS && b.ret==42 && info->memory.ptr==(void *)(uintptr_t)32768 && registered==4);
+ info->memory.ptr=(void *)(uintptr_t)32768;info->gpu_address=WMT_HEAP_AUTO_SHADOW;b.offset=UINT64_MAX;
+ assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_SUCCESS && b.ret==42 && info->memory.ptr==(void *)(uintptr_t)32768 && registered==5);
  info->memory.ptr=(void *)(uintptr_t)0xfffffff0u;info->gpu_address=77;
  assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && !b.ret && !info->memory.ptr && !info->gpu_address);
  b.ret=99; b.info.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && b.ret==0);

@@ -754,11 +754,33 @@ static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *
     case WMTPixelFormatPVRTC_RGBA_4BPP:
     case WMTPixelFormatPVRTC_RGBA_4BPP_sRGB:
         *layout=(struct rm_texture_read_layout){4,4,8,RM_TEXTURE_READ_PVRTC}; return 1;
+    case WMTPixelFormatDepth32Float_Stencil8:
+    case WMTPixelFormatX32_Stencil8: *layout=(struct rm_texture_read_layout){1,1,8,RM_TEXTURE_READ_MASKED}; return 1;
+    case WMTPixelFormatDepth24Unorm_Stencil8:
+    case WMTPixelFormatX24_Stencil8: *layout=(struct rm_texture_read_layout){1,1,4,RM_TEXTURE_READ_MASKED}; return 1;
     case WMTPixelFormatDepth16Unorm: *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
     case WMTPixelFormatDepth32Float: *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
     case WMTPixelFormatStencil8: *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
     default: return 0;
     }
+}
+
+/* Metal exposes different packed depth/stencil byte footprints on different GPUs. */
+static int rm_masked_pixel_stride(id<MTLTexture> texture, unsigned max_bytes) {
+    if (texture.sampleCount != 1 || texture.storageMode == MTLStorageModePrivate ||
+        texture.storageMode == MTLStorageModeMemoryless || !texture.width) return 0;
+    uint8_t zero[64], ones[64]; int last[2] = {-1,-1};
+    unsigned samples = texture.width > 1 ? 2 : 1;
+    for (unsigned n=1; n<=samples; n++) {
+        memset(zero,0,sizeof(zero)); memset(ones,0xff,sizeof(ones));
+        [texture getBytes:zero bytesPerRow:32 bytesPerImage:32 fromRegion:MTLRegionMake2D(0,0,n,1) mipmapLevel:0 slice:0];
+        [texture getBytes:ones bytesPerRow:32 bytesPerImage:32 fromRegion:MTLRegionMake2D(0,0,n,1) mipmapLevel:0 slice:0];
+        for (unsigned i=0; i<n*max_bytes; i++) if (zero[i]==ones[i]) last[n-1]=(int)i;
+    }
+    if (last[0] < 0) return 0;
+    if (samples==1) return (int)max_bytes;
+    int stride=last[1]-last[0];
+    return stride>0 && stride<=max_bytes && last[0]<stride ? stride : 0;
 }
 
 /* Replay a validated packed batch into an EXISTING encoder.
@@ -2164,7 +2186,43 @@ static void serve(int fd) {
             }
             struct rm_texture_read_layout layout;
             if (!rm_read_layout([(id<MTLTexture>)object pixelFormat],&layout)) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+            if (layout.reserved == RM_TEXTURE_READ_MASKED) {
+                int stride=rm_masked_pixel_stride(object,layout.block_bytes);
+                if (!stride) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
+                layout.block_bytes=(uint32_t)stride;
+            }
             reply(fd,&h,RM_OK,&layout,sizeof(layout)); break;
+        }
+        case RM_OP_TEXTURE_READ_MASKED: {
+            if (h.payload_len != sizeof(struct rm_texture_read_region)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_region *a=(const void *)payload;
+            id object=rm_resolve(a->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved != RM_TEXTURE_READ_MASKED ||
+                a->level >= texture.mipmapLevelCount || a->level >= 64 || a->height != 1 || !a->width) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            int stride=rm_masked_pixel_stride(texture,l.block_bytes);
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> a->level), hh=MAX(1ull,(uint64_t)texture.height >> a->level),
+                     dd=MAX(1ull,(uint64_t)texture.depth >> a->level), slices=texture.arrayLength;
+            if (texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray) slices*=6;
+            if (!stride || a->x>=w || a->width>w-a->x || a->y>=hh || a->z>=dd || a->slice>=slices ||
+                a->width > RM_CHUNK_BYTES/(2u*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            size_t alloc=(size_t)(a->width*l.block_bytes), count=(size_t)(a->width*(unsigned)stride);
+            uint8_t *zero=calloc(1,alloc), *ones=malloc(alloc), *out=malloc(count*2);
+            if (!zero || !ones || !out) { free(zero); free(ones); free(out); reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            @try {
+                memset(ones,0xff,alloc);
+                MTLRegion region=MTLRegionMake3D(a->x,a->y,a->z,a->width,1,1);
+                [texture getBytes:zero bytesPerRow:alloc bytesPerImage:alloc fromRegion:region mipmapLevel:a->level slice:a->slice];
+                [texture getBytes:ones bytesPerRow:alloc bytesPerImage:alloc fromRegion:region mipmapLevel:a->level slice:a->slice];
+                for (size_t i=0;i<count;i++) { out[i]=zero[i]; out[count+i]=(zero[i]==ones[i]); }
+                reply(fd,&h,RM_OK,out,(uint32_t)(count*2));
+            } @finally { free(zero); free(ones); free(out); }
+            break;
         }
         case RM_OP_TEXTURE_READ_REGION: {
             if (h.payload_len != sizeof(struct rm_texture_read_region)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
@@ -2205,7 +2263,8 @@ static void serve(int fd) {
             } @finally { free(data); }
             break;
         }
-        case RM_OP_TEXTURE_READ_PVRTC: {
+        case RM_OP_TEXTURE_READ_PVRTC:
+        case RM_OP_TEXTURE_READ_PVRTC_MASKED: {
             if (h.payload_len != sizeof(struct rm_texture_read_pvrtc)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             const struct rm_texture_read_pvrtc *a=(const void *)payload;
             const struct rm_texture_read_region *r=&a->region;
@@ -2225,21 +2284,36 @@ static void serve(int fd) {
             if (r->width != w || r->height != hh || cols > RM_MAX_PAYLOAD/l.block_bytes ||
                 rows > RM_MAX_PAYLOAD/(cols*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             uint64_t total=cols*rows*l.block_bytes;
-            /* shortcut: small PVRTC read footprints vary by GPU, add a write-mask protocol for extra bytes. */
             uint64_t alloc_cols=MAX(2ull,cols), alloc_rows=MAX(2ull,rows);
             if (alloc_cols > RM_MAX_PAYLOAD/l.block_bytes || alloc_rows > RM_MAX_PAYLOAD/(alloc_cols*l.block_bytes)) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
             }
-            if (!a->length || a->length > RM_CHUNK_BYTES || a->offset > total || a->length > total-a->offset) {
+            int masked = h.opcode == RM_OP_TEXTURE_READ_PVRTC_MASKED;
+            size_t alloc_size=(size_t)(alloc_cols*alloc_rows*l.block_bytes);
+            if (masked) total=alloc_size;
+            if (!a->length || a->length > (masked ? RM_CHUNK_BYTES/2 : RM_CHUNK_BYTES) ||
+                a->offset > total || a->length > total-a->offset) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
             }
-            void *data=calloc(1,(size_t)(alloc_cols*alloc_rows*l.block_bytes));
-            if (!data) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            uint8_t *data=calloc(1,alloc_size), *probe=masked ? malloc(alloc_size) : NULL;
+            uint8_t *out=masked ? malloc((size_t)a->length*2) : NULL;
+            if (!data || (masked && (!probe || !out))) {
+                free(data); free(probe); free(out); reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
             @try {
                 [texture getBytes:data bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)
                      mipmapLevel:r->level slice:0];
-                reply(fd,&h,RM_OK,(uint8_t *)data+a->offset,(uint32_t)a->length);
-            } @finally { free(data); }
+                if (masked) {
+                    memset(probe,0xff,alloc_size);
+                    [texture getBytes:probe bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)
+                         mipmapLevel:r->level slice:0];
+                    for (size_t i=0; i<a->length; i++) {
+                        out[i]=data[a->offset+i];
+                        out[a->length+i]=(data[a->offset+i]==probe[a->offset+i]);
+                    }
+                    reply(fd,&h,RM_OK,out,(uint32_t)a->length*2);
+                } else reply(fd,&h,RM_OK,data+a->offset,(uint32_t)a->length);
+            } @finally { free(data); free(probe); free(out); }
             break;
         }
         case RM_OP_NEW_TILE_PIPELINE: {

@@ -17,7 +17,7 @@ pre=r'''
 static id<MTLTexture> texture;static uint32_t status,length_out;static unsigned char response[1024];
 static id rm_resolve(uint64_t h,uint32_t *err) {*err=h==1?RM_OK:RM_ERR_BAD_HANDLE;return h==1?texture:nil;}
 static void reply(int fd,const struct rm_hdr *h,uint32_t code,const void *data,uint32_t length) {(void)fd;(void)h;status=code;length_out=length;if(length) {assert(length<=sizeof(response));memcpy(response,data,length);}}
-static void invoke(uint16_t op,void *payload,uint32_t length) {int fd=0;uint32_t err=RM_OK;struct rm_hdr h={.payload_len=length};switch(op) {
+static void invoke(uint16_t op,void *payload,uint32_t length) {int fd=0;uint32_t err=RM_OK;struct rm_hdr h={.opcode=op,.payload_len=length};switch(op) {
 '''
 main=r'''
 } }
@@ -73,9 +73,11 @@ int main(void) { @autoreleasepool {
   [texture replaceRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:2 withBytes:blocks bytesPerRow:0];
   memset(direct,0,sizeof(direct));
   [texture getBytes:direct bytesPerRow:0 fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:2];
-  p=(struct rm_texture_read_pvrtc){{1,0,0,0,4,4,2,0},0,8};
-  invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status==RM_OK && length_out==8 && !memcmp(response,direct,8));
-  p.offset=8;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
+  p=(struct rm_texture_read_pvrtc){{1,0,0,0,4,4,2,0},0,32};
+  invoke(RM_OP_TEXTURE_READ_PVRTC_MASKED,&p,sizeof(p));assert(status==RM_OK && length_out==64);
+  for(unsigned i=0;i<32;i++) if(response[32+i]) assert(response[i]==direct[i]);
+  for(unsigned i=0;i<8;i++) assert(response[32+i]);
+  p.offset=32;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC_MASKED,&p,sizeof(p));assert(status!=RM_OK);
  } else { puts("real PVRTC texture test skipped: format unavailable"); }
  desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
  desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget;
@@ -91,6 +93,32 @@ int main(void) { @autoreleasepool {
   struct rm_texture_read_region r={1,0,0,0,4,4,0,0};invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));
   assert(status==RM_OK && length_out==64 && !memcmp(response,expected,64) && expected[0]==0.25f);
  } else { puts("real depth texture test skipped: format unavailable"); }
+ desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:4 height:4 mipmapped:NO];
+ desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget|MTLTextureUsagePixelFormatView;
+ id<MTLTexture> combined=[d newTextureWithDescriptor:desc];
+ if (combined) {
+  id<MTLCommandQueue> queue=[d newCommandQueue];id<MTLCommandBuffer> command=[queue commandBuffer];
+  MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+  pass.depthAttachment.texture=combined;pass.depthAttachment.loadAction=MTLLoadActionClear;pass.depthAttachment.storeAction=MTLStoreActionStore;pass.depthAttachment.clearDepth=0.25;
+  pass.stencilAttachment.texture=combined;pass.stencilAttachment.loadAction=MTLLoadActionClear;pass.stencilAttachment.storeAction=MTLStoreActionStore;pass.stencilAttachment.clearStencil=0x5a;
+  [[command renderCommandEncoderWithDescriptor:pass] endEncoding];[command commit];[command waitUntilCompleted];assert(command.status==MTLCommandBufferStatusCompleted);
+  texture=combined;struct rm_arg_handle q={1};invoke(RM_OP_TEXTURE_READ_LAYOUT,&q,sizeof(q));
+  assert(status==RM_OK && length_out==sizeof(layout));memcpy(&layout,response,sizeof(layout));assert(layout.reserved==RM_TEXTURE_READ_MASKED);
+  uint8_t expected[64],actual[64];memset(expected,0xa5,sizeof(expected));memset(actual,0xa5,sizeof(actual));
+  [combined getBytes:expected bytesPerRow:4*layout.block_bytes fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0];
+  for(unsigned row=0;row<4;row++) {struct rm_texture_read_region r={1,0,row,0,4,1,0,0};invoke(RM_OP_TEXTURE_READ_MASKED,&r,sizeof(r));
+   unsigned n=4*layout.block_bytes;assert(status==RM_OK && length_out==2*n);for(unsigned i=0;i<n;i++)if(response[n+i])actual[row*n+i]=response[i];}
+  assert(!memcmp(actual,expected,4*4*layout.block_bytes));
+  id<MTLTexture> stencil=[combined newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  if (stencil) {
+   texture=stencil;invoke(RM_OP_TEXTURE_READ_LAYOUT,&q,sizeof(q));assert(status==RM_OK);memcpy(&layout,response,sizeof(layout));
+   memset(expected,0xa5,sizeof(expected));memset(actual,0xa5,sizeof(actual));
+   [stencil getBytes:expected bytesPerRow:4*layout.block_bytes fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0];
+   for(unsigned row=0;row<4;row++) {struct rm_texture_read_region r={1,0,row,0,4,1,0,0};invoke(RM_OP_TEXTURE_READ_MASKED,&r,sizeof(r));
+    unsigned n=4*layout.block_bytes;assert(status==RM_OK && length_out==2*n);for(unsigned i=0;i<n;i++)if(response[n+i])actual[row*n+i]=response[i];}
+   assert(!memcmp(actual,expected,4*4*layout.block_bytes));
+  }
+ } else { puts("real combined depth/stencil test skipped: format unavailable"); }
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-host-') as t:
@@ -101,6 +129,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-read-host-') as t:
  else: print('remote texture read host and real Metal pass')
 source=(dxmt/'src/winemetal/unix/winemetal_unix.c').read_text();start=source.index('static NTSTATUS\n_MTLTexture_getBytes(');end=source.index('\n\n/*\n * Definition from cache.c',start);handler=source[start:end]
 start=source.index('#define WMT_WOW64_POINTER_WRAPPER(name, type, field)');end=source.index('\n\nWMT_WOW64_POINTER_WRAPPER(',start);wrapper=source[start:end]
+start=source.index('static NTSTATUS _MTLTexture_getBytes_wow64(');end=source.index('\n#undef WMT_WOW64_POINTER_WRAPPER',start);texture_wow=source[start:end]
 client=r'''
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -114,12 +143,17 @@ typedef uint64_t obj_handle_t;typedef uint32_t NTSTATUS;
 #define STATUS_INVALID_PARAMETER 0xc000000du
 struct unixcall_mtltexture_replaceregion {uint64_t texture;struct WMTOrigin origin;struct WMTSize size;uint64_t level,slice;struct WMTMemoryPointer data;uint64_t bytes_per_row,bytes_per_image;};
 static unsigned char guest[(9u<<20)];static unsigned calls,chunk_mode;static uint32_t fail;
+static __thread uint64_t wmtr_texture_guest_limit=UINT64_MAX;
 static void *UInt32ToPtr(uint32_t p) {return p?guest+p:NULL;}
 static int wmtr_enabled(void) {return 1;}
 static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t cap,uint32_t *got) {
  calls++;if(fail)return fail;
- if(op==RM_OP_TEXTURE_READ_LAYOUT) {assert(len==sizeof(struct rm_arg_handle));*(struct rm_texture_read_layout*)out=chunk_mode==2?(struct rm_texture_read_layout){8,4,8,RM_TEXTURE_READ_PVRTC}:chunk_mode?(struct rm_texture_read_layout){1,1,16,0}:(struct rm_texture_read_layout){4,4,8,0};*got=sizeof(struct rm_texture_read_layout);return RM_OK;}
- if(op==RM_OP_TEXTURE_READ_PVRTC) { const struct rm_texture_read_pvrtc *p=arg;assert(len==sizeof(*p) && p->length==cap); memset(out,p->offset?0x99:0x55,cap);*got=cap;return RM_OK; }
+ if(op==RM_OP_TEXTURE_READ_LAYOUT) {assert(len==sizeof(struct rm_arg_handle));*(struct rm_texture_read_layout*)out=chunk_mode==3?(struct rm_texture_read_layout){1,1,4,RM_TEXTURE_READ_MASKED}:chunk_mode==2?(struct rm_texture_read_layout){8,4,8,RM_TEXTURE_READ_PVRTC}:chunk_mode?(struct rm_texture_read_layout){1,1,16,0}:(struct rm_texture_read_layout){4,4,8,0};*got=sizeof(struct rm_texture_read_layout);return RM_OK;}
+ if(op==RM_OP_TEXTURE_READ_MASKED) {const struct rm_texture_read_region *p=arg;unsigned n=p->width*4;assert(len==sizeof(*p) && cap==2*n);memset(out,0x71,n);for(unsigned i=0;i<n;i++)((uint8_t*)out)[n+i]=(i%4)!=3;*got=cap;return RM_OK;}
+ if(op==RM_OP_TEXTURE_READ_PVRTC_MASKED) { const struct rm_texture_read_pvrtc *p=arg;assert(len==sizeof(*p) && p->length*2==cap);
+  memset(out,p->offset?0x99:0x55,p->length);memset((uint8_t *)out+p->length,1,p->length);
+  if(p->region.width==4) memset((uint8_t *)out+p->length+8,0,p->length-8);
+  *got=cap;return RM_OK; }
  const struct rm_texture_read_region *a=arg;assert(op==RM_OP_TEXTURE_READ_REGION && len==sizeof(*a) && a->texture==1);
  if(chunk_mode) { assert(a->width==1 && (a->y==0 || a->y==524288)); memset(out,a->y?0x88:0x77,cap);*got=cap;return RM_OK; }
  assert(a->width==8 && a->height==8 && cap==32);
@@ -137,13 +171,16 @@ int main(void) { @autoreleasepool {
  fail=0;chunk_mode=1;calls=0;p.size=(struct WMTSize){1,524289,1};p.bytes_per_row=16;p.bytes_per_image=0;
  assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x77 && guest[32+(8u<<20)]==0x88);
  chunk_mode=2;calls=0;p.size=(struct WMTSize){8192,4100,1};p.bytes_per_row=0;
- assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x55 && guest[32+(8u<<20)]==0x99);
+ assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==4 && guest[32]==0x55 && guest[32+(8u<<20)]==0x99);
  p.bytes_per_row=8;assert(_MTLTexture_getBytes_wow64(&p)==STATUS_INVALID_PARAMETER);
  calls=0;p.size=(struct WMTSize){4,4,1};p.bytes_per_row=0;guest[40]=0xee;
  assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==2 && guest[32]==0x55 && guest[39]==0x55 && guest[40]==0xee);
+ p.data.ptr=(void *)(uintptr_t)0xfffffff0u;assert(_MTLTexture_getBytes_wow64(&p)==STATUS_INVALID_PARAMETER);
+ memset(guest,0xee,128);p.data.ptr=(void *)(uintptr_t)32;chunk_mode=3;calls=0;p.size=(struct WMTSize){2,2,1};p.bytes_per_row=12;
+ assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x71 && guest[35]==0xee && guest[44]==0x71 && guest[47]==0xee);
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-client-') as t:
- exe=Path(t)/'test';code=client+handler+'\n'+wrapper+'\nWMT_WOW64_POINTER_WRAPPER(_MTLTexture_getBytes, unixcall_mtltexture_replaceregion, data)\n'+client_end
+ exe=Path(t)/'test';code=client+handler+'\n'+texture_wow+'\n'+client_end
  subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),'-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],input=code,text=True,check=True);subprocess.run([str(exe)],check=True)
 print('remote texture read client padding and 32-bit pointer tests pass')

@@ -17,6 +17,7 @@ pre = r'''
 #include <string.h>
 #include <sys/mman.h>
 #include "protocol.h"
+#define WMT_HEAP_AUTO_SHADOW (UINT64_C(1) << 63)
 static uint8_t host[65536];
 static int fail_upload;
 static uint64_t handle_offset(uint64_t handle) { assert(handle == 2 || handle == 3); return handle == 2 ? 0 : 4096; }
@@ -46,9 +47,10 @@ int main(void) {
  uint8_t data[2]={0xa1,0xb2};assert(!wmtr_heap_update(3,7,data,2));assert(host[4103]==0xa1 && guest[4104]==0xb2);
  assert(wmtr_heap_update(3,UINT64_MAX,data,2));
  wmtr_heap_reference(1,0);assert(wmtr_heaps);wmtr_buf_remove(2);assert(wmtr_heaps);wmtr_buf_remove(3);assert(!wmtr_heaps);
- assert(!wmtr_heap_register(9,65536));void *native_a=wmtr_heap_native_pointer(9,0,8192);
- void *native_b=wmtr_heap_native_pointer(9,4096,8192);assert(native_a && (uint8_t *)native_b==(uint8_t *)native_a+4096);
- assert(!wmtr_heap_native_pointer(9,65535,2));wmtr_heap_reference(9,0);assert(!wmtr_heaps);
+ assert(!wmtr_heap_register(9,65536));uint64_t off=UINT64_MAX;void *native_a=wmtr_heap_native_pointer(9,&off,8192);assert(native_a && off==0);
+ wmtr_buf_add(2,native_a,8192,0,1,0);assert(!wmtr_heap_attach(2,9,off,native_a,8192));
+ off=UINT64_MAX;void *native_b=wmtr_heap_native_pointer(9,&off,8192);assert(native_b && off==8192 && (uint8_t *)native_b==(uint8_t *)native_a+8192);
+ off=65535;assert(!wmtr_heap_native_pointer(9,&off,2));wmtr_heap_reference(9,0);wmtr_buf_remove(2);assert(!wmtr_heaps);
  return 0;
 }
 '''
@@ -69,6 +71,7 @@ typedef uint64_t obj_handle_t; typedef size_t SIZE_T; typedef pthread_mutex_t SR
 #define MEM_COMMIT 4
 #define MEM_RELEASE 8
 #define PAGE_READWRITE 0
+#define WMT_HEAP_AUTO_SHADOW (UINT64_C(1) << 63)
 #define AcquireSRWLockExclusive pthread_mutex_lock
 #define ReleaseSRWLockExclusive pthread_mutex_unlock
 static unsigned frees;
@@ -82,6 +85,8 @@ int main(void) {
  assert(wmt_heap_begin(1,0,8192,&a,&ta)==1);wmt_heap_finish(ta,2);
  assert(wmt_heap_begin(1,4096,8192,&b,&tb)==1);wmt_heap_finish(tb,3);
  ((uint8_t *)a)[4096]=0x42;assert(((uint8_t *)b)[0]==0x42);
+ void *automatic;struct wmt_heap_buffer *tc;assert(wmt_heap_begin(1,UINT64_MAX,8192,&automatic,&tc)==1);
+ assert((uint8_t *)automatic==(uint8_t *)a+12288 && tc->offset==12288);wmt_heap_finish(tc,0);
  assert(wmt_heap_begin(1,65535,2,&b,&tb)==-1);
  wmt_heap_reference(1,0);assert(!frees);wmt_heap_reference(2,1);wmt_heap_reference(2,0);
  wmt_heap_reference(2,0);assert(!frees);wmt_heap_reference(3,0);assert(frees==1);
