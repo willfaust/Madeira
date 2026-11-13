@@ -230,6 +230,7 @@ enum rm_op {
     RM_OP_NEW_TILE_PIPELINE,
     RM_OP_TEXTURE_READ_LAYOUT,
     RM_OP_TEXTURE_READ_REGION,
+    RM_OP_TEXTURE_READ_PVRTC,
 };
 
 struct rm_heap_buffer_size { uint64_t device, length, options; };
@@ -241,7 +242,9 @@ struct rm_blit_samples { uint64_t cmdbuf; uint32_t count, reserved; };
 struct rm_library_source { uint64_t device, length; };
 struct rm_new_icb { uint64_t device, count, options; };
 struct rm_texture_read_layout { uint32_t block_width, block_height, block_bytes, reserved; };
+#define RM_TEXTURE_READ_PVRTC 1u
 struct rm_texture_read_region { uint64_t texture, x, y, z, width, height, level, slice; };
+struct rm_texture_read_pvrtc { struct rm_texture_read_region region; uint64_t offset, length; };
 struct rm_library_source_result { uint64_t library; uint32_t error_length, reserved; };
 #define RM_LIBRARY_ERROR_MAX 4096u
 struct rm_sample_attachment { uint64_t buffer, start, end; };

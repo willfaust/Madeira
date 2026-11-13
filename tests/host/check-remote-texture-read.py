@@ -13,6 +13,7 @@ pre=r'''
 #include <string.h>
 #include "protocol.h"
 #include "winemetal.h"
+#define RM_MAX_PAYLOAD (256u << 20)
 static id<MTLTexture> texture;static uint32_t status,length_out;static unsigned char response[1024];
 static id rm_resolve(uint64_t h,uint32_t *err) {*err=h==1?RM_OK:RM_ERR_BAD_HANDLE;return h==1?texture:nil;}
 static void reply(int fd,const struct rm_hdr *h,uint32_t code,const void *data,uint32_t length) {(void)fd;(void)h;status=code;length_out=length;if(length) {assert(length<=sizeof(response));memcpy(response,data,length);}}
@@ -22,6 +23,21 @@ main=r'''
 } }
 int main(void) { @autoreleasepool {
  struct rm_texture_read_layout layout; assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatBC1_RGBA,&layout) && layout.block_width==4 && layout.block_height==4 && layout.block_bytes==8);
+#define CHECK_ASTC(w,h) do { \
+ for (unsigned f=0; f<3; f++) { \
+  enum WMTPixelFormat formats[]={WMTPixelFormatASTC_##w##x##h##_sRGB,WMTPixelFormatASTC_##w##x##h##_LDR,WMTPixelFormatASTC_##w##x##h##_HDR}; \
+  assert(rm_read_layout((MTLPixelFormat)formats[f],&layout) && layout.block_width==w && layout.block_height==h && layout.block_bytes==16); \
+ } } while(0)
+ CHECK_ASTC(4,4); CHECK_ASTC(5,4); CHECK_ASTC(5,5); CHECK_ASTC(6,5); CHECK_ASTC(6,6);
+ CHECK_ASTC(8,5); CHECK_ASTC(8,6); CHECK_ASTC(8,8); CHECK_ASTC(10,5); CHECK_ASTC(10,6);
+ CHECK_ASTC(10,8); CHECK_ASTC(10,10); CHECK_ASTC(12,10); CHECK_ASTC(12,12);
+#undef CHECK_ASTC
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatEAC_R11Snorm,&layout) && layout.block_width==4 && layout.block_height==4 && layout.block_bytes==8);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatETC2_RGB8A1,&layout) && layout.block_bytes==8);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatEAC_RGBA8,&layout) && layout.block_bytes==16);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatGBGR422,&layout) && layout.block_width==2 && layout.block_height==1 && layout.block_bytes==4);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatPVRTC_RGB_2BPP,&layout) && layout.block_width==8 && layout.block_height==4 && layout.block_bytes==8 && layout.reserved==RM_TEXTURE_READ_PVRTC);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatPVRTC_RGBA_4BPP,&layout) && layout.block_width==4 && layout.block_height==4 && layout.block_bytes==8 && layout.reserved==RM_TEXTURE_READ_PVRTC);
  id<MTLDevice> d=MTLCreateSystemDefaultDevice();if(!d)return 77;
  MTLTextureDescriptor *desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:3 height:2 mipmapped:NO];desc.storageMode=MTLStorageModeShared;
  texture=[d newTextureWithDescriptor:desc];if(!texture)return 77;
@@ -32,6 +48,29 @@ int main(void) { @autoreleasepool {
  invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));assert(status==RM_OK && length_out==24 && !memcmp(response,pixels,24));
  r.width=4;invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));assert(status==RM_ERR_SHORT_PAYLOAD);
  r.width=3;r.level=64;invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));assert(status!=RM_OK);
+ desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatASTC_5x4_LDR width:10 height:8 mipmapped:NO]; desc.storageMode=MTLStorageModeShared;
+ id<MTLTexture> astc=[d newTextureWithDescriptor:desc];
+ if (astc) {
+  texture=astc; uint8_t blocks[64]; for(unsigned i=0;i<64;i++)blocks[i]=(uint8_t)(i+1);
+  [texture replaceRegion:MTLRegionMake2D(0,0,10,8) mipmapLevel:0 withBytes:blocks bytesPerRow:32];
+  r=(struct rm_texture_read_region){1,0,0,0,10,8,0,0}; invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));
+  assert(status==RM_OK && length_out==64 && !memcmp(response,blocks,64));
+  r.x=1;invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));assert(status!=RM_OK);
+ } else { puts("real ASTC texture test skipped: format unavailable"); }
+ desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)WMTPixelFormatPVRTC_RGB_2BPP width:16 height:16 mipmapped:YES]; desc.storageMode=MTLStorageModeShared;
+ id<MTLTexture> pvrtc=[d newTextureWithDescriptor:desc];
+ if (pvrtc) {
+  texture=pvrtc; uint8_t blocks[64]; for(unsigned i=0;i<64;i++)blocks[i]=(uint8_t)(i+1);
+  [texture replaceRegion:MTLRegionMake2D(0,0,16,16) mipmapLevel:0 withBytes:blocks bytesPerRow:0];
+  struct rm_texture_read_pvrtc p={{1,0,0,0,16,16,0,0},8,16};
+  invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p)); assert(status==RM_OK && length_out==16 && !memcmp(response,blocks+8,16));
+  p.offset=63;p.length=2;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
+  p.offset=0;p.length=16;p.region.width=8;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
+  [texture replaceRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:2 withBytes:blocks bytesPerRow:0];
+  p=(struct rm_texture_read_pvrtc){{1,0,0,0,4,4,2,0},0,8};
+  invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status==RM_OK && length_out==8 && !memcmp(response,blocks,8));
+  p.offset=8;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
+ } else { puts("real PVRTC texture test skipped: format unavailable"); }
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-host-') as t:
@@ -59,7 +98,8 @@ static void *UInt32ToPtr(uint32_t p) {return p?guest+p:NULL;}
 static int wmtr_enabled(void) {return 1;}
 static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uint32_t cap,uint32_t *got) {
  calls++;if(fail)return fail;
- if(op==RM_OP_TEXTURE_READ_LAYOUT) {assert(len==sizeof(struct rm_arg_handle));*(struct rm_texture_read_layout*)out=chunk_mode?(struct rm_texture_read_layout){1,1,16,0}:(struct rm_texture_read_layout){4,4,8,0};*got=sizeof(struct rm_texture_read_layout);return RM_OK;}
+ if(op==RM_OP_TEXTURE_READ_LAYOUT) {assert(len==sizeof(struct rm_arg_handle));*(struct rm_texture_read_layout*)out=chunk_mode==2?(struct rm_texture_read_layout){8,4,8,RM_TEXTURE_READ_PVRTC}:chunk_mode?(struct rm_texture_read_layout){1,1,16,0}:(struct rm_texture_read_layout){4,4,8,0};*got=sizeof(struct rm_texture_read_layout);return RM_OK;}
+ if(op==RM_OP_TEXTURE_READ_PVRTC) { const struct rm_texture_read_pvrtc *p=arg;assert(len==sizeof(*p) && p->length==cap); memset(out,p->offset?0x99:0x55,cap);*got=cap;return RM_OK; }
  const struct rm_texture_read_region *a=arg;assert(op==RM_OP_TEXTURE_READ_REGION && len==sizeof(*a) && a->texture==1);
  if(chunk_mode) { assert(a->width==1 && (a->y==0 || a->y==524288)); memset(out,a->y?0x88:0x77,cap);*got=cap;return RM_OK; }
  assert(a->width==8 && a->height==8 && cap==32);
@@ -76,6 +116,11 @@ int main(void) { @autoreleasepool {
  p.bytes_per_row=24;fail=RM_ERR_BAD_OPCODE;assert(_MTLTexture_getBytes_wow64(&p)==STATUS_UNSUCCESSFUL);
  fail=0;chunk_mode=1;calls=0;p.size=(struct WMTSize){1,524289,1};p.bytes_per_row=16;p.bytes_per_image=0;
  assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x77 && guest[32+(8u<<20)]==0x88);
+ chunk_mode=2;calls=0;p.size=(struct WMTSize){8192,4100,1};p.bytes_per_row=0;
+ assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x55 && guest[32+(8u<<20)]==0x99);
+ p.bytes_per_row=8;assert(_MTLTexture_getBytes_wow64(&p)==STATUS_INVALID_PARAMETER);
+ calls=0;p.size=(struct WMTSize){4,4,1};p.bytes_per_row=0;guest[40]=0xee;
+ assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==2 && guest[32]==0x55 && guest[40]==0xee);
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-client-') as t:

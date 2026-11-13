@@ -641,7 +641,7 @@ static MTLPixelFormat rm_fmt(enum WMTPixelFormat f) {
 }
 
 
-/* Block dimensions and byte sizes match the formats DXMT can expose to D3D. */
+/* Block dimensions and byte sizes for remote CPU texture reads. */
 static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *layout) {
     memset(layout,0,sizeof(*layout));
     switch ((enum WMTPixelFormat)format) {
@@ -705,6 +705,12 @@ static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *
     case WMTPixelFormatBC1_RGBA_sRGB:
     case WMTPixelFormatBC4_RUnorm:
     case WMTPixelFormatBC4_RSnorm:
+    case WMTPixelFormatEAC_R11Unorm:
+    case WMTPixelFormatEAC_R11Snorm:
+    case WMTPixelFormatETC2_RGB8:
+    case WMTPixelFormatETC2_RGB8_sRGB:
+    case WMTPixelFormatETC2_RGB8A1:
+    case WMTPixelFormatETC2_RGB8A1_sRGB:
         *layout=(struct rm_texture_read_layout){4,4,8,0}; return 1;
     case WMTPixelFormatRGBA32Uint:
     case WMTPixelFormatRGBA32Sint:
@@ -720,7 +726,34 @@ static int rm_read_layout(MTLPixelFormat format, struct rm_texture_read_layout *
     case WMTPixelFormatBC6H_RGBUfloat:
     case WMTPixelFormatBC7_RGBAUnorm:
     case WMTPixelFormatBC7_RGBAUnorm_sRGB:
+    case WMTPixelFormatEAC_RG11Unorm:
+    case WMTPixelFormatEAC_RG11Snorm:
+    case WMTPixelFormatEAC_RGBA8:
+    case WMTPixelFormatEAC_RGBA8_sRGB:
         *layout=(struct rm_texture_read_layout){4,4,16,0}; return 1;
+#define ASTC_LAYOUT(w,h) \
+    case WMTPixelFormatASTC_##w##x##h##_sRGB: \
+    case WMTPixelFormatASTC_##w##x##h##_LDR: \
+    case WMTPixelFormatASTC_##w##x##h##_HDR: \
+        *layout=(struct rm_texture_read_layout){w,h,16,0}; return 1;
+    ASTC_LAYOUT(4,4) ASTC_LAYOUT(5,4) ASTC_LAYOUT(5,5) ASTC_LAYOUT(6,5)
+    ASTC_LAYOUT(6,6) ASTC_LAYOUT(8,5) ASTC_LAYOUT(8,6) ASTC_LAYOUT(8,8)
+    ASTC_LAYOUT(10,5) ASTC_LAYOUT(10,6) ASTC_LAYOUT(10,8) ASTC_LAYOUT(10,10)
+    ASTC_LAYOUT(12,10) ASTC_LAYOUT(12,12)
+#undef ASTC_LAYOUT
+    case WMTPixelFormatGBGR422:
+    case WMTPixelFormatBGRG422:
+        *layout=(struct rm_texture_read_layout){2,1,4,0}; return 1;
+    case WMTPixelFormatPVRTC_RGB_2BPP:
+    case WMTPixelFormatPVRTC_RGB_2BPP_sRGB:
+    case WMTPixelFormatPVRTC_RGBA_2BPP:
+    case WMTPixelFormatPVRTC_RGBA_2BPP_sRGB:
+        *layout=(struct rm_texture_read_layout){8,4,8,RM_TEXTURE_READ_PVRTC}; return 1;
+    case WMTPixelFormatPVRTC_RGB_4BPP:
+    case WMTPixelFormatPVRTC_RGB_4BPP_sRGB:
+    case WMTPixelFormatPVRTC_RGBA_4BPP:
+    case WMTPixelFormatPVRTC_RGBA_4BPP_sRGB:
+        *layout=(struct rm_texture_read_layout){4,4,8,RM_TEXTURE_READ_PVRTC}; return 1;
     case WMTPixelFormatDepth16Unorm: *layout=(struct rm_texture_read_layout){1,1,2,0}; return 1;
     case WMTPixelFormatDepth32Float: *layout=(struct rm_texture_read_layout){1,1,4,0}; return 1;
     case WMTPixelFormatStencil8: *layout=(struct rm_texture_read_layout){1,1,1,0}; return 1;
@@ -2138,7 +2171,7 @@ static void serve(int fd) {
                 reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
             }
             id<MTLTexture> texture=object; struct rm_texture_read_layout l;
-            if (!rm_read_layout(texture.pixelFormat,&l) || texture.sampleCount != 1 ||
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved || texture.sampleCount != 1 ||
                 texture.storageMode == MTLStorageModePrivate || texture.storageMode == MTLStorageModeMemoryless ||
                 a->level >= texture.mipmapLevelCount || a->level >= 64 || !a->width || !a->height) {
                 reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
@@ -2166,6 +2199,38 @@ static void serve(int fd) {
                       fromRegion:MTLRegionMake3D(a->x,a->y,a->z,a->width,a->height,1)
                      mipmapLevel:a->level slice:a->slice];
                 reply(fd,&h,RM_OK,data,(uint32_t)length);
+            } @finally { free(data); }
+            break;
+        }
+        case RM_OP_TEXTURE_READ_PVRTC: {
+            if (h.payload_len != sizeof(struct rm_texture_read_pvrtc)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            const struct rm_texture_read_pvrtc *a=(const void *)payload;
+            const struct rm_texture_read_region *r=&a->region;
+            id object=rm_resolve(r->texture,&err);
+            if (err != RM_OK || ![object conformsToProtocol:@protocol(MTLTexture)]) {
+                reply(fd,&h,err != RM_OK ? err : RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            id<MTLTexture> texture=object; struct rm_texture_read_layout l;
+            if (!rm_read_layout(texture.pixelFormat,&l) || l.reserved != RM_TEXTURE_READ_PVRTC ||
+                texture.textureType != MTLTextureType2D || texture.sampleCount != 1 ||
+                texture.storageMode == MTLStorageModePrivate || texture.storageMode == MTLStorageModeMemoryless ||
+                r->level >= texture.mipmapLevelCount || r->level >= 64 || r->slice || r->x || r->y || r->z) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
+            uint64_t w=MAX(1ull,(uint64_t)texture.width >> r->level), hh=MAX(1ull,(uint64_t)texture.height >> r->level);
+            uint64_t cols=(w-1)/l.block_width+1, rows=(hh-1)/l.block_height+1;
+            if (r->width != w || r->height != hh || cols > RM_MAX_PAYLOAD/l.block_bytes ||
+                rows > RM_MAX_PAYLOAD/(cols*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            uint64_t total=cols*rows*l.block_bytes;
+            if (!a->length || a->length > RM_CHUNK_BYTES || a->offset > total || a->length > total-a->offset) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
+            void *data=calloc(1,(size_t)total);
+            if (!data) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
+            @try {
+                [texture getBytes:data bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)
+                     mipmapLevel:r->level slice:0];
+                reply(fd,&h,RM_OK,(uint8_t *)data+a->offset,(uint32_t)a->length);
             } @finally { free(data); }
             break;
         }
