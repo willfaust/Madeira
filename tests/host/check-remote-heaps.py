@@ -12,6 +12,7 @@ pre=r'''
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <assert.h>
+#include <sys/mman.h>
 #include "protocol.h"
 #include "winemetal.h"
 static id objects[8]; static unsigned count=1; static uint32_t result; static uint64_t returned;
@@ -67,6 +68,7 @@ client=r'''
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <assert.h>
+#include <sys/mman.h>
 #include "protocol.h"
 #include "winemetal.h"
 typedef uint64_t obj_handle_t; typedef uint32_t NTSTATUS;
@@ -78,7 +80,7 @@ struct unixcall_mtldevice_newheap { obj_handle_t device; struct WMTMemoryPointer
 struct unixcall_mtlheap_newbuffer { obj_handle_t heap; struct WMTMemoryPointer info; uint64_t offset; obj_handle_t ret; };
 struct unixcall_mtlheap_newtexture { obj_handle_t heap; struct WMTMemoryPointer info; uint64_t offset; obj_handle_t ret; };
 static void fill_texture_descriptor(MTLTextureDescriptor *d, struct WMTTextureInfo *i) { (void)d; (void)i; }
-static unsigned char guest[1024]; static unsigned calls,registered; static uint32_t status;
+static unsigned char *guest; static unsigned calls,registered; static uint32_t status;
 static void *UInt32ToPtr(uint32_t p) { return p?guest+p:NULL; }
 static int remote_enabled = 1;
 static int wmtr_enabled(void) { return remote_enabled; }
@@ -106,6 +108,7 @@ static uint32_t wmtr_call(uint16_t op,const void *arg,uint32_t len,void *out,uin
 '''
 client_end=r'''
 int main(void) { @autoreleasepool {
+ guest=mmap(NULL,1u<<20,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0); assert(guest!=MAP_FAILED);
  struct WMTHeapInfo *heap=(void *)(guest+32); heap->size=65536;
  struct unixcall_mtldevice_newheap h={0}; h.device=3; h.info.ptr=(void *)(uintptr_t)32;
  assert(_MTLDevice_newHeap_wow64(&h)==STATUS_SUCCESS && h.ret==17 && h.info.ptr==(void *)(uintptr_t)32);
@@ -119,6 +122,22 @@ int main(void) { @autoreleasepool {
  b.ret=99; b.info.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && b.ret==0);
  b.info.ptr=(void *)(uintptr_t)128; b.ret=99; remote_enabled=0; b.heap=(obj_handle_t)(uintptr_t)[SharedHeap new];
  assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_NOT_IMPLEMENTED && b.ret==0);
+ id<MTLDevice> device=MTLCreateSystemDefaultDevice(); assert(device);
+ MTLHeapDescriptor *desc=[MTLHeapDescriptor new];desc.size=262144;desc.storageMode=MTLStorageModeShared;desc.type=MTLHeapTypePlacement;
+ id<MTLHeap> native_heap=[device newHeapWithDescriptor:desc];assert(native_heap);
+ info->length=65536;info->options=0;info->memory.ptr=(void *)(uintptr_t)0x10000;info->gpu_address=WMT_HEAP_GUEST_RESERVATION;
+ b.heap=(obj_handle_t)(uintptr_t)native_heap;b.offset=0;
+ assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_SUCCESS && b.ret && info->memory.ptr);
+ id<MTLBuffer> first=(id<MTLBuffer>)(uintptr_t)b.ret;uint8_t *first_guest=UInt32ToPtr((uint32_t)(uintptr_t)info->memory.ptr);
+ struct WMTBufferInfo *other=(void *)(guest+384);other->length=65536;other->options=0;other->memory.ptr=(void *)(uintptr_t)0x40000;other->gpu_address=WMT_HEAP_GUEST_RESERVATION;
+ struct unixcall_mtlheap_newbuffer b2={0};b2.heap=b.heap;b2.offset=0;b2.info.ptr=(void *)(uintptr_t)384;
+ assert(_MTLHeap_newBuffer_wow64(&b2)==STATUS_SUCCESS && b2.ret && other->memory.ptr);
+ id<MTLBuffer> second=(id<MTLBuffer>)(uintptr_t)b2.ret;uint8_t *second_guest=UInt32ToPtr((uint32_t)(uintptr_t)other->memory.ptr);
+ first_guest[0]=0x61;first_guest[65535]=0x93;assert(second_guest[0]==0x61 && second_guest[65535]==0x93);
+ second_guest[37]=0xaf;assert(first_guest[37]==0xaf && ((uint8_t *)first.contents)[37]==0xaf);
+ info->length=UINT32_MAX;info->memory.ptr=(void *)(uintptr_t)0x10000;info->gpu_address=WMT_HEAP_GUEST_RESERVATION;b.ret=99;
+ assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && !b.ret && !info->memory.ptr);
+ [first release];[second release];[native_heap release];[desc release];assert(munmap(guest,1u<<20)==0);
  } return 0; }
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-private-heap-client-') as t:
@@ -126,6 +145,7 @@ with tempfile.TemporaryDirectory(prefix='madeira-private-heap-client-') as t:
  code=client+create+new_buffer+new_texture+'\n'+wrapper+'\nWMT_WOW64_POINTER_WRAPPER(_MTLDevice_newHeap, unixcall_mtldevice_newheap, info)\nWMT_WOW64_POINTER_WRAPPER(_MTLHeap_newTexture, unixcall_mtlheap_newtexture, info)\n'+wow+client_end
  subprocess.run(['xcrun','-sdk','macosx','clang','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),'-x','objective-c','-','-framework','Foundation','-framework','Metal','-o',str(exe)],input=code,text=True,check=True)
  subprocess.run([str(exe)],check=True)
+ subprocess.run(['xcrun','-sdk','iphoneos','clang','-arch','arm64','-fsyntax-only','-I',str(root/'research/remote-metal'),'-I',str(dxmt/'src/winemetal'),'-x','objective-c','-'],input=code,text=True,check=True)
 print('remote heap clients and 32-bit wrappers pass')
 
 # A failed unix call must not expose uninitialized handles or sizes to the PE caller.
