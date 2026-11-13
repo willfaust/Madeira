@@ -81,7 +81,8 @@ int main(void) { @autoreleasepool {
  } else { puts("real PVRTC texture test skipped: format unavailable"); }
  desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
  desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget;
- id<MTLTexture> depth=[d newTextureWithDescriptor:desc];
+ BOOL depth_supported=[d supportsFamily:MTLGPUFamilyApple2] || [d supportsFamily:MTLGPUFamilyMac2];
+ id<MTLTexture> depth=depth_supported ? [d newTextureWithDescriptor:desc] : nil;
  if (depth) {
   id<MTLCommandQueue> queue=[d newCommandQueue];id<MTLCommandBuffer> command=[queue commandBuffer];
   MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
@@ -95,7 +96,7 @@ int main(void) { @autoreleasepool {
  } else { puts("real depth texture test skipped: format unavailable"); }
  desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:4 height:4 mipmapped:NO];
  desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget|MTLTextureUsagePixelFormatView;
- id<MTLTexture> combined=[d newTextureWithDescriptor:desc];
+ id<MTLTexture> combined=depth_supported ? [d newTextureWithDescriptor:desc] : nil;
  if (combined) {
   id<MTLCommandQueue> queue=[d newCommandQueue];id<MTLCommandBuffer> command=[queue commandBuffer];
   MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];

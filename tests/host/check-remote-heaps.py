@@ -38,6 +38,8 @@ int main(void) { @autoreleasepool {
  struct rm_heap_new_buffer b={heap,UINT64_MAX,4096,MTLResourceStorageModePrivate};
  invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
  invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b)); assert(result==RM_OK && returned && [objects[returned] conformsToProtocol:@protocol(MTLBuffer)]);
+ BOOL placement_supported=[d supportsFamily:MTLGPUFamilyApple2] || [d supportsFamily:MTLGPUFamilyMac2];
+ if(placement_supported) {
  p.info.type=(enum WMTHeapType)MTLHeapTypePlacement;
  invoke(RM_OP_HEAP_CREATE,&p,sizeof(p)); assert(result==RM_OK && returned);
  uint64_t placed=returned; b.heap=placed;b.offset=0;
@@ -50,6 +52,7 @@ int main(void) { @autoreleasepool {
  [blit endEncoding];[cb commit];[cb waitUntilCompleted];assert(cb.status==MTLCommandBufferStatusCompleted);
  for(unsigned n=0;n<4096;n++)assert(((uint8_t *)readback.contents)[n]==0x5a);
  b.offset=UINT64_MAX-1;invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b));assert(result==RM_ERR_SHORT_PAYLOAD);
+ } else { puts("real Metal placement alias test skipped: GPU family unavailable"); }
  b.heap=heap;b.offset=UINT64_MAX;
  struct { struct rm_heap_new_texture head; struct WMTTextureInfo info; } texture={0};
  texture.head=(struct rm_heap_new_texture){heap,UINT64_MAX}; texture.info.pixel_format=(enum WMTPixelFormat)MTLPixelFormatRGBA8Unorm;
@@ -59,7 +62,7 @@ int main(void) { @autoreleasepool {
  invoke(RM_OP_HEAP_NEW_TEXTURE,&texture,sizeof(texture)-1); assert(result==RM_ERR_SHORT_PAYLOAD);
  invoke(RM_OP_HEAP_NEW_TEXTURE,&texture,sizeof(texture)); assert(result==RM_OK && returned && [objects[returned] conformsToProtocol:@protocol(MTLTexture)]);
  MTLHeapDescriptor *shared=[MTLHeapDescriptor new]; shared.size=1<<20; shared.storageMode=MTLStorageModeShared;shared.type=MTLHeapTypePlacement;
- id<MTLHeap> s=[d newHeapWithDescriptor:shared]; if(s) { uint64_t sh=rm_intern(s); b.heap=sh;b.offset=0;
+ id<MTLHeap> s=placement_supported ? [d newHeapWithDescriptor:shared] : nil; if(s) { uint64_t sh=rm_intern(s); b.heap=sh;b.offset=0;
   invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b)); assert(result==RM_ERR_SHORT_PAYLOAD);
   b.options=MTLResourceStorageModeShared;invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b));assert(result==RM_OK);id<MTLBuffer> a=objects[returned];
   invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b));assert(result==RM_OK);uint64_t ch=returned;id<MTLBuffer> c=objects[ch];
@@ -69,7 +72,7 @@ int main(void) { @autoreleasepool {
   struct { struct rm_buffer_range range; uint8_t data[8]; } u={{ch,UINT64_MAX,2},{0}};
   invoke(RM_OP_BUFFER_UPLOAD,&u,sizeof(u));assert(result==RM_ERR_SHORT_PAYLOAD);
  }
- shared.type=MTLHeapTypeAutomatic;s=[d newHeapWithDescriptor:shared];
+ shared.type=MTLHeapTypeAutomatic;s=placement_supported ? [d newHeapWithDescriptor:shared] : nil;
  if(s) { b.heap=rm_intern(s);b.offset=UINT64_MAX;b.options=MTLResourceStorageModeShared;
   invoke(RM_OP_HEAP_NEW_PRIVATE_BUFFER,&b,sizeof(b));assert(result==RM_OK && [objects[returned] contents]); }
  } return 0; }
