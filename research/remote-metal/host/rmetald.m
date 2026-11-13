@@ -1595,9 +1595,12 @@ static void serve(int fd) {
             struct rm_buffer_range *a = (void *)payload;
             if (h.payload_len < sizeof *a) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             id o = rm_resolve(a->handle, &err); if (err != RM_OK) { reply(fd,&h,err,NULL,0); break; }
+            if (![o conformsToProtocol:@protocol(MTLBuffer)] || ![(id<MTLBuffer>)o contents]) {
+                reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break;
+            }
             id<MTLBuffer> b = o;
             if (a->length > RM_CHUNK_BYTES ||
-                (uint64_t)a->offset + a->length > (uint64_t)b.length) {
+                a->offset > (uint64_t)b.length || a->length > (uint64_t)b.length - a->offset) {
                 reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
             }
             reply(fd, &h, RM_OK, (const uint8_t *)b.contents + a->offset, (uint32_t)a->length);
@@ -2429,6 +2432,13 @@ static void serve(int fd) {
             d.mipmapLevelCount = i->mipmap_level_count; d.sampleCount = i->sample_count;
             d.usage = (MTLTextureUsage)i->usage; d.resourceOptions = (MTLResourceOptions)i->options;
             id<MTLHeap> heap = object;
+            if (a->offset != UINT64_MAX) {
+                MTLSizeAndAlign sa = [heap.device heapTextureSizeAndAlignWithDescriptor:d];
+                if (heap.type != MTLHeapTypePlacement || !sa.size || !sa.align || a->offset % sa.align ||
+                    a->offset > heap.size || sa.size > heap.size - a->offset) {
+                    reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+                }
+            }
             id<MTLTexture> texture = a->offset == UINT64_MAX ? [heap newTextureWithDescriptor:d]
                 : [heap newTextureWithDescriptor:d offset:a->offset];
             struct rm_ret_handle_u64 result = {rm_intern(texture), texture ? texture.gpuResourceID._impl : 0};
@@ -2464,12 +2474,23 @@ static void serve(int fd) {
                 reply(fd, &h, err != RM_OK ? err : RM_ERR_WRONG_CLASS, NULL, 0); break;
             }
             id<MTLHeap> heap = object;
-            if (heap.storageMode != MTLStorageModePrivate) {
+            if (heap.storageMode != MTLStorageModePrivate && heap.storageMode != MTLStorageModeShared) {
                 reply(fd, &h, RM_ERR_WRONG_CLASS, NULL, 0); break;
+            }
+            if (!a->length || ((a->options & 0x30) >> 4) != heap.storageMode) {
+                reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+            }
+            if (a->offset != UINT64_MAX) {
+                MTLSizeAndAlign sa = [heap.device heapBufferSizeAndAlignWithLength:a->length options:(MTLResourceOptions)a->options];
+                if (heap.type != MTLHeapTypePlacement || !sa.size || !sa.align || a->offset % sa.align ||
+                    a->offset > heap.size || sa.size > heap.size - a->offset) {
+                    reply(fd, &h, RM_ERR_SHORT_PAYLOAD, NULL, 0); break;
+                }
             }
             id<MTLBuffer> buffer = a->offset == UINT64_MAX
                 ? [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options]
                 : [heap newBufferWithLength:a->length options:(MTLResourceOptions)a->options offset:a->offset];
+            if (buffer && heap.storageMode == MTLStorageModeShared && !buffer.contents) buffer = nil;
             struct rm_ret_handle_u64 result = {rm_intern(buffer), buffer ? buffer.gpuAddress : 0};
             reply(fd, &h, buffer ? RM_OK : RM_ERR_WRONG_CLASS, &result, sizeof(result)); break;
         }
@@ -3182,14 +3203,15 @@ static void serve(int fd) {
                                     "(status %u)\n", (unsigned long long)a->handle, err);
                 reply(fd,&h,err,NULL,0); break;
             }
+            if (![o conformsToProtocol:@protocol(MTLBuffer)]) { reply(fd,&h,RM_ERR_WRONG_CLASS,NULL,0); break; }
             id<MTLBuffer> b = o;
             uint64_t have = h.payload_len - sizeof *a;
-            if (a->offset + a->length > b.length || a->length > have) {
+            if (a->offset > b.length || a->length > b.length - a->offset || a->length > have) {
                 fprintf(stderr, "[rmetald] buffer upload out of range: off %llu len %llu into %llu\n",
                         (unsigned long long)a->offset, (unsigned long long)a->length,
                         (unsigned long long)b.length);
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
-            if (b.storageMode == MTLStorageModePrivate) {
+            if (b.storageMode == MTLStorageModePrivate || !b.contents) {
                 /* Silent before: the guest saw a failed upload with no reason
                  * on this side, which is the hardest kind of gap to chase. */
                 static unsigned told;

@@ -35,6 +35,9 @@ int main(void) { @autoreleasepool {
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatEAC_R11Snorm,&layout) && layout.block_width==4 && layout.block_height==4 && layout.block_bytes==8);
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatETC2_RGB8A1,&layout) && layout.block_bytes==8);
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatEAC_RGBA8,&layout) && layout.block_bytes==16);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatStencil8,&layout) && layout.block_bytes==1);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatDepth16Unorm,&layout) && layout.block_bytes==2);
+ assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatDepth32Float,&layout) && layout.block_bytes==4);
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatGBGR422,&layout) && layout.block_width==2 && layout.block_height==1 && layout.block_bytes==4);
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatPVRTC_RGB_2BPP,&layout) && layout.block_width==8 && layout.block_height==4 && layout.block_bytes==8 && layout.reserved==RM_TEXTURE_READ_PVRTC);
  assert(rm_read_layout((MTLPixelFormat)WMTPixelFormatPVRTC_RGBA_4BPP,&layout) && layout.block_width==4 && layout.block_height==4 && layout.block_bytes==8 && layout.reserved==RM_TEXTURE_READ_PVRTC);
@@ -74,6 +77,20 @@ int main(void) { @autoreleasepool {
   invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status==RM_OK && length_out==32 && !memcmp(response,direct,32));
   p.offset=32;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
  } else { puts("real PVRTC texture test skipped: format unavailable"); }
+ desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
+ desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget;
+ id<MTLTexture> depth=[d newTextureWithDescriptor:desc];
+ if (depth) {
+  id<MTLCommandQueue> queue=[d newCommandQueue];id<MTLCommandBuffer> command=[queue commandBuffer];
+  MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+  pass.depthAttachment.texture=depth;pass.depthAttachment.loadAction=MTLLoadActionClear;
+  pass.depthAttachment.storeAction=MTLStoreActionStore;pass.depthAttachment.clearDepth=0.25;
+  [[command renderCommandEncoderWithDescriptor:pass] endEncoding];[command commit];[command waitUntilCompleted];
+  assert(command.status==MTLCommandBufferStatusCompleted);texture=depth;float expected[16];
+  [depth getBytes:expected bytesPerRow:16 fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:0];
+  struct rm_texture_read_region r={1,0,0,0,4,4,0,0};invoke(RM_OP_TEXTURE_READ_REGION,&r,sizeof(r));
+  assert(status==RM_OK && length_out==64 && !memcmp(response,expected,64) && expected[0]==0.25f);
+ } else { puts("real depth texture test skipped: format unavailable"); }
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-host-') as t:

@@ -283,6 +283,7 @@ jobs:
         run: |
           python3 tests/host/check-remote-residency.py
           python3 tests/host/check-remote-heaps.py
+          python3 tests/host/check-remote-shared-heaps.py
           python3 tests/host/check-remote-counters.py
           python3 tests/host/check-remote-library-source.py
           python3 tests/host/check-remote-icb.py
