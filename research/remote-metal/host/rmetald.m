@@ -2219,6 +2219,7 @@ static void serve(int fd) {
             }
             uint64_t w=MAX(1ull,(uint64_t)texture.width >> r->level), hh=MAX(1ull,(uint64_t)texture.height >> r->level);
             uint64_t cols=(w-1)/l.block_width+1, rows=(hh-1)/l.block_height+1;
+            cols=MAX(2ull,cols); rows=MAX(2ull,rows);
             if (r->width != w || r->height != hh || cols > RM_MAX_PAYLOAD/l.block_bytes ||
                 rows > RM_MAX_PAYLOAD/(cols*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             uint64_t total=cols*rows*l.block_bytes;
