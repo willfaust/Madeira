@@ -291,7 +291,8 @@ struct rm_os_version { uint32_t major, minor, patch, pad; };
 #define RM_CHUNK_BYTES (8u << 20)   /* per-message ceiling for a range */
 
 struct rm_buffer_create { uint64_t device; uint64_t length; uint32_t options; uint32_t pad; };
-struct rm_buffer_range  { uint64_t handle; uint64_t offset; uint64_t length; };
+/* Multi-upload descriptors follow variable-length data and may be unaligned. */
+struct __attribute__((packed)) rm_buffer_range  { uint64_t handle; uint64_t offset; uint64_t length; };
 
 /* ml821 coalesced upload. Layout is: this header, then `data_bytes` of packed
  * payload, then `count` rm_buffer_range descriptors whose lengths sum to

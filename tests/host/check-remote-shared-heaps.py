@@ -19,13 +19,22 @@ pre = r'''
 #include "protocol.h"
 #define WMT_HEAP_AUTO_SHADOW (UINT64_C(1) << 63)
 static uint8_t host[65536];
-static int fail_upload;
+static int fail_upload, uploads;
 static uint64_t handle_offset(uint64_t handle) { assert(handle == 2 || handle == 3); return handle == 2 ? 0 : 4096; }
 static int wmtr_buf_upload(uint64_t handle, const void *src, uint64_t offset, uint64_t length) {
  if (fail_upload) return -1;
+ uploads++;
  assert(handle_offset(handle)+offset+length<=sizeof(host)); memcpy(host+handle_offset(handle)+offset,src,length);return 0;
 }
 static uint32_t wmtr_call(uint16_t op,const void *input,uint32_t len,void *out,uint32_t cap,uint32_t *got) {
+ if (op==RM_OP_BUFFER_UPLOAD_MULTI) {
+  const struct rm_buffer_range *ranges;const uint8_t *data;
+  assert(rm_multi_ok(input,len,&ranges,&data));if(fail_upload)return RM_ERR_SHORT_PAYLOAD;
+  const struct rm_buffer_multi *h=input;size_t off=0;uploads++;
+  for(unsigned i=0;i<h->count;i++) {assert(handle_offset(ranges[i].handle)+ranges[i].offset+ranges[i].length<=sizeof(host));
+   memcpy(host+handle_offset(ranges[i].handle)+ranges[i].offset,data+off,ranges[i].length);off+=ranges[i].length;}
+  return RM_OK;
+ }
  assert(op==RM_OP_BUFFER_READ && len==sizeof(struct rm_buffer_range));
  const struct rm_buffer_range *r=input;assert(cap==r->length && handle_offset(r->handle)+r->offset+cap<=sizeof(host));
  memcpy(out,host+handle_offset(r->handle)+r->offset,cap);*got=cap;return RM_OK;
@@ -35,7 +44,7 @@ main = r'''
 int main(void) {
  uint8_t guest[65536]={0};
  assert(!wmtr_heap_register(1,sizeof(guest)));
- wmtr_buf_add(2,guest,8192,0,1,0);assert(!wmtr_heap_attach(2,1,0,guest,8192));
+ wmtr_buf_add(2,guest,65536,0,1,0);assert(!wmtr_heap_attach(2,1,0,guest,65536));
  wmtr_buf_add(3,guest+4096,8192,0,1,0);assert(!wmtr_heap_attach(3,1,4096,guest+4096,8192));
  guest[4097]=0x11;guest[4098]=0x22;assert(!wmtr_heap_flush());
  assert(host[4097]==0x11 && host[4098]==0x22);
@@ -43,8 +52,11 @@ int main(void) {
  assert(guest[4097]==0x33 && guest[4098]==0x44);assert(!wmtr_heap_flush());
  assert(host[4097]==0x33 && host[4098]==0x44);
  guest[120]=0x73;assert(!wmtr_heap_sync() && guest[120]==0x73);assert(!wmtr_heap_flush() && host[120]==0x73);
- guest[4100]=0x99;fail_upload=1;assert(wmtr_heap_flush());assert(host[4100]==0);
- fail_upload=0;assert(!wmtr_heap_flush() && host[4100]==0x99);
+ guest[65535]=0x75;uploads=0;assert(!wmtr_heap_flush() && host[65535]==0x75 && uploads==1);
+ for(unsigned i=0;i<65536;i+=2) guest[i]^=0xff;
+ uploads=0;assert(!wmtr_heap_flush() && !memcmp(host,guest,65536) && uploads<=65);
+ uint8_t before=host[4100];guest[4100]=before^0xff;fail_upload=1;assert(wmtr_heap_flush());assert(host[4100]==before);
+ fail_upload=0;assert(!wmtr_heap_flush() && host[4100]==guest[4100]);
  uint8_t data[2]={0xa1,0xb2};assert(!wmtr_heap_update(3,7,data,2));assert(host[4103]==0xa1 && guest[4104]==0xb2);
  assert(wmtr_heap_update(3,UINT64_MAX,data,2));
  wmtr_heap_reference(1,0);assert(wmtr_heaps);wmtr_buf_remove(2);assert(wmtr_heaps);wmtr_buf_remove(3);assert(!wmtr_heaps);

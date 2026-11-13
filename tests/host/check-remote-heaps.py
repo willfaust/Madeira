@@ -10,6 +10,7 @@ end=host.index('        case RM_OP_HEAP_TEXTURE_SIZE: {',start)
 cases=host[start:end]
 start=host.index('        case RM_OP_BUFFER_READ: {');end=host.index('        case RM_OP_SUBMIT_WMT_BATCH:',start);cases+=host[start:end]
 start=host.index('        case RM_OP_BUFFER_UPLOAD: {');end=host.index('        case RM_OP_NEW_MESH_PSO_INFO:',start);cases+=host[start:end]
+start=host.index('        case RM_OP_BUFFER_UPLOAD_MULTI: {');end=host.index('        case RM_OP_STATS:',start);cases+=host[start:end]
 pre=r'''
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -71,6 +72,12 @@ int main(void) { @autoreleasepool {
   r.handle=1;r.offset=0;r.length=1;invoke(RM_OP_BUFFER_READ,&r,sizeof(r));assert(result==RM_ERR_WRONG_CLASS);
   struct { struct rm_buffer_range range; uint8_t data[8]; } u={{ch,UINT64_MAX,2},{0}};
   invoke(RM_OP_BUFFER_UPLOAD,&u,sizeof(u));assert(result==RM_ERR_SHORT_PAYLOAD);
+  uint8_t msg[sizeof(struct rm_buffer_multi)+2+2*sizeof(struct rm_buffer_range)]={0};
+  struct rm_buffer_multi mh={2,2};struct rm_buffer_range ranges[2]={{ch,0,1},{ch,4096,1}};
+  memcpy(msg,&mh,sizeof(mh));msg[sizeof(mh)]=0xaa;msg[sizeof(mh)+1]=0xbb;memcpy(msg+sizeof(mh)+2,ranges,sizeof(ranges));
+  ((uint8_t *)a.contents)[0]=0x3c;invoke(RM_OP_BUFFER_UPLOAD_MULTI,msg,sizeof(msg));assert(result==RM_ERR_SHORT_PAYLOAD && ((uint8_t *)a.contents)[0]==0x3c);
+  ranges[1].offset=1;memcpy(msg+sizeof(mh)+2,ranges,sizeof(ranges));invoke(RM_OP_BUFFER_UPLOAD_MULTI,msg,sizeof(msg));
+  assert(result==RM_OK && ((uint8_t *)a.contents)[0]==0xaa && ((uint8_t *)a.contents)[1]==0xbb);
  }
  shared.type=MTLHeapTypeAutomatic;s=placement_supported ? [d newHeapWithDescriptor:shared] : nil;
  if(s) { b.heap=rm_intern(s);b.offset=UINT64_MAX;b.options=MTLResourceStorageModeShared;

@@ -1160,18 +1160,27 @@ static void serve(int fd) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             uint32_t n = ((const struct rm_buffer_multi *)payload)->count;
             uint32_t st = RM_OK; uint64_t at = 0;
+            id<MTLBuffer> buffers[RM_MULTI_MAX_RANGES] = {0};
             for (uint32_t i = 0; i < n; i++) {
                 id o = rm_resolve(r[i].handle, &err);
                 if (err != RM_OK) { st = err; break; }
+                if (![o conformsToProtocol:@protocol(MTLBuffer)] || ![(id<MTLBuffer>)o contents]) {
+                    st = RM_ERR_WRONG_CLASS; break;
+                }
                 id<MTLBuffer> b = o;
-                if ((uint64_t)r[i].offset + r[i].length > (uint64_t)b.length) {
+                if (r[i].offset > (uint64_t)b.length || r[i].length > (uint64_t)b.length-r[i].offset) {
                     fprintf(stderr, "[rmetald] coalesced upload out of range: off %llu len %llu "
                                     "into %llu\n", (unsigned long long)r[i].offset,
                             (unsigned long long)r[i].length, (unsigned long long)b.length);
                     st = RM_ERR_SHORT_PAYLOAD; break;
                 }
-                memcpy((uint8_t *)b.contents + r[i].offset, data + at, (size_t)r[i].length);
-                at += r[i].length;
+                buffers[i] = b;
+            }
+            if (st == RM_OK) for (uint32_t i=0; i<n; i++) {
+                memcpy((uint8_t *)buffers[i].contents+r[i].offset,data+at,(size_t)r[i].length);
+                if (buffers[i].storageMode == MTLStorageModeManaged)
+                    [buffers[i] didModifyRange:NSMakeRange(r[i].offset,r[i].length)];
+                at+=r[i].length;
             }
             reply(fd, &h, st, NULL, 0); break;
         }
