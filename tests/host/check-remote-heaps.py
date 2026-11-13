@@ -119,7 +119,7 @@ static void *UInt32ToPtr(uint32_t p) { return p?guest+p:NULL; }
 static int remote_enabled = 1;
 static int wmtr_enabled(void) { return remote_enabled; }
 static int wmtr_heap_register(uint64_t h,uint64_t size) { (void)h;(void)size;return 0; }
-static void *wmtr_heap_native_pointer(uint64_t h,uint64_t off,uint64_t n) { (void)h;(void)off;(void)n;return NULL; }
+static void *wmtr_heap_native_pointer(uint64_t h,uint64_t off,uint64_t n) { return h==17 && !off && n==4096 ? guest+32768 : NULL; }
 static int wmtr_heap_flush(void) { return 0; }
 static int wmtr_heap_sync(void) { return 0; }
 static int wmtr_heap_attach(uint64_t h,uint64_t heap,uint64_t off,void *ptr,uint64_t len) { (void)h;(void)heap;(void)off;(void)ptr;(void)len;return 0; }
@@ -170,12 +170,12 @@ int main(void) { @autoreleasepool {
  assert(_MTLHeap_newBufferAtOffset(&lb)==STATUS_SUCCESS && lb.ret==42 && info->gpu_address==1234 && registered==2);
  struct unixcall_mtlheap_newtextureatoffset lt={0};lt.heap=17;lt.info.ptr=tex;lt.offset=0;
  assert(_MTLHeap_newTextureAtOffset(&lt)==STATUS_SUCCESS && lt.ret==44 && tex->gpu_resource_id==5678);
- info->options=0;lb.ret=1;info->gpu_address=1234;
- assert(_MTLHeap_newBufferAtOffset(&lb)==STATUS_SUCCESS && !lb.ret && !info->gpu_address);
+ info->options=0;info->memory.ptr=NULL;lb.ret=1;info->gpu_address=1234;
+ assert(_MTLHeap_newBufferAtOffset(&lb)==STATUS_SUCCESS && lb.ret==42 && info->memory.ptr==guest+32768);
  info->options=WMTResourceStorageModePrivate;
- status=RM_ERR_BAD_OPCODE; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_UNSUCCESSFUL && b.ret==0 && registered==2);
+ status=RM_ERR_BAD_OPCODE;info->memory.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_UNSUCCESSFUL && b.ret==0 && registered==3);
  status=0;info->options=WMTResourceStorageModeShared;info->memory.ptr=(void *)(uintptr_t)32768;b.offset=0;
- assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_SUCCESS && b.ret==42 && info->memory.ptr==(void *)(uintptr_t)32768 && registered==3);
+ assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_SUCCESS && b.ret==42 && info->memory.ptr==(void *)(uintptr_t)32768 && registered==4);
  info->memory.ptr=(void *)(uintptr_t)0xfffffff0u;info->gpu_address=77;
  assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && !b.ret && !info->memory.ptr && !info->gpu_address);
  b.ret=99; b.info.ptr=NULL; assert(_MTLHeap_newBuffer_wow64(&b)==STATUS_INVALID_PARAMETER && b.ret==0);
