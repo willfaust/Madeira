@@ -42,6 +42,7 @@ int main(void) {
  host[4097]=0x33;guest[4098]=0x44;assert(!wmtr_heap_sync());
  assert(guest[4097]==0x33 && guest[4098]==0x44);assert(!wmtr_heap_flush());
  assert(host[4097]==0x33 && host[4098]==0x44);
+ guest[120]=0x73;assert(!wmtr_heap_sync() && guest[120]==0x73);assert(!wmtr_heap_flush() && host[120]==0x73);
  guest[4100]=0x99;fail_upload=1;assert(wmtr_heap_flush());assert(host[4100]==0);
  fail_upload=0;assert(!wmtr_heap_flush() && host[4100]==0x99);
  uint8_t data[2]={0xa1,0xb2};assert(!wmtr_heap_update(3,7,data,2));assert(host[4103]==0xa1 && guest[4104]==0xb2);
