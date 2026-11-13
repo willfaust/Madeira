@@ -7,7 +7,8 @@
  *
  * Assembled twice. Without symbols: the first helper build, everything in one
  * .text tail blob. With --defsym SCH296=1: Social Club 2.4.0.296, whose .text
- * tail has 792 bytes, so the getter and destructor hooks are plain Win64
+ * tail has 792 bytes (2.4.0.302 is the same code with 0x670 bytes inserted into
+ * .text and uses this variant too), so the getter and destructor hooks are plain Win64
  * functions (their sites have no live volatile state, see virtual_ios.c), the
  * creation log line is dropped, and the three small stubs go into their own
  * sections, which the test links at verified int3 padding between functions.
@@ -189,7 +190,7 @@ initial_connect_done:
  * clearing the browser singleton, after the main path has called cef_shutdown.
  * The recursive renderer destructor clears only the renderer cache. */
 .ifdef SCH296
-/* 2.4.0.296: CloseHandle was the last call, and the code after the hook
+/* 2.4.0.296 and 2.4.0.302: CloseHandle was the last call, and the code after the hook
  * reloads or tests everything it uses except RCX. The frame is aligned. */
 sc_ipc_destroy:
     cmp rdi, qword ptr [rip+renderer_manager]
@@ -265,7 +266,7 @@ destroy_renderer:
 /* One helper function inlines the singleton load instead of calling its
  * getter. Route that lookup by the same CEF thread, preserving its live RAX. */
 .ifdef SCH296
-/* 2.4.0.296: the load follows a CALL and the code after it overwrites RAX,
+/* 2.4.0.296 and 2.4.0.302: the load follows a CALL and the code after it overwrites RAX,
  * RCX and the flags before reading them: CALL the getter like its callers. */
 .pushsection .text.direct, "ax"
 sc_ipc_direct_getter:
