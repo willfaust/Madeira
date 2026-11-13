@@ -8495,6 +8495,9 @@ static int ios_storm_gate( unsigned long *n )
  * map_free_area call. virtual_mutex is held throughout, so a plain global is
  * safe. Proves or refutes the grind above in one run. */
 static unsigned int ios_va_scan_tries;
+/* Of those tries, the granules below the address map's floor: counted, no
+ * longer attempted (see ios_va_map_floor). Reported as below-floor=. */
+static unsigned int ios_va_scan_below_floor;
 /* ml211: how many times the scan JUMPED over a foreign Mach region instead of
  * crawling a granule at a time. Reported next to tries= so the two are directly
  * comparable: before this, placing 1MB cost ~8000 tries and 0 skips. */
@@ -14275,11 +14278,81 @@ static inline int ios_in_layerkit( unsigned long long a, size_t size )
     return ios_layerkit_enforce && ios_layerkit_hi && a + size > ios_layerkit_lo && a < ios_layerkit_hi;
 }
 
+/* The lowest address the kernel maps for this task (TASK_VM_INFO.min_address),
+ * or 0 when it does not say.
+ *
+ * iOS extends __PAGEZERO by the ASLR slide instead of moving it, so the address
+ * map starts at the app image (address-map=[0x104e60000,0xfc0000000) on the iPad
+ * this was measured on) and a fixed mapping anywhere below is refused with
+ * KERN_INVALID_ADDRESS. Mach reports that range as a free hole, so
+ * ios_skip_occupied has nothing to jump over and a bottom-up scan whose window
+ * starts at 0x10000 crawled it one granule at a time: 66,845 refused mach_vm_map
+ * calls and as many mach_vm_region queries to place ONE 4 KB view, all under
+ * virtual_mutex ("[va-scan] SLOW window=0x10000..0x400000000 size=0x1000 ...
+ * tries=66845 ... firstfail=0x10000 errno=12 FREE hole, next region 0x104e60000").
+ *
+ * Madeira Dock takes a process snapshot once a second while a game runs, and
+ * Wine's toolhelp maps and unmaps such a view for every Process32Next: 14 of
+ * these scans a second kept Dock's main thread at ~85% of a core holding the
+ * lock every other thread needs for a read, an ioctl or an allocation. Terraria
+ * (2026-11-13, iPad14,8) drew a few frames and stalled, about once a second:
+ * frame times of hundreds of ms beside 1.3 ms of GPU time. */
+static uintptr_t ios_va_map_floor(void)
+{
+    static uintptr_t floor = 1;      /* 1 = not asked yet */
+
+    if (floor == 1)
+    {
+        /* 0: the free-area scan tries every granule below the address map's
+         * floor again (tens of thousands of refused mappings per placement)
+         * instead of jumping to the floor. Default on. */
+        const char *e = getenv( "MADEIRA_VA_SCAN_FLOOR" );
+        task_vm_info_data_t vmi;
+        mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+        uintptr_t lo = 0;
+
+        if (!(e && e[0] == '0') &&
+            task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt ) == KERN_SUCCESS &&
+            vmi.min_address < vmi.max_address)
+            lo = (uintptr_t)vmi.min_address;
+        floor = lo;
+        dprintf( 2, "[va-scan] floor=%p: the free-area scan starts no lower (MADEIRA_VA_SCAN_FLOOR=0 "
+                    "tries every granule below it again)\n", (void *)lo );
+    }
+    return floor;
+}
+
 static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
                                 void *start, size_t size, int unix_prot )
 {
     while (start && base <= start && (char*)start + size <= (char*)end)
     {
+        /* Nothing below the address map's floor can be mapped -- see
+         * ios_va_map_floor. Bottom-up, resume at the floor; top-down, everything
+         * still ahead is lower, so the scan is over. The granules not tried are
+         * counted and described as the refusals they would have been, so the
+         * [va-scan] line and the pressure latch decide exactly as before; only
+         * the system calls go. A fixed-address attempt (step 0) is left alone. */
+        if (step)
+        {
+            uintptr_t floor = ios_va_map_floor(), a = (uintptr_t)start;
+
+            if (a < floor)
+            {
+                uintptr_t g = (uintptr_t)(step < 0 ? -step : step);
+                uintptr_t up = (floor - a + g - 1) / g;                  /* steps to the first address at or above the floor */
+                uintptr_t fit = ((uintptr_t)end - size - a) / g + 1;     /* addresses the window still holds going up */
+                uintptr_t n = step < 0 ? (a - (uintptr_t)base) / g + 1 : (up < fit ? up : fit);
+
+                ios_va_scan_tries += (unsigned int)n;
+                ios_va_scan_below_floor += (unsigned int)n;
+                if (!ios_scan_fail_addr) { ios_scan_fail_addr = start; ios_scan_fail_errno = ENOMEM; }
+                errno = ENOMEM;
+                if (step < 0) break;
+                start = (void *)(a + up * g);
+                continue;
+            }
+        }
         /* ml253 ROOT-CAUSE FIX: never allocate inside the JIT pool.
          *
          * Wine's scanner walks straight through the pool -- measured, marching upward in
@@ -22227,6 +22300,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         {
             unsigned int tries0 = ios_va_scan_tries;
             unsigned int skips0 = ios_va_scan_skips;
+            unsigned int below0 = ios_va_scan_below_floor;
 
             ptr = map_free_area( start, end, host_size, top_down, unix_prot, align_mask );
 #ifdef WINE_IOS
@@ -22282,12 +22356,13 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                  * a thread 6 minutes later. */
                 if (ptr ? ios_storm_gate( &vs_storm )
                         : ceiling_relaxable ? (++vs_relaxed <= 64 || !(vs_relaxed % 1024)) : (vs_fails++ < 256))
-                dprintf( 2, "[va-scan] %s window=%p..%p size=%p align=%p %s tries=%u skips=%u"
+                dprintf( 2, "[va-scan] %s window=%p..%p size=%p align=%p %s tries=%u skips=%u below-floor=%u"
                             " | seen=%p..%p views=%u maxgap=%p tailgap=%p stop=%s"
                             " | firstfail=%p errno=%d(%s) %s%s\n",
                          ptr ? "SLOW" : "FAILED", start, end, (void *)size,
                          (void *)(align_mask + 1), top_down ? "top-down" : "bottom-up",
                          ios_va_scan_tries - tries0, ios_va_scan_skips - skips0,
+                         ios_va_scan_below_floor - below0,   /* of the tries: counted, not attempted */
                          ios_scan_base, ios_scan_end, ios_scan_views,
                          (void *)ios_scan_maxgap, (void *)ios_scan_tailgap,
                          ios_scan_stop_name( ios_scan_stop ),
