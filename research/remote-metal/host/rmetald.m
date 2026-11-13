@@ -2222,14 +2222,18 @@ static void serve(int fd) {
             }
             uint64_t w=MAX(1ull,(uint64_t)texture.width >> r->level), hh=MAX(1ull,(uint64_t)texture.height >> r->level);
             uint64_t cols=(w-1)/l.block_width+1, rows=(hh-1)/l.block_height+1;
-            cols=MAX(2ull,cols); rows=MAX(2ull,rows);
             if (r->width != w || r->height != hh || cols > RM_MAX_PAYLOAD/l.block_bytes ||
                 rows > RM_MAX_PAYLOAD/(cols*l.block_bytes)) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             uint64_t total=cols*rows*l.block_bytes;
+            /* shortcut: small PVRTC read footprints vary by GPU, add a write-mask protocol for extra bytes. */
+            uint64_t alloc_cols=MAX(2ull,cols), alloc_rows=MAX(2ull,rows);
+            if (alloc_cols > RM_MAX_PAYLOAD/l.block_bytes || alloc_rows > RM_MAX_PAYLOAD/(alloc_cols*l.block_bytes)) {
+                reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
+            }
             if (!a->length || a->length > RM_CHUNK_BYTES || a->offset > total || a->length > total-a->offset) {
                 reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break;
             }
-            void *data=calloc(1,(size_t)total);
+            void *data=calloc(1,(size_t)(alloc_cols*alloc_rows*l.block_bytes));
             if (!data) { reply(fd,&h,RM_ERR_SHORT_PAYLOAD,NULL,0); break; }
             @try {
                 [texture getBytes:data bytesPerRow:0 bytesPerImage:0 fromRegion:MTLRegionMake2D(0,0,w,hh)

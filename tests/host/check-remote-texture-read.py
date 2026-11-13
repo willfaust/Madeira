@@ -73,9 +73,9 @@ int main(void) { @autoreleasepool {
   [texture replaceRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:2 withBytes:blocks bytesPerRow:0];
   memset(direct,0,sizeof(direct));
   [texture getBytes:direct bytesPerRow:0 fromRegion:MTLRegionMake2D(0,0,4,4) mipmapLevel:2];
-  p=(struct rm_texture_read_pvrtc){{1,0,0,0,4,4,2,0},0,32};
-  invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status==RM_OK && length_out==32 && !memcmp(response,direct,32));
-  p.offset=32;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
+  p=(struct rm_texture_read_pvrtc){{1,0,0,0,4,4,2,0},0,8};
+  invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status==RM_OK && length_out==8 && !memcmp(response,direct,8));
+  p.offset=8;p.length=1;invoke(RM_OP_TEXTURE_READ_PVRTC,&p,sizeof(p));assert(status!=RM_OK);
  } else { puts("real PVRTC texture test skipped: format unavailable"); }
  desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:4 height:4 mipmapped:NO];
  desc.storageMode=MTLStorageModeShared;desc.usage=MTLTextureUsageRenderTarget;
@@ -139,8 +139,8 @@ int main(void) { @autoreleasepool {
  chunk_mode=2;calls=0;p.size=(struct WMTSize){8192,4100,1};p.bytes_per_row=0;
  assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==3 && guest[32]==0x55 && guest[32+(8u<<20)]==0x99);
  p.bytes_per_row=8;assert(_MTLTexture_getBytes_wow64(&p)==STATUS_INVALID_PARAMETER);
- calls=0;p.size=(struct WMTSize){4,4,1};p.bytes_per_row=0;guest[64]=0xee;
- assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==2 && guest[32]==0x55 && guest[63]==0x55 && guest[64]==0xee);
+ calls=0;p.size=(struct WMTSize){4,4,1};p.bytes_per_row=0;guest[40]=0xee;
+ assert(_MTLTexture_getBytes_wow64(&p)==STATUS_SUCCESS && calls==2 && guest[32]==0x55 && guest[39]==0x55 && guest[40]==0xee);
  }return 0;}
 '''
 with tempfile.TemporaryDirectory(prefix='madeira-read-client-') as t:
