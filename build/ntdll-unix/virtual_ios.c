@@ -27435,7 +27435,14 @@ static unsigned int ios_fd_reuse( const void *addr, SIZE_T size, ULONG type );  
  * pages are committed from the start here, so a commit inside a grown view
  * succeeds (Wine answers STATUS_ALREADY_COMMITTED for other file views, and
  * LMDB would fail its first page). The grown views are kept by address
- * (ios_grown_views, under virtual_mutex like both callers). */
+ * (ios_grown_views, under virtual_mutex like both callers).
+ * vk6: PoE2 sets a 100 GB map size (its data.mdb meta pages: mm_mapsize
+ * 0x1900000000). That is only address space on Windows, but Madeira has about
+ * 58 GB of it on the phone, so the view is CAPPED at env.MADEIRA_SECTION_VIEW_CAP_GB
+ * (default 16) and the caller is told the smaller size. LMDB keeps its own map
+ * size and only reads pages it has written, so a capped view is safe while the
+ * database stays under the cap; past it LMDB would read beyond the view. The
+ * [section-grow] line gives the requested and the mapped size. */
 static struct { void *base; SIZE_T size; } ios_grown_views[16];
 static int ios_section_view_grown( const struct file_view *view )
 {
@@ -27444,7 +27451,7 @@ static int ios_section_view_grown( const struct file_view *view )
         if (ios_grown_views[i].base == view->base && ios_grown_views[i].size == view->size) return 1;
     return 0;
 }
-static int ios_section_view_grow_ok( ULONG alloc_type, ULONGLONG end )
+static int ios_section_view_grow_ok( ULONG alloc_type )
 {
     static int on = -1;
     if (on < 0)
@@ -27452,8 +27459,21 @@ static int ios_section_view_grow_ok( ULONG alloc_type, ULONGLONG end )
         const char *e = getenv( "MADEIRA_SECTION_VIEW_GROW" );
         on = !(e && e[0] == '0');
     }
-    return on && (alloc_type & MEM_RESERVE) && end <= (64ull << 30);
+    return on && (alloc_type & MEM_RESERVE);
 }
+static ULONGLONG ios_section_view_cap(void)   /* bytes; vk6 */
+{
+    static ULONGLONG cap;
+    if (!cap)
+    {
+        const char *e = getenv( "MADEIRA_SECTION_VIEW_CAP_GB" );
+        long long gb = e ? atoll( e ) : 0;
+        if (gb < 1 || gb > 48) gb = 16;
+        cap = (ULONGLONG)gb << 30;
+    }
+    return cap;
+}
+static ULONGLONG ios_grow_requested;   /* the size the caller asked for, for the log (under virtual_mutex) */
 static unsigned int ios_section_view_grow( int fd, mem_size_t full_size, ULONGLONG end, void *base, SIZE_T size )
 {
     static LONG said;
@@ -27477,10 +27497,19 @@ static unsigned int ios_section_view_grow( int fd, mem_size_t full_size, ULONGLO
         ios_grown_views[slot].size = size;
     }
     if (InterlockedIncrement( &said ) <= 16)
-        dprintf( 2, "[section-grow] %s: reserve view %p+0x%lx over %s (0x%llx bytes)%s%s "
-                    "(env.MADEIRA_SECTION_VIEW_GROW = 0 turns it off)\n",
-                 why ? "REFUSED" : "file extended to cover the view", base, (unsigned long)size, path,
-                 (unsigned long long)full_size, why ? ": " : "", why ? why : "" );
+    {
+        /* blocks written so far: how full a capped database is (the file itself is sparse) */
+        unsigned long long used_mb = why ? 0 : (unsigned long long)st.st_blocks * 512 >> 20;
+        dprintf( 2, "[section-grow] %s: reserve view %p+0x%lx (asked 0x%llx%s) over %s (0x%llx bytes, %llu MB written)%s%s "
+                    "(env.MADEIRA_SECTION_VIEW_GROW = 0 turns it off, MADEIRA_SECTION_VIEW_CAP_GB sets the cap)\n",
+                 why ? "REFUSED" : "file extended to cover the view", base, (unsigned long)size,
+                 ios_grow_requested, ios_grow_requested > size ? ", CAPPED" : "", path,
+                 (unsigned long long)full_size, used_mb, why ? ": " : "", why ? why : "" );
+        if (!why && ios_grow_requested > size && used_mb << 20 > (unsigned long long)size / 4 * 3)
+            dprintf( 2, "[section-grow] WARNING: %s has %llu MB written of a %lu MB view; past the view the game "
+                        "would read unmapped memory: raise MADEIRA_SECTION_VIEW_CAP_GB or delete the cache folder\n",
+                     path, used_mb, (unsigned long)(size >> 20) );
+    }
     return why ? STATUS_INVALID_VIEW_SIZE : STATUS_SUCCESS;
 }
 #endif
@@ -27598,8 +27627,14 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
         {
 #ifdef WINE_IOS
             /* madeira-duo section-view-grow: a reserve view past the end of its file */
-            if (!image_info && ios_section_view_grow_ok( alloc_type, (ULONGLONG)offset.QuadPart + size ))
+            if (!image_info && ios_section_view_grow_ok( alloc_type ) &&
+                (ULONGLONG)offset.QuadPart < ios_section_view_cap())
+            {
+                ios_grow_requested = size;
+                if ((ULONGLONG)offset.QuadPart + size > ios_section_view_cap())   /* vk6: capped */
+                    size = ios_section_view_cap() - (ULONGLONG)offset.QuadPart;
                 ios_grow_to = (ULONGLONG)offset.QuadPart + size;
+            }
             else
 #endif
             return STATUS_INVALID_VIEW_SIZE;
