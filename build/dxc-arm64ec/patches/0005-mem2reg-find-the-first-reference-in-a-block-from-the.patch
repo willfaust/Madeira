@@ -1,0 +1,131 @@
+From e130005f4e09b3f1d6a320f4ce1cc15ce2ed1844 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Sat, 14 Nov 2026 23:45:05 +1100
+Subject: [PATCH 5/6] mem2reg: find the first reference in a block from the
+ alloca's own uses
+
+ComputeLiveInBlocks walked each defining-and-using block from its start
+for every alloca until it met a load or store of that alloca. Shaders that
+inline into a few huge blocks with many allocas make that quadratic: on
+Path of Exile 2's shaders it was 19% of all compile time (PromoteMem2Reg::run
+on a 100 Hz CPU profile on the iPhone).
+
+Take the earliest of the alloca's own loads and stores in each block instead,
+ordered by LargeBlockInfo's per-block numbering, which is computed once per
+block and shared by every alloca. The answer is the same, so the output
+doesn't change. MADEIRA_DXC_MEM2REG_SCAN=1 goes back to the walk.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Utils/PromoteMemoryToRegister.cpp         | 59 ++++++++++++++++++-
+ 1 file changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/lib/Transforms/Utils/PromoteMemoryToRegister.cpp b/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
+index b452d238..962c2edb 100644
+--- a/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
++++ b/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
+@@ -39,6 +39,7 @@
+ #include "llvm/IR/Module.h"
+ #include "llvm/Transforms/Utils/Local.h"
+ #include <algorithm>
++#include <cstdlib>
+ using namespace llvm;
+ 
+ #define DEBUG_TYPE "mem2reg"
+@@ -298,7 +299,8 @@ private:
+   void ComputeLiveInBlocks(AllocaInst *AI, AllocaInfo &Info,
+                            const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
+                            SmallPtrSetImpl<BasicBlock *> &LiveInBlocks,
+-                           BasicBlock *LifetimeStartBB);
++                           BasicBlock *LifetimeStartBB,
++                           LargeBlockInfo &LBI);
+   void RenamePass(BasicBlock *BB, BasicBlock *Pred,
+                   RenamePassData::ValVector &IncVals,
+                   std::vector<RenamePassData> &Worklist);
+@@ -640,7 +642,7 @@ void PromoteMem2Reg::run() {
+     // Determine which blocks the value is live in.  These are blocks which lead
+     // to uses.
+     SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
+-    ComputeLiveInBlocks(AI, Info, DefBlocks, LiveInBlocks, LifetimeStartBB);
++    ComputeLiveInBlocks(AI, Info, DefBlocks, LiveInBlocks, LifetimeStartBB, LBI);
+ 
+     // If there is a lifetime start block, add it to the def blocks now.
+     // This ensures that the block that holds the lifetime.start call is treated
+@@ -852,7 +854,8 @@ void PromoteMem2Reg::ComputeLiveInBlocks(
+     AllocaInst *AI, AllocaInfo &Info,
+     const SmallPtrSetImpl<BasicBlock *> &DefBlocks,
+     SmallPtrSetImpl<BasicBlock *> &LiveInBlocks,
+-    BasicBlock *LifetimeStartBB) {
++    BasicBlock *LifetimeStartBB,
++    LargeBlockInfo &LBI) {
+ 
+   // To determine liveness, we must iterate through the predecessors of blocks
+   // where the def is live.  Blocks are added to the worklist if we need to
+@@ -863,6 +866,8 @@ void PromoteMem2Reg::ComputeLiveInBlocks(
+   // If any of the using blocks is also a definition block, check to see if the
+   // definition occurs before or after the use.  If it happens before the use,
+   // the value isn't really live-in.
++  SmallDenseMap<BasicBlock *, std::pair<unsigned, bool>, 16> FirstReference;
++  bool FirstReferenceDone = false;
+   for (unsigned i = 0, e = LiveInBlockWorklist.size(); i != e; ++i) {
+     BasicBlock *BB = LiveInBlockWorklist[i];
+     if (!DefBlocks.count(BB))
+@@ -882,6 +887,54 @@ void PromoteMem2Reg::ComputeLiveInBlocks(
+ 
+     // Okay, this is a block that both uses and defines the value.  If the first
+     // reference to the alloca is a def (store), then we know it isn't live-in.
++    //
++    // Madeira: the walk below goes from the start of the block for every
++    // alloca, which is quadratic on shaders that inline into a few huge blocks
++    // with many allocas (19% of all compile time on Path of Exile 2's shaders).
++    // Instead, take the earliest of this alloca's own loads and stores in the
++    // block by LargeBlockInfo's per-block numbering (one scan per block, shared
++    // by every alloca). Same answer, so the output doesn't change.
++    // MADEIRA_DXC_MEM2REG_SCAN=1 goes back to the walk.
++    static const bool UseWalk = [] {
++      const char *Value = getenv("MADEIRA_DXC_MEM2REG_SCAN");
++      return Value && Value[0] && !(Value[0] == '0' && !Value[1]);
++    }();
++    if (!UseWalk) {
++      // One pass over the alloca's users, the first time a block needs it:
++      // the earliest reference in each defining block, and whether it is a
++      // store.
++      if (!FirstReferenceDone) {
++        FirstReferenceDone = true;
++        for (User *U : AI->users()) {
++          Instruction *UserInst = dyn_cast<Instruction>(U);
++          if (!UserInst)
++            continue;
++          bool IsStore =
++              isa<StoreInst>(UserInst) && UserInst->getOperand(1) == AI;
++          bool IsLoad =
++              isa<LoadInst>(UserInst) && UserInst->getOperand(0) == AI;
++          if (!IsStore && !IsLoad)
++            continue;
++          BasicBlock *UserBlock = UserInst->getParent();
++          if (!DefBlocks.count(UserBlock))
++            continue;
++          unsigned Index = LBI.getInstructionIndex(UserInst);
++          auto Inserted = FirstReference.insert(
++              std::make_pair(UserBlock, std::make_pair(Index, IsStore)));
++          if (!Inserted.second && Index < Inserted.first->second.first)
++            Inserted.first->second = std::make_pair(Index, IsStore);
++        }
++      }
++      auto Found = FirstReference.find(BB);
++      if (Found != FirstReference.end() && Found->second.second) {
++        // The first reference is a store: not live-in here.
++        LiveInBlockWorklist[i] = LiveInBlockWorklist.back();
++        LiveInBlockWorklist.pop_back();
++        --i, --e;
++      }
++      continue;
++    }
++
+     for (BasicBlock::iterator I = BB->begin();; ++I) {
+       if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+         if (SI->getOperand(1) != AI)
+-- 
+2.56.0
+
