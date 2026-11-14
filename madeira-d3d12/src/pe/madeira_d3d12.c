@@ -6833,6 +6833,43 @@ static volatile LONG g_csb_queued, g_csb_built, g_csb_failed, g_csb_full, g_csb_
 static volatile LONG64 g_csb_wait_t;
 static int mad_lzlib_restore(struct mad_pso *p);   /* madeira-bcd pso-lazy-libs */
 static void mad_po_build(const struct mad_pso *p, int kind, LONG64 dt);   /* madeira-duo pso-origin */
+/* madeira-duo REBUILT IN ONE SESSION (with pso-create-block or pso-create-build, which
+ * key the pipelines). A pipeline built and added to the pso-archive is in a saved chunk
+ * within ~25 s (MADEIRA_PSO_ARCHIVE_MAX_AGE), so the same key compiling again 30 s or
+ * more later means the archive did not answer for it: the lookup does not match what
+ * was added (a descriptor that differs between builds), or it never got in. Counted,
+ * the first 20 named; [pso-rebuilt] lines. */
+#define MAD_RB_CAP 32768
+static UINT64 g_rb_key[MAD_RB_CAP];
+static LONG64 g_rb_t[MAD_RB_CAP];
+static SRWLOCK g_rb_lock = SRWLOCK_INIT;
+static volatile LONG g_rb_n, g_rb_again, g_rb_late, g_rb_said;
+static double mad_pcbk_ms(LONG64 ticks);
+static void mad_rb_note(struct mad_pso *p, LONG64 t_end, LONG64 dt) {
+    UINT64 k = p->seen_key;
+    ULONG i;
+    LONG64 prev = 0;
+    int found = 0, compiled = mad_pcbk_ms(dt) >= 150.0;
+    if (!k) return;
+    AcquireSRWLockExclusive(&g_rb_lock);
+    for (i = (ULONG)(k * 0x9e3779b97f4a7c15ull >> 49) & (MAD_RB_CAP - 1);; i = (i + 1) & (MAD_RB_CAP - 1)) {
+        if (g_rb_key[i] == k) { found = 1; prev = g_rb_t[i]; g_rb_t[i] = t_end; break; }
+        if (!g_rb_key[i]) {
+            if (g_rb_n < MAD_RB_CAP / 2) { g_rb_key[i] = k; g_rb_t[i] = t_end; g_rb_n++; }
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_rb_lock);
+    if (!found || !compiled) return;
+    InterlockedIncrement(&g_rb_again);
+    if (mad_pcbk_ms(t_end - prev) >= 30000.0) {
+        LONG n = InterlockedIncrement(&g_rb_late);
+        if (InterlockedIncrement(&g_rb_said) <= 20 || !(n % 100))
+            d3d12_log("[pso-rebuilt] %ld compiled again 30 s+ after this session built them (%ld again in all); this one %.0f ms, "
+                      "%.0f s after the first build (vs '%s', ps '%s', key %016llx)\n", (long)n, (long)g_rb_again,
+                      mad_pcbk_ms(dt), mad_pcbk_ms(t_end - prev) / 1000.0, p->vs_name, p->ps_name, (unsigned long long)k);
+    }
+}
 static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     if (p->rps || !p->lazy) return p->rps;
     AcquireSRWLockExclusive(&p->rlock);   /* per pipeline: builds of different pipelines run in parallel */
@@ -6846,6 +6883,7 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
         if (err) mad_log_nserror(p->vs_name, err);
         InterlockedExchangeAdd64(&g_pt_realize, mad_qpc() - t0); InterlockedIncrement(&g_pn_realize);
         if (p->origin) mad_po_build(p, 0, mad_qpc() - t0);   /* madeira-duo pso-origin */
+        if (p->rps) { LONG64 t1 = mad_qpc(); mad_rb_note(p, t1, t1 - t0); }   /* madeira-duo rebuilt in one session */
         if (p->rps) {
             LONG n = InterlockedIncrement(&g_pso_lazy_built);
             if (n == 1 || (n % 500) == 0)
@@ -7294,7 +7332,7 @@ static void mad_pcbk_build(struct mad_pso *p) {
  * nothing on a miss when fail_on_binary_archive_miss is set without archives of
  * the caller's own, and compiles nothing). 1 = built from the archive. */
 static volatile LONG g_pcbp_hit, g_pcbp_miss;
-static volatile LONG64 g_pcbp_t, g_pcbp_max;
+static volatile LONG64 g_pcbp_t, g_pcbp_max, g_pcbp_t_miss;
 static int mad_pcbk_probe(struct mad_pso *p) {
     obj_handle_t pool, err = 0, built = 0;
     LONG64 t0, dt, was;
@@ -7315,11 +7353,15 @@ static int mad_pcbk_probe(struct mad_pso *p) {
     dt = mad_qpc() - t0;
     InterlockedExchangeAdd64(&g_pcbp_t, dt);
     do { was = g_pcbp_max; } while (dt > was && InterlockedCompareExchange64(&g_pcbp_max, dt, was) != was);
-    if (built) InterlockedIncrement(&g_pcbp_hit); else InterlockedIncrement(&g_pcbp_miss);
+    if (built) InterlockedIncrement(&g_pcbp_hit);
+    else { InterlockedIncrement(&g_pcbp_miss); InterlockedExchangeAdd64(&g_pcbp_t_miss, dt); }
     n = g_pcbp_hit + g_pcbp_miss;
     if (n == 1 || !(n % 500))
         d3d12_log("[pso-block] archive lookups in the create call: %ld hits (built there), %ld misses (to the background builders), "
-                  "%.0f ms in all, max %.1f ms\n", (long)g_pcbp_hit, (long)g_pcbp_miss, mad_pcbk_ms(g_pcbp_t), mad_pcbk_ms(g_pcbp_max));
+                  "%.0f ms in all, max %.1f ms; avg a hit %.2f ms, a miss %.2f ms\n", (long)g_pcbp_hit, (long)g_pcbp_miss,
+                  mad_pcbk_ms(g_pcbp_t), mad_pcbk_ms(g_pcbp_max),
+                  g_pcbp_hit ? mad_pcbk_ms(g_pcbp_t - g_pcbp_t_miss) / g_pcbp_hit : 0.0,
+                  g_pcbp_miss ? mad_pcbk_ms(g_pcbp_t_miss) / g_pcbp_miss : 0.0);
     return p->rps != 0;
 }
 /* At creation: 1 when the pipeline went to the low-priority queue. */
@@ -7398,6 +7440,7 @@ static int (__cdecl *g_po_dbg_output)(const char *);
 /* [kind][class]: kind 0 render, 1 compute, 2 stride variant */
 static volatile LONG g_po_created[2][4], g_po_built[3][4], g_po_compiled[3][4];
 static volatile LONG64 g_po_compile_t[3];
+static volatile LONG64 g_po_compile_tc[3][4];   /* madeira-duo: compile time by class (MAD_PO_DRAWN..MAD_PO_NEW) */
 static int mad_po_on(void) {
     if (g_po_on < 0) {
         LARGE_INTEGER f;
@@ -7540,6 +7583,7 @@ static void mad_po_build(const struct mad_pso *p, int kind, LONG64 dt) {
     if (dt * 1000 >= (LONG64)MAD_PO_COMPILE_MS * g_po_qpf) {
         InterlockedIncrement(&g_po_compiled[kind][cls]);
         InterlockedExchangeAdd64(&g_po_compile_t[kind], dt);
+        InterlockedExchangeAdd64(&g_po_compile_tc[kind][cls], dt);
     }
     InterlockedIncrement(&g_po_events);
 }
@@ -7566,6 +7610,12 @@ static void mad_po_log(const char *when, int exiting) {
              (long)mad_po_sum(g_po_compiled[2]), (long)g_po_compiled[2][1], (long)g_po_compiled[2][2], (long)g_po_compiled[2][3],
              (double)g_po_compile_t[2] / q,
              (long)g_po_n, (long)g_po_nprev, (long)g_po_saved, (long)g_po_full);
+    if (!exiting) d3d12_log("%s", buf);
+    else if (g_po_dbg_output) g_po_dbg_output(buf);
+    snprintf(buf, sizeof buf, "[pso-origin] %s: compile time by class: render drawn-before %.1f s, created-before %.1f s, new %.1f s; "
+             "compute created-before %.1f s, new %.1f s\n", when,
+             (double)g_po_compile_tc[0][1] / q, (double)g_po_compile_tc[0][2] / q, (double)g_po_compile_tc[0][3] / q,
+             (double)g_po_compile_tc[1][2] / q, (double)g_po_compile_tc[1][3] / q);
     if (!exiting) d3d12_log("%s", buf);
     else if (g_po_dbg_output) g_po_dbg_output(buf);
 }
