@@ -27487,7 +27487,7 @@ static unsigned int ios_section_view_grow( int fd, mem_size_t full_size, ULONGLO
         fcntl( fd, F_GETPATH, path );
         if (!S_ISREG( st.st_mode ) || st.st_nlink < 1) why = "not a linked regular file";
         else if ((mem_size_t)st.st_size != full_size) why = "the file's size is not the section's (not this section's file?)";
-        else if (ftruncate( fd, (off_t)end )) why = strerror( errno );
+        else if ((ULONGLONG)st.st_size < end && ftruncate( fd, (off_t)end )) why = strerror( errno );   /* grow only, never shrink */
     }
     if (!why)
     {

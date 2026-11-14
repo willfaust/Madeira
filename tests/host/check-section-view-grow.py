@@ -42,6 +42,7 @@ check('getenv( "MADEIRA_SECTION_VIEW_GROW" )' in v, 'env.MADEIRA_SECTION_VIEW_GR
 check(grow.index('S_ISREG( st.st_mode )') < grow.index('ftruncate(') and grow.index('st.st_size != full_size') < grow.index('ftruncate('),
       "the descriptor must be a linked regular file of the section's size before it is extended")
 check('[section-grow]' in grow and 'F_GETPATH' in grow, 'each case is logged with the file path')
+check('(ULONGLONG)st.st_size < end && ftruncate(' in grow, 'the file only ever grows (a lower cap never truncates a database)')
 
 commit = v[v.index('else  /* commit the pages */'):]
 commit = commit[:commit.index('SERVER_START_REQ')]
