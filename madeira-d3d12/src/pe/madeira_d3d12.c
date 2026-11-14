@@ -7053,10 +7053,14 @@ static int mad_pcb_mode(void) {
     if (g_pcb_mode < 0) {
         long long m = mad_cfg_int_pe("pso-create-build", 0);   /* madeira-duo: 1 = pipelines drawn in an earlier session are built in the background when the game creates them, 2 = every plain render pipeline; 0 = at their first draw (as before) */
         int v = m <= 0 ? 0 : m >= 2 ? 2 : 1;
-        g_pcb_block = mad_cfg_int_pe("pso-create-block", 0) > 0;   /* madeira-duo: 1 = pipelines drawn in an earlier session are built inside the game's create call, on its thread (no draw finds them unbuilt); 0 = off */
+        long long b = mad_cfg_int_pe("pso-create-block", 0);   /* madeira-duo: 1 = pipelines drawn in an earlier session are built inside the game's create call, on its thread (no draw finds them unbuilt); 2 = only those already in the pso-archive (a lookup, no compile), the rest go to the background builders; 0 = off */
+        g_pcb_block = b <= 0 ? 0 : b >= 2 ? 2 : 1;
         g_seen_record = v == 1 || g_pcb_block || mad_cfg_int_pe("pso-seen-record", 0) > 0;   /* madeira-duo: 1 = remember the pipelines drawn (pso-create-build = 1 does it anyway) */
-        if (g_pcb_block)
+        if (g_pcb_block == 1)
             d3d12_log("[madeira-d3d12] pso-create-block = 1: pipelines drawn in earlier sessions are built inside the create call, on the game's thread\n");
+        else if (g_pcb_block == 2)
+            d3d12_log("[madeira-d3d12] pso-create-block = 2: pipelines drawn in earlier sessions are taken from the pso-archive inside the create call "
+                      "when they are there (no compile on the game's thread); the others go to the background builders\n");
         if (v || g_seen_record)
             d3d12_log("[madeira-d3d12] pso-create-build = %d%s: %s\n", v, g_seen_record ? ", pso-seen-record" : "",
                       v == 2 ? "every plain render pipeline is queued for the background builders when the game creates it"
@@ -7286,17 +7290,54 @@ static void mad_pcbk_build(struct mad_pso *p) {
                   mad_pcbk_ms(g_pcbk_t), mad_pcbk_ms(g_pcbk_max), thr, g_ecl_tid);
     }
 }
+/* pso-create-block = 2: the pipeline from the pso-archive only (winemetal returns
+ * nothing on a miss when fail_on_binary_archive_miss is set without archives of
+ * the caller's own, and compiles nothing). 1 = built from the archive. */
+static volatile LONG g_pcbp_hit, g_pcbp_miss;
+static volatile LONG64 g_pcbp_t, g_pcbp_max;
+static int mad_pcbk_probe(struct mad_pso *p) {
+    obj_handle_t pool, err = 0, built = 0;
+    LONG64 t0, dt, was;
+    LONG n;
+    if (p->lz) return 0;   /* pso-lazy-libs: the libraries need restoring first; the builders do that */
+    pool = NSAutoreleasePool_alloc_init();
+    t0 = mad_qpc();
+    AcquireSRWLockExclusive(&p->rlock);
+    if (!p->rps && p->lazy) {
+        p->rp.fail_on_binary_archive_miss = 1;
+        built = p->has_vd ? MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &p->vd, &err)
+                          : MTLDevice_newRenderPipelineState(p->device_handle, &p->rp, &err);
+        p->rp.fail_on_binary_archive_miss = 0;
+        if (built) { MemoryBarrier(); p->rps = built; }
+    }
+    ReleaseSRWLockExclusive(&p->rlock);
+    if (pool) NSObject_release(pool);
+    dt = mad_qpc() - t0;
+    InterlockedExchangeAdd64(&g_pcbp_t, dt);
+    do { was = g_pcbp_max; } while (dt > was && InterlockedCompareExchange64(&g_pcbp_max, dt, was) != was);
+    if (built) InterlockedIncrement(&g_pcbp_hit); else InterlockedIncrement(&g_pcbp_miss);
+    n = g_pcbp_hit + g_pcbp_miss;
+    if (n == 1 || !(n % 500))
+        d3d12_log("[pso-block] archive lookups in the create call: %ld hits (built there), %ld misses (to the background builders), "
+                  "%.0f ms in all, max %.1f ms\n", (long)g_pcbp_hit, (long)g_pcbp_miss, mad_pcbk_ms(g_pcbp_t), mad_pcbk_ms(g_pcbp_max));
+    return p->rps != 0;
+}
 /* At creation: 1 when the pipeline went to the low-priority queue. */
 static int mad_pcb_on_create(struct mad_pso *p, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc) {
     int mode = mad_pcb_mode();
     static int said_noasync;
     if (g_seen_record) p->seen_key = mad_seen_key(desc);   /* drawn ones go on the list (mad_seen_mark) */
+    int probe_missed = 0;
     if (g_pcb_block && p->lazy && !p->rps) {   /* pso-create-block: drawn before = built now, on the game's thread */
-        if (mad_seen_has(p->seen_key)) { InterlockedIncrement(&g_pcb_hits); mad_pcbk_build(p); return 0; }
-        if (mode != 2) { InterlockedIncrement(&g_pcb_misses); return 0; }
+        if (mad_seen_has(p->seen_key)) {
+            InterlockedIncrement(&g_pcb_hits);
+            if (g_pcb_block == 1) { mad_pcbk_build(p); return 0; }
+            if (mad_pcbk_probe(p)) return 0;   /* 2: in the archive, built here */
+            probe_missed = 1;   /* 2: not in the archive: queued for the builders below, whatever pso-create-build says */
+        } else if (mode != 2) { InterlockedIncrement(&g_pcb_misses); return 0; }
     }
-    if (!mode) return 0;
-    if (mode == 1) {
+    if (!mode && !probe_missed) return 0;
+    if (mode == 1 && !probe_missed) {
         if (!mad_seen_has(p->seen_key)) { InterlockedIncrement(&g_pcb_misses); return 0; }
         InterlockedIncrement(&g_pcb_hits);
     }
