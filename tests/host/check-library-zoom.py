@@ -165,6 +165,25 @@ struct Checks {
         var distinct = true
         for i in 1..<steps.count { distinct = distinct && steps[i] <= steps[i - 1] }
         require(distinct && Set(steps).count > 2, "title: landscape's finer levels step by half points (\(steps))")
+        // iPhone Duo (iPhone19,4) widths: inner 951x669 pt and outer 466x678 pt, each as
+        // held and turned, plus a taller 19.5:9 outer screen as on other foldables.
+        for (name, viewport) in [("Duo inner", 951.0), ("Duo inner, turned", 669.0), ("Duo outer", 466.0),
+                                 ("Duo outer, turned", 678.0), ("Foldable outer 19.5:9", 812.0), ("Foldable outer 19.5:9, portrait", 375.0)] {
+            let c = G.contentWidth(viewport: CGFloat(viewport))
+            let stops = G.stops(content: c)
+            var ordered = stops.count >= 2 && stops.count <= G.maxStops
+            for i in stops.indices.dropFirst() { ordered = ordered && stops[i] > stops[i - 1] }
+            require(ordered, "\(name) (\(Int(viewport)) pt): two to five levels, fewest columns first (\(stops))")
+            var fills = true, titles = true
+            for n in stops {
+                let w = G.cardWidth(content: c, columns: n)
+                fills = fills && w > 0 && near(CGFloat(n) * w + CGFloat(n - 1) * G.columnGap, c)
+                let t = T.size(cardWidth: w)
+                titles = titles && t >= 12 && t <= 15
+            }
+            require(fills && titles, "\(name): cards fill the width and titles stay in 12...15 at every level")
+            require(c <= 1100 - 32 + 0.01, "\(name): the page keeps its 1100 pt cap")
+        }
 
         // The page layout.
         let blocks: [LibraryGridLayoutModel.Block] = [.fixed(height: 44, spacing: 0), .fixed(height: 30, spacing: 24),

@@ -214,6 +214,7 @@
 		A1000961 /* LibraryGridZoomModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000961 /* LibraryGridZoomModel.swift */; };
 		A1000960 /* LibraryGridLevels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000960 /* LibraryGridLevels.swift */; };
 		A1000401 /* GuestDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000401 /* GuestDisplay.swift */; };
+		A1000D60 /* DisplayGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000D60 /* DisplayGeometry.swift */; };
 		A1000243 /* GamepadInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000243 /* GamepadInput.swift */; };
 		A1000260 /* PadKeyboardMouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000260 /* PadKeyboardMouse.swift */; };
 		A1000F51 /* PadAssist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000F51 /* PadAssist.swift */; };
@@ -510,6 +511,7 @@
 		A2000961 /* LibraryGridZoomModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridZoomModel.swift"; sourceTree = "<group>"; };
 		A2000960 /* LibraryGridLevels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LibraryGridLevels.swift"; sourceTree = "<group>"; };
 		A2000401 /* GuestDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuestDisplay.swift; sourceTree = "<group>"; };
+		A2000D60 /* DisplayGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayGeometry.swift; sourceTree = "<group>"; };
 		A2000243 /* GamepadInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GamepadInput.swift"; sourceTree = "<group>"; };
 		A2000260 /* PadKeyboardMouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadKeyboardMouse.swift"; sourceTree = "<group>"; };
 		A2000F51 /* PadAssist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PadAssist.swift"; sourceTree = "<group>"; };
@@ -753,6 +755,7 @@
 				A2000961 /* LibraryGridZoomModel.swift */,
 				A2000960 /* LibraryGridLevels.swift */,
 				A2000401 /* GuestDisplay.swift */,
+				A2000D60 /* DisplayGeometry.swift */,
 				A2000004 /* JITAllocator.c */,
 				A2000005 /* JITAllocator.h */,
 				A200000B /* FEXBridge.mm */,
@@ -1218,6 +1221,7 @@
 				A1000961 /* LibraryGridZoomModel.swift in Sources */,
 				A1000960 /* LibraryGridLevels.swift in Sources */,
 				A1000401 /* GuestDisplay.swift in Sources */,
+				A1000D60 /* DisplayGeometry.swift in Sources */,
 				A1000004 /* JITAllocator.c in Sources */,
 				A1000005 /* EntitlementChecker.swift in Sources */,
 				A1000006 /* FEXBridge.mm in Sources */,

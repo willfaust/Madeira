@@ -38,7 +38,9 @@ exit report.
 Run from anywhere; needs `swift` and `cc` on PATH.
 """
 from pathlib import Path
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,6 +80,15 @@ import Foundation
 func L(_ text: String) -> String { text }   // Library.swift's lookup; English here
 #if canImport(CoreGraphics)
 import CoreGraphics   // CGRect.width and friends: Foundation alone no longer re-exports them on macOS (Swift 6.4)
+#endif
+#if os(Windows)
+import ucrt
+// Windows hosts: the C runtime has _putenv_s, not POSIX setenv/unsetenv.
+@discardableResult func setenv(_ name: String, _ value: String, _ overwrite: Int32) -> Int32 {
+    if overwrite == 0, getenv(name) != nil { return 0 }
+    return _putenv_s(name, value) == 0 ? 0 : -1
+}
+@discardableResult func unsetenv(_ name: String) -> Int32 { _putenv_s(name, "") == 0 ? 0 : -1 }
 #endif
 #if canImport(Combine)
 import Combine
@@ -189,6 +200,44 @@ expect(env("MADEIRA_SCREEN_W") == "1560" && env("MADEIRA_SCREEN_H") == "720" && 
        "a screen-shape resolution is exported and published")
 expect((try? game.validate()) != nil, "a screen-shape resolution validates")
 game.resolution = "1280x720"; game.configureLaunch()
+
+// Foldables: on a device that has shown two screen shapes (a foldable), a new
+// entry follows the screen it starts on; a single-screen device stores the size.
+do {
+    let suite = "madeira-frontend-check-\(UUID().uuidString)"
+    ResolutionChoices.store = UserDefaults(suiteName: suite)!
+    let pad = ResolutionChoices.screen
+    let inner = ResolutionChoices.Screen(points: CGSize(width: 951, height: 669), pixels: CGSize(width: 2670, height: 1878))
+    let outer = ResolutionChoices.Screen(points: CGSize(width: 678, height: 466), pixels: CGSize(width: 2034, height: 1398))
+    // Launched folded: the outer screen is the only shape seen so far.
+    ResolutionChoices.update(outer)
+    expect(LibraryEntry(title: "One", relativePath: "a.exe", bits: 64).resolution == "1152x792" && !ResolutionChoices.severalScreens,
+           "duo: one screen shape seen: a new entry stores the concrete default, as before")
+    // Unfolded: a second shape.
+    ResolutionChoices.update(inner)
+    var duo = LibraryEntry(title: "Duo", relativePath: "Games/duo.exe", bits: 64)
+    expect(ResolutionChoices.severalScreens && duo.resolution == ResolutionChoices.screenToken,
+           "duo: a second shape seen: a new entry stores the screen token")
+    duo.configureLaunch()
+    expect(env("MADEIRA_SCREEN_W") == "1152" && env("MADEIRA_SCREEN_H") == "808" && published == (1152, 808) && (try? duo.validate()) != nil,
+           "duo: started on the inner screen it gets the inner screen's default (1152x808)")
+    ResolutionChoices.update(outer)
+    duo.configureLaunch()
+    expect(env("MADEIRA_SCREEN_W") == "1152" && env("MADEIRA_SCREEN_H") == "792",
+           "duo: the same entry started on the outer screen gets the outer default (1152x792)")
+    duo.resolution = ResolutionChoices.screen720Token; duo.configureLaunch()
+    expect(env("MADEIRA_SCREEN_W") == "1152" && env("MADEIRA_SCREEN_H") == "792", "duo: the 720-line token on the outer screen, which has no 720-line size: its default")
+    ResolutionChoices.update(inner); duo.configureLaunch()
+    expect(env("MADEIRA_SCREEN_W") == "1152" && env("MADEIRA_SCREEN_H") == "808", "duo: and on the inner screen, whose default has 720 lines: 1152x808")
+    var desk = LibraryEntry(title: "Desktop", relativePath: "", bits: 64); desk.desktop = true
+    expect(desk.launchArguments.hasPrefix("/desktop=shell,1152x808 "), "duo: the Desktop entry's desktop follows the screen too")
+    duo.resolution = "1280x720"; duo.configureLaunch()
+    expect(env("MADEIRA_SCREEN_W") == "1280" && env("MADEIRA_SCREEN_H") == "720", "duo: a size picked on purpose stays fixed")
+    ResolutionChoices.update(pad)
+    UserDefaults.standard.removePersistentDomain(forName: suite)
+    ResolutionChoices.store = .standard
+}
+game.configureLaunch()
 
 // A Steam game: Madeira Dock sets what starts, so its profile leaves MADEIRA_EXE alone...
 var steamGame = LibraryEntry(title: "Steam game", relativePath: "Program Files (x86)/Steam/steamapps/common/Some Game", bits: 0)
@@ -526,7 +575,12 @@ int main(void) {
 with tempfile.TemporaryDirectory() as tmp:
     sp = Path(tmp) / 'frontend.swift'
     sp.write_text(swift)
-    r = subprocess.run(['swift', str(sp)], capture_output=True, text=True)
+    # Compile, then run: the `swift file.swift` immediate mode cannot link the
+    # harness on Windows hosts.
+    sexe = Path(tmp) / 'frontend'
+    r = subprocess.run([os.environ.get('SWIFTC', 'swiftc'), str(sp), '-o', str(sexe)], capture_output=True, text=True)
+    if not r.returncode:
+        r = subprocess.run([str(sexe)], capture_output=True, text=True)
     sys.stdout.write(r.stdout)
     if r.returncode:
         sys.stdout.write(r.stderr[-4000:])
@@ -534,7 +588,8 @@ with tempfile.TemporaryDirectory() as tmp:
     cp = Path(tmp) / 'exit.c'
     cp.write_text(c_src)
     exe = Path(tmp) / 'exit'
-    r = subprocess.run(['cc', '-std=c11', '-Wall', '-Werror', '-D_DEFAULT_SOURCE', '-o', str(exe), str(cp)],
+    cc = os.environ.get('CC') or shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
+    r = subprocess.run([cc, '-std=c11', '-Wall', '-Werror', '-D_DEFAULT_SOURCE', '-o', str(exe), str(cp)],
                        capture_output=True, text=True)
     if r.returncode:
         sys.stdout.write(r.stderr[-4000:])

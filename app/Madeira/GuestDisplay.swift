@@ -173,23 +173,56 @@ enum ResolutionChoices {
     }
 
     /// The screen in landscape: `points` give its shape, `pixels` its native size.
-    struct Screen {
+    struct Screen: Equatable {
         var points: CGSize
         var pixels: CGSize
+
+        /// A screen's bounds and nativeBounds in any orientation, turned to landscape.
+        static func landscape(points b: CGSize, pixels n: CGSize) -> Screen {
+            Screen(points: CGSize(width: max(b.width, b.height), height: min(b.width, b.height)),
+                   pixels: CGSize(width: max(n.width, n.height), height: min(n.width, n.height)))
+        }
     }
 
-    /// Read once. MadeiraApp.init touches it first, on the main thread;
-    /// library entries (whose default comes from it) are also made off it.
-    static var screen: Screen = {
+    /// Posted (on the thread that called update) when the screen changes shape:
+    /// a foldable folded or unfolded. Pickers built from `groups()` rebuild.
+    static let screenChanged = Notification.Name("MadeiraResolutionScreenChanged")
+
+    private static let lock = NSLock()
+    private static var current: Screen?
+
+    /// The screen the app is on. MadeiraApp.init reads it first, on the main
+    /// thread; library entries (whose default comes from it) are also made off
+    /// it. DisplayGeometryMonitor calls update(_:) when a scene's screen changes
+    /// shape, so on a foldable the choices follow the screen in use; on a device
+    /// with one screen it stays what the first read found.
+    static var screen: Screen {
+        lock.lock(); defer { lock.unlock() }
+        if let s = current { return s }
         #if canImport(UIKit)
-        let b = UIScreen.main.bounds, n = UIScreen.main.nativeBounds
-        return Screen(points: CGSize(width: max(b.width, b.height), height: min(b.width, b.height)),
-                      pixels: CGSize(width: max(n.width, n.height), height: min(n.width, n.height)))
+        let s = Screen.landscape(points: UIScreen.main.bounds.size, pixels: UIScreen.main.nativeBounds.size)
         #else
         // Hosts without UIKit (the host tests): an 11-inch iPad.
-        return Screen(points: CGSize(width: 1180, height: 820), pixels: CGSize(width: 2360, height: 1640))
+        let s = Screen(points: CGSize(width: 1180, height: 820), pixels: CGSize(width: 2360, height: 1640))
         #endif
-    }()
+        current = s
+        return s
+    }
+
+    /// Follows a screen that changed shape. Returns whether it changed (and
+    /// `screenChanged` was posted); a rotation of the same screen does not.
+    @discardableResult
+    static func update(_ s: Screen) -> Bool {
+        let s = Screen.landscape(points: s.points, pixels: s.pixels)
+        guard s.points.width > 0, s.points.height > 0, s.pixels.width > 0, s.pixels.height > 0 else { return false }
+        lock.lock()
+        let changed = current != s
+        current = s
+        lock.unlock()
+        noteShape(s)
+        if changed { NotificationCenter.default.post(name: screenChanged, object: nil) }
+        return changed
+    }
 
     /// Pixel counts of the screen-shaped choices: a light one (944x656's, 0.8x
     /// an 11-inch iPad's points), the default (1280x720's: 1408x648 on a 19.5:9
@@ -284,5 +317,70 @@ enum ResolutionChoices {
         let p = value.lowercased().split(separator: "x").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
         guard p.count == 2, !groups.contains(where: { $0.choices.contains { $0.w == p[0] && $0.h == p[1] } }) else { return nil }
         return Choice(w: p[0], h: p[1], label: "\(p[0])×\(p[1]) · \(note)")
+    }
+
+    // MARK: A Resolution that follows the screen
+
+    /// A stored Resolution meaning "this screen's default", resolved when the
+    /// game starts (resolve), so on a foldable a game added on one screen starts
+    /// screen-shaped on the other. Stored only on a device that has shown more
+    /// than one screen shape; every other device stores the concrete default,
+    /// as before.
+    static let screenToken = "screen"
+    /// "This screen's shape at 720 lines", or the default where that already has
+    /// 720 lines: the spelling GameRecommendation.screen720 already uses.
+    static let screen720Token = "screen@720"
+
+    /// The shapes this device has shown, "WxH@WxH" (points@pixels, landscape).
+    static let seenKey = "madeira.resolution.screen-shapes"
+    static var store: UserDefaults = .standard
+
+    static func encode(_ s: Screen) -> String {
+        "\(Int(s.points.width))x\(Int(s.points.height))@\(Int(s.pixels.width))x\(Int(s.pixels.height))"
+    }
+    static func decode(_ text: String) -> Screen? {
+        let n = text.split(whereSeparator: { $0 == "x" || $0 == "@" }).compactMap { Double($0) }
+        guard n.count == 4, n.allSatisfy({ $0 > 0 }) else { return nil }
+        return Screen(points: CGSize(width: n[0], height: n[1]), pixels: CGSize(width: n[2], height: n[3]))
+    }
+    static var seenScreens: [Screen] { (store.stringArray(forKey: seenKey) ?? []).compactMap(decode) }
+
+    /// Remembers this screen's shape. A screen of a shape already seen (a
+    /// rotation, Display Zoom, More Space: within `fills`' 1.5%) adds nothing.
+    @discardableResult
+    static func noteShape(_ s: Screen = screen) -> Bool {
+        let s = Screen.landscape(points: s.points, pixels: s.pixels)
+        guard s.points.width > 0, s.points.height > 0 else { return false }
+        let d = defaultSize(for: s)
+        guard !seenScreens.contains(where: { fills(d.w, d.h, screen: $0) }) else { return false }
+        store.set((store.stringArray(forKey: seenKey) ?? []) + [encode(s)], forKey: seenKey)
+        return true
+    }
+    /// True once the device has shown screens of two shapes (a foldable).
+    static var severalScreens: Bool { seenScreens.count > 1 }
+
+    /// What a new library entry stores.
+    static var newEntryValue: String { severalScreens ? screenToken : defaultValue }
+
+    /// A stored Resolution as the "WxH" a game starts at on screen `s`.
+    static func resolve(_ value: String, for s: Screen = screen) -> String {
+        switch value {
+        case screenToken:
+            let d = defaultSize(for: s); return "\(d.w)x\(d.h)"
+        case screen720Token:
+            let l = screen720(for: s) ?? defaultSize(for: s); return "\(l.w)x\(l.h)"
+        default:
+            return value
+        }
+    }
+
+    /// The one-time conversion on a device that has shown several shapes:
+    /// a value that is the default (or the 720-line size) of a shape it has
+    /// shown becomes the token, so it follows the screen from then on.
+    static func followTokens(for screens: [Screen]) -> [String: String] {
+        var out: [String: String] = [:]
+        for s in screens { if let l = screen720(for: s) { out["\(l.w)x\(l.h)"] = screen720Token } }
+        for s in screens { let d = defaultSize(for: s); out["\(d.w)x\(d.h)"] = screenToken }
+        return out
     }
 }
