@@ -17,6 +17,11 @@ struct MadeiraApp: App {
         // ml1172: read the screen on the main thread; library entries, whose
         // default Resolution comes from it, are also made on other threads.
         _ = ResolutionChoices.screen
+        // Foldables: remember this screen's shape (a foldable shows two).
+        ResolutionChoices.noteShape()
+        // [display-geometry] lines at launch and whenever a scene's geometry or size
+        // classes change (a foldable folding, Stage Manager): DisplayGeometry.swift.
+        DisplayGeometryMonitor.shared.start()
         // A sign-in an installer left goes into the Keychain before anything else runs
         // (SigningRefresh.swift), only while the refresh is switched on.
         if SigningRefresh.enabled { SigningAccountStore.takeIn() }
@@ -33,6 +38,13 @@ struct MadeiraApp: App {
             ContentView()
                 .background(InteractionFrameRateInstaller())   // touch frame-rate request (New library grid)
                 .modifier(ClaimGamepadEvents())
+                // Foldables: the root fills the window, safe area included. The view
+                // handlesGameControllerEvents wraps the root in (_UIInteractionView) was
+                // sized to the safe area, and on the iPhone Duo the system moves the
+                // toolbar's buttons and the tab bar into the right-hand status column
+                // (the safe area's right inset), outside it: drawn, but every tap there
+                // missed. The navigation stack inside keeps the safe area through UIKit.
+                .ignoresSafeArea()
                 .onAppear {
                     ExternalDrives.shared.mountAll()
                     GamepadInput.shared.start()

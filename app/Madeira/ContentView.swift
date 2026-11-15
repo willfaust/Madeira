@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine   // Publishers.Merge for the touch-controls re-frame
 import QuartzCore
 import Metal
 import os.log
@@ -283,6 +284,10 @@ final class MetalBackedView: UIView {
         },
         NotificationCenter.default.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { _ in
             MetalBackedView.refreshDisplayMode(reason: "orientation")
+        },
+        // Foldables: a fold or unfold that keeps the orientation (DisplayGeometry.swift).
+        NotificationCenter.default.addObserver(forName: DisplayGeometry.changed, object: nil, queue: .main) { _ in
+            MetalBackedView.refreshDisplayMode(reason: "scene-geometry")
         },
     ]
     static func observeModeChanges() { _ = observers }
@@ -1444,9 +1449,9 @@ struct ContentView: View {
             Color.black
             MadeiraMetalView()
                 .onAppear { TouchControlsHost.attach() }
-                .onReceive(NotificationCenter.default.publisher(
-                    for: UIDevice.orientationDidChangeNotification)) { _ in
-                    TouchControlsHost.attach()   // re-frame to the new bounds
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)
+                    .merge(with: NotificationCenter.default.publisher(for: DisplayGeometry.changed))) { _ in
+                    TouchControlsHost.attach()   // re-frame to the new bounds (a rotation, or a fold in the same orientation)
                 }
         }
         .ignoresSafeArea()
@@ -1481,9 +1486,9 @@ struct ContentView: View {
                 .frame(height: 240)
                 .background(Color.black)
                 .onAppear { TouchControlsHost.attach() }
-                .onReceive(NotificationCenter.default.publisher(
-                    for: UIDevice.orientationDidChangeNotification)) { _ in
-                    TouchControlsHost.attach()   // re-frame to the new bounds
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)
+                    .merge(with: NotificationCenter.default.publisher(for: DisplayGeometry.changed))) { _ in
+                    TouchControlsHost.attach()   // re-frame to the new bounds (a rotation, or a fold in the same orientation)
                 }
             HStack(spacing: 6) {
                 if pointerPanel {
@@ -3675,7 +3680,7 @@ struct ContentView: View {
                 if p.count == 2, p[0] >= 640, p[1] >= 360, p[0] <= 3840, p[1] <= 2160 { width = p[0]; height = p[1] }
             }
             // A Steam game's own Resolution (validated above) sizes its Dock desktop.
-            if let size = profile?.resolution.split(separator: "x").compactMap({ Int($0) }), size.count == 2 {
+            if let size = profile?.launchResolution.split(separator: "x").compactMap({ Int($0) }), size.count == 2 {
                 width = size[0]; height = size[1]
             }
             setenv("MADEIRA_EXE", "explorer.exe", 1)

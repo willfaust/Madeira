@@ -192,7 +192,11 @@ struct LibraryEntry: Codable, Identifiable {
     /// desktop size. ml1172: new entries default to this screen's shape at
     /// 1280x720's pixel count (ResolutionChoices: 1408x648 on a 19.5:9 iPhone,
     /// as before, and 1152x800 on an 11-inch iPad, where a fixed 1408x648 left bars).
-    var resolution = ResolutionChoices.defaultValue
+    /// Foldables: on a device that has shown two screen shapes (a foldable) it is
+    /// ResolutionChoices.screenToken, resolved for the screen the game starts on.
+    var resolution = ResolutionChoices.newEntryValue
+    /// The "WxH" this entry starts at on the screen in use now.
+    var launchResolution: String { ResolutionChoices.resolve(resolution) }
     /// How the monitor is scaled to the screen (DisplayMode raw value; nil = Fit).
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
@@ -372,7 +376,7 @@ struct LibraryEntry: Codable, Identifiable {
     var displayMode: DisplayMode { display.flatMap(DisplayMode.init(rawValue:)) ?? .fit }
 
     var launchArguments: String {
-        if desktop == true { return "/desktop=shell,\(resolution) C:\\windows\\system32\\services.exe" }
+        if desktop == true { return "/desktop=shell,\(launchResolution) C:\\windows\\system32\\services.exe" }
         return launchCommand.args
     }
 
@@ -508,7 +512,7 @@ struct LibraryEntry: Codable, Identifiable {
         let parent = batch ? nil : parent
         if runsInDesktop {
             let program = parent.map { quoted($0) + " " + quoted(path) } ?? quoted(path)
-            return ("explorer.exe", "/desktop=shell,\(resolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : program))
+            return ("explorer.exe", "/desktop=shell,\(launchResolution) " + withExtra(batch ? "cmd /c \(quoted(path))" : program))
         }
         if batch { return ("C:\\windows\\system32\\cmd.exe", withExtra("/c \(quoted(path))")) }
         if let parent { return (parent, withExtra(quoted(path))) }
@@ -735,7 +739,7 @@ struct LibraryEntry: Codable, Identifiable {
     var effectiveFPSMode: Int32 { ProMotionIntent.supportedMode(fpsMode) }
 
     func validate() throws {
-        let size = resolution.split(separator: "x").compactMap { Int($0) }
+        let size = launchResolution.split(separator: "x").compactMap { Int($0) }
         guard size.count == 2, (320...4096).contains(size[0]), (240...4096).contains(size[1]),
               (0...4).contains(fpsMode), !arguments.contains("\0"), !windowsPath.contains("\0"),
               !launchArguments.contains("\0"), !launchWindowsPath.contains("\0"),
@@ -848,7 +852,8 @@ struct LibraryEntry: Codable, Identifiable {
         if usesLaunchOptions {
             fputs("[library] ml1163 start=\(runsInDesktop ? "desktop" : "direct") batch=\(isBatch ? 1 : 0) services=\(servicesScript != nil ? 1 : 0) cwd=\(launchDirectory)\n", stderr)
         }
-        LogStore.shared.log("[display-shape] resolution=\(resolution) mode=\(displayMode.rawValue)")
+        LogStore.shared.log("[display-shape] resolution=\(launchResolution)"
+            + (launchResolution != resolution ? " (\(resolution))" : "") + " mode=\(displayMode.rawValue)")
     }
 
     /// What the bridge starts. Set on the main thread before the session begins.
@@ -861,7 +866,7 @@ struct LibraryEntry: Codable, Identifiable {
             // the virtual monitor follows this entry's Resolution, as below. "The game" starts
             // its own program below, like any library game.
             if !startsSteamGameDirectly {
-                GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: resolution)
+                GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: launchResolution)
                 return
             }
         }
@@ -896,7 +901,7 @@ struct LibraryEntry: Codable, Identifiable {
         // Every session's virtual monitor takes this entry's Resolution
         // (MADEIRA_SCREEN_W/H, source "knob"); for the Desktop entry it is the
         // same size as its /desktop= argument.
-        GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: resolution)
+        GuestDisplay.configureSessionDefault(view: CGSize(width: 1280, height: 720), knob: launchResolution)
     }
 }
 
@@ -1108,6 +1113,11 @@ final class LibraryModel: ObservableObject {
             }
         }
         resetPhoneResolution()
+        followScreenDefaults()
+        // A foldable's second screen shape can first appear while the app runs.
+        _ = NotificationCenter.default.addObserver(forName: ResolutionChoices.screenChanged, object: nil, queue: .main) { _ in
+            LibraryModel.shared.followScreenDefaults()
+        }
         applyRecommendations()
     }
 
@@ -1141,6 +1151,26 @@ final class LibraryModel: ObservableObject {
         }
         UserDefaults.standard.set(true, forKey: key)
         LogStore.shared.log("[library] ml1172 resolution default \(ResolutionChoices.defaultValue); \(reset) entries reset from \(phone)")
+    }
+
+    /// Foldables: once this device has shown a second screen shape (a
+    /// foldable), entries still on the default (or the 720-line size) of a shape
+    /// it has shown take the token instead, once, so they start screen-shaped on
+    /// either screen. A device with one screen never meets the condition. A size
+    /// chosen on purpose that equals such a default converts too; nothing tells
+    /// them apart (as with ml1172).
+    private func followScreenDefaults() {
+        let key = "madeira.resolution.follow-screen"
+        guard !readOnly, ResolutionChoices.severalScreens, !UserDefaults.standard.bool(forKey: key) else { return }
+        let tokens = ResolutionChoices.followTokens(for: ResolutionChoices.seenScreens)
+        var next = entries, converted = 0
+        for i in next.indices {
+            if let token = tokens[next[i].resolution] { next[i].resolution = token; converted += 1 }
+        }
+        if converted > 0 { guard persist(next, wait: true) else { return } }   // try again at the next change or start
+        UserDefaults.standard.set(true, forKey: key)
+        LogStore.shared.log("[library] resolution follows the screen: \(converted) entries converted"
+            + " (shapes \(ResolutionChoices.seenScreens.map(ResolutionChoices.encode).joined(separator: " ")))")
     }
 
     func refreshFlag() {
@@ -3946,6 +3976,8 @@ struct LibraryDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
     @State private var importCover = false
+    /// Bumped when ResolutionChoices.screen changes (a foldable folds), so the Resolution picker rebuilds.
+    @State private var screenRevision = 0
     /// madeira-bcd: this game's own switches as the fork stores them (reloadBCD).
     @State private var bcd = BCDGameValues()
     @State private var findCover = false
@@ -4156,7 +4188,7 @@ struct LibraryDetail: View {
     /// The value a page's row shows, when one setting sums it up.
     private func summary(_ page: Page) -> String? {
         switch page {
-        case .display: return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
+        case .display: return entry.metalFXUpscale.map { "\(entry.launchResolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.launchResolution
         case .controls: return entry.controllerMode == "keys" ? "Keyboard and mouse" : entry.controllerMode == "dinput" ? "XInput and DirectInput" : nil
         case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? L("Wine desktop") : L("Directly")) : nil
         case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
@@ -4199,6 +4231,15 @@ struct LibraryDetail: View {
             let groups = ResolutionChoices.groups()
             let metalFX = ResolutionChoices.metalFX(in: groups)
             Picker("Resolution", selection: $entry.resolution) {
+                // Foldables: on a foldable, the default that follows the screen the game starts on.
+                if ResolutionChoices.severalScreens || entry.resolution == ResolutionChoices.screenToken {
+                    Text("Default for this screen (\(ResolutionChoices.resolve(ResolutionChoices.screenToken).replacingOccurrences(of: "x", with: "×")))")
+                        .tag(ResolutionChoices.screenToken)
+                }
+                if entry.resolution == ResolutionChoices.screen720Token {
+                    Text("720 lines on this screen (\(ResolutionChoices.resolve(ResolutionChoices.screen720Token).replacingOccurrences(of: "x", with: "×")))")
+                        .tag(ResolutionChoices.screen720Token)
+                }
                 ForEach(groups, id: \.title) { group in
                     Section(group.title) {
                         ForEach(group.choices, id: \.value) { Text($0.label).tag($0.value) }
@@ -4212,6 +4253,10 @@ struct LibraryDetail: View {
                 if entry.resolution != metalFX?.value, let saved = ResolutionChoices.extra(entry.resolution, in: groups, note: "saved") {
                     Text(saved.label).tag(entry.resolution)
                 }
+            }
+            .id(screenRevision)
+            .onReceive(NotificationCenter.default.publisher(for: ResolutionChoices.screenChanged).receive(on: RunLoop.main)) { _ in
+                screenRevision &+= 1
             }
             Picker("Aspect & scaling", selection: Binding(get: { entry.displayMode.rawValue }, set: { entry.display = $0 })) {
                 ForEach(DisplayMode.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }

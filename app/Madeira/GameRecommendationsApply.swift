@@ -173,7 +173,9 @@ extension GameRecommendations {
         if let mode = rec.fpsMode { entry.fpsMode = mode }
         if let size = rec.resolution {
             // This screen's shape at 720 lines; a screen whose default has them keeps its own.
+            // Foldables: a foldable stores the token and resolves it for the screen the game starts on.
             if size != GameRecommendation.screen720 { entry.resolution = size }
+            else if ResolutionChoices.severalScreens { entry.resolution = ResolutionChoices.screen720Token }
             else if let lines720 = ResolutionChoices.screen720Value { entry.resolution = lines720 }
         }
         if let mode = rec.display { entry.display = mode == DisplayMode.fit.rawValue ? nil : mode }

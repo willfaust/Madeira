@@ -300,7 +300,10 @@ assert bac['switches'] == 'olderNvidia: true' and bac['version'] == 2, bac
 bo1 = presets['black-ops-1']
 assert bo1['tested'] == ['env.MADEIRA_EC_HOOK_TRACE = 0'] and bo1['switches'] == 'olderNvidia: true, resolution: "1280x720"' \
     and bo1['version'] == 1, bo1
-assert 'if size != GameRecommendation.screen720 { entry.resolution = size }\n            else if let lines720 = ResolutionChoices.screen720Value { entry.resolution = lines720 }' in apply_src
+# madeira-duo: a device that has shown two screen shapes (a foldable) stores the token, resolved at launch.
+assert 'if size != GameRecommendation.screen720 { entry.resolution = size }\n' \
+    '            else if ResolutionChoices.severalScreens { entry.resolution = ResolutionChoices.screen720Token }\n' \
+    '            else if let lines720 = ResolutionChoices.screen720Value { entry.resolution = lines720 }' in apply_src
 gta = presets['gta5e-steam']
 assert 'env.MADEIRA_CHILD_ARGS = PlayGTAV.exe -nobattleye' in gta['lines']
 assert 'env.MADEIRA_DOCK_KEEP_ALIVE = Launcher.exe;GTA5_Enhanced.exe' in gta['lines']
@@ -609,7 +612,11 @@ stubs = r'''import Foundation
 
 enum DisplayMode: String { case fit, fill, stretch, aspect }
 
-enum ResolutionChoices { static var screen720Value: String? { "1568x720" } }   // a 19.5:9 iPhone
+enum ResolutionChoices {   // a 19.5:9 iPhone, one screen
+    static var screen720Value: String? { "1568x720" }
+    static var severalScreens: Bool { false }
+    static let screen720Token = "screen@720"
+}
 
 final class LibraryModel {
     static let shared = LibraryModel()

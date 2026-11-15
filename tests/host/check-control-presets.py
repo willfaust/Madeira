@@ -51,6 +51,10 @@ let screens: [(String, ControlPresetScreen)] = [
     ("13in tablet", ControlPresetScreen(width: 1366, height: 1024, top: 24, bottom: 20)),
     ("mini tablet", ControlPresetScreen(width: 1133, height: 744, top: 24, bottom: 20)),
     ("phone, portrait", ControlPresetScreen(width: 402, height: 874, left: 0, right: 0, top: 62, bottom: 34)),
+    // iPhone Duo (iPhone19,4), as held: inner 951x669 pt and outer 466x678 pt, both
+    // with a 0,0,34,84 safe area (status bar and bars in an 84 pt right-hand column).
+    ("Duo inner", ControlPresetScreen(width: 951, height: 669, right: 84, top: 0, bottom: 34)),
+    ("Duo outer", ControlPresetScreen(width: 466, height: 678, right: 84, top: 0, bottom: 34)),
 ]
 let expected = ["LS", "RS", "D↑", "D↓", "D←", "D→", "A", "B", "X", "Y",
                 "LB", "RB", "LT", "RT", "View", "Menu", "L3", "R3"]
