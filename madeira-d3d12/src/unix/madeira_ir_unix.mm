@@ -1486,6 +1486,19 @@ static void mad_dxc_init_once(void)
         return;
     }
     mkdir(dir, 0755);
+    /* madeira-duo (16 Nov 2026): with d3d12-shader-pack on, new entries go to the pack and
+     * loose ones are only read (and moved into the pack on a hit), so the loose bound has
+     * nothing to bound. The scan still stat()ed every leftover loose entry each launch
+     * (17,348 files, 451 MB on the Duo: 2.5% of the process's CPU in Path of Exile 2's
+     * hideout). It is skipped then; MADEIRA_D3D12_DXIL_LOOSE_SCAN=1 runs it anyway. */
+    if (mad_sc_pack_on()) {
+        const char *force = getenv("MADEIRA_D3D12_DXIL_LOOSE_SCAN");
+        if (!(force && force[0] == '1')) {
+            dprintf(2, "[d3d12-dxil-cache] ml1990 enabled, entries in the shader pack; loose entries not scanned "
+                       "(read and moved into the pack on a hit); retry slots %s\n", g_dxc_slot_on ? "on" : "off");
+            return;
+        }
+    }
     /* madeira-duo (6 Nov 2026): the first scan stats every loose entry (17k on the Duo,
      * over a second), and this runs inside the first pipeline creation, on the game's
      * Main thread in PoE2: one 2.3 s hitch. It runs on its own thread now. Until it
