@@ -87,13 +87,14 @@ else:
     print('SKIP: dxmt submodule not checked out here')
 
 # --- the overlay ----------------------------------------------------------------------
-check('void madeira_shader_overlay_stats(unsigned long long *shader_misses, unsigned long long *pipeline_misses,' in bridge,
-      'the bridging header declares it for Swift')
+check('int madeira_shader_overlay_stats_optional(unsigned long long *shader_misses, unsigned long long *pipeline_misses,' in bridge,
+      'the bridging header declares the run-time lookup for Swift (a DXMT without the counters still links)')
 check('"GPU", "Shader misses", "RAM"' in lib, 'the overlay settings offer the Shader misses field (off unless picked)')
-check('madeira_shader_overlay_stats(&shaders, &pipelines, &queue, &background, &flags)' in lib
+check('madeira_shader_overlay_stats_optional(&shaders, &pipelines, &queue, &background, &flags)' in lib
       and lib.count('if model.overlayFields.contains("Shader misses") {') == 3,
       'sampled only while the field is shown; cells and the spoken summary follow the same switch')
-check('Cell(id: "miss", label: "MISS/s"' in lib and 'Cell(id: "psoq", label: "PSO Q"' in lib, 'two cells: MISS/s and PSO Q')
+check('Cell(id: "miss", label: "SHADERS"' in lib and 'Cell(id: "pso", label: "PSO"' in lib and 'Cell(id: "psoq", label: "WAIT"' in lib
+      and 'MISS/s' not in lib, 'session totals (vk4): SHADERS and PSO, and WAIT for the pipelines the game waits on now')
 
 print(f'{failures} failure(s)')
 sys.exit(1 if failures else 0)
