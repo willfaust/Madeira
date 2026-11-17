@@ -94,6 +94,15 @@ OVERLAY = {
                         "of sound lagging slightly behind the picture: Black Ops II's Zombies crackled at 60 ms "
                         "and was clean at 150. A game's own config can set it for that game alone. Applies at "
                         "the next game start."},
+    "env.MADEIRA_AUDIO_MIX_RATE": {"category": "Audio", "title": "Sound mixing rate",
+                "kind": "choice", "default": "",
+                "choices": [("", "48 kHz (default)"), ("32000", "32 kHz"), ("24000", "24 kHz")],
+                "note": "The sample rate Madeira reports for the sound device (8000-96000 Hz, default 48000). A "
+                        "game whose sound engine mixes at the device's rate then mixes that much less audio each "
+                        "second, which is CPU the game gets back; an engine whose game fixed the rate converts at "
+                        "its output instead and gains nothing. FMOD's own default on mobile is 24 kHz \"to reduce "
+                        "CPU cost\"; at 24 kHz sound above 12 kHz is lost. The [ios_audio] create_stream lines in "
+                        "the log give the rate each program opened. Applies at the next game start."},
     "env.MADEIRA_AUDIO_DOWNMIX": {"category": "Audio", "title": "Mix surround sound down to stereo",
                 "kind": "bool", "default": "1",
                 "note": "On by default: a game that plays 5.1 or 7.1 sound has every channel folded into the "
