@@ -18539,17 +18539,32 @@ static void STDMETHODCALLTYPE device_CreateShaderResourceView(ID3D12Device *This
  * Every MIN/MAX filter value is logged once with its mapping (default on: a
  * game using one renders wrongly here); sampler-census = 1 logs every
  * distinct filter value. */
-static int g_smp_red = -1, g_smp_census;
+/* madeira-duo SAMPLER ANISOTROPY CAP (madeira.cfg sampler-max-aniso, opt-in, default
+ * 0). A game's anisotropic samplers ask for up to 16 taps along the stretched
+ * axis of every texture read; on a phone GPU that is fragment time a low internal
+ * resolution does not need. Path of Exile 2 at "texture_filtering = 8" uses one
+ * anisotropic sampler (filter 0x55, 8x, wrap) for its material textures. N (1..16)
+ * caps maxAnisotropy of the Metal sampler at N; 1 is plain trilinear. Only the
+ * Metal sampler object changes: the root signature the converter and the shader
+ * cache see keeps the game's value, so no shader is converted again. 0: as asked. */
+static int g_smp_red = -1, g_smp_census, g_smp_aniso;
+static volatile LONG g_smp_aniso_capped, g_smp_aniso_kept;
 static volatile LONG g_smp_seen[16];   /* filter values 0..0x1ff already logged */
 static const char *const g_cmp_names[8] = { "Never", "Less", "Equal", "LessEqual", "Greater", "NotEqual", "GreaterEqual", "Always" };
 static void mad_sampler_red_load(void) {
-    long long v;
+    long long v, a;
     if (g_smp_red >= 0) return;
     v = mad_cfg_int_pe("sampler-reduction", 0);    /* MIN/MAX reduction samplers (GoT Hi-Z culling): 3 = Metal reductionMode (iOS 26, A19 / Apple10; the fix), 1 = point filtering and no comparison, 2 = no comparison only */
     g_smp_census = mad_cfg_int_pe("sampler-census", 0) ? 1 : 0;   /* diagnostic: log every distinct sampler filter value once with its Metal mapping */
+    a = mad_cfg_int_pe("sampler-max-aniso", 0);    /* madeira-duo: N (1..16) caps the anisotropy of every sampler at N (1 = trilinear; less fragment time); 0 = as the game asks */
+    g_smp_aniso = a >= 1 && a <= 16 ? (int)a : 0;
+    MemoryBarrier();
     g_smp_red = v >= 1 && v <= 3 ? (int)v : 0;
     if (g_smp_red || g_smp_census)
         d3d12_log("[sampler] madeira-bcd sampler-reduction=%d sampler-census=%d\n", g_smp_red, g_smp_census);
+    if (g_smp_aniso)
+        d3d12_log("[sampler] madeira-duo sampler-max-aniso = %d: anisotropic samplers are capped at %dx%s\n", g_smp_aniso, g_smp_aniso,
+                  g_smp_aniso == 1 ? " (trilinear)" : "");
 }
 static void mad_sampler_log(const struct WMTSamplerInfo *si, UINT filter, UINT cmp, const char *who) {
     static const char *const red[4] = { "standard", "comparison", "MINIMUM", "MAXIMUM" };
@@ -18588,6 +18603,17 @@ static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UI
     si->compare_function = (filter & 0x80) ? mad_compare((D3D12_COMPARISON_FUNC)cmp) : WMTCompareFunctionNever;
     si->lod_min_clamp = minlod; si->lod_max_clamp = maxlod > 1000.0f ? 1000.0f : maxlod;
     si->max_anisotroy = (filter & 0x40) ? (aniso ? aniso : 16) : 1;
+    if ((filter & 0x40) && g_smp_aniso) {   /* madeira-duo sampler-max-aniso, see above; unset, nothing here runs */
+        unsigned asked = (unsigned)si->max_anisotroy;
+        if (asked > (unsigned)g_smp_aniso) {
+            si->max_anisotroy = g_smp_aniso;
+            if (InterlockedIncrement(&g_smp_aniso_capped) == 1)
+                d3d12_log("[sampler] madeira-duo sampler-max-aniso: first anisotropic sampler capped, %ux -> %dx (filter 0x%03x, from %s)\n",
+                          asked, g_smp_aniso, filter, who ? who : "?");
+        } else if (InterlockedIncrement(&g_smp_aniso_kept) == 1)
+            d3d12_log("[sampler] madeira-duo sampler-max-aniso: first anisotropic sampler within the cap, %ux (filter 0x%03x, from %s)\n",
+                      asked, filter, who ? who : "?");
+    }
     si->normalized_coords = true;
     si->support_argument_buffers = true;
     if (red >= 2 && g_smp_red) {   /* madeira-bcd: sampler-reduction, see above */
@@ -21769,10 +21795,10 @@ static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,
         memset(&ci, 0, sizeof ci);   /* the descriptor mad_cpso_realize builds */
         ci.compute_function = p->vs_fn;
         if (mad_po_on()) p->origin = mad_po_note(mad_po_cs_key(desc), 1);   /* madeira-duo pso-origin: classed before a builder can take it */
-        queued = mad_csb_queue(p);   /* madeira-duo cs-create-build: a builder compiles it now */
+        queued = mad_csb_block(p) || mad_csb_queue(p);   /* madeira-duo cs-create-build: compiled here (3), or a builder compiles it now */
         if (!queued) mad_pso_warm(p->device_handle, &ci, NULL, 2);   /* pso-warm */
         hr = pso_QI((ID3D12PipelineState *)p, riid, out);
-        if (!queued && lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);   /* madeira-bcd pso-lazy-libs; a queued build reads them */
+        if (!queued && lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);   /* madeira-bcd pso-lazy-libs; a queued build reads them, a built one keeps them as after a first dispatch */
         pso_Release((ID3D12PipelineState *)p);
         return hr;
     }
