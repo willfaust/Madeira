@@ -45,6 +45,7 @@ final class HardwareInput {
     static var pointerLockAvailable = true
     static var desktopMode = false
     static var hiddenCursorAbsolute = false   // MADEIRA_POINTER_HIDDEN_ABSOLUTE, off by default
+    static var lockOnStart = false            // MADEIRA_POINTER_LOCK_ON_START, off by default
     static let moveFlag: UInt32 = 1
     static let absoluteFlag: UInt32 = 0x8000
     static func desktopSize() -> (w: Int, h: Int) { (1024, 768) }
@@ -68,9 +69,10 @@ final class HardwareInput {
 '''
 
 tests = r'''
-func reset(relative: Bool = false, desktop: Bool = false) -> HardwareInput {
+func reset(relative: Bool = false, desktop: Bool = false, lockOnStart: Bool = false) -> HardwareInput {
     Clock.now = 100
     InputSettings.shared.relative = relative
+    HardwareInput.lockOnStart = lockOnStart
     HardwareInput.mouseRoutingEnabled = true
     HardwareInput.autoLockEnabled = true
     HardwareInput.directCursorEnabled = true
@@ -97,6 +99,31 @@ for desktop in [false, true] {
     h.baseFocused = false
     h.updateAutoLock()
     assert(!h.pointerLocked, "focus loss did not release capture")
+}
+
+// A game's lock-on-start setting captures like Relative mode with the toggle off,
+// and keeps capture while the game shows a cursor.
+do {
+    let h = reset(lockOnStart: true)
+    h.cursorState = (1, 1)
+    assert(!h.cursorShownForRoute)
+    h.updateAutoLock()
+    assert(h.pointerLocked && h.lockedByUs, "lock on start did not capture")
+    Clock.now += 10
+    h.lastGCDeltaAt = Clock.now
+    h.updateAutoLock()
+    assert(h.pointerLocked, "lock on start released while the game shows a cursor")
+    h.baseFocused = false
+    h.updateAutoLock()
+    assert(!h.pointerLocked, "focus loss did not release lock on start")
+}
+// Without the setting, the same shown cursor keeps the pointer free.
+do {
+    let h = reset()
+    h.cursorState = (1, 1)
+    h.lastReportAt = Clock.now
+    h.updateAutoLock()
+    assert(!h.pointerLocked)
 }
 
 // Explicit release, unsupported paths and idle motion must not be overridden.

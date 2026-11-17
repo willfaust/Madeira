@@ -729,6 +729,16 @@ final class HardwareInput: ObservableObject {
         return String(cString: v) == "1"
     }
 
+    /// MADEIRA_POINTER_LOCK_ON_START=1 (a game's own config): the game starts in
+    /// relative mouse-look with automatic pointer lock, as with the Relative
+    /// toggle, without waiting for a hidden-cursor report. For first-person games
+    /// whose view must turn past the screen edges. Read per use: the app sets a
+    /// game's env lines for each launch. Default off.
+    static var lockOnStart: Bool {
+        guard let v = getenv("MADEIRA_POINTER_LOCK_ON_START") else { return false }
+        return String(cString: v) == "1"
+    }
+
     /// The desktop's live size in guest pixels (IOSDisplayShim): the session
     /// default until a program changes the display mode, which resizes it.
     private static func desktopSize() -> (w: Int, h: Int) {
@@ -1650,7 +1660,8 @@ final class HardwareInput: ObservableObject {
     private var cursorShownForRoute: Bool {
         PointerPolicy.cursorShown(desktop: Self.desktopMode, directEnabled: Self.directCursorEnabled,
                                   reports: cursorState.reports, shown: cursorState.shown != 0,
-                                  routingEnabled: Self.mouseRoutingEnabled, relative: InputSettings.shared.relative,
+                                  routingEnabled: Self.mouseRoutingEnabled,
+                                  relative: InputSettings.shared.relative || Self.lockOnStart,
                                   hiddenAbsolute: Self.hiddenCursorAbsolute)
     }
 
@@ -1728,7 +1739,7 @@ final class HardwareInput: ObservableObject {
         let now = CACurrentMediaTime()
         motionLock.lock(); let lastDelta = lastGCDeltaAt; motionLock.unlock()
         // Adapted from BCD dd2fe9c (2026-10-27): relative mode need not report a hidden cursor.
-        let relative = Self.mouseRoutingEnabled && InputSettings.shared.relative
+        let relative = Self.mouseRoutingEnabled && (InputSettings.shared.relative || Self.lockOnStart)
         let shown = !relative && cursorState.shown != 0
         let hiddenFor = relative ? AutoLock.hiddenDelay
             : (cursorState.reports == 0 || cursorHiddenSince == 0 ? 0 : now - cursorHiddenSince)
