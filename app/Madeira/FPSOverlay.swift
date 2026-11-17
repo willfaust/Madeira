@@ -84,6 +84,7 @@ final class ProMotionIntent {
             link = l
             activeMax = want
             displaySyncApplied = false; armedAt = 0; tickStart = 0   // ml2021: per arming
+            kickWanted = false
             fputs("[promote] display link armed preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz\n", stderr)
             // ml2020: stderr written before Wine starts is not in the exported log; say it there too
             LogStore.shared.log("[promote] display link armed min=\(Int(lo))Hz preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz")
@@ -139,6 +140,10 @@ final class ProMotionIntent {
     /// drawable waits fall with this on, that is what the display link alone does not do.
     private var kickLayer: CALayer?
     private var kickOn = false
+    /// madeira-duo: `kickEnabled` as read once per arming (with display sync, a second after the link starts).
+    /// Reading it on every tick cost two stat() calls on madeira.cfg plus string building each time:
+    /// 160 stats a second on the main thread at panel-hz 80, 44% of that thread's samples in a profile.
+    private var kickWanted = false
     static var kickEnabled: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE_KICK", fallback: false) }
 
     /// ml2021: env.MADEIRA_DISPLAY_SYNC applied to the game's layer once the session's
@@ -150,6 +155,7 @@ final class ProMotionIntent {
     private func applyDisplaySync(now: CFTimeInterval) {
         guard !displaySyncApplied, now - armedAt >= 1 else { return }
         displaySyncApplied = true
+        kickWanted = ProMotionIntent.kickEnabled
         let layer = MetalHostView.shared.metalLayer
         let sel = NSSelectorFromString("setDisplaySyncEnabled:")
         guard layer.responds(to: sel) else { return }
@@ -176,7 +182,7 @@ final class ProMotionIntent {
                                        (sender.targetTimestamp - sender.timestamp) * 1000))
             tickStart = now; tickCount = 1; tickMaxGap = 0
         }
-        if ProMotionIntent.kickEnabled { kick() }
+        if kickWanted { kick() }
     }
 
     private func kick() {
