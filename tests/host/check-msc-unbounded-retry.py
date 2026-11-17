@@ -66,7 +66,7 @@ def body(sig):
 
 
 unb = pe[pe.index("#define MAD_UNB_FAILS_MAX 4"):pe.index("/* madeira-bcd pso-placeholder: see device_CreateGraphicsPipelineState. */")]
-memo = pe[pe.index("#define MAD_FAILMEMO_N 16384u"):pe.index("static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a);\nstatic void mad_ir_convert_cached(")]
+memo = pe[pe.index("#define MAD_FAILMEMO_N 16384u"):pe.index("static void mad_ir_convert_cached_impl(struct madeira_ir_convert_args *a);\n")]
 
 harness = r'''
 #include <stdio.h>

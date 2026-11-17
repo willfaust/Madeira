@@ -74,7 +74,7 @@ ident = ident[:ident.index("n = GetEnvironmentVariableW(L\"LOCALAPPDATA\"")]
 check("runtime cache identity: \", dxbc-spaces 1\" only with the switch on, before the identity is hashed",
       'if (mad_cfg_int_pe("dxbc-register-spaces", 0)) {' in ident
       and 'snprintf(g_sc_rt + l, sizeof g_sc_rt - l, ", dxbc-spaces 1");' in ident
-      and ident.index('", dxbc-spaces 1"') < ident.index("mad_sc_feed(&hr, g_sc_rt, sizeof g_sc_rt);"))
+      and ident.index('", dxbc-spaces 1"') < ident.index("mad_sc_feed(&hr, g_sc_rt, strlen(g_sc_rt) < 96 ? 96 : sizeof g_sc_rt);"))
 resolve = pe[pe.index("static int mad_air_resolve(struct mad_exec *e,", pe.index("/* Resolve one declaration range against the root signature.")):]
 resolve = resolve[:resolve.index("\n}\n") + 3]
 check("mad_air_resolve matches the space: tables, root constants, root descriptors, static samplers",

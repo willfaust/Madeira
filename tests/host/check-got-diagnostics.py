@@ -268,6 +268,7 @@ SD1 = SRC.index("static int exec_arg_slot_for(struct mad_exec *e, const struct m
                 "                             const UINT32 (*consts)[64], obj_handle_t *buf, UINT64 *off, const UINT *ovr, const struct mad_pso *pso) {")
 
 SD_STUBS = r'''
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -303,6 +304,8 @@ static long long mad_cfg_int_pe(const char *key, long long dflt) {
     int i; for (i = 0; i < 11; i++) if (!strcmp(key, k[i])) return g_cfg[i] ? g_cfg[i] : dflt;
     return dflt;
 }
+/* rcas-fill (FSR sharpening when PoE2 gives none) reads its strength as text in this region: unset here */
+static int mad_cfg_str_pe(const char *key, char *out, size_t cap) { (void)key; (void)out; (void)cap; return 0; }
 struct mad_device { obj_handle_t gpu_event, mtl_device; volatile LONG64 gpu_serial_committed, gpu_serial_failed; };
 static UINT64 g_completed;
 static UINT64 mad_gpu_completed(struct mad_device *d) { (void)d; return g_completed; }
@@ -633,7 +636,7 @@ else:
         c.write_text(code)
         exe = pathlib.Path(t) / "sd"
         p = subprocess.run([cc, "-std=c11", "-Wall", "-Wno-unused-function", "-Wno-unused-variable",
-                            "-I", str(R / "madeira-d3d12/src"), "-o", str(exe), str(c)], capture_output=True, text=True)
+                            "-I", str(R / "madeira-d3d12/src"), "-o", str(exe), str(c), "-lm"], capture_output=True, text=True)
         check("sync harness compiles", p.returncode == 0)
         if p.returncode:
             print(p.stderr[-4000:])

@@ -93,8 +93,9 @@ check('a released resource stops being refreshed before its memory goes',
       'if (r->cpu) mad_tvs_forget(r);' in rel and rel.index('mad_tvs_forget(r)') < rel.index('if (r->own_mem)'))
 check('view-census reports the copies', '[view-census] typed-view-shadow: %ld views read an aligned copy' in pe)
 check('vis-trace hooks: draws, dispatches and copies (by queue type) counted only when on',
-      'case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c); break;' in pe and
-      'case MC_DISPATCH: exec_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;' in pe and
+      # [gpu-work]'s per-frame counters (mad_gw_draw / mad_gw_dispatch) sit between the encode and the vis-trace hook
+      'case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); mad_gw_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c); break;' in pe and
+      'case MC_DISPATCH: exec_dispatch(&e, c); mad_gw_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;' in pe and
       'if (g_vt_on > 0) InterlockedIncrement(&g_vt_copy_q[q->type & 3]);' in pe)
 check('readbacks: looked at only with vis-trace or readback-far on; a filled one encodes no copy',
       'if ((g_vt_on > 0 || g_rbf_on > 0) && mad_vt_copy(e, c)) return;   /* madeira-bcd vis-trace / readback-far */' in pe)

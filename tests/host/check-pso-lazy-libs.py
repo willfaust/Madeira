@@ -65,21 +65,25 @@ check('the key is taken after a successful conversion, before the sized ranges a
 real = body('static obj_handle_t mad_pso_realize(struct mad_pso *p)')
 check('the first draw reads the libraries back before building',
       real.index('if (!p->lz || mad_lzlib_restore(p))') < real.index('MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &p->vd, &err)'))
-creal = body('static obj_handle_t mad_cpso_realize(struct mad_pso *p)')
+# cs-create-build: the build is mad_cpso_build (a first dispatch or a builder); mad_cpso_realize is its dispatch entry
+creal = body('static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg)')
+check('a first dispatch goes through the same build',
+      'static obj_handle_t mad_cpso_realize(struct mad_pso *p) { return mad_cpso_build(p, 0); }' in pe)
 check('the first dispatch too, and only then takes the function',
       creal.index('if (!p->lz || mad_lzlib_restore(p))') < creal.index('ci.compute_function = p->vs_fn;'))
 gfx = body('static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,')
 check('graphics: only a plain pipeline that is built at its first draw',
       'lz_on = mad_lzlib_on() && mad_pso_lazy_on() && !desc->GS.pShaderBytecode && !desc->HS.pShaderBytecode &&\n'
       '            !desc->DS.pShaderBytecode;' in gfx)
-drop = 'if (lz_on && p->lazy && !p->rps && mad_lzlib_can_drop(p, &lzv, &lzp)) mad_lzlib_drop(p, &lzv, &lzp);'
+# pso-create-build / cs-create-build: a pipeline queued for the builders at creation keeps its libraries (the build reads them)
+drop = 'if (!queued && lz_on && p->lazy && !p->rps && mad_lzlib_can_drop(p, &lzv, &lzp)) mad_lzlib_drop(p, &lzv, &lzp);'
 check('graphics: dropped after the pso-warm request (where pso-warm is built in), before the pipeline is handed out',
       ('mad_pso_warm(' not in gfx or gfx.index('mad_pso_warm(p->device_handle, &p->rp') < gfx.index(drop))
       and gfx.index(drop) < gfx.rindex('hr = pso_QI('))
 check('graphics: both stages are converted with the key request',
       'if (lz_on) ov2.lz = &lzv;' in gfx and 'if (lz_on) op.lz = &lzp;' in gfx)
 cs = body('static HRESULT device_CreateComputePipelineState_impl(ID3D12Device *This,')
-cdrop = 'if (lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);'
+cdrop = 'if (!queued && lz_on && mad_lzlib_can_drop(p, &lzc, NULL)) mad_lzlib_drop(p, &lzc, NULL);'
 check('compute: dropped after the pso-warm request of a lazy pipeline (where pso-warm is built in)',
       'if (lz_on) o.lz = &lzc;' in cs and
       ('mad_pso_warm(' not in cs or cs.index('mad_pso_warm(p->device_handle, &ci, NULL, 2);') < cs.index(cdrop)) and
