@@ -1395,6 +1395,7 @@ struct mad_pso {
     volatile LONG async_q;                          /* pso-async: handed to the background builders (1; 2 = pso-create-build's low-priority queue) */
     UINT64 seen_key; LONG seen_mark;                /* madeira-duo pso-create-build: the pipeline's content key, and drawn once this session */
     UINT8 origin;                                   /* madeira-duo pso-origin: 1 drawn in an earlier session, 2 created in one, 3 new (0 = not counted) */
+    LONG64 csb_t0;                                  /* madeira-duo cs-create-build: QPC when it was queued at creation (0 = not queued) */
     /* madeira-bcd pso-lazy-libs: lz = the stage libraries were dropped once the
      * pipeline was created and come back from the shader cache under these keys
      * at its first draw (mad_lzlib_restore); lz_has_ps never changes after creation */
@@ -6830,6 +6831,7 @@ static enum WMTPrimitiveType mad_prim(D3D12_PRIMITIVE_TOPOLOGY t) {
  * creation. */
 static volatile LONG g_pso_lazy_built, g_pso_lazy_failed;
 static volatile LONG g_csb_queued, g_csb_built, g_csb_failed, g_csb_full, g_csb_waited, g_csb_inline;   /* madeira-duo cs-create-build */
+static int g_csb = -1;   /* cs-create-build: 0 off, 1 every compute pipeline on the builders, 2 only the ones no earlier session created, 3 those built inside the create call (mad_csb_on) */
 static volatile LONG64 g_csb_wait_t;
 static int mad_lzlib_restore(struct mad_pso *p);   /* madeira-bcd pso-lazy-libs */
 static void mad_po_build(const struct mad_pso *p, int kind, LONG64 dt);   /* madeira-duo pso-origin */
@@ -6899,6 +6901,17 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     return p->rps;
 }
 
+/* madeira-duo cs-create-build = 2 / 3: one line per new compute pipeline the builders took (a few dozen a session). dt: QPC ticks. */
+static void mad_csb_say(const struct mad_pso *p, const char *what, LONG64 dt) {
+    LARGE_INTEGER f;
+    if (!QueryPerformanceFrequency(&f) || !f.QuadPart) return;
+    d3d12_log("[cs-create-build] %s cs:%08x: %s, %.0f ms (created %.0f ms earlier) | built at creation %ld, failed %ld, queued %ld, not queued (queue full) %ld; "
+              "first dispatches that waited %ld (%.1f ms in all), that built it themselves %ld\n",
+              p->vs_name, (unsigned)p->cs_hash, what, (double)dt * 1000.0 / (double)f.QuadPart,
+              p->csb_t0 ? (double)(mad_qpc() - p->csb_t0) * 1000.0 / (double)f.QuadPart : 0.0,
+              (long)g_csb_built, (long)g_csb_failed, (long)g_csb_queued, (long)g_csb_full,
+              (long)g_csb_waited, (double)g_csb_wait_t * 1000.0 / (double)f.QuadPart, (long)g_csb_inline);
+}
 /* bg: a cs-create-build builder (mad_csb_built), not a dispatch. */
 static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
     if (p->cps || !p->lazy_cs) return p->cps;
@@ -6910,6 +6923,7 @@ static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
             InterlockedExchangeAdd64(&g_hz_cs_realize_t, tw); InterlockedIncrement(&g_hz_cs_realize_n);   /* hitch recorder: the dispatch did wait */
             InterlockedIncrement(&g_csb_waited);
             InterlockedExchangeAdd64(&g_csb_wait_t, tw);
+            if (g_csb >= 2) mad_csb_say(p, "its first dispatch waited for the build in progress", tw);
         }
     } else AcquireSRWLockExclusive(&p->rlock);
     if (!p->cps && p->lazy_cs) {
@@ -6922,7 +6936,10 @@ static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
             if (p->origin) mad_po_build(p, 1, mad_qpc() - t0);   /* madeira-duo pso-origin */
             if (!bg) { InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n); }
             else if (p->cps) InterlockedIncrement(&g_csb_built);
-            if (!bg && p->async_q == 2) InterlockedIncrement(&g_csb_inline);   /* queued, but its dispatch came first */
+            if (!bg && p->async_q == 2) {   /* queued, but its dispatch came first */
+                InterlockedIncrement(&g_csb_inline);
+                if (g_csb >= 2) mad_csb_say(p, "its first dispatch came before a builder took it and built it", mad_qpc() - t0);
+            }
         }
         if (err) mad_log_nserror("compute pipeline", err);
         if (!p->cps) {
@@ -6960,6 +6977,12 @@ static LONG g_pa_head, g_pa_tail;
 #define MAD_PCB_MAX 16384
 static struct mad_pso *g_pcb_q[MAD_PCB_MAX];
 static LONG g_pcb_head, g_pcb_tail;
+/* madeira-duo cs-create-build = 2: compute pipelines no earlier session created, taken
+ * before both queues. A dispatch can't be skipped while a builder works, so the frame
+ * that first uses one waits for whatever of its build is left. */
+#define MAD_PCS_MAX 256
+static struct mad_pso *g_pcs_q[MAD_PCS_MAX];
+static LONG g_pcs_head, g_pcs_tail;
 static SRWLOCK g_pa_lock = SRWLOCK_INIT;
 static HANDLE g_pa_sem;
 static volatile LONG g_pa_queued, g_pa_built, g_pa_failed, g_pa_inline, g_pa_skips;
@@ -6994,12 +7017,13 @@ static DWORD WINAPI mad_pa_worker(void *arg) {
         struct mad_pso *p = NULL; obj_handle_t pool; LONG n = 0; int low = 0;
         WaitForSingleObject(g_pa_sem, INFINITE);
         AcquireSRWLockExclusive(&g_pa_lock);
-        if (g_pa_head != g_pa_tail) { p = g_pa_q[(ULONG)g_pa_head % MAD_PA_MAX]; g_pa_head++; }
+        if (g_pcs_head != g_pcs_tail) { p = g_pcs_q[(ULONG)g_pcs_head % MAD_PCS_MAX]; g_pcs_head++; }   /* cs-create-build = 2: new compute pipelines first */
+        else if (g_pa_head != g_pa_tail) { p = g_pa_q[(ULONG)g_pa_head % MAD_PA_MAX]; g_pa_head++; }
         else if (g_pcb_head != g_pcb_tail) { p = g_pcb_q[(ULONG)g_pcb_head % MAD_PCB_MAX]; g_pcb_head++; low = 1; }   /* pso-create-build */
         ReleaseSRWLockExclusive(&g_pa_lock);
         if (!p) continue;
         pool = NSAutoreleasePool_alloc_init();
-        if (low && p->is_compute) mad_csb_built(p);   /* madeira-duo cs-create-build */
+        if (p->is_compute) mad_csb_built(p);   /* madeira-duo cs-create-build: the low queue (1) or the compute one (2); pso-async queues render pipelines only */
         else if (low) mad_pcb_built(p);   /* pso-create-build: counted on its own */
         else if (mad_pso_realize(p)) n = InterlockedIncrement(&g_pa_built);
         else InterlockedIncrement(&g_pa_failed);
@@ -7024,7 +7048,7 @@ static int mad_pa_start(void) {
          * stayed invisible for seconds (text15: 11k draws skipped). */
         unsigned want = (unsigned)mad_cfg_int_pe("pso-async-threads", 2);
         if (want < 1) want = 1; if (want > 8) want = 8;
-        g_pa_sem = CreateSemaphoreA(NULL, 0, MAD_PA_MAX + MAD_PCB_MAX, NULL);
+        g_pa_sem = CreateSemaphoreA(NULL, 0, MAD_PA_MAX + MAD_PCB_MAX + MAD_PCS_MAX, NULL);
         d3d12_log("[madeira-d3d12] pso-async: %u builder threads (madeira.cfg pso-async-threads)\n", want);
         for (t = 0; g_pa_sem && t < want; t++) {
             HANDLE h = CreateThread(NULL, 256 << 10, mad_pa_worker, NULL, 0, NULL);
@@ -7274,6 +7298,23 @@ static void mad_pcb_built(struct mad_pso *p) {
 static volatile LONG g_pcbk_n, g_pcbk_failed, g_pcbk_slow, g_pcbk_slow_said;
 static volatile LONG64 g_pcbk_t, g_pcbk_max;
 static volatile DWORD g_ecl_tid;   /* the thread that last called ExecuteCommandLists */
+/* madeira-duo cs-create-build = 3: every thread that has called ExecuteCommandLists.
+ * PoE2 submits a frame from whichever of its Main / HIGH threads runs that job. */
+static volatile DWORD g_ecl_tids[8];
+static void mad_ecl_thread_note(DWORD me) {
+    int i;
+    if (g_ecl_tid == me) return;   /* the thread of the last call: noted then */
+    for (i = 0; i < 8; i++) {
+        if (g_ecl_tids[i] == me) return;
+        if (!g_ecl_tids[i] && !InterlockedCompareExchange((volatile LONG *)&g_ecl_tids[i], (LONG)me, 0)) return;
+    }
+}
+static int mad_ecl_thread(DWORD me) {
+    int i;
+    if (g_ecl_tid == me) return 1;
+    for (i = 0; i < 8 && g_ecl_tids[i]; i++) if (g_ecl_tids[i] == me) return 1;
+    return 0;
+}
 static struct { volatile DWORD tid; volatile LONG n; char name[40]; } g_pcbk_thr[8];
 static double mad_pcbk_ms(LONG64 ticks) {
     static LONG64 freq;
@@ -7689,12 +7730,29 @@ static void mad_po_exit(void) {
  * entry then finds it built. Not needing pso-async: the builder threads start on
  * the first queued pipeline. A full queue builds at the first dispatch as before.
  * Memory: every compute pipeline the game creates is built, not only the ones it
- * dispatches. 0 (the default): built at the first dispatch, as before. */
-static int g_csb = -1;
+ * dispatches. 0 (the default): built at the first dispatch, as before.
+ *
+ * 1 queues every compute pipeline (PoE2: 2,079 a session, 736 dispatched). 2 and 3
+ * act only on the ones pso-origin classes as new, created in no earlier session
+ * (34 in that session), which are the ones whose first dispatch compiles; the rest
+ * are in the pso-archive and stay with pso-warm and the first dispatch. 2 queues a
+ * new one for the builders ahead of every render pipeline. 3 builds it inside the
+ * create call (mad_csb_block) and falls back to 2's queue on a thread that submits
+ * frames. Each such pipeline gets one [cs-create-build] line. */
 static int mad_csb_on(void) {
     if (g_csb < 0) {
-        int on = mad_pso_lazy_on() && mad_cfg_int_pe("cs-create-build", 0) > 0;   /* madeira-duo: 1 = compute pipelines are built on the background builders when the game creates them; a first dispatch waits for that build instead of compiling; 0 = built at the first dispatch (as before) */
-        if (on) d3d12_log("[madeira-d3d12] cs-create-build = 1: compute pipelines are built in the background when the game creates them\n");
+        long long v = mad_pso_lazy_on() ? mad_cfg_int_pe("cs-create-build", 0) : 0;   /* madeira-duo: when the game creates a compute pipeline: 3 = one no earlier session created is built inside the create call, on the game's creating thread (the game dispatches it once the call returns, so no frame waits for the compile; a creating thread that submits frames is not held, its pipeline goes to the builders); 2 = such a pipeline goes to the background builders, ahead of the render pipelines waiting for a draw, and a first dispatch waits for a build in progress; 1 = every compute pipeline goes to the builders' low-priority queue; 2 and 3 need pso-origin = 1 and leave the other pipelines to pso-warm; 0 = built at the first dispatch (as before) */
+        int on = v == 3 ? 3 : v == 2 ? 2 : v > 0 ? 1 : 0;
+        if (on >= 2 && !mad_po_on()) {
+            d3d12_log("[madeira-d3d12] cs-create-build = %d needs pso-origin = 1 (it tells a new compute pipeline from one created before): off\n", on);
+            on = 0;
+        }
+        if (on == 1) d3d12_log("[madeira-d3d12] cs-create-build = 1: compute pipelines are built in the background when the game creates them\n");
+        if (on == 2) d3d12_log("[madeira-d3d12] cs-create-build = 2: compute pipelines no earlier session created are built on the background builders when "
+                               "the game creates them, before the render pipelines waiting for a draw; the others go to pso-warm as before\n");
+        if (on == 3) d3d12_log("[madeira-d3d12] cs-create-build = 3: compute pipelines no earlier session created are built inside the create call, on the "
+                               "game's creating thread (on the background builders when that thread submits frames); the others go to pso-warm as before\n");
+        MemoryBarrier();
         g_csb = on;
     }
     return g_csb;
@@ -7702,31 +7760,82 @@ static int mad_csb_on(void) {
 static void mad_csb_built(struct mad_pso *p) {
     LONG n, before = g_csb_built;
     LARGE_INTEGER f;
+    LONG64 t0 = mad_qpc();
     if (!mad_cpso_build(p, 1) || g_csb_built == before) return;   /* failed, or a dispatch built it first */
     n = g_csb_built;
+    if (g_csb >= 2) { mad_csb_say(p, "built on a background builder at creation", mad_qpc() - t0); return; }
     if ((n == 1 || (n && !(n % 250))) && QueryPerformanceFrequency(&f) && f.QuadPart)
         d3d12_log("[madeira-d3d12] cs-create-build: %ld compute pipelines built at creation (%ld failed, %ld queued, %ld not queued with the queue full); "
                   "dispatches that waited for a build in progress %ld (%.1f ms in all), that built it first %ld\n", (long)n, (long)g_csb_failed,
                   (long)g_csb_queued, (long)g_csb_full, (long)g_csb_waited, (double)g_csb_wait_t * 1000.0 / (double)f.QuadPart, (long)g_csb_inline);
 }
-/* At creation: 1 when the compute pipeline went to the low-priority queue. */
+/* At creation: 1 when the compute pipeline went to a builders' queue (the low-priority one,
+ * or with cs-create-build = 2 / 3 the compute one, for a pipeline pso-origin classed as new). */
 static int mad_csb_queue(struct mad_pso *p) {
-    if (!mad_csb_on() || p->cps || !p->lazy_cs || InterlockedCompareExchange(&p->async_q, 2, 0)) return 0;
+    int mode = mad_csb_on();
+    if (!mode || p->cps || !p->lazy_cs) return 0;
+    if (mode >= 2 && p->origin != MAD_PO_NEW) return 0;   /* created before: archived by pso-warm in that session, or warmed now */
+    if (InterlockedCompareExchange(&p->async_q, 2, 0)) return 0;
     if (!mad_pa_start()) { InterlockedExchange(&p->async_q, 0); return 0; }
     AcquireSRWLockExclusive(&g_pa_lock);
-    if (g_pcb_tail - g_pcb_head >= MAD_PCB_MAX) {
+    if (mode >= 2 ? g_pcs_tail - g_pcs_head >= MAD_PCS_MAX : g_pcb_tail - g_pcb_head >= MAD_PCB_MAX) {
         ReleaseSRWLockExclusive(&g_pa_lock);
         InterlockedExchange(&p->async_q, 0);
         InterlockedIncrement(&g_csb_full);
         return 0;
     }
     InterlockedIncrement(&p->refs);   /* the worker releases it once the pipeline is built */
-    g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
-    InterlockedIncrement64(&g_xp.shader.pcb_wait);   /* madeira-duo overlay-shader */
+    p->csb_t0 = mad_qpc();
+    if (mode >= 2) {
+        g_pcs_q[(ULONG)g_pcs_tail % MAD_PCS_MAX] = p; g_pcs_tail++;
+        InterlockedIncrement64(&g_xp.shader.pa_wait);    /* madeira-duo overlay-shader: a frame may wait for it */
+    } else {
+        g_pcb_q[(ULONG)g_pcb_tail % MAD_PCB_MAX] = p; g_pcb_tail++;
+        InterlockedIncrement64(&g_xp.shader.pcb_wait);   /* madeira-duo overlay-shader */
+    }
     ReleaseSRWLockExclusive(&g_pa_lock);
     ReleaseSemaphore(g_pa_sem, 1, NULL);
     if (InterlockedIncrement(&g_csb_queued) == 1)
         d3d12_log("[madeira-d3d12] cs-create-build: first compute pipeline queued at creation\n");
+    return 1;
+}
+/* madeira-duo cs-create-build = 3: a compute pipeline no earlier session created is
+ * built here, inside the game's create call, on its creating thread. That is where
+ * Direct3D compiles it on Windows, and a game that creates pipelines on a thread of
+ * its own (PoE2: LOW0) dispatches one only after the call has returned, so no frame
+ * waits for the compile. vk8c, 18 Nov 2026: PoE2 dispatched such pipelines within
+ * frames of creating them; 26 frames of 150-760 ms (10.7 s) in one map were each such
+ * a compile on the thread that submits the frame, and a build started on the builders
+ * at creation (cs-create-build = 2) would have been waited for almost in full. A
+ * creating thread that itself submits frames is not held: its pipeline goes to the
+ * builders (mad_csb_queue). 1: built here (or it failed here). */
+static volatile LONG g_csbk_n, g_csbk_failed, g_csbk_frame;
+static volatile LONG64 g_csbk_t;
+static int mad_csb_block(struct mad_pso *p) {
+    DWORD me = GetCurrentThreadId();
+    obj_handle_t pool; LONG64 t0, dt; LONG n; int slot, built;
+    if (mad_csb_on() != 3 || p->cps || !p->lazy_cs || p->origin != MAD_PO_NEW) return 0;
+    if (mad_ecl_thread(me)) {   /* it submits frames: the builders take the pipeline */
+        if (InterlockedIncrement(&g_csbk_frame) <= 20)
+            d3d12_log("[cs-create-build] %s cs:%08x: created on thread %04lx, which submits frames; left to the builders\n",
+                      p->vs_name, (unsigned)p->cs_hash, me);
+        return 0;
+    }
+    slot = mad_pcbk_thread_slot();
+    pool = NSAutoreleasePool_alloc_init();
+    t0 = mad_qpc();
+    InterlockedIncrement64(&g_xp.shader.pa_wait);   /* overlay-shader: counted with the pipelines the game waits for */
+    built = mad_cpso_build(p, 1) != 0;
+    InterlockedDecrement64(&g_xp.shader.pa_wait);
+    if (pool) NSObject_release(pool);
+    dt = mad_qpc() - t0;
+    InterlockedExchangeAdd64(&g_csbk_t, dt);
+    if (!built) InterlockedIncrement(&g_csbk_failed);
+    n = InterlockedIncrement(&g_csbk_n);
+    d3d12_log("[cs-create-build] %s cs:%08x: %s inside the create call on thread %04lx '%s', %.0f ms | %ld built in the create call (%ld failed, %.0f ms in all), "
+              "%ld created on a thread that submits frames and left to the builders; submit thread %04lx\n",
+              p->vs_name, (unsigned)p->cs_hash, built ? "built" : "FAILED", me, slot >= 0 ? g_pcbk_thr[slot].name : "?", mad_pcbk_ms(dt),
+              (long)n, (long)g_csbk_failed, mad_pcbk_ms(g_csbk_t), (long)g_csbk_frame, g_ecl_tid);
     return 1;
 }
 
@@ -12318,7 +12427,7 @@ static void STDMETHODCALLTYPE queue_ExecuteCommandLists(ID3D12CommandQueue *This
     QueryPerformanceCounter(&t0);   /* ml1119: caller-thread time in here */
     InterlockedIncrement(&g_perf_ecl);   /* ml1109 */
     mad_xp_role('E'); InterlockedIncrement64(&g_xp.ecl_calls);   /* ml1128 */
-    g_ecl_tid = GetCurrentThreadId();   /* madeira-duo pso-create-block: named in its [pso-block] lines */
+    { DWORD me = GetCurrentThreadId(); mad_ecl_thread_note(me); g_ecl_tid = me; }   /* madeira-duo pso-create-block: named in its [pso-block] lines; cs-create-build = 3 never holds such a thread */
     mad_tvs_refresh();   /* madeira-bcd typed-view-shadow: the game wrote this submission's UPLOAD data by now */
     if (g_vt_on < 0) mad_vt_load();   /* madeira-bcd vis-trace / readback-far */
     if (g_sd_state > 0 && g_qtrace) mad_qtrace("ExecuteCommandLists", q, NULL, 0, count);   /* madeira-bcd */
