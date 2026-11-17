@@ -3680,7 +3680,7 @@ static void ios_stuck_store_check( void )
  * ios_guest_rip_profile): records are buffered and written after the resume. */
 #define IOS_PROF_SLOTS 256
 #define IOS_PROF_SYMS  16384
-struct ios_prof_slot { mach_port_t port; int used, idle, seen, peb_done; uint64_t cpu_ns, peb; char name[64]; };
+struct ios_prof_slot { mach_port_t port; int used, idle, seen, peb_done, skip; uint64_t cpu_ns, peb; char name[64]; };
 struct ios_prof_rec { uint64_t pc, rip, extra; uint32_t weight_ns; uint16_t slot; uint8_t cls, flags; };
 
 static void ios_prof_symbolize( FILE *txt, uint64_t *keys, uint64_t a )
@@ -3724,6 +3724,30 @@ static void ios_prof_dump_modules( FILE *txt, uint64_t peb )
     }
 }
 
+/* madeira-duo [prof] MADEIRA_PROF_THREADS = <part of a thread name>[;<part>...]: only
+ * threads whose name contains one of the parts are sampled, so only they are ever
+ * suspended; every other thread costs one name read a second. For a long, cheap
+ * profile of a few threads ("FMOD": the audio mixer) beside a normal run. Unset or
+ * empty: every thread, as before. */
+static int ios_prof_name_wanted( const char *name, const char *filter )
+{
+    const char *p = filter;
+    if (!filter || !*filter) return 1;
+    while (*p) {
+        const char *e = strchr( p, ';' );
+        size_t n = e ? (size_t)(e - p) : strlen( p );
+        char part[64];
+        if (n && n < sizeof(part)) {
+            memcpy( part, p, n );
+            part[n] = 0;
+            if (strstr( name, part )) return 1;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
 static void ios_prof_main(void)
 {
     extern void *ios_jit_rx_base_global; extern size_t ios_jit_pool_size_global;
@@ -3735,6 +3759,7 @@ static void ios_prof_main(void)
     static uint64_t pebs[32];
     int npebs = 0;
     const char *hz_env = getenv( "MADEIRA_PROF_HZ" );
+    const char *threads_env = getenv( "MADEIRA_PROF_THREADS" );   /* with MADEIRA_PROF: parts of thread names separated by ';' (FMOD;Main); only threads whose name contains one are sampled or suspended, for a long, cheap profile of a few threads; unset: every thread */
     int hz = hz_env ? atoi( hz_env ) : 100;
     mach_port_t self_port = pthread_mach_thread_np( pthread_self() );
     char path[1024], base[1100];
@@ -3767,7 +3792,9 @@ static void ios_prof_main(void)
     setvbuf( bin, NULL, _IOFBF, 1 << 18 );
     fprintf( txt, "J %#llx %#llx\nP %u\n", (unsigned long long)(uintptr_t)ios_jit_rx_base_global,
              (unsigned long long)ios_jit_pool_size_global, period_us );
-    wine_log_write( "[prof] sampling every thread at %d Hz, CPU-time weighted -> %s.bin/.txt", hz, base );
+    if (threads_env && !*threads_env) threads_env = NULL;
+    wine_log_write( "[prof] sampling %s%s at %d Hz, CPU-time weighted -> %s.bin/.txt",
+                    threads_env ? "the threads named like MADEIRA_PROF_THREADS=" : "every thread", threads_env ? threads_env : "", hz, base );
 
     for (;; pass++) {
         uint64_t t0 = mach_absolute_time() * tb.numer / tb.denom;
@@ -3824,11 +3851,16 @@ static void ios_prof_main(void)
             int got, cls = 2;
 
             if (!sl->used) continue;
+            if (sl->skip && pass % hz) continue;   /* MADEIRA_PROF_THREADS: not a wanted thread; its name is read again once a second */
             if (sl->idle >= 50 && (pass + s) % 50) continue;
             if (thread_info( sl->port, THREAD_EXTENDED_INFO, (thread_info_t)&xi, &xc ) != KERN_SUCCESS) continue;
             if (strncmp( sl->name, xi.pth_name, sizeof(sl->name) - 1 )) {
                 snprintf( sl->name, sizeof(sl->name), "%s", xi.pth_name );
                 fprintf( txt, "T %d %#x %s\n", s, sl->port, sl->name );
+            }
+            if (threads_env) {   /* a thread is named after it starts: the test is repeated */
+                sl->skip = !ios_prof_name_wanted( sl->name, threads_env );
+                if (sl->skip) { sl->cpu_ns = ~0ull; continue; }
             }
             cpu = xi.pth_user_time + xi.pth_system_time;
             if (sl->cpu_ns == ~0ull || cpu < sl->cpu_ns) { sl->cpu_ns = cpu; continue; }
