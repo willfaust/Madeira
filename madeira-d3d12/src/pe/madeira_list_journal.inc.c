@@ -192,6 +192,28 @@ static const struct {
 #undef MAD_JR_COUNTED
 };
 
+/* jr-pe-entries (default 1): every address installed here is entered from x64
+ * code (the game's calls, the trampolines' jumps, the x64 methods' flush call).
+ * Native code takes addresses in Madeira's pool copy of this image, and the
+ * emulator never caches a block for a pool-copy address: each call took FEX's
+ * slow lookup and a redirect to the PE view (fexl1-run1, 20 Nov 2026: about
+ * 450K calls a second per frame thread, 27% of their CPU). In the PE view the
+ * x64 entries hit FEX's block cache, and the ARM64EC methods the trampolines
+ * jump to take the normal x64 -> ARM64EC crossing. Only x64 code reads these
+ * tables' x64 entries and target[]; native callers of a list slot go through
+ * the ARM64EC call checker, which emulates an x64 PE address the same way.
+ * 0 keeps the pool addresses. */
+static int g_jr_pe = -1;
+static unsigned g_jr_pe_moved;
+
+static void *jr_entry(const void *address)
+{
+    void *pe = (void *)address;
+    if (g_jr_pe > 0) pe = mad_x64_graphics_entry_pe(address, &__ImageBase);
+    if (pe != address) g_jr_pe_moved++;
+    return pe;
+}
+
 /* After every build_vtables (it refills all slots with the ARM64EC methods). */
 static void mad_jr_install(void)
 {
@@ -199,6 +221,7 @@ static void mad_jr_install(void)
     unsigned i, k;
     const struct mad_jr_method *m;
     if (g_jr_installed) return;   /* the tables kept their trampolines (build_vtables returned early) */
+    if (g_jr_pe < 0) g_jr_pe = mad_cfg_int_pe("jr-pe-entries", 1) ? 1 : 0;
     if (g_jr_on < 0) {
         int journal = mad_cfg_int_pe("list-journal", 0) ? 1 : 0;
         g_jr_census = mad_cfg_int_pe("api-census", 0) ? 1 : 0;
@@ -213,7 +236,7 @@ static void mad_jr_install(void)
     }
     /* Every table gets its jr_ctx first: the x64 GetGPUVirtualAddress reads the
      * resource table's even with api-census off. */
-    g_jr_list_ctx.flush = mad_jr_flush;
+    g_jr_list_ctx.flush = jr_entry((const void *)mad_jr_flush);
     g_jr_list_ctx.census = g_jr_census;
     slots[-1] = &g_jr_list_ctx;
     for (k = 0; k < sizeof g_jr_counted / sizeof g_jr_counted[0]; k++) {
@@ -221,21 +244,27 @@ static void mad_jr_install(void)
         ((void **)g_jr_counted[k].table)[-1] = &g_jr_ctx[k];
     }
     if (g_jr_on || g_jr_census) {
-        for (i = 0; i < MAD_LIST_SLOT_COUNT; i++) { g_jr_list_ctx.target[i] = slots[i]; slots[i] = mad_jr_list_tramps[i]; }
-        if (g_jr_on) for (m = mad_jr_x64_methods; m->fn; m++) slots[m->slot] = m->fn;
+        for (i = 0; i < MAD_LIST_SLOT_COUNT; i++) {
+            g_jr_list_ctx.target[i] = jr_entry(slots[i]);
+            slots[i] = jr_entry(mad_jr_list_tramps[i]);
+        }
+        if (g_jr_on) for (m = mad_jr_x64_methods; m->fn; m++) slots[m->slot] = jr_entry((const void *)m->fn);
     }
     if (g_jr_census) {
         for (k = 0; k < sizeof g_jr_counted / sizeof g_jr_counted[0]; k++) {
             void **table = (void **)g_jr_counted[k].table;
             for (i = 0; i < g_jr_counted[k].count; i++) {
-                g_jr_ctx[k].target[i] = table[i];
-                table[i] = mad_jr_count_tramps[i];
+                g_jr_ctx[k].target[i] = jr_entry(table[i]);
+                table[i] = jr_entry(mad_jr_count_tramps[i]);
             }
         }
     }
     /* After the census: the x64 GetGPUVirtualAddress counts in the resource ctx itself. */
-    if (g_jr_on) g_res_vtbl.GetGPUVirtualAddress = (void *)mad_res_gva_x64;
+    if (g_jr_on) g_res_vtbl.GetGPUVirtualAddress = jr_entry((const void *)mad_res_gva_x64);
     g_jr_installed = g_jr_on || g_jr_census;
+    if (g_jr_installed)
+        d3d12_log("[madeira-d3d12] jr-pe-entries = %d: %u x64-facing addresses moved from the pool copy %p to the PE view\n",
+                  g_jr_pe, g_jr_pe_moved, (void *)&__ImageBase);
 }
 
 static const char *const g_jr_op_method[JR_OP_COUNT] = {
