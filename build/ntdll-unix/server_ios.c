@@ -3007,11 +3007,23 @@ static void ios_xprobe_main( void )
     {
         thread_act_array_t th = NULL; mach_msg_type_number_t nth = 0, k;
         uint64_t now; double dt_ms, sum_thr_ms = 0; int nrows = 0, i, j;
+        char ttl[1400], ttwall[16]; int ttn = 0, tt;   /* madeira-duo thread table */
 #define XP_MS(ticks) ((double)(ticks) * tb.numer / tb.denom / 1e6)
         usleep( 250000 );
         now = mach_absolute_time();
         dt_ms = XP_MS( now - t_prev );
         gen++;
+        /* madeira-duo thread table, about every 30 s: one [xp-thr] entry for every thread with at
+         * least half a second of CPU so far -- Windows thread id, Mach thread id (the m<id> of
+         * [xp-t]), name, scheduled / base priority, policy, and its CPU so far on P and E cores in
+         * ms. It names the threads [xp-t], [wake-census] and [srv-req] show by id only. */
+        tt = (gen % 120) == 8; ttwall[0] = 0;
+        if (tt)
+        {
+            struct timeval ttv; struct tm ttm;
+            gettimeofday( &ttv, NULL ); localtime_r( &ttv.tv_sec, &ttm );
+            snprintf( ttwall, sizeof(ttwall), "%02d:%02d:%02d.%03d", ttm.tm_hour, ttm.tm_min, ttm.tm_sec, (int)(ttv.tv_usec / 1000) );
+        }
         if (used > 1400) { memset( ios_xp_tab, 0, sizeof(ios_xp_tab) ); used = 0; wine_log_write( "[xp] ml1128 thread table reset (gen %u)", gen ); }
 
         /* per-thread counters */
@@ -3031,6 +3043,23 @@ static void ios_xprobe_main( void )
                         struct ios_xp_tcd cur[2]; int nl = tc.len > 2 ? 2 : tc.len;
                         memset( cur, 0, sizeof(cur) );
                         for (lv = 0; lv < nl; lv++) cur[lv] = tc.c[lv];
+                        if (tt)   /* madeira-duo thread table */
+                        {
+                            double tp = XP_MS( cur[0].ut + cur[0].st ), te = XP_MS( cur[1].ut + cur[1].st );
+                            thread_extended_info_data_t txi; mach_msg_type_number_t txc = THREAD_EXTENDED_INFO_COUNT;
+                            if (tp + te >= 500.0 && thread_info( th[k], THREAD_EXTENDED_INFO, (thread_info_t)&txi, &txc ) == KERN_SUCCESS)
+                            {
+                                pthread_t tpt = pthread_from_mach_thread_np( th[k] );
+                                uint64_t tteb = tpt ? ios_ts_teb( tpt ) : 0; uint32_t tw = 0;
+                                if (tteb) ios_ts_read( tteb + 0x48, &tw, 4 );
+                                txi.pth_name[sizeof(txi.pth_name) - 1] = 0;
+                                if (ttn > (int)sizeof(ttl) - 160) { wine_log_write( "%s", ttl ); ttn = 0; }
+                                if (!ttn) ttn = snprintf( ttl, sizeof(ttl), "[xp-thr] %s", ttwall );
+                                ttn += snprintf( ttl + ttn, sizeof(ttl) - ttn, " | %04x m%llu \"%s\" pri %d/%d pol %d P %.0f E %.0f", tw,
+                                                 (unsigned long long)idi.thread_id, txi.pth_name, (int)txi.pth_curpri, (int)txi.pth_priority,
+                                                 (int)txi.pth_policy, tp, te );
+                            }
+                        }
                         for (h = (int)(idi.thread_id * 2654435761u) & 2047, j = 0; j < 2048; j++, h = (h + 1) & 2047)
                             if (!ios_xp_tab[h].tid || ios_xp_tab[h].tid == idi.thread_id) { pv = &ios_xp_tab[h]; break; }
                         if (pv && pv->tid == idi.thread_id && pv->gen == gen - 1 && nrows < 1024)
@@ -3079,6 +3108,7 @@ static void ios_xprobe_main( void )
             }
             vm_deallocate( mach_task_self(), (vm_address_t)th, nth * sizeof(*th) );
         }
+        if (ttn) wine_log_write( "%s", ttl );   /* madeira-duo thread table */
         if (!(gen % 40)) ios_xp_fallback_pick();   /* ml1131c: every ~10 s */
 
         /* process counters + PE counters */
@@ -3154,6 +3184,43 @@ static void ios_xprobe_main( void )
                 wine_log_write( "%s", line );
             }
             if (!(gen & 3)) ios_xp_api_report( wall, XP_MS( now - t_start ) / 1000.0 );   /* ml1131: ~1 s */
+            if (!(gen & 3))
+            {   /* madeira-duo [xp-vm], ~1 s: where the page-ins come from. The system's counters since the
+                 * last line (decompressions = pages brought back from the memory compressor, pageins =
+                 * pages read from files) and this process's resident memory by kind. Last, the [xp] line's
+                 * run= value read as nanoseconds instead of Mach ticks, to settle its unit. */
+                static vm_statistics64_data_t pvm; static int have_vm; static mach_port_t hport;
+                vm_statistics64_data_t vm; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
+                task_vm_info_data_t ti; mach_msg_type_number_t tic = TASK_VM_INFO_COUNT;
+                if (!hport) hport = mach_host_self();
+                memset( &ti, 0, sizeof(ti) );
+                task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &tic );
+                if (host_statistics64( hport, HOST_VM_INFO64, (host_info64_t)&vm, &vc ) == KERN_SUCCESS)
+                {
+                    unsigned long long pg = (unsigned long long)getpagesize();
+                    if (have_vm)
+                        wine_log_write( "[xp-vm] %s system: decompressions %llu compressions %llu pageins %llu faults %llu cow %llu zero-fill %llu, "
+                                        "free %llu MB, compressor %llu MB | process: internal %llu MB, compressed %llu MB, external %llu MB, "
+                                        "footprint %llu MB | run-as-ns %.1f ms",
+                                        wall, (unsigned long long)(vm.decompressions - pvm.decompressions),
+                                        (unsigned long long)(vm.compressions - pvm.compressions), (unsigned long long)(vm.pageins - pvm.pageins),
+                                        (unsigned long long)(vm.faults - pvm.faults), (unsigned long long)(vm.cow_faults - pvm.cow_faults),
+                                        (unsigned long long)(vm.zero_fill_count - pvm.zero_fill_count),
+                                        ((unsigned long long)vm.free_count * pg) >> 20, ((unsigned long long)vm.compressor_page_count * pg) >> 20,
+                                        (unsigned long long)(ti.internal >> 20), (unsigned long long)(ti.compressed >> 20),
+                                        (unsigned long long)(ti.external >> 20), (unsigned long long)(ti.phys_footprint >> 20),
+                                        (double)(ru.ri_runnable_time - pru.ri_runnable_time) / 1e6 );
+                    pvm = vm; have_vm = 1;
+                }
+            }
+            if (!(gen % 40))
+            {   /* madeira-duo [wake-census], ~10 s (unix/sync.c ios_wc_format) */
+                extern void ios_wc_format( char *out, size_t size, const char *wall, double seconds );
+                static uint64_t wc_prev; char wl[1400];
+                ios_wc_format( wl, sizeof(wl), wall, wc_prev ? XP_MS( now - wc_prev ) / 1000.0 : 0.0 );
+                wc_prev = now;
+                if (wl[0]) wine_log_write( "%s", wl );
+            }
             if (ios_power_probe_on)   /* madeira-bcd power probe: every 5 s; ri_penergy_nj is the uint64 after ri_energy_nj in v6 */
                 ios_power_probe_tick( wall, ios_bg_now_ns(), dt_ms, (double)(ru.ri_energy_nj - pru.ri_energy_nj) / 1e6,
                                       (double)((&ru.ri_energy_nj)[1] - (&pru.ri_energy_nj)[1]) / 1e6,
