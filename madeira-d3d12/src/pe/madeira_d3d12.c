@@ -1044,6 +1044,189 @@ static void mad_es_label(obj_handle_t e, obj_handle_t s) {
     (MTLCommandEncoder_setLabel)(e, s);
 }
 static long long mad_cfg_int_pe(const char *key, long long dflt);
+/* madeira-duo FRAME TIMELINE (madeira.cfg frame-timeline = 1, default 0; measurement
+ * only). One [ftl] line per presented frame, written by the submission worker four
+ * frames late so that the GPU's own times for the frame's command buffers are in:
+ *
+ *   [ftl] #N hh:mm:ss.mmm f=<ms> tid=<hex> q=<presents>/<jobs> thr=<ms> |
+ *         w: replay=<ms>/<lists> sig=<ms> wait=<ms> prs=<ms> (flush lat draw cmt) idle=<ms> end=+<ms> |
+ *         gpu: cbs=<n> busy=<ms> span=<ms> gap=<ms> done=+<ms>
+ *
+ * f     Present call to Present call on the game's threads: the frame time.
+ * tid   the thread that called Present. q: presents the worker had not run yet when
+ *       this one was queued (itself included) / jobs queued ahead of it.
+ * thr   this Present's run-ahead wait (async-present-ahead).
+ * w:    the worker's time for the frame's jobs by kind; the Present job's parts
+ *       (flush, the wait for the GPU to finish frame N-latency, nextDrawable,
+ *       blit+present+commit); idle = time between the previous Present job's end and
+ *       this one's that no job used; end = when the Present job ended, counted from
+ *       the Present call.
+ * gpu:  the frame's command buffers (the Present blit's own buffer is not retired
+ *       and is not in here): how many, the union of their GPU intervals, first start
+ *       to last end, gap = the GPU's idle time between the previous frame's last end
+ *       and this frame's first start (negative: they overlapped), done = the last
+ *       end, counted from the Present call.
+ * done uses the smallest (QPC - Metal time) seen at a retire as the offset between
+ * the two clocks, so it is late by the quickest retire of the session. The time
+ * from the game starting a frame to its pixels is about f + done + one refresh.
+ * The clock time is local, taken at the Present call, and matches the [xp] lines.
+ *
+ * Also here: [pso-slow] (madeira.cfg pso-slow-ms, default 0 = off), one line for
+ * every pipeline creation or first-use build that took at least that long, with
+ * the thread it ran on and the frame it fell in. */
+#define MAD_FTL_N 64
+struct mad_ftl_rec {
+    UINT64 no;
+    LONG64 t_call, t_prev, thr, wall;   /* game side: QPC ticks; wall in FILETIME units, UTC */
+    DWORD tid; LONG q_presents, q_jobs;
+    volatile LONG64 w_replay, w_sig, w_wait;   /* worker, QPC ticks */
+    LONG64 w_prs, w_flush, w_lat, w_draw, w_cmt, w_idle, w_end;
+    volatile LONG w_ecl;
+    double g_first, g_last, g_union, g_cursor; LONG g_cbs;   /* retire: Metal's clock, seconds */
+};
+static struct mad_ftl_rec g_ftl[MAD_FTL_N];
+static int g_ftl_on = -1;
+static volatile LONG64 g_ftl_no;         /* Present calls so far */
+static volatile LONG64 g_ftl_wcur = 1;   /* the frame the worker's jobs belong to */
+static volatile LONG g_ftl_jobs;         /* jobs queued, all queues */
+static UINT64 g_ftl_cur;                 /* the Present call in progress (the game makes one at a time) */
+static struct { obj_handle_t cb; UINT64 no; } g_ftl_cb[128]; static volatile LONG g_ftl_cb_n;
+static double g_ftl_off = 1e300;         /* QPC seconds - Metal seconds, smallest seen */
+static LONG64 g_ftl_bias;                /* local time - UTC, FILETIME units */
+static LONG64 mad_ftl_wall(void) { FILETIME f; GetSystemTimeAsFileTime(&f); return (LONG64)(((UINT64)f.dwHighDateTime << 32) | f.dwLowDateTime); }
+static int mad_ftl_enabled(void) {
+    if (g_ftl_on < 0) {
+        SYSTEMTIME lt, st; FILETIME lf, sf; LONG64 bias = 0;
+        int on = mad_cfg_int_pe("frame-timeline", 0) ? 1 : 0;
+        GetLocalTime(&lt); GetSystemTime(&st);
+        if (SystemTimeToFileTime(&lt, &lf) && SystemTimeToFileTime(&st, &sf))
+            bias = (LONG64)(((UINT64)lf.dwHighDateTime << 32) | lf.dwLowDateTime) - (LONG64)(((UINT64)sf.dwHighDateTime << 32) | sf.dwLowDateTime);
+        g_ftl_bias = ((bias + (bias >= 0 ? 300000000LL : -300000000LL)) / 600000000LL) * 600000000LL;   /* whole minutes */
+        g_ftl[1].no = 1;   /* lists replayed before the first Present belong to frame 1 */
+        d3d12_log("[madeira-d3d12] frame-timeline = %d (%s), local time = UTC %+lld min\n", on,
+                  on ? "one [ftl] line a frame, written by the worker 4 frames late" : "off", (long long)(g_ftl_bias / 600000000LL));
+        g_ftl_on = on;
+    }
+    return g_ftl_on;
+}
+static void mad_ftl_clock(LONG64 wall, char out[16]) {
+    LONG64 t = (wall + g_ftl_bias) / 10000;   /* ms */
+    unsigned ms = (unsigned)(t % 1000), s = (unsigned)((t / 1000) % 86400);
+    snprintf(out, 16, "%02u:%02u:%02u.%03u", s / 3600, (s / 60) % 60, s % 60, ms);
+}
+/* The game's thread, entering Present. */
+static void mad_ftl_call(LONG64 t0) {
+    static LONG64 prev;
+    struct mad_ftl_rec *r, *nx; UINT64 no;
+    g_ftl_cur = 0;
+    if (!mad_ftl_enabled()) return;
+    no = (UINT64)InterlockedIncrement64(&g_ftl_no);
+    r = &g_ftl[no % MAD_FTL_N];
+    r->no = no; r->t_call = t0; r->t_prev = prev; r->tid = GetCurrentThreadId(); r->wall = mad_ftl_wall();
+    prev = t0;
+    nx = &g_ftl[(no + 1) % MAD_FTL_N];   /* the next frame's record, before a job of it can be queued behind this Present */
+    memset(nx, 0, sizeof *nx); nx->no = no + 1;
+    g_ftl_cur = no;
+}
+static void mad_ftl_depth(LONG presents) {
+    if (g_ftl_cur) { struct mad_ftl_rec *r = &g_ftl[g_ftl_cur % MAD_FTL_N]; r->q_presents = presents; r->q_jobs = g_ftl_jobs; }
+}
+static void mad_ftl_called(LONG64 thr) { if (g_ftl_cur) g_ftl[g_ftl_cur % MAD_FTL_N].thr = thr; }
+/* A queue committed a command buffer: it belongs to the frame the worker is on. */
+static void mad_ftl_commit(obj_handle_t cb) {
+    LONG i;
+    if (g_ftl_on <= 0) return;
+    i = (InterlockedIncrement(&g_ftl_cb_n) - 1) & 127;
+    g_ftl_cb[i].no = (UINT64)g_ftl_wcur; g_ftl_cb[i].cb = cb;
+}
+/* A command buffer retired with the GPU's start and end times (mad_perf_cb, under its lock). */
+static void mad_ftl_retired(obj_handle_t cb, double start, double end) {
+    LONG n, k; double off;
+    if (g_ftl_on <= 0) return;
+    off = (double)mad_qpc() / (double)(g_xp.qpf ? g_xp.qpf : 10000000) - end;
+    if (off < g_ftl_off) g_ftl_off = off;
+    n = g_ftl_cb_n;
+    for (k = 1; k <= 128; k++) {
+        LONG i = (n - k) & 127;
+        if (g_ftl_cb[i].cb == cb) {
+            struct mad_ftl_rec *r = &g_ftl[g_ftl_cb[i].no % MAD_FTL_N];
+            double s0;
+            g_ftl_cb[i].cb = 0;
+            if (r->no != g_ftl_cb[i].no) return;
+            if (!r->g_cbs || start < r->g_first) r->g_first = start;
+            s0 = start > r->g_cursor ? start : r->g_cursor;
+            if (end > s0) r->g_union += end - s0;
+            if (end > r->g_cursor) r->g_cursor = end;
+            if (end > r->g_last) r->g_last = end;
+            r->g_cbs++;
+            return;
+        }
+    }
+}
+static void mad_ftl_print(UINT64 m) {
+    struct mad_ftl_rec *r = &g_ftl[m % MAD_FTL_N], *p = &g_ftl[(m - 1) % MAD_FTL_N];
+    double ms = 1000.0 / (double)(g_xp.qpf ? g_xp.qpf : 10000000), gap = 0.0, done = -1.0;
+    char clk[16];
+    if (r->no != m || !r->t_call) return;
+    mad_ftl_clock(r->wall, clk);
+    if (r->g_cbs && p->no == m - 1 && p->g_cbs) gap = (r->g_first - p->g_last) * 1000.0;
+    if (r->g_cbs && g_ftl_off < 1e299) done = (r->g_last + g_ftl_off) * 1000.0 - (double)r->t_call * ms;
+    d3d12_log("[ftl] #%llu %s f=%.1f tid=%04lx q=%ld/%ld thr=%.1f | w: replay=%.1f/%ld sig=%.1f wait=%.1f prs=%.1f (flush %.1f lat %.1f draw %.1f cmt %.1f) "
+              "idle=%.1f end=+%.1f | gpu: cbs=%ld busy=%.1f span=%.1f gap=%.1f done=+%.1f\n",
+              (unsigned long long)m, clk, r->t_prev ? (double)(r->t_call - r->t_prev) * ms : 0.0, (unsigned long)r->tid,
+              (long)r->q_presents, (long)r->q_jobs, (double)r->thr * ms,
+              (double)r->w_replay * ms, (long)r->w_ecl, (double)r->w_sig * ms, (double)r->w_wait * ms, (double)r->w_prs * ms,
+              (double)r->w_flush * ms, (double)r->w_lat * ms, (double)r->w_draw * ms, (double)r->w_cmt * ms,
+              (double)r->w_idle * ms, r->w_end ? (double)(r->w_end - r->t_call) * ms : -1.0,
+              (long)r->g_cbs, r->g_union * 1000.0, r->g_cbs ? (r->g_last - r->g_first) * 1000.0 : 0.0, gap, done);
+}
+/* A worker finished a job. kind: 1 lists, 2 Signal, 3 Wait, 4 Present (MAD_SUB_*);
+ * d its elapsed ticks; no the Present's frame number (Present jobs only); now = QPC. */
+static void mad_ftl_job(int kind, LONG64 d, UINT64 no, LONG64 now) {
+    struct mad_ftl_rec *r;
+    if (!mad_ftl_enabled()) return;
+    if (kind != 4) {
+        UINT64 cur = (UINT64)g_ftl_wcur;
+        r = &g_ftl[cur % MAD_FTL_N];
+        if (r->no != cur) return;
+        if (kind == 1) { InterlockedExchangeAdd64(&r->w_replay, d); InterlockedIncrement(&r->w_ecl); }
+        else if (kind == 2) InterlockedExchangeAdd64(&r->w_sig, d);
+        else InterlockedExchangeAdd64(&r->w_wait, d);
+        return;
+    }
+    {   /* Present jobs run on one worker, in order */
+        static LONG64 prev_end, pf, pl, pd, pc;
+        if (no) {
+            r = &g_ftl[no % MAD_FTL_N];
+            if (r->no == no) {
+                LONG64 idle = prev_end ? (now - prev_end) - (r->w_replay + r->w_sig + r->w_wait + d) : 0;
+                r->w_prs = d; r->w_flush = g_xp.t_flush - pf; r->w_lat = g_xp.t_lat - pl; r->w_draw = g_xp.t_draw - pd; r->w_cmt = g_xp.t_cmt - pc;
+                r->w_idle = idle > 0 ? idle : 0; r->w_end = now;
+            }
+            InterlockedExchange64(&g_ftl_wcur, (LONG64)no + 1);
+            if (no > 4) mad_ftl_print(no - 4);
+        }
+        pf = g_xp.t_flush; pl = g_xp.t_lat; pd = g_xp.t_draw; pc = g_xp.t_cmt; prev_end = now;
+    }
+}
+static int g_pso_slow_ms = -1;
+static void mad_pso_slow(const char *what, LONG64 ticks, const char *name) {
+    static LONG lines;
+    LONG64 qpf = g_xp.qpf;
+    char clk[16];
+    if (g_pso_slow_ms < 0) {
+        g_pso_slow_ms = (int)mad_cfg_int_pe("pso-slow-ms", 0);
+        if (g_pso_slow_ms > 0) d3d12_log("[madeira-d3d12] pso-slow-ms = %d: a [pso-slow] line for every pipeline creation or first-use build at least that long\n", g_pso_slow_ms);
+    }
+    if (g_pso_slow_ms <= 0) return;
+    if (!qpf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); qpf = f.QuadPart ? f.QuadPart : 10000000; }
+    if (ticks * 1000 < (LONG64)g_pso_slow_ms * qpf || InterlockedIncrement(&lines) > 6000) return;
+    mad_ftl_enabled();   /* the local-time offset */
+    mad_ftl_clock(mad_ftl_wall(), clk);
+    d3d12_log("[pso-slow] %s %s took %.1f ms on tid %04lx, ending in the game's frame #%lld (worker on #%lld)%s%s\n", clk, what,
+              (double)ticks * 1000.0 / (double)qpf, (unsigned long)GetCurrentThreadId(), (long long)g_ftl_no + 1, (long long)g_ftl_wcur,
+              name && name[0] ? ": " : "", name && name[0] ? name : "");
+}
 /* A replay starts on this thread (mad_ecl_run): encode-batch and draw-dedup
  * apply until mad_es_finish. NULL when both are off. */
 static struct mad_eb *mad_es_begin(void) {
@@ -1706,6 +1889,9 @@ struct mad_fence {
      * threads that poll: a lost update only shortens or lengthens one run. */
     UINT64 fpb_seen, fpb_t;
     LONG fpb_run, fpb_polls;
+    /* madeira-duo poll runs (mad_pr_poll): the value the last poll returned, the thread
+     * that made it, when the run began and when its last poll was, and its length. */
+    UINT64 pr_seen, pr_t0, pr_last; LONG pr_n; DWORD pr_tid;
 };
 
 static void fence_set_locked(struct mad_fence *f, UINT64 v) {
@@ -1844,6 +2030,23 @@ static UINT64 mad_fpb_sleep(struct mad_fence *f, UINT64 seen) {
     InterlockedExchangeAdd64(&g_fpb_ticks, (LONG64)(mad_tick() - t0));
     return v;
 }
+/* madeira-duo poll runs: does the game wait for the GPU by polling? A run is one thread
+ * polling the same fence less than 5 ms apart and getting the same value 3+ times; it
+ * ends, and is counted with its length, at the poll that sees the fence move. Reported
+ * with the [perf] lines. Unlocked per-fence state: a lost update miscounts one run. */
+static volatile LONG g_pr_runs; static volatile LONG64 g_pr_ticks, g_pr_max;
+static void mad_pr_poll(struct mad_fence *f, UINT64 v) {
+    UINT64 now = mad_tick(); DWORD me = GetCurrentThreadId();
+    if (me == f->pr_tid && now - f->pr_last < mad_tick_freq() / 200) {
+        if (v == f->pr_seen) { f->pr_n++; f->pr_last = now; return; }
+        if (f->pr_n >= 3) {
+            LONG64 d = (LONG64)(now - f->pr_t0);
+            InterlockedIncrement(&g_pr_runs); InterlockedExchangeAdd64(&g_pr_ticks, d);
+            if (d > g_pr_max) g_pr_max = d;
+        }
+    }
+    f->pr_seen = v; f->pr_tid = me; f->pr_t0 = now; f->pr_last = now; f->pr_n = 1;
+}
 static UINT64 STDMETHODCALLTYPE fence_GetCompletedValue(ID3D12Fence *This) {
     struct mad_fence *f = (struct mad_fence *)This;
     if (g_fpb < 0) mad_fpb_init();
@@ -1866,6 +2069,7 @@ static UINT64 STDMETHODCALLTYPE fence_GetCompletedValue(ID3D12Fence *This) {
     EnterCriticalSection(&f->lock);
     UINT64 v = f->value;
     LeaveCriticalSection(&f->lock);
+    mad_pr_poll(f, v);   /* madeira-duo poll runs */
     return v;
 }
 static HRESULT STDMETHODCALLTYPE fence_SetEventOnCompletion(ID3D12Fence *This, UINT64 value, HANDLE event) {
@@ -6884,6 +7088,7 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
         if (built) { MemoryBarrier(); p->rps = built; }   /* pso-async: draws on other threads read rps without the lock */
         if (err) mad_log_nserror(p->vs_name, err);
         InterlockedExchangeAdd64(&g_pt_realize, mad_qpc() - t0); InterlockedIncrement(&g_pn_realize);
+        mad_pso_slow("graphics pipeline built at first draw", mad_qpc() - t0, p->ps_name[0] ? p->ps_name : p->vs_name);
         if (p->origin) mad_po_build(p, 0, mad_qpc() - t0);   /* madeira-duo pso-origin */
         if (p->rps) { LONG64 t1 = mad_qpc(); mad_rb_note(p, t1, t1 - t0); }   /* madeira-duo rebuilt in one session */
         if (p->rps) {
@@ -6921,6 +7126,7 @@ static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
             AcquireSRWLockExclusive(&p->rlock);
             tw = mad_qpc() - tw;
             InterlockedExchangeAdd64(&g_hz_cs_realize_t, tw); InterlockedIncrement(&g_hz_cs_realize_n);   /* hitch recorder: the dispatch did wait */
+            mad_pso_slow("compute dispatch waiting for a build in progress", tw, p->vs_name);
             InterlockedIncrement(&g_csb_waited);
             InterlockedExchangeAdd64(&g_csb_wait_t, tw);
             if (g_csb >= 2) mad_csb_say(p, "its first dispatch waited for the build in progress", tw);
@@ -6934,6 +7140,7 @@ static obj_handle_t mad_cpso_build(struct mad_pso *p, int bg) {
             ci.compute_function = p->vs_fn;
             p->cps = MTLDevice_newComputePipelineState(p->device_handle, &ci, &err);
             if (p->origin) mad_po_build(p, 1, mad_qpc() - t0);   /* madeira-duo pso-origin */
+            mad_pso_slow(bg ? "compute pipeline built by a builder" : "compute pipeline built at first dispatch", mad_qpc() - t0, p->vs_name);
             if (!bg) { InterlockedExchangeAdd64(&g_hz_cs_realize_t, mad_qpc() - t0); InterlockedIncrement(&g_hz_cs_realize_n); }
             else if (p->cps) InterlockedIncrement(&g_csb_built);
             if (!bg && p->async_q == 2) {   /* queued, but its dispatch came first */
@@ -12411,9 +12618,12 @@ struct mad_subjob {
     UINT count; struct mad_list **lists;   /* ECL: validated, AddRef'd, inflight counted */
     ID3D12Fence *fence; UINT64 value;      /* SIGNAL / WAIT: AddRef'd */
     struct mad_swapchain *swap; UINT index;   /* PRESENT (ml1121): no reference held -- swap_Release drains the queue first */
+    UINT64 ftl_no;                         /* PRESENT: madeira-duo frame timeline, the Present call's number (0 = timeline off) */
 };
+_Static_assert(MAD_SUB_ECL == 1 && MAD_SUB_SIGNAL == 2 && MAD_SUB_WAIT == 3 && MAD_SUB_PRESENT == 4, "mad_ftl_job takes the job kinds as numbers");
 static void mad_sub_enqueue(struct mad_queue *q, struct mad_subjob *j) {
     j->next = NULL;
+    InterlockedIncrement(&g_ftl_jobs);   /* madeira-duo frame timeline */
     EnterCriticalSection(&q->sub_lock);
     if (q->sub_tail) q->sub_tail->next = j; else q->sub_head = j;
     q->sub_tail = j;
@@ -12526,6 +12736,7 @@ static void mad_perf_cb(obj_handle_t cb, double wait_s) {
     g_perf_wait_s += wait_s; g_perf_cbs++;
     if (a.ret && t.end > t.start) {
         double s0 = t.start, e0 = t.end;
+        mad_ftl_retired(cb, t.start, t.end);   /* madeira-duo frame timeline */
         g_perf_gpu_sum += e0 - s0;
         if (!g_perf_first_start) g_perf_first_start = s0;
         if (s0 < g_perf_last_end) s0 = g_perf_last_end;
@@ -12649,6 +12860,14 @@ static void mad_perf_present(void) {
                   g_perf_presents ? 1000.0 * g_perf_wait_ticks / (double)fq.QuadPart / g_perf_presents : 0.0, 100.0 * g_perf_wait_ticks / (double)fq.QuadPart / wall,
                   g_perf_presents ? (double)g_perf_polls / g_perf_presents : 0.0, g_perf_presents ? (double)g_perf_qwait_sleeps / g_perf_presents : 0.0,
                   g_perf_sig_lat_n ? 1000.0 * g_perf_sig_lat_ticks / (double)fq.QuadPart / g_perf_sig_lat_n : 0.0, g_perf_sig_lat_n);
+        {   /* madeira-duo poll runs (mad_pr_poll) */
+            LONG rn = InterlockedExchange(&g_pr_runs, 0);
+            LONG64 rt = InterlockedExchange64(&g_pr_ticks, 0), rm = InterlockedExchange64(&g_pr_max, 0);
+            double tf = (double)mad_tick_freq();
+            d3d12_log("[perf] fence poll runs per frame: %.2f (one thread polling a fence that does not move, 3+ polls under 5 ms apart), "
+                      "%.2f ms inside them, longest %.1f ms\n", g_perf_presents ? (double)rn / g_perf_presents : 0.0,
+                      g_perf_presents ? 1000.0 * (double)rt / tf / g_perf_presents : 0.0, 1000.0 * (double)rm / tf);
+        }
         if (g_fpb > 0 && g_perf_presents) {   /* fence-poll-backoff */
             LONG bn = InterlockedExchange(&g_fpb_n, 0), bm = InterlockedExchange(&g_fpb_moved, 0);
             LONG64 bt = InterlockedExchange64(&g_fpb_ticks, 0);
@@ -12737,6 +12956,7 @@ static void mad_queue_flush(struct mad_queue *q) {
         }
         mad_vis_flush(q, q->open_cb);            /* ml1099: under fence_lock, so the pending list is in SERIAL order (Astra) */
         MTLCommandBuffer_commit(q->open_cb);
+        mad_ftl_commit(q->open_cb);              /* madeira-duo frame timeline */
         if (serial) { q->last_serial = serial; InterlockedExchange64(&sd->gpu_serial_committed, (LONG64)serial); }
         if (q->open_ticket) { mad_ticket_commit(q->open_ticket, serial); q->open_ticket = 0; }   /* madeira-bcd: sync diagnostics */
         LeaveCriticalSection(&sd->fence_lock);
@@ -13219,6 +13439,7 @@ static DWORD WINAPI mad_sub_worker(void *arg) {
         j = q->sub_head; q->sub_head = j->next; if (!q->sub_head) q->sub_tail = NULL;
         q->sub_busy = 1;
         LeaveCriticalSection(&q->sub_lock);
+        InterlockedDecrement(&g_ftl_jobs);   /* madeira-duo frame timeline */
 
         QueryPerformanceCounter(&t0);
         pool = NSAutoreleasePool_alloc_init();
@@ -13259,6 +13480,7 @@ static DWORD WINAPI mad_sub_worker(void *arg) {
             case MAD_SUB_WAIT: InterlockedIncrement64(&g_xp.n_wait); InterlockedExchangeAdd64(&g_xp.t_wait, d); break;
             case MAD_SUB_PRESENT: InterlockedIncrement64(&g_xp.pres_done); InterlockedExchangeAdd64(&g_xp.t_prs, d); break;
             }
+            mad_ftl_job(j->kind, d, j->ftl_no, tk);   /* madeira-duo frame timeline */
             if (pool) NSObject_release(pool);
             InterlockedExchangeAdd64(&g_xp.t_pool, mad_qpc() - tk);
         }
@@ -21117,6 +21339,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
     HRESULT hr = device_CreateGraphicsPipelineState_impl(This, desc, riid, out);
     LONG n;
     InterlockedExchangeAdd64(&g_pt_gfx, mad_qpc() - t0);
+    mad_pso_slow("CreateGraphicsPipelineState", mad_qpc() - t0, NULL);
     n = InterlockedIncrement(&g_pn_gfx);
     if ((n % 2000) == 0) mad_pso_time_report("every 2000 graphics pipelines");
     return hr;
@@ -21680,6 +21903,7 @@ static HRESULT STDMETHODCALLTYPE device_CreateComputePipelineState(ID3D12Device 
     LONG64 t0 = mad_qpc();
     HRESULT hr = device_CreateComputePipelineState_impl(This, desc, riid, out);
     InterlockedExchangeAdd64(&g_pt_cs, mad_qpc() - t0);
+    mad_pso_slow("CreateComputePipelineState", mad_qpc() - t0, NULL);
     InterlockedIncrement(&g_pn_cs);
     return hr;
 }
@@ -24210,14 +24434,15 @@ static void mad_hitch_frame(struct mad_swapchain *s, HANDLE worker, UINT64 prese
             double pcpu = n.proc_cpu >= 0 && prev.proc_cpu >= 0 ? (n.proc_cpu - prev.proc_cpu) / 10000.0 : -1.0;
             double in_ecl = HZ(t_ecl_caller), in_prs = (double)(n.present - prev.present) * ms;
             double wbusy = HZ(t_ecl) + HZ(t_prs) + HZ(t_wait) + HZ(t_sig) + HZ(t_pool);
-            char mem[96];
+            char mem[96], clk[16];
             mad_hz_memory(mem, sizeof mem);
+            mad_ftl_enabled(); mad_ftl_clock(mad_ftl_wall(), clk);   /* madeira-duo frame timeline: when, and which [ftl] frame */
             d3d12_log("[hitch] frame %.1f ms at present #%llu | game thread %04lx: cpu %.1f ms, in ExecuteCommandLists %.1f (%lld calls), "
                       "in Present %.1f [run-ahead wait %.1f, fps cap %.1f], outside d3d12 %.1f | process cpu %.1f ms | "
                       "worker busy %.1f ms, cpu %.1f: replay %.1f (%lld), present %.1f (%lld) [flush %.1f, gpu latency wait %.1f (%lld), "
                       "drawable %.1f, blit+present+commit %.1f], fence wait %.1f (%lld), signal %.1f (%lld), pool drain %.1f | "
                       "encode %.1f ms, encoders open/end %.1f, commits %ld (%.1f ms) | first-use pipelines gfx %ld (%.1f ms) "
-                      "compute %ld (%.1f ms), created %ld (%.1f ms) | %s\n",
+                      "compute %ld (%.1f ms), created %ld (%.1f ms) | %s | at %s, ftl #%lld\n",
                       frame, (unsigned long long)present_no, (unsigned long)n.game_tid, gcpu, in_ecl,
                       (long long)(n.xp.ecl_calls - prev.xp.ecl_calls), in_prs, HZ(t_thr), HZ(t_cap), frame - in_ecl - in_prs,
                       pcpu, wbusy, wcpu, HZ(t_ecl), (long long)(n.xp.n_ecl - prev.xp.n_ecl), HZ(t_prs),
@@ -24226,7 +24451,7 @@ static void mad_hitch_frame(struct mad_swapchain *s, HANDLE worker, UINT64 prese
                       (long long)(n.xp.n_sig - prev.xp.n_sig), HZ(t_pool),
                       (n.enc - prev.enc) * tms, (n.open - prev.open) * tms, (long)(n.fln - prev.fln), (n.fl - prev.fl) * ms,
                       (long)(n.rzn - prev.rzn), (n.rz - prev.rz) * ms, (long)(n.csn - prev.csn), (n.cs - prev.cs) * ms,
-                      (long)(n.createn - prev.createn), (n.create - prev.create) * ms, mem);
+                      (long)(n.createn - prev.createn), (n.create - prev.create) * ms, mem, clk, (long long)g_ftl_no);
             #undef HZ
         }
     }
@@ -24242,11 +24467,13 @@ static void mad_hitch_frame(struct mad_swapchain *s, HANDLE worker, UINT64 prese
     prev = n; have = 1;
 }
 static HRESULT STDMETHODCALLTYPE swap_Present(IDXGISwapChain4 *T, UINT sync, UINT flags) {   /* ml1119: timed wrapper */
-    LARGE_INTEGER t0, t1; HRESULT hr;
+    LARGE_INTEGER t0, t1; HRESULT hr; LONG64 ftl_thr = 0;
     mad_xp_role('P'); InterlockedIncrement64(&g_xp.pres_enq);   /* ml1128 */
     QueryPerformanceCounter(&t0);
+    if (!(flags & DXGI_PRESENT_TEST)) { ftl_thr = g_xp.t_thr; mad_ftl_call(t0.QuadPart); }   /* madeira-duo frame timeline */
     hr = swap_Present_pool(T, sync, flags);
     QueryPerformanceCounter(&t1);
+    if (!(flags & DXGI_PRESENT_TEST)) mad_ftl_called(g_xp.t_thr - ftl_thr);
     InterlockedExchangeAdd64(&g_perf_present_ticks, t1.QuadPart - t0.QuadPart);
     if (g_xp.fps_cap && !(flags & DXGI_PRESENT_TEST)) mad_fps_cap_pace((struct mad_swapchain *)T, t1.QuadPart);   /* madeira-bcd fps-gov */
     if (!(flags & DXGI_PRESENT_TEST)) {   /* madeira-duo hitch recorder: fps-cap pacing counts as time in Present */
@@ -24273,7 +24500,8 @@ static HRESULT swap_Present_inner(IDXGISwapChain4 *T, UINT sync, UINT flags) {
         if (j) {
             j->kind = MAD_SUB_PRESENT; j->swap = s; j->index = s->index;
             s->index = (s->index + 1) % s->nbuf;   /* GetCurrentBackBufferIndex moves on at once, as on Windows */
-            EnterCriticalSection(&q->sub_lock); q->sub_presents++; LeaveCriticalSection(&q->sub_lock);
+            EnterCriticalSection(&q->sub_lock); q->sub_presents++; mad_ftl_depth(q->sub_presents); LeaveCriticalSection(&q->sub_lock);
+            j->ftl_no = g_ftl_cur;   /* madeira-duo frame timeline */
             mad_sub_enqueue(q, j);
             mad_present_throttle(q);
             return S_OK;
