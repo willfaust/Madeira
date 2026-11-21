@@ -92,6 +92,11 @@ configure = glue[glue.index("static void wgp_configure(void)"):]
 configure = configure[:configure.index("\n}\n")]
 assert 'getenv( "MADEIRA_WG_VIDEO" )' in glue and "wg_video_switch_on()" in configure
 assert "mav_configure( video, &mav_apple_video_backend, &mav_apple_audio_backend, native )" in configure
+# rgb32 by default: the media session connects a source to its renderer with the native type only,
+# and DXMT has no YUV Direct3D 9 surface for the EVR's sample allocator (see the glue)
+native_fn = glue[glue.index("static enum mav_pixel_format wg_video_native_format(void)"):]
+native_fn = native_fn[:native_fn.index("\n}\n")]
+assert "if (!v || !*v) return MAV_PIX_BGRx;" in native_fn and native_fn.rstrip().endswith("return MAV_PIX_BGRx;"), native_fn
 assert '#include "wg_parser_av_ios.c"' in glue
 csrc = core.read_text()
 assert '#define MAV_TAG "[wg-parser] ml1990 "' in csrc and "#define MAV_MAX_LOGS 64" in csrc
@@ -1281,6 +1286,8 @@ with tempfile.TemporaryDirectory() as t:
     assert any("connect refused" in l and "no enabled demuxer recognised the stream" in l for l in lines), lines
     assert any("connect container=mp4 stream=0 video codec=h264 backend=stub-video 320x240 fps=30/1 out=nv12" in l for l in lines), lines
     assert any("connect container=mp4 codec=aac layer=0 rate=44100 channels=2 mask=0x3 out=f32" in l and "stream=1 backend=stub-aac" in l for l in lines), lines
+    assert any(l.endswith("stream 0: first picture delivered (nv12 320x240)") for l in lines), lines
+    assert any(l.endswith("stream 1: first audio buffer delivered") for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=0): container disabled by MADEIRA_WG_VIDEO=0" in l for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=1): compressed output requested" in l for l in lines), lines
     assert any("video codec h264 (codec id 27" in l and "stub: unexpected codec data" in l for l in lines), lines

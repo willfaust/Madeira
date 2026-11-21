@@ -2186,10 +2186,24 @@ static NTSTATUS wma_transform_notify_qos( void *args )
  * AudioToolbox, wg_parser_apple_ios.c).  MADEIRA_WG_VIDEO=0 restores the
  * ml1980 MP3/WAV-only behaviour (an MP4 is refused at connect).
  * MADEIRA_WG_VIDEO_FORMAT=nv12|i420|yv12|yuy2|rgb32|argb32|abgr32 picks the
- * native format a video stream reports (default nv12: what the hardware
- * decoder produces, and the first format media_source.c offers anyway); only
- * the native format and media_source.c's YUV list become media types, so a
- * consumer that insists on RGB can be served by choosing it here.
+ * native format a video stream reports.  Only the native format and
+ * media_source.c's YUV list (NV12, YV12, YUY2, I420, IYUV) become media types.
+ *
+ * The default is rgb32, not the nv12 the hardware decoder produces.  A media
+ * session resolves a source -> renderer branch with the source's current type
+ * only, and that is the native one.  With nv12 the EVR accepts it (dxva2's
+ * processor service lists NV12 without asking the device), and the session
+ * then asks the EVR's sample allocator for NV12 Direct3D 9 surfaces.  This
+ * port's d3d9 (DXMT) has no YUV surface format, so the allocator fails, and
+ * session.c drops the renderer's output node and every node after it
+ * (session_collect_nodes stops at the first failure).  The session still
+ * reports itself started.  Nothing is requested from the source, the audio
+ * renderer never gets the clock, and the title shows an empty video window
+ * until it is killed: Senren Banka's 32-bit CG movie (MP4, H.264 1080p + AAC,
+ * through krkrz's MFPlayer: media session, EVR, SAR).  RGB32 surfaces are
+ * plain DXMT surfaces, and the YUV list still serves a consumer (a source
+ * reader) that asks for NV12.  The cost is the NV12 -> BGRx conversion of
+ * each picture on the CPU.  nv12 restores the previous default.
  *
  * A parser has up to MAV_MAX_STREAMS streams.  Each stream handle is a
  * separate object inside the parser so a parser handle passed as a stream
@@ -2247,11 +2261,11 @@ static enum mav_pixel_format wg_video_native_format(void)
     const char *v = getenv( "MADEIRA_WG_VIDEO_FORMAT" );
     unsigned int i;
 
-    if (!v || !*v) return MAV_PIX_NV12;
+    if (!v || !*v) return MAV_PIX_BGRx;   /* rgb32: see above */
     for (i = 0; i < ARRAY_SIZE(names); i++)
         if (!strcasecmp( v, names[i].name )) return names[i].fmt;
-    mav_log( "MADEIRA_WG_VIDEO_FORMAT=%.16s is not one of nv12/i420/yv12/yuy2/rgb32/argb32/abgr32; using nv12", v );
-    return MAV_PIX_NV12;
+    mav_log( "MADEIRA_WG_VIDEO_FORMAT=%.16s is not one of nv12/i420/yv12/yuy2/rgb32/argb32/abgr32; using rgb32", v );
+    return MAV_PIX_BGRx;
 }
 
 static pthread_once_t wgp_config_once = PTHREAD_ONCE_INIT;

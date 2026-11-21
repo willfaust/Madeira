@@ -664,6 +664,7 @@ struct mav_stream
     int64_t next_pts;           /* 100 ns */
     int64_t seek_target;        /* 100 ns, -1 = none */
     unsigned int decode_errors, errors_logged;
+    int delivered;              /* a buffer has been handed out (logged once) */
 };
 
 struct mav_parser
@@ -2478,7 +2479,22 @@ static int mav_get_buffer( struct mav_parser *p, int stream, struct mav_buffer *
         }
         status = s ? MAV_OK : MAV_NO_BUFFER;
     }
-    if (status == MAV_OK) *buffer = s->cur;
+    if (status == MAV_OK)
+    {
+        *buffer = s->cur;
+        /* One line per stream, so a device log tells a stream nobody asked
+         * for (a renderer the media session dropped) from one that fails to
+         * decode. */
+        if (!s->delivered)
+        {
+            s->delivered = 1;
+            if (s->type == MAV_STREAM_VIDEO)
+                mav_log( "stream %u: first picture delivered (%s %dx%d)", s->number, mav_pix_name( s->vout.fmt ),
+                         s->vout.width, s->vout.height );
+            else
+                mav_log( "stream %u: first audio buffer delivered", s->number );
+        }
+    }
     /* a queue may have shrunk, or a stream ended: a waiter re-checks */
     if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
     pthread_mutex_unlock( &p->lock );

@@ -53,6 +53,23 @@ backend reports: WMV1/WMV2/WMV3/WMVA/WVC1 video, WMA audio with its version,
 block alignment and codec data, so a game that reads the file's profile
 through `IWMProfile` sees the real stream types.
 
+**The video format a stream reports: RGB32.** A video stream's native format
+(the media type Media Foundation's source lists first) is RGB32 by default,
+although VideoToolbox decodes to NV12 and the picture is converted on the CPU.
+A media session connects a source straight to its renderer with that native
+type only. The EVR accepts NV12, and the session then asks the EVR's sample
+allocator for NV12 Direct3D 9 surfaces. DXMT, this port's d3d9, has no YUV
+surface format, so the allocator fails. The session then drops the renderer's
+output node and every node after it, and still reports that playback
+started. No sample is ever requested, the audio renderer never starts, and the
+title shows an empty video window. Senren Banka's CG movie did this (an MP4
+through krkrz's MFPlayer; the workaround was `MADEIRA_WG_VIDEO=0`, which skips
+the movie). RGB32 surfaces are ordinary DXMT surfaces. A source reader that
+asks for NV12 still gets it from the YUV types listed after the native one.
+`MADEIRA_WG_VIDEO_FORMAT=nv12` restores the old default. Each stream logs
+`stream N: first picture delivered` (or `first audio buffer delivered`) once,
+so a device log shows whether any sample was ever requested.
+
 **One demuxer, several readers: back-pressure.** Each stream is read on its
 own thread by quartz and Media Foundation; a packet read for another stream
 is queued for it. A stream whose reader falls behind (a video decoded slower
@@ -83,7 +100,7 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 | `MADEIRA_WG_64BIT` | WMA only | `0`: 64-bit processes get the stub table again; `1`: their `wg_parser` too (see above). |
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
 | `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV or ASF is refused at connect. |
-| `MADEIRA_WG_VIDEO_FORMAT` | `nv12` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32`. |
+| `MADEIRA_WG_VIDEO_FORMAT` | `rgb32` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32` (see above for why the default is `rgb32`). |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
 
