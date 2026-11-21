@@ -103,6 +103,20 @@ MadeiraConfig.set("env.MADEIRA_FASTSYNC", nil)
 expect(SyncEngine.current == .wine, "inproc-sync = 0 without MADEIRA_FASTSYNC stays Wine standard sync (as written before)")
 MadeiraConfig.set("inproc-sync", nil)
 expect(SyncEngine.current == .fastsync, "neither key: Fastsync")
+
+// A byte that is not UTF-8 (a comment saved as Windows-1252, 0xE9 = é) neither hides
+// madeira.cfg from Settings nor lets set() rewrite it with only the new key.
+var latin = Data("# r".utf8); latin.append(0xE9)
+latin.append(contentsOf: Data("glages\r\nswap-mb = 4096\r\nvram-mb = 3072\nenv.MADEIRA_STEAM_LANGUAGE = french\n".utf8))
+try! latin.write(to: cfg)
+expect(MadeiraConfig.get("swap-mb") == "4096" && MadeiraConfig.get("env.MADEIRA_STEAM_LANGUAGE") == "french",
+       "a byte that is not UTF-8 does not hide madeira.cfg")
+expect(MadeiraConfig.set("env.MADEIRA_STEAM_CLOUD", "0"), "set() on such a file succeeds")
+let rewritten = try! Data(contentsOf: cfg)
+expect(rewritten.starts(with: Data([0x23, 0x20, 0x72, 0xE9, 0x67])), "set() keeps the comment byte for byte")
+expect(MadeiraConfig.get("swap-mb") == "4096" && MadeiraConfig.get("vram-mb") == "3072"
+       && MadeiraConfig.get("env.MADEIRA_STEAM_LANGUAGE") == "french" && MadeiraConfig.get("env.MADEIRA_STEAM_CLOUD") == "0",
+       "set() keeps every other key of such a file")
 exit(failed == 0 ? 0 : 1)
 '''
 

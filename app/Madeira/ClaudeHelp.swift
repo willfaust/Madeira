@@ -73,7 +73,8 @@ enum ClaudeHelp {
         // Chats take .txt files more readily than .cfg ones.
         let cfg = docs.appendingPathComponent(MadeiraConfig.fileName)
         let cfgCopy = folder.appendingPathComponent("madeira.cfg.txt")
-        if let text = try? String(contentsOf: cfg, encoding: .utf8),
+        // Lossy, as MadeiraConfig reads it: a byte that is not UTF-8 must not leave the file out of the help.
+        if let text = (try? Data(contentsOf: cfg)).map({ String(decoding: $0, as: UTF8.self) }),
            (try? ("# Documents/madeira.cfg (global settings)\n" + text).write(to: cfgCopy, atomically: true, encoding: .utf8)) != nil {
             out.append(cfgCopy)
         }
