@@ -38,7 +38,7 @@ before unless `MADEIRA_WG_64BIT=1`.
 
 | File | What it is |
 |---|---|
-| `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and two kinds of `wg_transform` on libavcodec: the WMA decoder `wma_decoder.c` uses (WMA v1/v2/Pro/Lossless, XMA1/2) and the WMV decoder `video_decoder.c`'s WMVideo Decoder DMO/MFT uses (WMV1, WMV2, WMV3, WMVA, WVC1; see below). `transform_create` gives a create to the first kind that claims its input type; every other entry finds the kind by the magic its object starts with. Other transforms (AAC, H.264, the resampler, the colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
+| `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and two kinds of `wg_transform` on libavcodec: the WMA decoder `wma_decoder.c` uses (WMA v1/v2/Pro/Lossless, XMA1/2) and the WMV decoder `video_decoder.c`'s WMVideo Decoder DMO/MFT uses (WMV1, WMV2, WMV3, WMVA, WVC1; see below). `transform_create` gives a create to the first kind that claims its input type; every other entry finds the kind by the magic its object starts with. Raw audio in is a third kind, the resampler `resampler.c` uses, on libswresample (see below). Other transforms (AAC, H.264, the colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
 | `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov, asf), MPEG audio / PCM / WMA decode through libavcodec + libswresample, Windows Media video (WMV7/8/9, VC-1, MS-MPEG4 v1-v3) decoded in software by libavcodec (`mav_lavc_video`), a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion (`mav_convert_picture`, which the WMV transform uses too) to the formats `quartz_parser.c`, `media_source.c` and `wm_reader.c` ask for: NV12, I420, YV12, YUY2, UYVY, YVYU, BGRx, BGRA, RGBA, 24-bit BGR (the WM reader's default, bottom-up), RGB565 and RGB555. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
@@ -133,6 +133,22 @@ B-frames) is lost at the end of a stream, as with GStreamer. When the DMO
 wrapper meets a new output media type, `video_decoder.c` makes a new
 transform, whose new decoder waits for a keyframe.
 
+**The resampler.** Media Foundation's topology loader puts winegstreamer's
+resampler (`CLSID_CResamplerMediaObject`, `wg_resampler`) between a source's
+PCM and the audio renderer, which takes only the device mix format. Its
+`wg_transform` was refused here ("input format tag 0x1 is not a WMA family
+stream"), so `resampler_create` failed. For Senren Banka's WMV movie (48 kHz
+S16 from the WMA stream) the topology then had no audio branch and no
+presentation clock, and the video renderer never presented. The resampler is
+now libswresample:
+- integer PCM of 8, 16, 24 or 32 bits and float of 32 or 64, in and out;
+- `WAVEFORMATEX` or `WAVEFORMATEXTENSIBLE`, any rate, 1 to 8 channels;
+- timestamps run from the input's, less what the resampler holds back, and do
+  not drift.
+
+It logs one `[resampler] created ...` line per transform.
+`MADEIRA_WG_RESAMPLER=0` refuses it again.
+
 **One demuxer, several readers: back-pressure.** Each stream is read on its
 own thread by quartz and Media Foundation; a packet read for another stream
 is queued for it. A stream whose reader falls behind (a video decoded slower
@@ -164,15 +180,17 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
 | `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV or ASF is refused at connect. |
 | `MADEIRA_WG_WMV_TRANSFORM` | on | `0`: every video `wg_transform` is refused at create again, so the WMVideo Decoder DMO/MFT cannot be created, as before. Read once per process. WMA is unaffected. |
+| `MADEIRA_WG_RESAMPLER` | on | `0`: the resampler transform is refused at create, as before. |
 | `MADEIRA_WG_COMPRESSED` | on | `0`: a compressed-output parser refuses an ASF, as before: the WM reader's compressed samples are not available (see above). |
 | `MADEIRA_WG_VIDEO_FORMAT` | `rgb32` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32` (see above for why the default is `rgb32`). |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
 
 Log tags: `[wma]` for the WMA decoder, `[wmv]` for the WMV decoder (one line
-per create and per destroy, refusals with their reason), `[wg-parser]` for the
-parser. All are rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`
-and `[wmv]` caps).
+per create and per destroy, refusals with their reason), `[resampler]` for the
+resampler (one line per create), `[wg-parser]` for the parser. All are
+rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`, `[wmv]` and
+`[resampler]` caps).
 
 ## Tests
 
@@ -227,6 +245,16 @@ and `[wmv]` caps).
   `MADEIRA_WG_WMV_TRANSFORM=0`. WMV3/WVC1/WMVA are covered by codec-id
   plumbing only (the DMO's probe, hand-built sequence headers, garbage
   frames): FFmpeg cannot encode them.
+- `tests/host/check-wg-resampler.py` (needs a configured Wine tree, like
+  the WMA test): drives the resampler through the `wg_transform` entries under
+  ASan/UBSan. It covers:
+  - 48 kHz S16 stereo to 48 and 44.1 kHz float (Senren's case): the tone's
+    frequency and level, the frame count, timestamps without gaps or drift;
+  - all 36 pairs of u8/s16/s24/s32/f32/f64, with identity bit-exact;
+  - 5.1 to stereo, mono to stereo, stereo to mono;
+  - `check_audio_transform_support()`'s probe, back-pressure, flush, a new
+    output type mid-stream, drain;
+  - refusals and `MADEIRA_WG_RESAMPLER=0`.
 - `tests/x86/wma-x86.c` (`build-wma-test.sh`): a 32-bit program that
   reaches the WMA decoder exactly as FAudio does and checks that the decoded
   PCM has the 440 Hz fundamental it was encoded from. Exit 62 pass, 63 decode

@@ -589,6 +589,9 @@ OVERLAY = {
                         "created. By default they decode WMV1/2/3, WMVA and WVC1 with libavcodec. WMA is unaffected."},
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
+    "env.MADEIRA_WG_RESAMPLER": {"title": "Media: audio resampler",
+                "note": "0 refuses the resampler transform again; by default Media Foundation converts a movie's audio to the "
+                        "device mix format with libswresample."},
     "env.MADEIRA_WG_COMPRESSED": {"title": "Media: compressed WMV/WMA samples (32-bit programs)",
                 "note": "0 refuses the WM reader's compressed samples of an ASF again; by default an application that "
                         "decodes them itself (KiriKiri's movie plugin, through the WMV/WMA decoder DMOs) gets the file's packets."},

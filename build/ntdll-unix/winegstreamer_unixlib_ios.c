@@ -44,9 +44,10 @@
  * video_decoder.c's WMV decoder use: create / destroy / push_data /
  * read_data / get_output_type / set_output_type / drain / flush / get_status
  * (+ notify_qos as a no-op, and wg_init_gstreamer as a benign success so
- * main.c's init_gstreamer_proc lets the DLL load), for two kinds of
- * transform: WMA audio (below) and WMV video (the section "the WMV decoder";
- * "transform kinds" after it is how a call finds its kind).  The wg_muxer
+ * main.c's init_gstreamer_proc lets the DLL load), for three kinds of
+ * transform: WMA audio (below), WMV video (the section "the WMV decoder") and
+ * the audio resampler (resampler.c's; the section after it).  "Transform
+ * kinds" is how a call finds its kind.  The wg_muxer
  * side returns STATUS_NOT_IMPLEMENTED.  Those callers already handle a
  * component that is not available; what they must never get is a success
  * with an untouched output field (no fake success).
@@ -61,12 +62,14 @@
  * wg_parser_apple_ios.c) for the Media Foundation source; MADEIRA_WG_VIDEO=0
  * restores the MP3/WAV-only parser.
  *
- * wg_transform_create also REFUSES anything that is neither a WMA family
- * stream nor Windows Media video (WMV1/WMV2/WMV3/WMVA/WVC1).  winegstreamer's
- * other transforms (aac, h264, the resampler, the colour converter) are real
- * GStreamer pipelines with no replacement here, and a transform that accepts
- * an H.264 stream and then emits nothing is worse for the caller than one
- * that never opened.  MADEIRA_WG_WMV_TRANSFORM=0 refuses the WMV one too.
+ * wg_transform_create also REFUSES anything that is not a WMA family
+ * stream, Windows Media video (WMV1/WMV2/WMV3/WMVA/WVC1) or raw audio (the
+ * resampler, on libswresample).  winegstreamer's other transforms (aac, h264,
+ * the colour converter) are real GStreamer pipelines with no replacement
+ * here, and a transform that accepts an H.264 stream and then emits nothing
+ * is worse for the caller than one that never opened.
+ * MADEIRA_WG_WMV_TRANSFORM=0 refuses the WMV one too, MADEIRA_WG_RESAMPLER=0
+ * the resampler.
  *
  * DECODING
  * --------
@@ -3052,6 +3055,488 @@ static BOOL wmv_claims( const struct wg_transform_create_params *params )
 }
 
 /***********************************************************************
+ *           wg_transform: the audio resampler   (MADEIRA)
+ *
+ * winegstreamer's resampler -- CLSID_CResamplerMediaObject and wg_resampler,
+ * the converter Media Foundation's topology loader puts between a source's
+ * PCM and the audio renderer, which takes nothing but the device mix format --
+ * is a GStreamer audioconvert ! audioresample pipeline upstream.  Here it is
+ * libswresample: integer PCM of 8, 16, 24 or 32 bits and float of 32 or 64,
+ * WAVEFORMATEX or WAVEFORMATEXTENSIBLE, any rate, 1 to 8 channels, in and out.
+ * Without it a movie whose audio is not in the mix format loses its whole
+ * topology: no audio branch, no presentation clock, and the video renderer
+ * never presents (Senren Banka's WMV movies: 48 kHz S16 from the WMA decoder).
+ * MADEIRA_WG_RESAMPLER=0 refuses it again.
+ *
+ * Same protocol as the WMA decoder: push converts at once, and refuses more
+ * input (MF_E_NOTACCEPTING) while converted audio waits to be read.  It is the
+ * first row of transform_kinds, so raw audio never reaches the WMA decoder.
+ */
+#define MADEIRA_WG_RESAMPLER_MAGIC 0x52534d50  /* 'RSMP' */
+#define RS_MAX_CHANNELS 8
+#define RS_MAX_LOGS 32
+
+static unsigned int rs_log_count;
+
+#define RS_LOG( fmt, ... )                                                           \
+    do {                                                                             \
+        unsigned int _n = __atomic_add_fetch( &rs_log_count, 1, __ATOMIC_RELAXED );  \
+        if (_n <= RS_MAX_LOGS || wma_diag_on())                                      \
+            dprintf( 2, "[resampler] " fmt, ## __VA_ARGS__ );                        \
+    } while (0)
+
+struct rs_format
+{
+    enum AVSampleFormat fmt;    /* what libswresample sees: 24-bit PCM goes through S32 */
+    UINT32 bits;                /* bits per sample in the caller's buffers */
+    UINT32 rate, channels;
+    UINT32 frame_size;          /* bytes per frame in the caller's buffers */
+    AVChannelLayout layout;
+};
+
+struct rs_transform
+{
+    UINT32 magic;
+    pthread_mutex_t lock;
+    SwrContext *swr;
+    struct rs_format in, out;
+
+    /* the output type as the caller set it, handed back verbatim */
+    BYTE *out_format;
+    UINT32 out_format_size;
+
+    BYTE *wide;                 /* 24-bit input widened to S32 */
+    size_t wide_cap;
+    BYTE *pcm_buf;              /* converted audio, consumed by read_data */
+    size_t pcm_cap, pcm_pos, pcm_len;
+
+    /* timestamps: the output frame `anchor_frames` before the next one read
+     * starts at `anchor`, so that rounding never adds up */
+    INT64 anchor;               /* 100 ns */
+    UINT64 anchor_frames;
+    BOOL have_pts;
+    BOOL discontinuity;
+    UINT32 partial_logged;
+};
+
+/* MADEIRA_WG_RESAMPLER=0 refuses the resampler again: raw audio in fails at
+ * create, as before, and a media session with no matching mix format loses its
+ * audio branch. */
+static BOOL rs_switch_on(void)
+{
+    const char *v = getenv( "MADEIRA_WG_RESAMPLER" );
+    return !(v && v[0] == '0' && !v[1]);
+}
+
+static struct rs_transform *get_rs_transform( wg_transform_t handle )
+{
+    struct rs_transform *transform = (struct rs_transform *)(UINT_PTR)handle;
+
+    if (!transform || transform->magic != MADEIRA_WG_RESAMPLER_MAGIC) return NULL;
+    return transform;
+}
+
+/* Raw audio in: a resampler's input, not a decoder's. */
+static BOOL rs_is_raw_audio( const struct wg_media_type *type )
+{
+    const WAVEFORMATEX *wfx = audio_format( type );
+    UINT tag;
+
+    if (!wfx) return FALSE;
+    tag = format_tag( wfx, type->format_size );
+    return tag == WAVE_FORMAT_PCM || tag == WAVE_FORMAT_IEEE_FLOAT;
+}
+
+static BOOL rs_parse( const struct wg_media_type *type, struct rs_format *f )
+{
+    const WAVEFORMATEX *wfx = audio_format( type );
+    UINT tag;
+
+    memset( f, 0, sizeof(*f) );
+    if (!wfx) return FALSE;
+    tag = format_tag( wfx, type->format_size );
+    if (tag == WAVE_FORMAT_PCM)
+    {
+        switch (wfx->wBitsPerSample)
+        {
+        case 8:  f->fmt = AV_SAMPLE_FMT_U8; break;
+        case 16: f->fmt = AV_SAMPLE_FMT_S16; break;
+        case 24:
+        case 32: f->fmt = AV_SAMPLE_FMT_S32; break;
+        default: return FALSE;
+        }
+    }
+    else if (tag == WAVE_FORMAT_IEEE_FLOAT)
+    {
+        switch (wfx->wBitsPerSample)
+        {
+        case 32: f->fmt = AV_SAMPLE_FMT_FLT; break;
+        case 64: f->fmt = AV_SAMPLE_FMT_DBL; break;
+        default: return FALSE;
+        }
+    }
+    else return FALSE;
+    /* nBlockAlign is not trusted: check_audio_transform_support() leaves it 0 */
+    if (!wfx->nChannels || wfx->nChannels > RS_MAX_CHANNELS || !wfx->nSamplesPerSec || wfx->nSamplesPerSec > 768000)
+        return FALSE;
+    f->bits = wfx->wBitsPerSample;
+    f->rate = wfx->nSamplesPerSec;
+    f->channels = wfx->nChannels;
+    f->frame_size = f->channels * (f->bits / 8);
+    layout_from_mask( &f->layout, channel_mask( wfx, type->format_size ), f->channels );
+    return TRUE;
+}
+
+static const char *rs_format_name( const struct rs_format *f )
+{
+    switch (f->fmt)
+    {
+    case AV_SAMPLE_FMT_U8:  return "u8";
+    case AV_SAMPLE_FMT_S16: return "s16";
+    case AV_SAMPLE_FMT_S32: return f->bits == 24 ? "s24" : "s32";
+    case AV_SAMPLE_FMT_FLT: return "f32";
+    case AV_SAMPLE_FMT_DBL: return "f64";
+    default:                return "?";
+    }
+}
+
+static int rs_open( struct rs_transform *transform )
+{
+    int err;
+
+    swr_free( &transform->swr );
+    if ((err = swr_alloc_set_opts2( &transform->swr, &transform->out.layout, transform->out.fmt,
+                                    transform->out.rate, &transform->in.layout, transform->in.fmt,
+                                    transform->in.rate, 0, NULL )) < 0)
+        return err;
+    if ((err = swr_init( transform->swr )) < 0) swr_free( &transform->swr );
+    return err;
+}
+
+/* Converts `frames` frames of the caller's input (NULL: what libswresample
+ * still holds) onto the end of pcm_buf. */
+static NTSTATUS rs_convert( struct rs_transform *transform, const BYTE *data, UINT32 frames )
+{
+    const uint8_t *in = data;
+    uint8_t *out;
+    UINT32 swr_frame = transform->out.channels * av_get_bytes_per_sample( transform->out.fmt );
+    int max, n, i;
+
+    if (data && transform->in.bits == 24)
+    {
+        /* little-endian 24-bit to the top of an S32 */
+        size_t samples = (size_t)frames * transform->in.channels;
+        INT32 *w;
+        if (!buffer_reserve( &transform->wide, &transform->wide_cap, samples * 4 )) return STATUS_NO_MEMORY;
+        w = (INT32 *)transform->wide;
+        for (i = 0; i < (int)samples; i++)
+            w[i] = (INT32)((UINT32)data[3 * i] << 8 | (UINT32)data[3 * i + 1] << 16 | (UINT32)data[3 * i + 2] << 24);
+        in = transform->wide;
+    }
+    if ((max = swr_get_out_samples( transform->swr, data ? (int)frames : 0 )) < 0) return STATUS_INTERNAL_ERROR;
+    if (!max) return STATUS_SUCCESS;
+    if (!buffer_reserve( &transform->pcm_buf, &transform->pcm_cap, transform->pcm_len + (size_t)max * swr_frame ))
+        return STATUS_NO_MEMORY;
+    out = transform->pcm_buf + transform->pcm_len;
+    if ((n = swr_convert( transform->swr, &out, max, data ? &in : NULL, data ? (int)frames : 0 )) < 0)
+    {
+        RS_LOG( "swr_convert failed (%d) on %u frames (transform %p)\n", n, frames, transform );
+        return STATUS_INTERNAL_ERROR;
+    }
+    if (transform->out.bits == 24)
+    {
+        /* back down from S32, in place: each 3-byte sample lands at or before its source */
+        size_t samples = (size_t)n * transform->out.channels;
+        for (i = 0; i < (int)samples; i++)
+        {
+            UINT32 v = ((UINT32 *)out)[i];
+            out[3 * i] = (BYTE)(v >> 8);
+            out[3 * i + 1] = (BYTE)(v >> 16);
+            out[3 * i + 2] = (BYTE)(v >> 24);
+        }
+    }
+    transform->pcm_len += (size_t)n * transform->out.frame_size;
+    return STATUS_SUCCESS;
+}
+
+static void rs_compact( struct rs_transform *transform )
+{
+    if (transform->pcm_pos == transform->pcm_len)
+        transform->pcm_pos = transform->pcm_len = 0;
+}
+
+static BOOL rs_claims( const struct wg_transform_create_params *params )
+{
+    return rs_is_raw_audio( &params->input_type );
+}
+
+static NTSTATUS rs_create( struct wg_transform_create_params *params )
+{
+    const WAVEFORMATEX *out = audio_format( &params->output_type );
+    struct rs_transform *transform;
+    struct rs_format fin, fout;
+    int err;
+
+    params->transform = 0;
+    if (!rs_switch_on())
+    {
+        RS_LOG( "disabled by MADEIRA_WG_RESAMPLER=0; refusing\n" );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!rs_parse( &params->input_type, &fin ))
+    {
+        RS_LOG( "input is not 8/16/24/32-bit PCM or 32/64-bit float, 1-%u channels; refusing\n", RS_MAX_CHANNELS );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!rs_parse( &params->output_type, &fout ))
+    {
+        RS_LOG( "output is not 8/16/24/32-bit PCM or 32/64-bit float, 1-%u channels; refusing\n", RS_MAX_CHANNELS );
+        av_channel_layout_uninit( &fin.layout );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!(transform = calloc( 1, sizeof(*transform) ))
+        || !(transform->out_format = malloc( params->output_type.format_size )))
+    {
+        free( transform );
+        av_channel_layout_uninit( &fin.layout );
+        av_channel_layout_uninit( &fout.layout );
+        return STATUS_NO_MEMORY;
+    }
+    transform->in = fin;
+    transform->out = fout;
+    memcpy( transform->out_format, out, params->output_type.format_size );
+    transform->out_format_size = params->output_type.format_size;
+    if ((err = rs_open( transform )) < 0)
+    {
+        RS_LOG( "libswresample refused %s %u Hz %uch -> %s %u Hz %uch (%d)\n", rs_format_name( &fin ), fin.rate,
+                fin.channels, rs_format_name( &fout ), fout.rate, fout.channels, err );
+        av_channel_layout_uninit( &transform->in.layout );
+        av_channel_layout_uninit( &transform->out.layout );
+        free( transform->out_format );
+        free( transform );
+        return STATUS_NOT_SUPPORTED;
+    }
+    pthread_mutex_init( &transform->lock, NULL );
+    transform->magic = MADEIRA_WG_RESAMPLER_MAGIC;
+    transform->discontinuity = TRUE;
+    params->transform = (wg_transform_t)(UINT_PTR)transform;
+    RS_LOG( "created %s %u Hz %uch -> %s %u Hz %uch (transform %p)\n", rs_format_name( &fin ), fin.rate,
+            fin.channels, rs_format_name( &fout ), fout.rate, fout.channels, transform );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS rs_destroy( wg_transform_t handle )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    transform->magic = 0;
+    swr_free( &transform->swr );
+    av_channel_layout_uninit( &transform->in.layout );
+    av_channel_layout_uninit( &transform->out.layout );
+    free( transform->out_format );
+    free( transform->wide );
+    free( transform->pcm_buf );
+    pthread_mutex_unlock( &transform->lock );
+    pthread_mutex_destroy( &transform->lock );
+    free( transform );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS rs_push_data( wg_transform_t handle, struct wg_sample *sample, const void *data, HRESULT *result )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    UINT32 frames;
+    NTSTATUS status;
+
+    if (!transform || !sample) return STATUS_INVALID_HANDLE;
+    if (sample->size && !data) return STATUS_INVALID_PARAMETER;
+
+    pthread_mutex_lock( &transform->lock );
+    if (transform->pcm_len > transform->pcm_pos)
+    {
+        *result = MF_E_NOTACCEPTING;
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_SUCCESS;
+    }
+    rs_compact( transform );
+    frames = sample->size / transform->in.frame_size;
+    if (sample->size % transform->in.frame_size && transform->partial_logged++ < 3)
+        RS_LOG( "a %u-byte sample is not whole %u-byte frames; the tail is dropped (transform %p)\n",
+                (UINT)sample->size, transform->in.frame_size, transform );
+    /* The first frame out of this push is what libswresample still holds from
+     * earlier ones, so it starts that much before this sample. */
+    if (sample->flags & WG_SAMPLE_FLAG_HAS_PTS)
+    {
+        transform->anchor = sample->pts - swr_get_delay( transform->swr, 10000000 );
+        transform->anchor_frames = 0;
+        transform->have_pts = TRUE;
+    }
+    if (sample->flags & WG_SAMPLE_FLAG_DISCONTINUITY) transform->discontinuity = TRUE;
+    status = frames ? rs_convert( transform, data, frames ) : STATUS_SUCCESS;
+    pthread_mutex_unlock( &transform->lock );
+
+    *result = status ? E_FAIL : S_OK;
+    return status;
+}
+
+static NTSTATUS rs_read_data( wg_transform_t handle, struct wg_sample *sample, void *data, HRESULT *result )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    size_t avail, copy;
+
+    if (!transform || !sample) return STATUS_INVALID_HANDLE;
+    if (sample->max_size && !data) return STATUS_INVALID_PARAMETER;
+
+    pthread_mutex_lock( &transform->lock );
+    avail = transform->pcm_len - transform->pcm_pos;
+    copy = avail < sample->max_size ? avail : sample->max_size;
+    copy -= copy % transform->out.frame_size;
+    if (!copy)
+    {
+        sample->size = 0;
+        pthread_mutex_unlock( &transform->lock );
+        *result = MF_E_TRANSFORM_NEED_MORE_INPUT;
+        return STATUS_SUCCESS;
+    }
+    memcpy( data, transform->pcm_buf + transform->pcm_pos, copy );
+    sample->size = copy;
+    sample->flags &= ~(WG_SAMPLE_FLAG_INCOMPLETE | WG_SAMPLE_FLAG_HAS_PTS |
+                       WG_SAMPLE_FLAG_HAS_DURATION | WG_SAMPLE_FLAG_DISCONTINUITY);
+    sample->flags |= WG_SAMPLE_FLAG_SYNC_POINT | WG_SAMPLE_FLAG_HAS_DURATION;
+    {
+        UINT64 frames = copy / transform->out.frame_size, rate = transform->out.rate;
+        INT64 start = transform->anchor + (INT64)((transform->anchor_frames * 10000000 + rate / 2) / rate);
+        INT64 end = transform->anchor + (INT64)(((transform->anchor_frames + frames) * 10000000 + rate / 2) / rate);
+
+        sample->duration = end - start;
+        if (transform->have_pts)
+        {
+            sample->flags |= WG_SAMPLE_FLAG_HAS_PTS;
+            sample->pts = start;
+        }
+        transform->anchor_frames += frames;
+    }
+    if (transform->discontinuity)
+    {
+        sample->flags |= WG_SAMPLE_FLAG_DISCONTINUITY;
+        transform->discontinuity = FALSE;
+    }
+    transform->pcm_pos += copy;
+    if (transform->pcm_pos < transform->pcm_len) sample->flags |= WG_SAMPLE_FLAG_INCOMPLETE;
+    else rs_compact( transform );
+    pthread_mutex_unlock( &transform->lock );
+    *result = S_OK;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS rs_get_output_type( wg_transform_t handle, struct wg_media_type *type )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    UINT32 size;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    size = transform->out_format_size;
+    type->major = madeira_MFMediaType_Audio;
+    if (!type->u.format || type->format_size < size)
+    {
+        type->format_size = size;
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    memcpy( type->u.format, transform->out_format, size );
+    type->format_size = size;
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS rs_set_output_type( wg_transform_t handle, const struct wg_media_type *type )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    struct rs_format fout, old;
+    BYTE *copy;
+    int err;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    if (!rs_parse( type, &fout )) return STATUS_NOT_SUPPORTED;
+    if (!(copy = malloc( type->format_size )))
+    {
+        av_channel_layout_uninit( &fout.layout );
+        return STATUS_NO_MEMORY;
+    }
+    memcpy( copy, type->u.format, type->format_size );
+
+    pthread_mutex_lock( &transform->lock );
+    old = transform->out;
+    transform->out = fout;
+    if ((err = rs_open( transform )) < 0)
+    {
+        transform->out = old;
+        rs_open( transform );
+        pthread_mutex_unlock( &transform->lock );
+        av_channel_layout_uninit( &fout.layout );
+        free( copy );
+        RS_LOG( "libswresample refused the new output type (%d); keeping the old one\n", err );
+        return STATUS_NOT_SUPPORTED;
+    }
+    av_channel_layout_uninit( &old.layout );
+    /* anything converted is in the old format */
+    transform->pcm_pos = transform->pcm_len = 0;
+    transform->discontinuity = TRUE;
+    free( transform->out_format );
+    transform->out_format = copy;
+    transform->out_format_size = type->format_size;
+    pthread_mutex_unlock( &transform->lock );
+    RS_LOG( "output type set to %s %u Hz %uch (transform %p)\n", rs_format_name( &fout ), fout.rate,
+            fout.channels, transform );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS rs_get_status( wg_transform_t handle, UINT32 *accepts_input )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    *accepts_input = transform->pcm_len == transform->pcm_pos;
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+/* What libswresample still holds comes out, and it starts afresh. */
+static NTSTATUS rs_drain( wg_transform_t handle )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    NTSTATUS status;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    status = rs_convert( transform, NULL, 0 );
+    if (swr_init( transform->swr ) < 0) status = STATUS_INTERNAL_ERROR;
+    pthread_mutex_unlock( &transform->lock );
+    return status;
+}
+
+static NTSTATUS rs_flush( wg_transform_t handle )
+{
+    struct rs_transform *transform = get_rs_transform( handle );
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    transform->pcm_pos = transform->pcm_len = 0;
+    transform->have_pts = FALSE;
+    transform->anchor = 0;
+    transform->anchor_frames = 0;
+    transform->discontinuity = TRUE;
+    if (swr_init( transform->swr ) < 0) status = STATUS_INTERNAL_ERROR;
+    pthread_mutex_unlock( &transform->lock );
+    return status;
+}
+
+/***********************************************************************
  *           transform kinds
  *
  * wg_transform_create gives the create to the first kind below that claims
@@ -3078,6 +3563,12 @@ struct wg_transform_ops
     NTSTATUS (*flush)( wg_transform_t handle );
 };
 
+static const struct wg_transform_ops rs_transform_ops =
+{
+    "resampler", MADEIRA_WG_RESAMPLER_MAGIC, rs_claims, rs_create, rs_destroy, rs_get_output_type,
+    rs_set_output_type, rs_push_data, rs_read_data, rs_get_status, rs_drain, rs_flush,
+};
+
 static const struct wg_transform_ops wma_transform_ops =
 {
     "wma", MADEIRA_WG_TRANSFORM_MAGIC, wma_claims, wma_create, wma_destroy, wma_get_output_type,
@@ -3090,9 +3581,10 @@ static const struct wg_transform_ops wmv_transform_ops =
     wmv_set_output_type, wmv_push_data, wmv_read_data, wmv_get_status, wmv_drain, wmv_flush,
 };
 
-/* In claim order. */
+/* In claim order: raw audio is the resampler's, other audio the WMA decoder's. */
 static const struct wg_transform_ops *const transform_kinds[] =
 {
+    &rs_transform_ops,
     &wma_transform_ops,
     &wmv_transform_ops,
 };
