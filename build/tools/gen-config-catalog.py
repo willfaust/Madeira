@@ -584,6 +584,9 @@ OVERLAY = {
     "eco": { "note": 'Runs guest threads at a lower iOS QoS class so the system favours efficiency and saves power; can cost speed. Class chosen by eco-qos.',"title": "Eco scheduling"},
     "eco-qos": {"title": "Eco QoS class", "kind": "choice", "note": "The QoS class guest threads run at while eco is on.",
                 "choices": [("", "Utility (default)"), ("background", "Background"), ("initiated", "User initiated")]},
+    "env.MADEIRA_WG_WMV_TRANSFORM": {"title": "Media: WMV video decoder",
+                "note": "0 refuses every video transform again, as before: the WMVideo Decoder DMO and MFT cannot be "
+                        "created. By default they decode WMV1/2/3, WMVA and WVC1 with libavcodec. WMA is unaffected."},
     "env.MADEIRA_WG_VIDEO": {"title": "Media: MP4 video (32-bit programs)",
                 "note": "0 limits the media parser to MP3/WAV; by default MP4 with H.264/HEVC video decodes through VideoToolbox."},
     "env.MADEIRA_WOW_RWX_PLAIN": {"category": "Memory & JIT pool", "note": "Unset: a 32-bit window's anonymous RWX memory is plain read/write to the host once Wine Mono's libmono-2.0-x86.dll is mapped there (ml1279/ml1282). 1: in every 32-bit window. 0: never (stores go through the JIT pool's alias, and FEX's Mono bridge stays off)."},

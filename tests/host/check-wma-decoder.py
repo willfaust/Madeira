@@ -220,7 +220,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
     create.output_type.major = madeira_MFMediaType_Audio;
     create.output_type.format_size = sizeof(WAVEFORMATEX);
     create.output_type.u.audio = &out.wfx;
-    CHECK( !wma_transform_create( &create ) && create.transform, "create failed" );
+    CHECK( !wg_transform_create( &create ) && create.transform, "create failed" );
 
     chunk = (size_t)s.block_align * packets_per_push;
     for (off = 0; off <= s.size; )
@@ -235,7 +235,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
             sample.data = (UINT64)(UINT_PTR)(s.data + off);
             push.transform = create.transform;
             push.sample = &sample;
-            CHECK( !wma_transform_push_data( &push ), "push_data failed" );
+            CHECK( !wg_transform_push_data( &push ), "push_data failed" );
             hr = push.result;
             if (hr == MF_E_NOTACCEPTING) goto drain_out;
             CHECK( hr == S_OK, "push result %#x", (unsigned)hr );
@@ -243,7 +243,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
         }
         else
         {
-            CHECK( !wma_transform_drain( &create.transform ), "drain failed" );
+            CHECK( !wg_transform_drain( &create.transform ), "drain failed" );
             off++;
         }
     drain_out:
@@ -254,7 +254,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
             sample.data = (UINT64)(UINT_PTR)outbuf;
             read.transform = create.transform;
             read.sample = &sample;
-            CHECK( !wma_transform_read_data( &read ), "read_data failed" );
+            CHECK( !wg_transform_read_data( &read ), "read_data failed" );
             if (read.result == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
             CHECK( read.result == S_OK && sample.size, "read result %#x size %u", (unsigned)read.result, sample.size );
             CHECK( sample.size % out.wfx.nBlockAlign == 0, "partial frame (%u bytes)", sample.size );
@@ -302,7 +302,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
         }
     }
 done:
-    if (create.transform) wma_transform_destroy( &create.transform );
+    if (create.transform) wg_transform_destroy( &create.transform );
     free( pcm );
     free( s.data );
     return 0;

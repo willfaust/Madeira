@@ -2168,18 +2168,22 @@ static void mav_yuv_coefs( int bt709, int full, struct mav_yuv_coefs *c )
     c->yoff = full ? 0 : 16;
 }
 
-/* Writes one decoded 4:2:0 bi-planar picture into `dst` in s->vout's format
- * and layout.  A picture smaller than the output is padded with black; a
- * larger one is cropped (the codec's cropping is the decoder's business). */
-static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes *src, uint8_t *dst,
-                                 const struct mav_layout *l )
+/* Writes one decoded 4:2:0 bi-planar picture into `dst` in `vout`'s format
+ * and layout, converting to RGB with the BT.709 matrix if `bt709`, else
+ * BT.601.  A picture smaller than the output is padded with black; a larger
+ * one is cropped (the codec's cropping is the decoder's business).  It takes
+ * the output description rather than a stream so that the wg_transform's WMV
+ * decoder (winegstreamer_unixlib_ios.c) writes its pictures with the same
+ * code. */
+static void mav_convert_picture( const struct mav_video_output *vout, int bt709, const struct mav_vplanes *src,
+                                 uint8_t *dst, const struct mav_layout *l )
 {
-    uint32_t w = s->vout.width, h = s->vout.height < 0 ? -s->vout.height : s->vout.height;
+    uint32_t w = vout->width, h = vout->height < 0 ? -vout->height : vout->height;
     uint32_t cw = src->width < w ? src->width : w, ch = src->height < h ? src->height : h;
     uint32_t ccw = (cw + 1) / 2, cch = (ch + 1) / 2, x, y;
-    int flip = s->vout.height < 0;
-    int planar = s->vout.fmt == MAV_PIX_NV12 || s->vout.fmt == MAV_PIX_I420 || s->vout.fmt == MAV_PIX_YV12;
-    int packed = s->vout.fmt == MAV_PIX_YUY2 || s->vout.fmt == MAV_PIX_UYVY || s->vout.fmt == MAV_PIX_YVYU;
+    int flip = vout->height < 0;
+    int planar = vout->fmt == MAV_PIX_NV12 || vout->fmt == MAV_PIX_I420 || vout->fmt == MAV_PIX_YV12;
+    int packed = vout->fmt == MAV_PIX_YUY2 || vout->fmt == MAV_PIX_UYVY || vout->fmt == MAV_PIX_YVYU;
 
     if (cw < w || ch < h)
     {
@@ -2188,13 +2192,13 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
             for (y = 0; y < h; y++)
                 for (x = 0; x < l->stride[0] / 4; x++)
                     memcpy( dst + (size_t)y * l->stride[0] + x * 4,
-                            s->vout.fmt == MAV_PIX_UYVY ? "\x80\x10\x80\x10" : "\x10\x80\x10\x80", 4 );
+                            vout->fmt == MAV_PIX_UYVY ? "\x80\x10\x80\x10" : "\x10\x80\x10\x80", 4 );
         else if (planar)
         {
             memset( dst, 16, l->offset[1] );
             memset( dst + l->offset[1], 128, l->size - l->offset[1] );
         }
-        else if (s->vout.fmt == MAV_PIX_BGR || s->vout.fmt == MAV_PIX_RGB15 || s->vout.fmt == MAV_PIX_RGB16)
+        else if (vout->fmt == MAV_PIX_BGR || vout->fmt == MAV_PIX_RGB15 || vout->fmt == MAV_PIX_RGB16)
             memset( dst, 0, l->size );
         else
             for (y = 0; y < h; y++)
@@ -2203,7 +2207,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     }
 
 #define DST_ROW(plane, row, rows) (dst + l->offset[plane] + (size_t)l->stride[plane] * (flip ? (rows) - 1 - (row) : (row)))
-    switch (s->vout.fmt)
+    switch (vout->fmt)
     {
     case MAV_PIX_NV12:
         for (y = 0; y < ch; y++) memcpy( DST_ROW( 0, y, h ), src->y + (size_t)y * src->y_stride, cw );
@@ -2212,7 +2216,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     case MAV_PIX_I420:
     case MAV_PIX_YV12:
     {
-        int u_plane = s->vout.fmt == MAV_PIX_I420 ? 1 : 2, v_plane = 3 - u_plane;
+        int u_plane = vout->fmt == MAV_PIX_I420 ? 1 : 2, v_plane = 3 - u_plane;
         for (y = 0; y < ch; y++) memcpy( DST_ROW( 0, y, h ), src->y + (size_t)y * src->y_stride, cw );
         for (y = 0; y < cch; y++)
         {
@@ -2231,9 +2235,9 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     case MAV_PIX_YVYU:
     {
         /* byte offsets of Y0, U, Y1, V in each 4-byte pair */
-        int y0 = s->vout.fmt == MAV_PIX_UYVY ? 1 : 0, y1 = y0 + 2;
-        int uo = s->vout.fmt == MAV_PIX_YUY2 ? 1 : s->vout.fmt == MAV_PIX_UYVY ? 0 : 3;
-        int vo = s->vout.fmt == MAV_PIX_YUY2 ? 3 : s->vout.fmt == MAV_PIX_UYVY ? 2 : 1;
+        int y0 = vout->fmt == MAV_PIX_UYVY ? 1 : 0, y1 = y0 + 2;
+        int uo = vout->fmt == MAV_PIX_YUY2 ? 1 : vout->fmt == MAV_PIX_UYVY ? 0 : 3;
+        int vo = vout->fmt == MAV_PIX_YUY2 ? 3 : vout->fmt == MAV_PIX_UYVY ? 2 : 1;
         for (y = 0; y < ch; y++)
         {
             const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
@@ -2253,8 +2257,8 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     case MAV_PIX_RGBA:
     {
         struct mav_yuv_coefs c;
-        int ri = s->vout.fmt == MAV_PIX_RGBA ? 0 : 2, bi = 2 - ri;
-        mav_yuv_coefs( s->bt709, src->full_range, &c );
+        int ri = vout->fmt == MAV_PIX_RGBA ? 0 : 2, bi = 2 - ri;
+        mav_yuv_coefs( bt709, src->full_range, &c );
         for (y = 0; y < ch; y++)
         {
             const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
@@ -2276,7 +2280,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     case MAV_PIX_RGB16:
     {
         struct mav_yuv_coefs c;
-        mav_yuv_coefs( s->bt709, src->full_range, &c );
+        mav_yuv_coefs( bt709, src->full_range, &c );
         for (y = 0; y < ch; y++)
         {
             const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
@@ -2288,7 +2292,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
                 uint8_t r = mav_clip8( (yy + c.rv * v) >> 16 );
                 uint8_t g = mav_clip8( (yy - c.gu * u - c.gv * v) >> 16 );
                 uint8_t b = mav_clip8( (yy + c.bu * u) >> 16 );
-                if (s->vout.fmt == MAV_PIX_BGR)
+                if (vout->fmt == MAV_PIX_BGR)
                 {
                     o[3 * x] = b;
                     o[3 * x + 1] = g;
@@ -2296,7 +2300,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
                 }
                 else
                 {
-                    uint16_t px = s->vout.fmt == MAV_PIX_RGB16
+                    uint16_t px = vout->fmt == MAV_PIX_RGB16
                                   ? (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | b >> 3)
                                   : (uint16_t)((r >> 3) << 10 | (g >> 3) << 5 | b >> 3);
                     o[2 * x] = (uint8_t)px;
@@ -2359,7 +2363,7 @@ static int mav_video_emit( struct mav_parser *p, struct mav_stream *s, struct ma
         s->discontinuity = 1;
         return 0;
     }
-    mav_convert_picture( s, &planes, s->buf, &l );
+    mav_convert_picture( &s->vout, s->bt709, &planes, s->buf, &l );
     s->vbackend->unmap( f->handle );
     s->vbackend->release( f->handle );
 

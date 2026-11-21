@@ -15,7 +15,13 @@ three things that Windows programs use every day have no decoder:
   `WMCreateSyncReader`, and DirectShow's WM ASF Reader on top of it), which
   plays WMV/WMA (ASF) files. A visual novel's cutscenes went through it; the
   reader failed to connect (`no enabled demuxer recognised the stream`,
-  `0x80040265`) and the game showed a white screen with no sound.
+  `0x80040265`) and the game showed a white screen with no sound;
+- the WMVideo Decoder DMO and MFT (`CLSID_CWMVDecMediaObject`, Wine's
+  `wmv_decoder_create()` in `dlls/winegstreamer/video_decoder.c`), which a
+  DirectShow graph or a Media Foundation pipeline uses to decode compressed
+  Windows Media video. Sabbat of the Witch's `krmovie.dll` reads compressed
+  WMV3 samples from `IWMSyncReader` and decodes them with it; without it the
+  DMO could not even be created and the cutscenes were a white screen.
 
 This port supplies that unix side in `libntdll_unix.a`, bound by name in
 `load_builtin_unixlib()` (`build/ntdll-unix/virtual_ios.c`).
@@ -23,16 +29,17 @@ This port supplies that unix side in `libntdll_unix.a`, bound by name in
 **32-bit (WoW64) and 64-bit (ARM64EC) processes both get it.** The ARM64EC
 farm ships `winegstreamer.dll` and `wmadmod.dll`, so an x64 program's xWMA
 voices (XAudio2/FAudio's WMA decoder DMO) decode instead of playing silence.
-A 64-bit process gets the WMA transform only: its `wg_parser` (quartz / Media
-Foundation source) is refused as before unless `MADEIRA_WG_64BIT=1`.
+A 64-bit process gets the transforms only (the WMA and WMV decoders and the
+resampler): its `wg_parser` (quartz / Media Foundation source) is refused as
+before unless `MADEIRA_WG_64BIT=1`.
 `MADEIRA_WG_64BIT=0` gives 64-bit processes the generic stub table again.
 
 ## Pieces
 
 | File | What it is |
 |---|---|
-| `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and the `wg_transform` subset `wma_decoder.c` uses, on libavcodec: WMA v1/v2/Pro/Lossless and XMA1/2 only. Other transforms (AAC, H.264, WMV, resampler, colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
-| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov, asf), MPEG audio / PCM / WMA decode through libavcodec + libswresample, Windows Media video (WMV7/8/9, VC-1, MS-MPEG4 v1-v3) decoded in software by libavcodec (`mav_lavc_video`), a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion to the formats `quartz_parser.c`, `media_source.c` and `wm_reader.c` ask for: NV12, I420, YV12, YUY2, UYVY, YVYU, BGRx, BGRA, RGBA, 24-bit BGR (the WM reader's default, bottom-up), RGB565 and RGB555. |
+| `build/ntdll-unix/winegstreamer_unixlib_ios.c` | Both unix call tables (entry for entry with `dlls/winegstreamer/unixlib.h`), the wow64 thunks, and two kinds of `wg_transform` on libavcodec: the WMA decoder `wma_decoder.c` uses (WMA v1/v2/Pro/Lossless, XMA1/2) and the WMV decoder `video_decoder.c`'s WMVideo Decoder DMO/MFT uses (WMV1, WMV2, WMV3, WMVA, WVC1; see below). `transform_create` gives a create to the first kind that claims its input type; every other entry finds the kind by the magic its object starts with. Other transforms (AAC, H.264, the resampler, the colour converter) are refused at create, and `wg_muxer` returns `STATUS_NOT_IMPLEMENTED`. |
+| `build/ntdll-unix/wg_parser_av_ios.c` | The `wg_parser` core, `#include`d by the file above: the PE read thread's pull protocol as an AVIOContext, libavformat demux (mp3, wav, mov, asf), MPEG audio / PCM / WMA decode through libavcodec + libswresample, Windows Media video (WMV7/8/9, VC-1, MS-MPEG4 v1-v3) decoded in software by libavcodec (`mav_lavc_video`), a packet queue with back-pressure, B-frame reordering, keyframe seek with exact trim, and conversion (`mav_convert_picture`, which the WMV transform uses too) to the formats `quartz_parser.c`, `media_source.c` and `wm_reader.c` ask for: NV12, I420, YV12, YUY2, UYVY, YVYU, BGRx, BGRA, RGBA, 24-bit BGR (the WM reader's default, bottom-up), RGB565 and RGB555. |
 | `build/ntdll-unix/wg_parser_apple_ios.c` | H.264/HEVC on VideoToolbox (NV12 out) and AAC on an AudioToolbox AudioConverter (float PCM out). Its own translation unit with no Wine or FFmpeg header. |
 | `build/ntdll-unix/wg_parser_backend_ios.h` | The contract between the core and a decoder backend; plain C types only, so the host test can supply stub backends. |
 | `build/ffmpeg/build.sh` | FFmpeg 7.1.5, pinned by SHA-256, LGPL-only configuration. |
@@ -70,6 +77,39 @@ asks for NV12 still gets it from the YUV types listed after the native one.
 `stream N: first picture delivered` (or `first audio buffer delivered`) once,
 so a device log shows whether any sample was ever requested.
 
+**The WMV decoder (`wg_transform`).** `video_decoder.c` probes a WMV3
+1920x1080 to I420 transform without codec private data when the DMO is
+created (`check_video_transform_support`), and libavcodec cannot open `wmv3`
+or `vc1` without it. So a create whose input type has no codec private data
+succeeds with the decoder closed and logs `[decoder not open: ...]`; frames
+pushed into such a transform are dropped and logged. A sequence header that
+libavcodec refuses refuses the create. As in upstream's GStreamer
+`wg_transform.c`, `push_data` only queues the compressed frame (at most
+`input_queue_length` + 1, then `MF_E_NOTACCEPTING`) and `read_data` decodes
+until a picture comes out. Nothing ready is `MF_E_TRANSFORM_NEED_MORE_INPUT`,
+which the DMO turns into `S_FALSE`. A picture is never split, so
+`WG_SAMPLE_FLAG_INCOMPLETE` (the DMO's `DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE`,
+on which Wine's DMO wrapper calls `ProcessOutput` again) is never set. Output
+formats: NV12, YV12, I420/IYUV, YUY2, UYVY, YVYU, RGB32, ARGB32, ABGR32,
+RGB24, RGB565 and RGB555, top-down or bottom-up
+(`MFVideoFlag_BottomUpLinearRep`). NV11 and RGB8 are refused, as GStreamer
+refuses them. The frame is laid out as upstream's does it (4-byte aligned
+rows, NV12 at 2), or at the stride of the caller's 2D buffer. An aperture
+smaller than the frame is where the picture goes. A picture is not scaled: a
+different size is cropped or padded with black, unless the caller allowed a
+format change (`MF_E_TRANSFORM_STREAM_CHANGE`, then `get_output_type`; WMV
+callers never allow it). Each picture is a sync point and keeps the time and
+duration of the sample it was coded in, flagged
+`WG_SAMPLE_FLAG_PRESERVE_TIMESTAMPS`, as `video_decoder.c` expects. A sample
+without a time gets the previous picture's end (the first gets 0) and one
+frame at the input type's frame rate. `set_output_type` keeps the decoder and
+the pictures it holds, and writes them in the new format. Limits: WMV3 and
+VC-1 are checked by codec-id plumbing only, because FFmpeg cannot encode
+them. The DMO never drains, so a picture the decoder holds back (WMV3 with
+B-frames) is lost at the end of a stream, as with GStreamer. When the DMO
+wrapper meets a new output media type, `video_decoder.c` makes a new
+transform, whose new decoder waits for a keyframe.
+
 **One demuxer, several readers: back-pressure.** Each stream is read on its
 own thread by quartz and Media Foundation; a packet read for another stream
 is queued for it. A stream whose reader falls behind (a video decoded slower
@@ -97,15 +137,18 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MADEIRA_WG_64BIT` | WMA only | `0`: 64-bit processes get the stub table again; `1`: their `wg_parser` too (see above). |
+| `MADEIRA_WG_64BIT` | transforms only | `0`: 64-bit processes get the stub table again; `1`: their `wg_parser` too (see above). |
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
 | `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV or ASF is refused at connect. |
+| `MADEIRA_WG_WMV_TRANSFORM` | on | `0`: every video `wg_transform` is refused at create again, so the WMVideo Decoder DMO/MFT cannot be created, as before. Read once per process. WMA is unaffected. |
 | `MADEIRA_WG_VIDEO_FORMAT` | `rgb32` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32` (see above for why the default is `rgb32`). |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
 
-Log tags: `[wma]` for the decoder, `[wg-parser]` for the parser; both are
-rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]` cap).
+Log tags: `[wma]` for the WMA decoder, `[wmv]` for the WMV decoder (one line
+per create and per destroy, refusals with their reason), `[wg-parser]` for the
+parser. All are rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`
+and `[wmv]` caps).
 
 ## Tests
 
@@ -135,9 +178,25 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]` cap).
   FFmpeg's own encoders at several rates and channel counts, drives them
   through the `wg_transform` entries the way `wma_decoder.c` does, to s16 and
   to float, with the parameter search on and off, and requires audio with the
-  right level and fundamental back. Also checks that 64-bit callers keep the
-  stub table by default. Bit-reservoir (superframe) streams are not covered:
+  right level and fundamental back. Also checks that 64-bit callers get the
+  transforms by default and their parser only with `MADEIRA_WG_64BIT=1`. Bit-reservoir (superframe) streams are not covered:
   FFmpeg cannot encode them.
+- `tests/host/check-wmv-transform.py` (Linux or macOS, needs a configured
+  Wine tree): source checks on both call tables, the kind table, the switch,
+  and the facts of the Wine pin the transform relies on. Then it compiles the
+  production file under ASan/UBSan against the host FFmpeg build that
+  `check-wg-parser-asf.py` uses, encodes WMV7 and WMV8 streams with FFmpeg's
+  encoders, and drives them through both call tables. It checks: every
+  picture bit-exact against libavcodec; every output format in both
+  orientations at the default layout and at a 2D buffer's stride, pixel by
+  pixel with the bytes around them untouched; apertures, cropping and
+  padding; timestamps; the queue limit, drain, flush, mid-stream
+  `set_output_type`, a format change, a buffer too small; Wine's DMO-wrapper
+  loop; two threads; refusals; the wow64 thunks with 32-bit argument blocks
+  below 4 GB; WMA through the same dispatcher; and
+  `MADEIRA_WG_WMV_TRANSFORM=0`. WMV3/WVC1/WMVA are covered by codec-id
+  plumbing only (the DMO's probe, hand-built sequence headers, garbage
+  frames): FFmpeg cannot encode them.
 - `tests/x86/wma-x86.c` (`build-wma-test.sh`): a 32-bit program that
   reaches the WMA decoder exactly as FAudio does and checks that the decoded
   PCM has the 440 Hz fundamental it was encoded from. Exit 62 pass, 63 decode

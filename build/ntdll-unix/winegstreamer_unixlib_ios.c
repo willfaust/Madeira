@@ -40,14 +40,16 @@
  * port does not implement -- an index that drifts from the header silently
  * dispatches one call to another function's argument block.
  *
- * What is implemented is the wg_transform subset that wma_decoder.c uses:
- * create / destroy / push_data / read_data / get_output_type /
- * set_output_type / drain / flush / get_status (+ notify_qos as a no-op, and
- * wg_init_gstreamer as a benign success so main.c's init_gstreamer_proc lets
- * the DLL load).  The wg_muxer side returns STATUS_NOT_IMPLEMENTED.  Those
- * callers already handle a component that is not available; what they must
- * never get is a success with an untouched output field (no fake
- * success).
+ * What is implemented is the wg_transform subset that wma_decoder.c and
+ * video_decoder.c's WMV decoder use: create / destroy / push_data /
+ * read_data / get_output_type / set_output_type / drain / flush / get_status
+ * (+ notify_qos as a no-op, and wg_init_gstreamer as a benign success so
+ * main.c's init_gstreamer_proc lets the DLL load), for two kinds of
+ * transform: WMA audio (below) and WMV video (the section "the WMV decoder";
+ * "transform kinds" after it is how a call finds its kind).  The wg_muxer
+ * side returns STATUS_NOT_IMPLEMENTED.  Those callers already handle a
+ * component that is not available; what they must never get is a success
+ * with an untouched output field (no fake success).
  *
  * ml1980: the wg_parser side (quartz's splitters, and the same pull protocol
  * for the MF media source) is implemented for AUDIO files only -- MP3 (and
@@ -59,11 +61,12 @@
  * wg_parser_apple_ios.c) for the Media Foundation source; MADEIRA_WG_VIDEO=0
  * restores the MP3/WAV-only parser.
  *
- * wg_transform_create also REFUSES anything that is not a WMA family stream.
- * winegstreamer's other transforms (aac, h264, wmv, the resampler, the colour
- * converter) are real GStreamer pipelines with no libavcodec replacement here,
- * and a transform that accepts an H.264 stream and then emits nothing is worse
- * for the caller than one that never opened.
+ * wg_transform_create also REFUSES anything that is neither a WMA family
+ * stream nor Windows Media video (WMV1/WMV2/WMV3/WMVA/WVC1).  winegstreamer's
+ * other transforms (aac, h264, the resampler, the colour converter) are real
+ * GStreamer pipelines with no replacement here, and a transform that accepts
+ * an H.264 stream and then emits nothing is worse for the caller than one
+ * that never opened.  MADEIRA_WG_WMV_TRANSFORM=0 refuses the WMV one too.
  *
  * DECODING
  * --------
@@ -506,10 +509,15 @@ static int wma_diag_on( void )
 
 static unsigned int wma_av_log_count;
 
+/* The WMV transform's decoders are opened by the wg_parser core's backend and
+ * then marked with this instead of MAV_DECODER_MARKER (wmv_create). */
+static const char wmv_decoder_marker;
+#define WMV_DECODER_MARKER ((void *)&wmv_decoder_marker)
+
 /* ml1980: the same callback serves the wg_parser core, whose demuxer and
  * decoder contexts are told apart by their class (the demuxer / its I/O) or
  * by the marker the core leaves in AVCodecContext.opaque, so a parser
- * diagnostic is not reported as a WMA one.  One cap for both. */
+ * diagnostic is not reported as a WMA one.  One cap for all of them. */
 static const char *av_log_owner( void *avcl )
 {
     const AVClass *cls = avcl ? *(const AVClass **)avcl : NULL;
@@ -520,6 +528,9 @@ static const char *av_log_owner( void *avcl )
     if (!strcmp( cls->class_name, "AVCodecContext" )
         && ((AVCodecContext *)avcl)->opaque == MAV_DECODER_MARKER)
         return "[wg-parser] av:";
+    if (!strcmp( cls->class_name, "AVCodecContext" )
+        && ((AVCodecContext *)avcl)->opaque == WMV_DECODER_MARKER)
+        return "[wmv] av:";
     return "[wma] av:";
 }
 
@@ -551,7 +562,7 @@ static void wma_install_av_log(void)
     av_log_set_callback( wma_av_log );
 }
 
-static struct wma_transform *get_transform( wg_transform_t handle )
+static struct wma_transform *get_wma_transform( wg_transform_t handle )
 {
     struct wma_transform *transform = (struct wma_transform *)(UINT_PTR)handle;
 
@@ -1607,7 +1618,7 @@ static void report_failures( struct wma_transform *transform )
 /***********************************************************************
  *           wg_transform_create
  */
-static NTSTATUS transform_create( struct wg_transform_create_params *params )
+static NTSTATUS wma_create( struct wg_transform_create_params *params )
 {
     const WAVEFORMATEX *in = audio_format( &params->input_type );
     const WAVEFORMATEX *out = audio_format( &params->output_type );
@@ -1622,8 +1633,8 @@ static NTSTATUS transform_create( struct wg_transform_create_params *params )
 
     if (!in || !out)
     {
-        /* Video, or a malformed block: winegstreamer's other transforms live
-         * here too and this port has no replacement for them. */
+        /* A malformed block, or an output that is not audio: transform_create
+         * hands this kind audio inputs only. */
         return STATUS_NOT_SUPPORTED;
     }
 
@@ -1788,9 +1799,9 @@ fail:
     return (NTSTATUS)err;
 }
 
-static NTSTATUS transform_destroy( wg_transform_t handle )
+static NTSTATUS wma_destroy( wg_transform_t handle )
 {
-    struct wma_transform *transform = get_transform( handle );
+    struct wma_transform *transform = get_wma_transform( handle );
 
     if (!transform) return STATUS_INVALID_HANDLE;
 
@@ -1824,10 +1835,10 @@ static NTSTATUS transform_destroy( wg_transform_t handle )
  * aligns them to 8 like the host does -- so the OUT fields are written through
  * the caller's own struct.
  */
-static NTSTATUS transform_push_data( wg_transform_t handle, struct wg_sample *sample,
-                                     const void *data, HRESULT *result )
+static NTSTATUS wma_push_data( wg_transform_t handle, struct wg_sample *sample,
+                             const void *data, HRESULT *result )
 {
-    struct wma_transform *transform = get_transform( handle );
+    struct wma_transform *transform = get_wma_transform( handle );
     NTSTATUS status;
 
     if (!transform || !sample) return STATUS_INVALID_HANDLE;
@@ -1895,10 +1906,10 @@ static NTSTATUS transform_push_data( wg_transform_t handle, struct wg_sample *sa
     return status ? status : STATUS_SUCCESS;
 }
 
-static NTSTATUS transform_read_data( wg_transform_t handle, struct wg_sample *sample,
-                                     void *data, HRESULT *result )
+static NTSTATUS wma_read_data( wg_transform_t handle, struct wg_sample *sample,
+                             void *data, HRESULT *result )
 {
-    struct wma_transform *transform = get_transform( handle );
+    struct wma_transform *transform = get_wma_transform( handle );
     size_t avail, copy, frames;
 
     if (!transform || !sample) return STATUS_INVALID_HANDLE;
@@ -1962,9 +1973,9 @@ static NTSTATUS transform_read_data( wg_transform_t handle, struct wg_sample *sa
 /***********************************************************************
  *           output type
  */
-static NTSTATUS transform_get_output_type( wg_transform_t handle, struct wg_media_type *type )
+static NTSTATUS wma_get_output_type( wg_transform_t handle, struct wg_media_type *type )
 {
-    struct wma_transform *transform = get_transform( handle );
+    struct wma_transform *transform = get_wma_transform( handle );
     UINT32 size;
 
     if (!transform) return STATUS_INVALID_HANDLE;
@@ -1987,9 +1998,9 @@ static NTSTATUS transform_get_output_type( wg_transform_t handle, struct wg_medi
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS transform_set_output_type( wg_transform_t handle, const struct wg_media_type *type )
+static NTSTATUS wma_set_output_type( wg_transform_t handle, const struct wg_media_type *type )
 {
-    struct wma_transform *transform = get_transform( handle );
+    struct wma_transform *transform = get_wma_transform( handle );
     const WAVEFORMATEX *out = audio_format( type );
     enum AVSampleFormat sample_fmt;
     AVChannelLayout layout = {0};
@@ -2035,81 +2046,22 @@ static NTSTATUS transform_set_output_type( wg_transform_t handle, const struct w
 }
 
 /***********************************************************************
- *           the unix call entries
+ *           the WMA kind's remaining entries
  */
-static NTSTATUS wma_init( void *args )
+static NTSTATUS wma_get_status( wg_transform_t handle, UINT32 *accepts_input )
 {
-    struct wg_init_gstreamer_params *params = args;
-
-    /* Benign success: main.c's init_gstreamer_proc() fails the whole DLL if
-     * this fails, and everything this port implements is below it. */
-    (void)params;
-    return STATUS_SUCCESS;
-}
-
-static NTSTATUS wma_not_implemented( void *args )
-{
-    (void)args;
-    return STATUS_NOT_IMPLEMENTED;
-}
-
-static NTSTATUS wma_transform_create( void *args )
-{
-    return transform_create( args );
-}
-
-static NTSTATUS wma_transform_destroy( void *args )
-{
-    return transform_destroy( *(wg_transform_t *)args );
-}
-
-static NTSTATUS wma_transform_get_output_type( void *args )
-{
-    struct wg_transform_get_output_type_params *params = args;
-    return transform_get_output_type( params->transform, &params->media_type );
-}
-
-static NTSTATUS wma_transform_set_output_type( void *args )
-{
-    struct wg_transform_set_output_type_params *params = args;
-    return transform_set_output_type( params->transform, &params->media_type );
-}
-
-static NTSTATUS wma_transform_push_data( void *args )
-{
-    struct wg_transform_push_data_params *params = args;
-    struct wg_sample *sample = params->sample;
-
-    if (!sample) return STATUS_INVALID_PARAMETER;
-    return transform_push_data( params->transform, sample,
-                                (const void *)(UINT_PTR)sample->data, &params->result );
-}
-
-static NTSTATUS wma_transform_read_data( void *args )
-{
-    struct wg_transform_read_data_params *params = args;
-    struct wg_sample *sample = params->sample;
-
-    if (!sample) return STATUS_INVALID_PARAMETER;
-    return transform_read_data( params->transform, sample,
-                                (void *)(UINT_PTR)sample->data, &params->result );
-}
-
-static NTSTATUS wma_transform_get_status( void *args )
-{
-    struct wg_transform_get_status_params *params = args;
-    struct wma_transform *transform = get_transform( params->transform );
+    struct wma_transform *transform = get_wma_transform( handle );
 
     if (!transform) return STATUS_INVALID_HANDLE;
     pthread_mutex_lock( &transform->lock );
-    params->accepts_input = (transform->pcm_len == transform->pcm_pos);
+    *accepts_input = (transform->pcm_len == transform->pcm_pos);
     pthread_mutex_unlock( &transform->lock );
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wma_transform_drain( void *args )
+static NTSTATUS wma_drain( wg_transform_t handle )
 {
-    struct wma_transform *transform = get_transform( *(wg_transform_t *)args );
+    struct wma_transform *transform = get_wma_transform( handle );
     NTSTATUS status;
 
     if (!transform) return STATUS_INVALID_HANDLE;
@@ -2137,9 +2089,9 @@ static NTSTATUS wma_transform_drain( void *args )
     return status;
 }
 
-static NTSTATUS wma_transform_flush( void *args )
+static NTSTATUS wma_flush( wg_transform_t handle )
 {
-    struct wma_transform *transform = get_transform( *(wg_transform_t *)args );
+    struct wma_transform *transform = get_wma_transform( handle );
 
     if (!transform) return STATUS_INVALID_HANDLE;
     pthread_mutex_lock( &transform->lock );
@@ -2162,11 +2114,1139 @@ static NTSTATUS wma_transform_flush( void *args )
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS wma_transform_notify_qos( void *args )
+/* Every audio input is this kind's to judge: wma_create refuses, and logs, a
+ * format tag that is not a WMA family stream, exactly as it did when it was
+ * the only kind. */
+static BOOL wma_claims( const struct wg_transform_create_params *params )
+{
+    return IsEqualGUID( &params->input_type.major, &madeira_MFMediaType_Audio );
+}
+
+/***********************************************************************
+ *           the WMV decoder   (MADEIRA, 2026-11-20)
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Sabbat of the Witch, a 32-bit KiriKiri title, plays its cutscenes through
+ * krmovie.dll: compressed WMV3 samples from IWMSyncReader
+ * (SetReadStreamSamples), decoded by the WMVideo Decoder DMO
+ * (CLSID_CWMVDecMediaObject) in a DirectShow DMO-wrapper graph.  In Wine
+ * that DMO, and its MFT face, is wmv_decoder_create() in
+ * dlls/winegstreamer/video_decoder.c (what upstream once had as
+ * wmv_decoder.c), a wg_transform user -- and this file refused every video
+ * transform.  The DMO could not even be created (its constructor probes a
+ * WMV3 -> I420 transform), so the cutscenes were a white screen.  The
+ * compressed ASF output of the parser and the reader's side are separate
+ * pieces; this is the decoder.
+ *
+ * WHAT video_decoder.c DOES WITH ITS wg_transform
+ * ------------------------------------------------
+ *   create       check_video_transform_support() in wmv_decoder_create():
+ *                WMV3 1920x1080 -> I420 with NO codec private data, created
+ *                and destroyed at once.  Then for real from the DMO's
+ *                SetOutputType (DMO_MEDIA_TYPE -> IMFMediaType ->
+ *                MFVIDEOFORMAT, wg_transform_create_quartz) or the MFT's.
+ *                The VIDEOINFOHEADER's extra bytes -- the sequence header --
+ *                arrive as MF_MT_USER_DATA after the MFVIDEOFORMAT.  attrs:
+ *                input_queue_length 15 and preserve_timestamps; never
+ *                allow_format_change or output_plane_align.
+ *   set_output_type  the MFT's SetOutputType once a transform exists.  The
+ *                DMO makes a new transform instead, also when the DMO
+ *                wrapper meets a sample with a new media type (qasf
+ *                dmowrapper.c get_output_samples), and a new transform is a
+ *                new decoder that waits for a keyframe.
+ *   push_data    one compressed frame per sample; MF_E_NOTACCEPTING when the
+ *                queue is full.
+ *   read_data    one whole picture into the caller's buffer: the DMO's
+ *                IMediaBuffer (no stride) or the MFT's sample (a 2D buffer's
+ *                pitch in wg_sample.stride).  Nothing ready is
+ *                MF_E_TRANSFORM_NEED_MORE_INPUT, which the DMO answers with
+ *                S_FALSE and dwStatus 0.  WG_SAMPLE_FLAG_INCOMPLETE would
+ *                become DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE, for which the DMO
+ *                wrapper calls ProcessOutput again, and again: a picture is
+ *                never split, so it is never set.
+ *   drain, flush the MFT's COMMAND_DRAIN / COMMAND_FLUSH, the DMO's Flush.
+ *                The DMO never drains (its Discontinuity is a no-op), so a
+ *                picture the decoder holds back comes out only with the next
+ *                input, as it does with GStreamer.
+ *   get_status, get_output_type, notify_qos  not used for WMV
+ *                (get_output_type follows MF_E_TRANSFORM_STREAM_CHANGE, which
+ *                needs allow_format_change); implemented all the same.
+ *
+ * HOW
+ * ---
+ * The decoder is wg_parser_av_ios.c's libavcodec backend (mav_lavc_video:
+ * wmv1, wmv2, wmv3, vc1, one thread), and pictures are written by that
+ * file's mav_convert_picture, so the parser and this transform share one
+ * decoder setup and one set of conversions.  As in wg_transform.c, push only
+ * queues the compressed frame and read decodes until a picture comes out:
+ * the queue limit counts compressed frames, and no more pictures are held
+ * than the decoder's own delay.
+ *
+ * Layout: the frame is the output MFVIDEOFORMAT's dwWidth x dwHeight in
+ * wg_transform.c's plane layout (wg_format_get_stride(): 4-byte aligned rows,
+ * except NV12 at 2), or at the stride of the caller's 2D buffer.
+ * MFVideoFlag_BottomUpLinearRep flips it.  A MinimumDisplayAperture smaller
+ * than the frame is where the picture goes; the rest is left alone.  A
+ * picture is never scaled: one of another size is cropped, or padded with
+ * black (GStreamer would fail to negotiate), unless the caller allowed a
+ * format change, in which case read_data returns
+ * MF_E_TRANSFORM_STREAM_CHANGE once and get_output_type the new size.
+ *
+ * Timestamps: a picture carries the pts and duration of the sample it was
+ * coded in (libavcodec reorders them with the pictures), with
+ * WG_SAMPLE_FLAG_PRESERVE_TIMESTAMPS when the caller asked for that, which
+ * is what video_decoder.c relies on.  A picture whose sample had no time
+ * follows the previous picture (the first at 0) and lasts one frame at the
+ * input type's frame rate (0 without one): the native DMO reports time 0
+ * for a stream pushed without times.  Every picture is a sync point with a
+ * time and a duration, as the native DMO's are.
+ *
+ * WMV3 / VC-1 WITHOUT A SEQUENCE HEADER.  libavcodec cannot open wmv3 or vc1
+ * without codec private data (AVERROR_INVALIDDATA, checked on the host), and
+ * wmv_decoder_create()'s probe has none.  Refusing it would make the DMO
+ * impossible to create, so create succeeds with the decoder closed when the
+ * input type has NO codec private data, and says so; what is pushed into
+ * such a transform is dropped, counted and logged, and nothing comes out.
+ * A sequence header that is present but refused refuses create.
+ *
+ * MADEIRA_WG_WMV_TRANSFORM=0 restores the refusal of every video transform.
+ * Log tag "[wmv]": one line per create, capped like "[wma]".
+ */
+#define MADEIRA_WG_WMV_MAGIC 0x574d5644   /* 'WMVD' */
+
+#define MADEIRA_WMV_MAX_LOGS 100
+#define MADEIRA_WMV_MAX_ERROR_LOGS 4      /* per transform: rejected frames */
+#define MADEIRA_WMV_MAX_CODEC_DATA (1u << 20)
+
+/* MFVideoFormat_RGB32 and its kin keep a D3DFORMAT in Data1; d3d9types.h is
+ * not included here. */
+#define WMV_D3DFMT_R8G8B8   20
+#define WMV_D3DFMT_A8R8G8B8 21
+#define WMV_D3DFMT_X8R8G8B8 22
+#define WMV_D3DFMT_R5G6B5   23
+#define WMV_D3DFMT_X1R5G5B5 24
+#define WMV_D3DFMT_A8B8G8R8 32
+
+/* The 32-bit PE layout of MFVIDEOFORMAT is the host's (i686-w64-mingw32 and
+ * this build agree, checked with llvm-mingw), so the wow64 thunks hand the
+ * guest's block over in place, as they do a WAVEFORMATEX. */
+C_ASSERT( sizeof(MFVIDEOFORMAT) == 176 );
+C_ASSERT( offsetof(MFVIDEOFORMAT, videoInfo.FramesPerSecond) == 48 );
+C_ASSERT( offsetof(MFVIDEOFORMAT, videoInfo.MinimumDisplayAperture) == 76 );
+C_ASSERT( offsetof(MFVIDEOFORMAT, videoInfo.VideoFlags) == 112 );
+C_ASSERT( offsetof(MFVIDEOFORMAT, guidFormat) == 120 );
+C_ASSERT( offsetof(MFVIDEOFORMAT, surfaceInfo.Palette) == 168 );
+
+static const GUID madeira_MFMediaType_Video =
+    { 0x73646976, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+
+static unsigned int wmv_log_count;
+
+#define WMV_LOG( fmt, ... )                                                          \
+    do {                                                                             \
+        unsigned int _n = __atomic_add_fetch( &wmv_log_count, 1, __ATOMIC_RELAXED ); \
+        if (_n <= MADEIRA_WMV_MAX_LOGS)                                              \
+            dprintf( 2, "[wmv] " fmt, ## __VA_ARGS__ );                              \
+        else if (_n == MADEIRA_WMV_MAX_LOGS + 1)                                     \
+            dprintf( 2, "[wmv] further lines suppressed after %u "                    \
+                        "(MADEIRA_DIAG=1 removes the cap)\n",                         \
+                     (unsigned int)MADEIRA_WMV_MAX_LOGS );                           \
+        else if (wma_diag_on())                                                      \
+            dprintf( 2, "[wmv] " fmt, ## __VA_ARGS__ );                              \
+    } while (0)
+
+struct wmv_packet
+{
+    BYTE *data;
+    UINT32 size;
+    UINT32 flags;           /* the sample's WG_SAMPLE_FLAG_* */
+    INT64 pts, duration;    /* 100 ns; INT64_MIN: the sample had none */
+};
+
+struct wmv_picture
+{
+    void *frame;            /* mav_lavc_video's copy of the picture */
+    INT64 pts, duration;    /* as the decoder hands them back; INT64_MIN: none */
+};
+
+struct wmv_transform
+{
+    UINT32 magic;
+    pthread_mutex_t lock;
+    struct wg_transform_attrs attrs;
+
+    int codec;              /* MAV_LAVC_* */
+    const char *name;       /* the input FourCC, for the log */
+    void *dec;              /* the mav_lavc_video decoder; NULL: no sequence header (see above) */
+    UINT32 width, height;   /* coded size, from the input type */
+    INT64 frame_duration;   /* 100 ns, from the input type's frame rate; 0 without one */
+    int bt709;
+
+    /* the output type exactly as it was set, and its pixel format */
+    MFVIDEOFORMAT *out_format;
+    UINT32 out_format_size;
+    enum mav_pixel_format out_fmt;
+
+    struct wmv_packet *packets;     /* compressed, oldest first */
+    UINT32 packet_count, packet_cap;
+    struct wmv_picture *pictures;   /* decoded, in presentation order */
+    UINT32 picture_count, picture_cap;
+
+    BOOL draining;
+    BOOL discontinuity;     /* the next picture is delivered with WG_SAMPLE_FLAG_DISCONTINUITY */
+    INT64 next_pts;         /* where a picture without a time goes */
+
+    /* for the log */
+    UINT32 pushed, delivered, rejected, rejected_logged, dropped, lost;
+    BOOL size_logged, stride_logged;
+};
+
+/* MADEIRA_WG_WMV_TRANSFORM=0 refuses every video transform again, as before
+ * this decoder existed: the WMVideo Decoder DMO and MFT then cannot be
+ * created (read once). */
+static BOOL wmv_transform_switch_on(void)
+{
+    static int on = -1;
+    int v = __atomic_load_n( &on, __ATOMIC_RELAXED );
+
+    if (v < 0)
+    {
+        const char *e = getenv( "MADEIRA_WG_WMV_TRANSFORM" );
+        v = !(e && e[0] == '0' && !e[1]);
+        __atomic_store_n( &on, v, __ATOMIC_RELAXED );
+    }
+    return v;
+}
+
+static struct wmv_transform *get_wmv_transform( wg_transform_t handle )
+{
+    struct wmv_transform *transform = (struct wmv_transform *)(UINT_PTR)handle;
+
+    if (!transform || transform->magic != MADEIRA_WG_WMV_MAGIC) return NULL;
+    return transform;
+}
+
+static const MFVIDEOFORMAT *video_format( const struct wg_media_type *type )
+{
+    if (!IsEqualGUID( &type->major, &madeira_MFMediaType_Video )) return NULL;
+    if (!type->u.video || type->format_size < sizeof(MFVIDEOFORMAT)) return NULL;
+    return type->u.video;
+}
+
+/* For the log: a FourCC, or the subtype's first field. */
+static const char *wmv_subtype_name( const GUID *subtype, char buf[16] )
+{
+    UINT tag;
+    int i;
+
+    if (madeira_subtype_tag( subtype, &tag ))
+    {
+        for (i = 0; i < 4; i++)
+        {
+            char c = (char)(tag >> (8 * i));
+            if (c < 0x20 || c > 0x7e) break;
+            buf[i] = c;
+        }
+        if (i == 4)
+        {
+            buf[4] = 0;
+            return buf;
+        }
+    }
+    snprintf( buf, 16, "%#x", (unsigned int)subtype->Data1 );
+    return buf;
+}
+
+static int wmv_input_codec( const GUID *subtype, const char **name )
+{
+    UINT tag;
+
+    if (!madeira_subtype_tag( subtype, &tag )) return 0;
+    switch (tag)
+    {
+    case MAKEFOURCC('W','M','V','1'): *name = "WMV1"; return MAV_LAVC_WMV1;
+    case MAKEFOURCC('W','M','V','2'): *name = "WMV2"; return MAV_LAVC_WMV2;
+    case MAKEFOURCC('W','M','V','3'): *name = "WMV3"; return MAV_LAVC_WMV3;
+    case MAKEFOURCC('W','M','V','A'): *name = "WMVA"; return MAV_LAVC_VC1;
+    case MAKEFOURCC('W','V','C','1'): *name = "WVC1"; return MAV_LAVC_VC1;
+    default:                          return 0;
+    }
+}
+
+/* The uncompressed formats video_decoder.c offers for WMV that GStreamer
+ * could produce too (wg_media_type.c subtype_to_gst_video_format): NV11 and
+ * RGB8 are refused there, and here. */
+static enum mav_pixel_format wmv_output_format( const GUID *subtype )
+{
+    UINT tag;
+
+    if (!madeira_subtype_tag( subtype, &tag )) return MAV_PIX_UNKNOWN;
+    switch (tag)
+    {
+    case MAKEFOURCC('N','V','1','2'): return MAV_PIX_NV12;
+    case MAKEFOURCC('Y','V','1','2'): return MAV_PIX_YV12;
+    case MAKEFOURCC('I','4','2','0'):
+    case MAKEFOURCC('I','Y','U','V'): return MAV_PIX_I420;
+    case MAKEFOURCC('Y','U','Y','2'): return MAV_PIX_YUY2;
+    case MAKEFOURCC('U','Y','V','Y'): return MAV_PIX_UYVY;
+    case MAKEFOURCC('Y','V','Y','U'): return MAV_PIX_YVYU;
+    case WMV_D3DFMT_X8R8G8B8:         return MAV_PIX_BGRx;
+    case WMV_D3DFMT_A8R8G8B8:         return MAV_PIX_BGRA;
+    case WMV_D3DFMT_A8B8G8R8:         return MAV_PIX_RGBA;
+    case WMV_D3DFMT_R8G8B8:           return MAV_PIX_BGR;
+    case WMV_D3DFMT_R5G6B5:           return MAV_PIX_RGB16;
+    case WMV_D3DFMT_X1R5G5B5:         return MAV_PIX_RGB15;
+    default:                          return MAV_PIX_UNKNOWN;
+    }
+}
+
+/* The codec private data: the MF_MT_USER_DATA bytes that
+ * MFCreateMFVideoFormatFromMFMediaType appends, after the palette if there
+ * is one (mfplat reads them back the same way). */
+static const BYTE *video_user_data( const MFVIDEOFORMAT *format, UINT32 format_size, UINT32 *size )
+{
+    UINT64 start = sizeof(*format);
+
+    if (format->surfaceInfo.PaletteEntries)
+        start = offsetof( MFVIDEOFORMAT, surfaceInfo.Palette )
+                + ((UINT64)format->surfaceInfo.PaletteEntries + 1) * sizeof(MFPaletteEntry);
+    *size = start < format_size ? format_size - (UINT32)start : 0;
+    return *size ? (const BYTE *)format + start : NULL;
+}
+
+/* Makes `type` the output, keeping a verbatim copy for get_output_type.  A
+ * frame size of 0 means the coded size. */
+static NTSTATUS wmv_set_output( struct wmv_transform *transform, const struct wg_media_type *type )
+{
+    const MFVIDEOFORMAT *out = video_format( type );
+    enum mav_pixel_format fmt;
+    MFVIDEOFORMAT *copy;
+
+    if (!out || (fmt = wmv_output_format( &out->guidFormat )) == MAV_PIX_UNKNOWN) return STATUS_NOT_SUPPORTED;
+    if (out->videoInfo.dwWidth > MAV_MAX_DIMENSION || out->videoInfo.dwHeight > MAV_MAX_DIMENSION)
+        return STATUS_NOT_SUPPORTED;
+    if (!(copy = malloc( type->format_size ))) return STATUS_NO_MEMORY;
+    memcpy( copy, out, type->format_size );
+    if (!copy->videoInfo.dwWidth || !copy->videoInfo.dwHeight)
+    {
+        copy->videoInfo.dwWidth = transform->width;
+        copy->videoInfo.dwHeight = transform->height;
+    }
+    free( transform->out_format );
+    transform->out_format = copy;
+    transform->out_format_size = type->format_size;
+    transform->out_fmt = fmt;
+    return STATUS_SUCCESS;
+}
+
+/* mav_lavc_video hands decoded pictures back through this, in presentation
+ * order. */
+static void wmv_emit( void *ctx, void *frame, int64_t pts, int64_t duration )
+{
+    struct wmv_transform *transform = ctx;
+
+    if (transform->picture_count == transform->picture_cap)
+    {
+        UINT32 cap = transform->picture_cap ? transform->picture_cap * 2 : 4;
+        struct wmv_picture *grown = realloc( transform->pictures, cap * sizeof(*grown) );
+
+        if (!grown)
+        {
+            mav_lavc_release( frame );
+            transform->lost++;
+            transform->discontinuity = TRUE;
+            return;
+        }
+        transform->pictures = grown;
+        transform->picture_cap = cap;
+    }
+    transform->pictures[transform->picture_count].frame = frame;
+    transform->pictures[transform->picture_count].pts = pts;
+    transform->pictures[transform->picture_count].duration = duration;
+    transform->picture_count++;
+}
+
+static void wmv_pop_picture( struct wmv_transform *transform )
+{
+    mav_lavc_release( transform->pictures[0].frame );
+    memmove( transform->pictures, transform->pictures + 1,
+             (transform->picture_count - 1) * sizeof(*transform->pictures) );
+    transform->picture_count--;
+}
+
+static void wmv_decode_packet( struct wmv_transform *transform, const struct wmv_packet *packet )
+{
+    int err;
+
+    if (packet->flags & WG_SAMPLE_FLAG_DISCONTINUITY) transform->discontinuity = TRUE;
+    /* An empty packet would tell libavcodec the stream has ended. */
+    if (!packet->size) return;
+    if (!transform->dec)
+    {
+        if (!transform->dropped++)
+            WMV_LOG( "transform %p: no %s decoder (the input type had no sequence header); "
+                     "dropping what is pushed\n", transform, transform->name );
+        return;
+    }
+    err = mav_lavc_decode( transform->dec, packet->data, packet->size, packet->pts, packet->duration,
+                           !!(packet->flags & WG_SAMPLE_FLAG_SYNC_POINT), wmv_emit, transform );
+    if (err < 0)
+    {
+        transform->rejected++;
+        transform->discontinuity = TRUE;
+        if (transform->rejected_logged < MADEIRA_WMV_MAX_ERROR_LOGS)
+        {
+            transform->rejected_logged++;
+            WMV_LOG( "transform %p: %s frame of %u bytes rejected by the decoder (%u so far)\n",
+                     transform, transform->name, packet->size, transform->rejected );
+        }
+    }
+}
+
+/* The end of the stream: what the decoder holds back.  After it the decoder
+ * takes frames again only once flushed. */
+static void wmv_complete_drain( struct wmv_transform *transform )
+{
+    transform->draining = FALSE;
+    if (!transform->dec) return;
+    mav_lavc_drain( transform->dec, wmv_emit, transform );
+    mav_lavc_flush( transform->dec );
+}
+
+static void wmv_decode_until_picture( struct wmv_transform *transform )
+{
+    while (!transform->picture_count && transform->packet_count)
+    {
+        struct wmv_packet packet = transform->packets[0];
+
+        memmove( transform->packets, transform->packets + 1,
+                 (transform->packet_count - 1) * sizeof(*transform->packets) );
+        transform->packet_count--;
+        wmv_decode_packet( transform, &packet );
+        free( packet.data );
+    }
+    /* wg_transform.c sends its end of stream once the last queued input has
+     * gone into the decoder. */
+    if (transform->draining && !transform->packet_count) wmv_complete_drain( transform );
+}
+
+static void wmv_report( struct wmv_transform *transform, const char *when )
+{
+    if (!transform->pushed && !transform->lost) return;
+    WMV_LOG( "%s: transform %p, %s: %u frames in, %u pictures out, %u rejected by the decoder, "
+             "%u dropped without a decoder, %u lost to memory\n", when, transform, transform->name,
+             transform->pushed, transform->delivered, transform->rejected, transform->dropped, transform->lost );
+}
+
+/***********************************************************************
+ *           where a picture goes in the caller's buffer
+ */
+struct wmv_geometry
+{
+    struct mav_video_output vout;   /* what is written: format, size; height < 0: bottom-up */
+    struct mav_layout frame;        /* the whole frame's planes */
+    struct mav_layout layout;       /* the same, moved to the picture's region */
+    UINT32 region_w, region_h;      /* the region: the aperture, or the whole frame */
+    BOOL covers;                    /* the picture fills its region */
+};
+
+/* Bytes per pixel of the first plane. */
+static UINT32 wmv_pixel_bytes( enum mav_pixel_format fmt )
+{
+    switch (fmt)
+    {
+    case MAV_PIX_NV12:
+    case MAV_PIX_I420:
+    case MAV_PIX_YV12:  return 1;
+    case MAV_PIX_YUY2:
+    case MAV_PIX_UYVY:
+    case MAV_PIX_YVYU:
+    case MAV_PIX_RGB15:
+    case MAV_PIX_RGB16: return 2;
+    case MAV_PIX_BGR:   return 3;
+    default:            return 4;
+    }
+}
+
+static BOOL wmv_geometry( struct wmv_transform *transform, const struct mav_vplanes *picture, UINT32 stride,
+                          struct wmv_geometry *g )
+{
+    const MFVideoInfo *info = &transform->out_format->videoInfo;
+    const MFVideoArea *aperture = &info->MinimumDisplayAperture;
+    enum mav_pixel_format fmt = transform->out_fmt;
+    BOOL planar = fmt == MAV_PIX_NV12 || fmt == MAV_PIX_I420 || fmt == MAV_PIX_YV12;
+    BOOL subsampled = planar || fmt == MAV_PIX_YUY2 || fmt == MAV_PIX_UYVY || fmt == MAV_PIX_YVYU;
+    BOOL flip = !!(info->VideoFlags & MFVideoFlag_BottomUpLinearRep);
+    UINT32 w = info->dwWidth, h = info->dwHeight, bpp = wmv_pixel_bytes( fmt );
+    UINT32 rx = 0, ry = 0, rw = w, rh = h, cw, ch, p, planes;
+    struct mav_layout *l = &g->frame;
+
+    if (!mav_video_layout( fmt, w, h, l )) return FALSE;
+    /* wg_transform.c's exception: NV12 rows are 2-aligned, as on Windows. */
+    if (fmt == MAV_PIX_NV12) l->stride[0] = l->stride[1] = (w + 1) & ~1u;
+    if (stride)
+    {
+        /* The caller's 2D buffer: its pitch is the first plane's stride; a
+         * planar format's chroma rows are half that (NV12's, interleaved,
+         * the same), as mfplat lays out its 2D buffers. */
+        UINT32 row = subsampled ? ((w + 1) & ~1u) * bpp : w * bpp;
+
+        if (stride >= row)
+        {
+            l->stride[0] = stride;
+            if (fmt == MAV_PIX_NV12) l->stride[1] = stride;
+            else if (planar) l->stride[1] = l->stride[2] = stride / 2;
+        }
+        else if (!transform->stride_logged)
+        {
+            transform->stride_logged = TRUE;
+            WMV_LOG( "transform %p: a stride of %u is too short for %u pixels of %s; using the default\n",
+                     transform, stride, w, mav_pix_name( fmt ) );
+        }
+    }
+    l->offset[0] = l->offset[1] = l->offset[2] = 0;
+    if (!planar) l->size = (size_t)l->stride[0] * h;
+    else
+    {
+        l->offset[1] = (size_t)l->stride[0] * h;
+        l->offset[2] = l->offset[1] + (size_t)l->stride[1] * l->chroma_height;
+        l->size = fmt == MAV_PIX_NV12 ? l->offset[2] : l->offset[2] + (size_t)l->stride[2] * l->chroma_height;
+    }
+
+    /* GStreamer's is_mf_video_area_empty(): an aperture is set if any field is. */
+    if ((aperture->OffsetX.value || aperture->OffsetY.value || aperture->Area.cx || aperture->Area.cy)
+        && aperture->OffsetX.value >= 0 && aperture->OffsetY.value >= 0
+        && (UINT32)aperture->OffsetX.value < w && (UINT32)aperture->OffsetY.value < h
+        && aperture->Area.cx > 0 && aperture->Area.cy > 0)
+    {
+        rx = aperture->OffsetX.value;
+        ry = aperture->OffsetY.value;
+        rw = min( (UINT32)aperture->Area.cx, w - rx );
+        rh = min( (UINT32)aperture->Area.cy, h - ry );
+        if (subsampled) rx &= ~1u;      /* chroma is shared by pixel pairs */
+        if (planar) ry &= ~1u;          /* and, in 4:2:0, by row pairs */
+    }
+    cw = min( picture->width, rw );
+    ch = min( picture->height, rh );
+    g->region_w = rw;
+    g->region_h = rh;
+    g->covers = cw == rw && ch == rh;
+    g->vout.fmt = fmt;
+    g->vout.width = cw;
+    g->vout.height = flip ? -(int32_t)ch : (int32_t)ch;
+    g->vout.fps_n = g->vout.fps_d = 0;
+
+    /* Each plane's origin moves to the region, so that mav_convert_picture's
+     * rows -- counted over the region, from its last row when flipped --
+     * land in it. */
+    g->layout = *l;
+    planes = fmt == MAV_PIX_NV12 ? 2 : planar ? 3 : 1;
+    for (p = 0; p < planes; p++)
+    {
+        UINT32 rows = p ? l->chroma_height : h, y = p ? ry / 2 : ry, n = p ? (ch + 1) / 2 : ch;
+        UINT32 x = p ? (fmt == MAV_PIX_NV12 ? rx : rx / 2) : rx * bpp;
+
+        g->layout.offset[p] += (size_t)l->stride[p] * (flip ? rows - y - n : y) + x;
+    }
+    g->layout.chroma_height = (ch + 1) / 2;
+    return TRUE;
+}
+
+/* A picture smaller than its region: the whole frame is black first, in the
+ * values mav_convert_picture pads with. */
+static void wmv_fill_black( enum mav_pixel_format fmt, const struct mav_layout *l, UINT32 w, UINT32 h, BYTE *dst )
+{
+    UINT32 x, y;
+
+    switch (fmt)
+    {
+    case MAV_PIX_NV12:
+    case MAV_PIX_I420:
+    case MAV_PIX_YV12:
+        memset( dst, 16, l->offset[1] );
+        memset( dst + l->offset[1], 128, l->size - l->offset[1] );
+        break;
+    case MAV_PIX_YUY2:
+    case MAV_PIX_UYVY:
+    case MAV_PIX_YVYU:
+        for (y = 0; y < h; y++)
+            for (x = 0; x + 4 <= l->stride[0]; x += 4)
+                memcpy( dst + (size_t)y * l->stride[0] + x, fmt == MAV_PIX_UYVY ? "\x80\x10\x80\x10" : "\x10\x80\x10\x80", 4 );
+        break;
+    case MAV_PIX_BGRA:
+    case MAV_PIX_BGRx:
+    case MAV_PIX_RGBA:
+        for (y = 0; y < h; y++)
+            for (x = 0; x < w; x++)
+                memcpy( dst + (size_t)y * l->stride[0] + x * 4, "\0\0\0\xff", 4 );
+        break;
+    default:
+        memset( dst, 0, l->size );
+        break;
+    }
+}
+
+/***********************************************************************
+ *           the WMV kind's entries
+ */
+static NTSTATUS wmv_create( struct wg_transform_create_params *params )
+{
+    const MFVIDEOFORMAT *in = video_format( &params->input_type );
+    const MFVIDEOFORMAT *out = video_format( &params->output_type );
+    struct wmv_transform *transform;
+    UINT32 codec_data_size = 0, fps_n, fps_d;
+    const BYTE *codec_data;
+    const char *name = NULL;
+    char why[96] = "", sub[16];
+    NTSTATUS status;
+    int codec;
+
+    params->transform = 0;
+    if (!in) return STATUS_NOT_SUPPORTED;   /* a malformed block */
+    if (!(codec = wmv_input_codec( &in->guidFormat, &name )))
+    {
+        WMV_LOG( "input subtype %s is not a Windows Media video stream (WMV1/WMV2/WMV3/WMVA/WVC1); refusing\n",
+                 wmv_subtype_name( &in->guidFormat, sub ) );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!out || wmv_output_format( &out->guidFormat ) == MAV_PIX_UNKNOWN)
+    {
+        WMV_LOG( "%s: output subtype %s is not one this decoder writes "
+                 "(NV12 YV12 I420 IYUV YUY2 UYVY YVYU RGB32 ARGB32 ABGR32 RGB24 RGB565 RGB555); refusing\n",
+                 name, out ? wmv_subtype_name( &out->guidFormat, sub ) : "(not video)" );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!in->videoInfo.dwWidth || !in->videoInfo.dwHeight
+        || in->videoInfo.dwWidth > MAV_MAX_DIMENSION || in->videoInfo.dwHeight > MAV_MAX_DIMENSION)
+    {
+        /* WMV7/8/9 bitstreams do not carry the picture size: the container's is all there is. */
+        WMV_LOG( "%s: unusable frame size %ux%u; refusing\n", name,
+                 (UINT)in->videoInfo.dwWidth, (UINT)in->videoInfo.dwHeight );
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!mav_lavc_supports( codec ))
+    {
+        WMV_LOG( "%s: no decoder for it in this FFmpeg build; refusing\n", name );
+        return STATUS_NOT_SUPPORTED;
+    }
+    codec_data = video_user_data( in, params->input_type.format_size, &codec_data_size );
+    if (codec_data_size > MADEIRA_WMV_MAX_CODEC_DATA)
+    {
+        WMV_LOG( "%s: %u bytes of codec private data; refusing\n", name, codec_data_size );
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /* libavcodec's diagnostics, under this file's tags (see wma_av_log). */
+    pthread_once( &wma_av_log_once, wma_install_av_log );
+
+    if (!(transform = calloc( 1, sizeof(*transform) ))) return STATUS_NO_MEMORY;
+    pthread_mutex_init( &transform->lock, NULL );
+    transform->magic = MADEIRA_WG_WMV_MAGIC;
+    transform->attrs = params->attrs;
+    transform->codec = codec;
+    transform->name = name;
+    transform->width = in->videoInfo.dwWidth;
+    transform->height = in->videoInfo.dwHeight;
+    fps_n = in->videoInfo.FramesPerSecond.Numerator;
+    fps_d = in->videoInfo.FramesPerSecond.Denominator;
+    if (fps_n && fps_d) transform->frame_duration = (INT64)fps_d * 10000000 / fps_n;
+    switch (in->videoInfo.TransferMatrix)
+    {
+    case MFVideoTransferMatrix_BT709:    transform->bt709 = 1; break;
+    case MFVideoTransferMatrix_BT601:
+    case MFVideoTransferMatrix_SMPTE240M: transform->bt709 = 0; break;
+    default: transform->bt709 = transform->height >= 720; break;   /* as the parser assumes */
+    }
+    if ((status = wmv_set_output( transform, &params->output_type )))
+    {
+        WMV_LOG( "%s: output type %ux%u refused (%#x)\n", name, (UINT)out->videoInfo.dwWidth,
+                 (UINT)out->videoInfo.dwHeight, (UINT)status );
+        goto fail;
+    }
+
+    transform->dec = mav_lavc_open( codec, codec_data, codec_data_size, transform->width, transform->height,
+                                    why, sizeof(why) );
+    if (!transform->dec && codec_data_size)
+    {
+        WMV_LOG( "%s %ux%u: the decoder refused the %u-byte sequence header (%s); refusing\n",
+                 name, transform->width, transform->height, codec_data_size, why );
+        status = STATUS_NOT_SUPPORTED;
+        goto fail;
+    }
+    if (transform->dec) ((struct mav_lavc_vdec *)transform->dec)->ctx->opaque = WMV_DECODER_MARKER;
+
+    params->transform = (wg_transform_t)(UINT_PTR)transform;
+    WMV_LOG( "decoder created fmt=%s %ux%u fps=%u/%u codec_data=%u -> %s %ux%u%s queue=%u%s (transform %p)%s\n",
+             name, transform->width, transform->height, fps_n, fps_d, codec_data_size,
+             mav_pix_name( transform->out_fmt ), (UINT)transform->out_format->videoInfo.dwWidth,
+             (UINT)transform->out_format->videoInfo.dwHeight,
+             (transform->out_format->videoInfo.VideoFlags & MFVideoFlag_BottomUpLinearRep) ? " bottom-up" : "",
+             transform->attrs.input_queue_length, transform->attrs.preserve_timestamps ? " preserve-ts" : "",
+             transform, transform->dec ? "" : " [decoder not open: no sequence header, as in "
+                                              "wmv_decoder_create()'s probe; input will be dropped]" );
+    return STATUS_SUCCESS;
+
+fail:
+    free( transform->out_format );
+    pthread_mutex_destroy( &transform->lock );
+    transform->magic = 0;
+    free( transform );
+    return status;
+}
+
+static void wmv_clear( struct wmv_transform *transform )
+{
+    while (transform->packet_count) free( transform->packets[--transform->packet_count].data );
+    while (transform->picture_count) wmv_pop_picture( transform );
+}
+
+static NTSTATUS wmv_destroy( wg_transform_t handle )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    wmv_report( transform, "destroy" );
+    transform->magic = 0;
+    wmv_clear( transform );
+    if (transform->dec) mav_lavc_close( transform->dec );
+    free( transform->packets );
+    free( transform->pictures );
+    free( transform->out_format );
+    pthread_mutex_unlock( &transform->lock );
+    pthread_mutex_destroy( &transform->lock );
+    free( transform );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_get_output_type( wg_transform_t handle, struct wg_media_type *type )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+    UINT32 size;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    size = transform->out_format_size;
+    type->major = madeira_MFMediaType_Video;
+    /* Two-phase, as main.c's wg_transform_get_output_type() expects. */
+    if (!type->u.format || type->format_size < size)
+    {
+        type->format_size = size;
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    memcpy( type->u.format, transform->out_format, size );
+    type->format_size = size;
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_set_output_type( wg_transform_t handle, const struct wg_media_type *type )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+    NTSTATUS status;
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    /* The decoder and the pictures it has made are kept: they are written in
+     * the new format when they are read, which is what wg_transform.c says a
+     * native transform does and GStreamer could not. */
+    if (!(status = wmv_set_output( transform, type )))
+        WMV_LOG( "transform %p: output type set to %s %ux%u%s\n", transform, mav_pix_name( transform->out_fmt ),
+                 (UINT)transform->out_format->videoInfo.dwWidth, (UINT)transform->out_format->videoInfo.dwHeight,
+                 (transform->out_format->videoInfo.VideoFlags & MFVideoFlag_BottomUpLinearRep) ? " bottom-up" : "" );
+    pthread_mutex_unlock( &transform->lock );
+    return status;
+}
+
+static NTSTATUS wmv_push_data( wg_transform_t handle, struct wg_sample *sample, const void *data, HRESULT *result )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+    struct wmv_packet *packet;
+
+    if (!transform || !sample) return STATUS_INVALID_HANDLE;
+    if (sample->size && !data) return STATUS_INVALID_PARAMETER;
+
+    pthread_mutex_lock( &transform->lock );
+    /* wg_transform.c: no input while a drain is under way, and no more than
+     * input_queue_length + 1 frames queued. */
+    if (transform->draining || transform->packet_count > transform->attrs.input_queue_length)
+    {
+        pthread_mutex_unlock( &transform->lock );
+        *result = MF_E_NOTACCEPTING;
+        return STATUS_SUCCESS;
+    }
+    if (transform->packet_count == transform->packet_cap)
+    {
+        UINT32 cap = transform->packet_cap ? transform->packet_cap * 2 : 8;
+        struct wmv_packet *grown = realloc( transform->packets, cap * sizeof(*grown) );
+
+        if (!grown)
+        {
+            pthread_mutex_unlock( &transform->lock );
+            return STATUS_NO_MEMORY;
+        }
+        transform->packets = grown;
+        transform->packet_cap = cap;
+    }
+    packet = &transform->packets[transform->packet_count];
+    memset( packet, 0, sizeof(*packet) );
+    if (sample->size && !(packet->data = malloc( sample->size )))
+    {
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_NO_MEMORY;
+    }
+    if (sample->size) memcpy( packet->data, data, sample->size );
+    packet->size = sample->size;
+    packet->flags = sample->flags;
+    packet->pts = (sample->flags & WG_SAMPLE_FLAG_HAS_PTS) ? sample->pts : INT64_MIN;
+    packet->duration = (sample->flags & WG_SAMPLE_FLAG_HAS_DURATION) ? (INT64)sample->duration : INT64_MIN;
+    transform->packet_count++;
+    transform->pushed++;
+    pthread_mutex_unlock( &transform->lock );
+    *result = S_OK;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_read_data( wg_transform_t handle, struct wg_sample *sample, void *data, HRESULT *result )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+    struct wmv_picture *picture;
+    struct mav_vplanes planes;
+    struct wmv_geometry g;
+    BOOL preserve = FALSE;
+    INT64 pts, duration;
+
+    if (!transform || !sample) return STATUS_INVALID_HANDLE;
+    if (sample->max_size && !data) return STATUS_INVALID_PARAMETER;
+
+    pthread_mutex_lock( &transform->lock );
+    wmv_decode_until_picture( transform );
+    if (!transform->picture_count)
+    {
+        sample->size = 0;
+        pthread_mutex_unlock( &transform->lock );
+        *result = MF_E_TRANSFORM_NEED_MORE_INPUT;
+        return STATUS_SUCCESS;
+    }
+    picture = &transform->pictures[0];
+    mav_lavc_map( picture->frame, &planes );
+
+    if (!wmv_geometry( transform, &planes, sample->stride, &g ))
+    {
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_UNSUCCESSFUL;
+    }
+    if (transform->attrs.allow_format_change && (planes.width != g.region_w || planes.height != g.region_h))
+    {
+        /* The caller takes a new size: report it once, deliver nothing. */
+        MFVideoInfo *info = &transform->out_format->videoInfo;
+
+        WMV_LOG( "transform %p: picture size %ux%u, was %ux%u: format change\n", transform,
+                 planes.width, planes.height, (UINT)info->dwWidth, (UINT)info->dwHeight );
+        info->dwWidth = planes.width;
+        info->dwHeight = planes.height;
+        memset( &info->GeometricAperture, 0, sizeof(info->GeometricAperture) );
+        memset( &info->MinimumDisplayAperture, 0, sizeof(info->MinimumDisplayAperture) );
+        memset( &info->PanScanAperture, 0, sizeof(info->PanScanAperture) );
+        sample->size = 0;
+        pthread_mutex_unlock( &transform->lock );
+        *result = MF_E_TRANSFORM_STREAM_CHANGE;
+        return STATUS_SUCCESS;
+    }
+    if (g.frame.size > sample->max_size)
+    {
+        /* As wg_transform.c: an error, and the picture stays for a bigger buffer. */
+        if (!transform->size_logged)
+        {
+            transform->size_logged = TRUE;
+            WMV_LOG( "transform %p: a %u-byte buffer cannot hold a %ux%u %s frame (%zu bytes)\n", transform,
+                     sample->max_size, (UINT)transform->out_format->videoInfo.dwWidth,
+                     (UINT)transform->out_format->videoInfo.dwHeight, mav_pix_name( transform->out_fmt ),
+                     g.frame.size );
+        }
+        sample->size = 0;
+        pthread_mutex_unlock( &transform->lock );
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (!g.covers)
+        wmv_fill_black( g.vout.fmt, &g.frame, transform->out_format->videoInfo.dwWidth,
+                        transform->out_format->videoInfo.dwHeight, data );
+    mav_convert_picture( &g.vout, transform->bt709, &planes, data, &g.layout );
+    mav_lavc_unmap( picture->frame );
+
+    if (picture->pts != INT64_MIN)
+    {
+        pts = picture->pts;
+        preserve = transform->attrs.preserve_timestamps;
+    }
+    else pts = transform->next_pts;
+    duration = picture->duration != INT64_MIN ? picture->duration : transform->frame_duration;
+    transform->next_pts = pts + duration;
+
+    sample->size = (UINT32)g.frame.size;
+    sample->flags &= ~(WG_SAMPLE_FLAG_INCOMPLETE | WG_SAMPLE_FLAG_HAS_PTS | WG_SAMPLE_FLAG_HAS_DURATION |
+                       WG_SAMPLE_FLAG_SYNC_POINT | WG_SAMPLE_FLAG_DISCONTINUITY |
+                       WG_SAMPLE_FLAG_PRESERVE_TIMESTAMPS);
+    sample->flags |= WG_SAMPLE_FLAG_SYNC_POINT | WG_SAMPLE_FLAG_HAS_PTS | WG_SAMPLE_FLAG_HAS_DURATION;
+    if (preserve) sample->flags |= WG_SAMPLE_FLAG_PRESERVE_TIMESTAMPS;
+    if (transform->discontinuity) sample->flags |= WG_SAMPLE_FLAG_DISCONTINUITY;
+    transform->discontinuity = FALSE;
+    sample->pts = pts;
+    sample->duration = duration;
+
+    wmv_pop_picture( transform );
+    transform->delivered++;
+    pthread_mutex_unlock( &transform->lock );
+    *result = S_OK;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_get_status( wg_transform_t handle, UINT32 *accepts_input )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    *accepts_input = transform->packet_count <= transform->attrs.input_queue_length;
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_drain( wg_transform_t handle )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    /* With frames still queued the end of stream waits for read_data to
+     * have decoded them, and push_data refuses until then. */
+    transform->draining = TRUE;
+    if (!transform->packet_count) wmv_complete_drain( transform );
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wmv_flush( wg_transform_t handle )
+{
+    struct wmv_transform *transform = get_wmv_transform( handle );
+
+    if (!transform) return STATUS_INVALID_HANDLE;
+    pthread_mutex_lock( &transform->lock );
+    if (transform->rejected || transform->dropped || transform->lost) wmv_report( transform, "flush" );
+    wmv_clear( transform );
+    if (transform->dec) mav_lavc_flush( transform->dec );
+    transform->draining = FALSE;
+    transform->next_pts = 0;
+    pthread_mutex_unlock( &transform->lock );
+    return STATUS_SUCCESS;
+}
+
+/* Every video input is this kind's to judge, unless switched off: wmv_create
+ * refuses, and logs, what is not Windows Media video. */
+static BOOL wmv_claims( const struct wg_transform_create_params *params )
+{
+    return IsEqualGUID( &params->input_type.major, &madeira_MFMediaType_Video ) && wmv_transform_switch_on();
+}
+
+/***********************************************************************
+ *           transform kinds
+ *
+ * wg_transform_create gives the create to the first kind below that claims
+ * the INPUT type, and that kind may still refuse the pair (its log says
+ * why).  Every later call finds the kind again by the magic that each kind's
+ * object starts with, so a handle is only ever read as the kind that made
+ * it, and an unknown one is STATUS_INVALID_HANDLE.  Another kind is another
+ * row: claims(), the entries, and a UINT32 magic of its own as the first
+ * member of its object.
+ */
+struct wg_transform_ops
+{
+    const char *name;
+    UINT32 magic;
+    BOOL (*claims)( const struct wg_transform_create_params *params );
+    NTSTATUS (*create)( struct wg_transform_create_params *params );
+    NTSTATUS (*destroy)( wg_transform_t handle );
+    NTSTATUS (*get_output_type)( wg_transform_t handle, struct wg_media_type *type );
+    NTSTATUS (*set_output_type)( wg_transform_t handle, const struct wg_media_type *type );
+    NTSTATUS (*push_data)( wg_transform_t handle, struct wg_sample *sample, const void *data, HRESULT *result );
+    NTSTATUS (*read_data)( wg_transform_t handle, struct wg_sample *sample, void *data, HRESULT *result );
+    NTSTATUS (*get_status)( wg_transform_t handle, UINT32 *accepts_input );
+    NTSTATUS (*drain)( wg_transform_t handle );
+    NTSTATUS (*flush)( wg_transform_t handle );
+};
+
+static const struct wg_transform_ops wma_transform_ops =
+{
+    "wma", MADEIRA_WG_TRANSFORM_MAGIC, wma_claims, wma_create, wma_destroy, wma_get_output_type,
+    wma_set_output_type, wma_push_data, wma_read_data, wma_get_status, wma_drain, wma_flush,
+};
+
+static const struct wg_transform_ops wmv_transform_ops =
+{
+    "wmv", MADEIRA_WG_WMV_MAGIC, wmv_claims, wmv_create, wmv_destroy, wmv_get_output_type,
+    wmv_set_output_type, wmv_push_data, wmv_read_data, wmv_get_status, wmv_drain, wmv_flush,
+};
+
+/* In claim order. */
+static const struct wg_transform_ops *const transform_kinds[] =
+{
+    &wma_transform_ops,
+    &wmv_transform_ops,
+};
+
+static const struct wg_transform_ops *transform_kind( wg_transform_t handle )
+{
+    const UINT32 *magic = (const UINT32 *)(UINT_PTR)handle;
+    unsigned int i;
+
+    if (!magic) return NULL;
+    for (i = 0; i < ARRAY_SIZE(transform_kinds); i++)
+        if (transform_kinds[i]->magic == *magic) return transform_kinds[i];
+    return NULL;
+}
+
+/* The unpacked forms, shared by the 64-bit entries and the wow64 thunks. */
+static NTSTATUS transform_create( struct wg_transform_create_params *params )
+{
+    unsigned int i;
+
+    params->transform = 0;
+    for (i = 0; i < ARRAY_SIZE(transform_kinds); i++)
+        if (transform_kinds[i]->claims( params )) return transform_kinds[i]->create( params );
+    /* Unclaimed: video with MADEIRA_WG_WMV_TRANSFORM=0, or neither audio nor video. */
+    if (IsEqualGUID( &params->input_type.major, &madeira_MFMediaType_Video ))
+        WMV_LOG( "video transform refused: MADEIRA_WG_WMV_TRANSFORM=0\n" );
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS transform_destroy( wg_transform_t handle )
+{
+    const struct wg_transform_ops *kind = transform_kind( handle );
+    return kind ? kind->destroy( handle ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS transform_get_output_type( wg_transform_t handle, struct wg_media_type *type )
+{
+    const struct wg_transform_ops *kind = transform_kind( handle );
+    return kind ? kind->get_output_type( handle, type ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS transform_set_output_type( wg_transform_t handle, const struct wg_media_type *type )
+{
+    const struct wg_transform_ops *kind = transform_kind( handle );
+    return kind ? kind->set_output_type( handle, type ) : STATUS_INVALID_HANDLE;
+}
+
+/* `data` is passed separately from `sample` because struct wg_sample's `data`
+ * member is a GUEST address for a 32-bit caller; see the wow64 table. */
+static NTSTATUS transform_push_data( wg_transform_t handle, struct wg_sample *sample, const void *data,
+                                     HRESULT *result )
+{
+    const struct wg_transform_ops *kind = transform_kind( handle );
+    return kind ? kind->push_data( handle, sample, data, result ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS transform_read_data( wg_transform_t handle, struct wg_sample *sample, void *data,
+                                     HRESULT *result )
+{
+    const struct wg_transform_ops *kind = transform_kind( handle );
+    return kind ? kind->read_data( handle, sample, data, result ) : STATUS_INVALID_HANDLE;
+}
+
+/***********************************************************************
+ *           the unix call entries
+ */
+static NTSTATUS wma_init( void *args )
+{
+    struct wg_init_gstreamer_params *params = args;
+
+    /* Benign success: main.c's init_gstreamer_proc() fails the whole DLL if
+     * this fails, and everything this port implements is below it. */
+    (void)params;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS wma_not_implemented( void *args )
+{
+    (void)args;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+static NTSTATUS wg_transform_create( void *args )
+{
+    return transform_create( args );
+}
+
+static NTSTATUS wg_transform_destroy( void *args )
+{
+    return transform_destroy( *(wg_transform_t *)args );
+}
+
+static NTSTATUS wg_transform_get_output_type( void *args )
+{
+    struct wg_transform_get_output_type_params *params = args;
+    return transform_get_output_type( params->transform, &params->media_type );
+}
+
+static NTSTATUS wg_transform_set_output_type( void *args )
+{
+    struct wg_transform_set_output_type_params *params = args;
+    return transform_set_output_type( params->transform, &params->media_type );
+}
+
+static NTSTATUS wg_transform_push_data( void *args )
+{
+    struct wg_transform_push_data_params *params = args;
+    struct wg_sample *sample = params->sample;
+
+    if (!sample) return STATUS_INVALID_PARAMETER;
+    return transform_push_data( params->transform, sample,
+                                (const void *)(UINT_PTR)sample->data, &params->result );
+}
+
+static NTSTATUS wg_transform_read_data( void *args )
+{
+    struct wg_transform_read_data_params *params = args;
+    struct wg_sample *sample = params->sample;
+
+    if (!sample) return STATUS_INVALID_PARAMETER;
+    return transform_read_data( params->transform, sample,
+                                (void *)(UINT_PTR)sample->data, &params->result );
+}
+
+static NTSTATUS wg_transform_get_status( void *args )
+{
+    struct wg_transform_get_status_params *params = args;
+    const struct wg_transform_ops *kind = transform_kind( params->transform );
+
+    return kind ? kind->get_status( params->transform, &params->accepts_input ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS wg_transform_drain( void *args )
+{
+    wg_transform_t handle = *(wg_transform_t *)args;
+    const struct wg_transform_ops *kind = transform_kind( handle );
+
+    return kind ? kind->drain( handle ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS wg_transform_flush( void *args )
+{
+    wg_transform_t handle = *(wg_transform_t *)args;
+    const struct wg_transform_ops *kind = transform_kind( handle );
+
+    return kind ? kind->flush( handle ) : STATUS_INVALID_HANDLE;
+}
+
+static NTSTATUS wg_transform_notify_qos( void *args )
 {
     /* Quality-of-service hints only change which frames a GStreamer pipeline
-     * bothers to decode; an audio decoder with no frame dropping has nothing
-     * to do with them, and the caller ignores the status. */
+     * bothers to decode.  Neither kind drops frames (a WMV decoder that
+     * skipped one would break the pictures that refer to it until the next
+     * keyframe), and the caller ignores the status. */
     (void)args;
     return STATUS_SUCCESS;
 }
@@ -2823,17 +3903,17 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     wgp_get_tag64,                      /* unix_wg_parser_stream_get_tag */
     wgp_seek,                           /* unix_wg_parser_stream_seek */
 
-    wma_transform_create,               /* unix_wg_transform_create */
-    wma_transform_destroy,              /* unix_wg_transform_destroy */
-    wma_transform_get_output_type,      /* unix_wg_transform_get_output_type */
-    wma_transform_set_output_type,      /* unix_wg_transform_set_output_type */
+    wg_transform_create,                /* unix_wg_transform_create */
+    wg_transform_destroy,               /* unix_wg_transform_destroy */
+    wg_transform_get_output_type,       /* unix_wg_transform_get_output_type */
+    wg_transform_set_output_type,       /* unix_wg_transform_set_output_type */
 
-    wma_transform_push_data,            /* unix_wg_transform_push_data */
-    wma_transform_read_data,            /* unix_wg_transform_read_data */
-    wma_transform_get_status,           /* unix_wg_transform_get_status */
-    wma_transform_drain,                /* unix_wg_transform_drain */
-    wma_transform_flush,                /* unix_wg_transform_flush */
-    wma_transform_notify_qos,           /* unix_wg_transform_notify_qos */
+    wg_transform_push_data,             /* unix_wg_transform_push_data */
+    wg_transform_read_data,             /* unix_wg_transform_read_data */
+    wg_transform_get_status,            /* unix_wg_transform_get_status */
+    wg_transform_drain,                 /* unix_wg_transform_drain */
+    wg_transform_flush,                 /* unix_wg_transform_flush */
+    wg_transform_notify_qos,            /* unix_wg_transform_notify_qos */
 
     wma_not_implemented,                /* unix_wg_muxer_create */
     wma_not_implemented,                /* unix_wg_muxer_destroy */
@@ -2865,6 +3945,13 @@ C_ASSERT( ARRAY_SIZE(__wine_unix_call_funcs) == unix_wg_funcs_count );
  *                          fixed-width and i386 aligns INT64/UINT64 to 8 like
  *                          the host -- but its `data` member holds a GUEST
  *                          address, so only that VALUE is converted.
+ *
+ * The block a wg_media_type points at is used in place, audio and video
+ * alike: a WAVEFORMATEX(-EXTENSIBLE) or an MFVIDEOFORMAT, with its codec
+ * data after it, is fixed-width and laid out identically by i686-w64-mingw32
+ * and the host (checked with llvm-mingw; the C_ASSERTs at the WMV decoder pin
+ * MFVIDEOFORMAT).  The offsets asserted below are the i386 ones, measured the
+ * same way.
  *
  * Everything else in the table takes either a bare wg_transform_t (a UINT64,
  * same in both) or a block of fixed-width scalars at identical offsets, so
@@ -2902,6 +3989,13 @@ struct wg_transform_output_type_params32
     struct wg_media_type32 media_type;
 };
 
+C_ASSERT( offsetof(struct wg_transform_create_params32, output_type) == 32 );
+C_ASSERT( offsetof(struct wg_transform_create_params32, attrs) == 56 );
+C_ASSERT( sizeof(struct wg_transform_create_params32) == 80 );
+C_ASSERT( offsetof(struct wg_transform_sample_params32, result) == 12 );
+C_ASSERT( sizeof(struct wg_transform_output_type_params32) == 32 );
+C_ASSERT( sizeof(struct wg_sample) == 48 && offsetof(struct wg_sample, data) == 40 );
+
 static void media_type_from32( struct wg_media_type *type, const struct wg_media_type32 *type32 )
 {
     type->major = type32->major;
@@ -2909,7 +4003,7 @@ static void media_type_from32( struct wg_media_type *type, const struct wg_media
     type->u.format = ios_wow_host_ptr( type32->format );
 }
 
-static NTSTATUS wow64_wma_transform_create( void *args )
+static NTSTATUS wow64_wg_transform_create( void *args )
 {
     struct wg_transform_create_params32 *params32 = args;
     struct wg_transform_create_params params;
@@ -2929,7 +4023,7 @@ static NTSTATUS wow64_wma_transform_create( void *args )
 
 /* `sample` is a guest pointer; the struct it points at has the same layout in
  * both builds, so it is used in place and only sample->data is converted. */
-static NTSTATUS wow64_wma_transform_push_data( void *args )
+static NTSTATUS wow64_wg_transform_push_data( void *args )
 {
     struct wg_transform_sample_params32 *params32 = args;
     struct wg_sample *sample;
@@ -2940,7 +4034,7 @@ static NTSTATUS wow64_wma_transform_push_data( void *args )
                                 ios_wow_host_ptr( (ULONG)sample->data ), &params32->result );
 }
 
-static NTSTATUS wow64_wma_transform_read_data( void *args )
+static NTSTATUS wow64_wg_transform_read_data( void *args )
 {
     struct wg_transform_sample_params32 *params32 = args;
     struct wg_sample *sample;
@@ -2951,7 +4045,7 @@ static NTSTATUS wow64_wma_transform_read_data( void *args )
                                 ios_wow_host_ptr( (ULONG)sample->data ), &params32->result );
 }
 
-static NTSTATUS wow64_wma_transform_get_output_type( void *args )
+static NTSTATUS wow64_wg_transform_get_output_type( void *args )
 {
     struct wg_transform_output_type_params32 *params32 = args;
     struct wg_media_type type;
@@ -2967,7 +4061,7 @@ static NTSTATUS wow64_wma_transform_get_output_type( void *args )
     return status;
 }
 
-static NTSTATUS wow64_wma_transform_set_output_type( void *args )
+static NTSTATUS wow64_wg_transform_set_output_type( void *args )
 {
     struct wg_transform_output_type_params32 *params32 = args;
     struct wg_media_type type;
@@ -3117,17 +4211,17 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     wow64_wgp_get_tag,                    /* unix_wg_parser_stream_get_tag */
     wgp_seek,                             /* unix_wg_parser_stream_seek */
 
-    wow64_wma_transform_create,           /* unix_wg_transform_create */
-    wma_transform_destroy,                /* unix_wg_transform_destroy */
-    wow64_wma_transform_get_output_type,  /* unix_wg_transform_get_output_type */
-    wow64_wma_transform_set_output_type,  /* unix_wg_transform_set_output_type */
+    wow64_wg_transform_create,            /* unix_wg_transform_create */
+    wg_transform_destroy,                 /* unix_wg_transform_destroy */
+    wow64_wg_transform_get_output_type,   /* unix_wg_transform_get_output_type */
+    wow64_wg_transform_set_output_type,   /* unix_wg_transform_set_output_type */
 
-    wow64_wma_transform_push_data,        /* unix_wg_transform_push_data */
-    wow64_wma_transform_read_data,        /* unix_wg_transform_read_data */
-    wma_transform_get_status,             /* unix_wg_transform_get_status */
-    wma_transform_drain,                  /* unix_wg_transform_drain */
-    wma_transform_flush,                  /* unix_wg_transform_flush */
-    wma_transform_notify_qos,             /* unix_wg_transform_notify_qos */
+    wow64_wg_transform_push_data,         /* unix_wg_transform_push_data */
+    wow64_wg_transform_read_data,         /* unix_wg_transform_read_data */
+    wg_transform_get_status,              /* unix_wg_transform_get_status */
+    wg_transform_drain,                   /* unix_wg_transform_drain */
+    wg_transform_flush,                   /* unix_wg_transform_flush */
+    wg_transform_notify_qos,              /* unix_wg_transform_notify_qos */
 
     wma_not_implemented,                  /* unix_wg_muxer_create */
     wma_not_implemented,                  /* unix_wg_muxer_destroy */
