@@ -12243,8 +12243,10 @@ static void exec_fx_temporal(struct mad_exec *e, const struct mad_cmd *c) {
  * other half, for the same command buffers: gpu-pass-timing times the command
  * buffers whose first encoder is created in the first second of each of its
  * periods on the device's uptime clock and lists the first three encoder by
- * encoder; the trace takes the first three command buffers whose first list is
- * replayed in the first second of each N on the same clock (QPC less the
+ * encoder; the trace takes the first three command buffers of dep-trace-min-enc
+ * (50) encoders or more whose first list is replayed in the first second of
+ * each N on the same clock, and starts none for an ExecuteCommandLists call of
+ * under dep-trace-min-cmds (300) recorded commands (QPC less the
  * offset frame-timeline measures; with frame-timeline off the second is QPC's
  * own and the two logs are of different frames). Set N to gpu-pass-timing's
  * period. The reader joins the two by encoder order and label.
@@ -12290,7 +12292,7 @@ enum { DT_W_RT = 1, DT_W_DS = 2, DT_W_UAV = 4, DT_W_CP = 8, DT_W_ANY = 15,
        DT_NOLEN_W = 0x1000, DT_BUF = 0x2000, DT_NOLEN_R = 0x4000 };
 struct mad_dt_ent { struct mad_resource *r; unsigned serial; UINT32 flags, n[2]; UINT64 lo[2], hi[2]; };   /* [0] written, [1] read */
 struct mad_dt {
-    int active; struct mad_queue *q; UINT64 batch; unsigned cb_no; LONG64 present;
+    int active; struct mad_queue *q; UINT64 batch; unsigned cb_no; LONG64 present, bucket;
     char kind, wait; int carried; unsigned seq, idx;
     UINT ps, vs, w, h, cs, tg[3]; char name[40];
     unsigned draws, ind, disp, ops, nstatic, gmin, gmax; UINT64 verts, groups;
@@ -12303,7 +12305,8 @@ struct mad_dt {
 static struct mad_dt g_dt_st;
 static volatile LONG g_dt_busy;   /* one replay at a time owns g_dt_st and everything below */
 static int g_dt_secs = -1;
-static LONG64 g_dt_bucket = -1; static unsigned g_dt_bucket_cbs, g_dt_cb_no;
+static LONG64 g_dt_bucket = -1; static unsigned g_dt_bucket_cbs, g_dt_bucket_starts, g_dt_cb_no;
+static unsigned g_dt_min_cmds = 300, g_dt_min_enc = 50;   /* dep-trace-min-cmds, dep-trace-min-enc */
 static struct { UINT64 id; struct mad_resource *r; } *g_dt_texh; static unsigned g_dt_texh_n;
 static UINT32 g_dt_seen[1u << 15];   /* resources already described, by serial */
 
@@ -12680,26 +12683,48 @@ static void mad_dt_end_trace(struct mad_dt *t) {
     if (t->kind) mad_dt_flush(t);
     d3d12_log("[dep] cb %u end: %u encoders, %u barriers, %u lists, %.0f us spent tracing\n", t->cb_no, t->encs, t->barriers, t->lists,
               (double)t->t_spent * 1e6 / (double)(g_xp.qpf ? g_xp.qpf : 10000000));
+    /* a command buffer that turned out small is not one of the second's three (the starts are capped apart) */
+    if (t->encs < g_dt_min_enc && t->bucket == g_dt_bucket && g_dt_bucket_cbs) g_dt_bucket_cbs--;
     t->active = 0;
 }
+/* Commands recorded in all the lists of the ExecuteCommandLists call being replayed. The trace is for a frame's
+ * command buffer. A game also submits a handful of copies beside it, perhaps on another queue: traced, such a call
+ * keeps the one trace there is until that queue's next call and the frame is never taken (PoE2 on the Duo: its
+ * upload list took all but one of the first run's traces). */
+static unsigned mad_dt_call_cmds(const struct mad_queue *q, const struct mad_list *l) {
+    unsigned n = 0; UINT i;
+    if (!q->rp_lists) return l ? l->ncmds : 0;
+    for (i = 0; i < q->rp_nlists; i++) { const struct mad_list *x = mad_rp_list_at(q, i); if (x) n += x->ncmds; }
+    return n;
+}
 static void mad_dt_list_begin(struct mad_exec *e, struct mad_queue *q) {
-    struct mad_dt *t = &g_dt_st; UINT64 batch = q->batches + 1;
+    struct mad_dt *t = &g_dt_st; UINT64 batch = q->batches + 1; int big;
     if (g_dt_secs < 0) {
         long long s = mad_cfg_int_pe("dep-trace", 0);   /* madeira-duo diagnostic: seconds between dependency traces (0 = off) */
+        long long mc = mad_cfg_int_pe("dep-trace-min-cmds", 300);   /* a call with fewer recorded commands starts no trace */
+        long long me = mad_cfg_int_pe("dep-trace-min-enc", 50);     /* a traced command buffer with fewer encoders is not one of the three */
+        g_dt_min_cmds = mc < 0 ? 0 : mc > 1000000 ? 1000000 : (unsigned)mc;
+        g_dt_min_enc = me < 0 ? 0 : me > 100000 ? 100000 : (unsigned)me;
         g_dt_secs = s <= 0 ? 0 : s > 3600 ? 3600 : (int)s;
-        if (g_dt_secs) d3d12_log("[madeira-d3d12] dep-trace = %d: [dep] lines for the first three command buffers begun in the first second of every %d s "
-                                 "(what each encoder reads and writes, its fence wait, the barriers)\n", g_dt_secs, g_dt_secs);
+        if (g_dt_secs) d3d12_log("[madeira-d3d12] dep-trace = %d: [dep] lines for the first three command buffers of %u encoders or more begun in the first "
+                                 "second of every %d s (what each encoder reads and writes, its fence wait, the barriers); calls under %u commands are "
+                                 "not traced, at most 8 traces a second\n", g_dt_secs, g_dt_min_enc, g_dt_secs, g_dt_min_cmds);
     }
     if (!g_dt_secs) return;
+    big = mad_dt_call_cmds(q, e->l) >= g_dt_min_cmds;
+    /* A small call that has no trace to end or to join stays out of the way: it would otherwise hold the trace's
+     * lock just as a frame begins on another queue. (active and q are read without the lock: a stale read ends a
+     * trace one list later, or takes the lock for nothing.) */
+    if (!big && !(t->active && t->q == q)) return;
     if (InterlockedCompareExchange(&g_dt_busy, 1, 0)) return;   /* another replay is being traced */
     if (t->active && ((t->q == q && t->batch != batch) || g_presents_now > t->present + 2)) mad_dt_end_trace(t);
-    if (!t->active && !q->open_lists) {
+    if (!t->active && !q->open_lists && big) {
         double up = mad_dt_uptime(); LONG64 sec = (LONG64)up;
         if (sec % g_dt_secs == 0) {
-            if (sec != g_dt_bucket) { g_dt_bucket = sec; g_dt_bucket_cbs = 0; }
-            if (g_dt_bucket_cbs < 3) {
+            if (sec != g_dt_bucket) { g_dt_bucket = sec; g_dt_bucket_cbs = 0; g_dt_bucket_starts = 0; }
+            if (g_dt_bucket_cbs < 3 && g_dt_bucket_starts < 8) {
                 LONG64 t0 = mad_qpc();
-                g_dt_bucket_cbs++;
+                g_dt_bucket_cbs++; g_dt_bucket_starts++; t->bucket = sec;
                 t->active = 1; t->q = q; t->batch = batch; t->cb_no = ++g_dt_cb_no; t->present = g_presents_now;
                 t->kind = 0; t->encs = t->barriers = t->lists = t->ncpw = 0;
                 mad_dt_texh_build(q->device);
