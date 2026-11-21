@@ -1464,6 +1464,7 @@ struct mad_resource {
      * MTLTextureType2DArray", 6520 reports in one run). Views are cached per
      * (type, levels, slices). */
     enum WMTTextureType tex_type; enum WMTPixelFormat tex_pf; UINT tex_mips, tex_layers; UINT tex_depth;   /* ml924: 3D depth */
+    UINT8 fg_bb;               /* madeira-duo framegen: a swapchain back buffer */
     struct mad_xview { UINT type, lvl0, nlvl, sl0, nsl, pf, swz; obj_handle_t tex; UINT64 id; } *xview;
     unsigned nxview, xview_cap;
     UINT64 reserved_bytes;   /* d3d12-tiled-resources: created by CreateReservedResource (fully backed), its tiles x 64 KB */
@@ -1564,6 +1565,7 @@ struct mad_pso {
     UINT64 cs_hash; UINT cs_len;   /* madeira-bcd: FNV-1a of the CS bytecode, for GPU fault reports */
     UINT64 vs_hash;                /* madeira-bcd skin-check: FNV-1a of the VS bytecode (0 unless skin-check is on) */
     UINT ps_id, vs_id;             /* madeira-duo gpu-pass-timing: the first 4 bytes of each DXBC container digest, to tell PoE2's all-"main" shaders apart in encoder labels */
+    UINT8 fg_blend0, fg_role;      /* madeira-duo framegen: render target 0 blends (a HUD draw, on a back buffer); compute: 0 not looked at, 1 nothing, 2 FSR's first pass */
     UINT vary_out, vary_unused;    /* madeira-duo vtx-census: bytes per vertex the VS writes (signature components x 4) and how many of them the PS never reads */
     UINT vary_flags;               /* madeira-duo vtx-census: 1 VS min precision, 2 VS native 16-bit, 4 PS min precision, 8 PS native 16-bit, 16 VS has 16-bit outputs */
     char *il_tag; int il_int;      /* madeira-bcd skin-check-trace: the input layout in short; il_int: an integer element (blend indices) */
@@ -10244,6 +10246,10 @@ static struct wmtcmd_base *mad_dd_buf(struct mad_dd *d, struct wmtcmd_render_set
     d->b[st][s->index].buf = s->buffer; d->b[st][s->index].off = s->offset;
     return (struct wmtcmd_base *)s;
 }
+static int g_fg_on = -1;   /* madeira-duo framegen (mad_fg, below): -1 not read, bit 0 generate, bit 1 probe */
+static void mad_fg_draw(struct mad_exec *e);
+static void mad_fg_fsr(struct mad_exec *e);
+static char g_fg_pass[64] = "PrepareInputsCS";   /* the compute entry point whose inputs are read (madeira.cfg framegen-pass) */
 static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
     struct wmtcmd_render_setpso c_pso;
     struct wmtcmd_render_draw_indirect c_di;
@@ -10287,6 +10293,7 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
         return;
     }
     if (g_vxc_secs > 0) exec_vc_draw(e, c);   /* madeira-duo vtx-census */
+    if (g_fg_on > 0 && e->nrt && e->rt[0] && e->rt[0]->fg_bb) mad_fg_draw(e);   /* madeira-duo framegen: the frame before its HUD */
     if (g_fault_diag) {   /* madeira-bcd: GPU fault attribution */
         if (mad_fault_skip_pso(e->pso)) { MAD_SKIP(e); return; }
         mad_fault_note(e, e->pso);
@@ -11646,6 +11653,10 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
         MAD_SKIP(e);
         return;
     }
+    if (g_fg_on > 0) {   /* madeira-duo framegen: FSR's first pass binds the game's motion vectors, depth and camera constants */
+        if (!e->cpso->fg_role) e->cpso->fg_role = strcmp(e->cpso->vs_name, g_fg_pass) ? 1 : 2;
+        if (e->cpso->fg_role == 2) mad_fg_fsr(e);
+    }
     /* ml930: pre-dispatch captures FIRST. exec_capture_cs blits through
      * exec_begin_blit, which ends every open encoder; doing it after the
      * compute encoder was created left e->cenc = 0 and the dispatch encoded
@@ -12225,6 +12236,380 @@ static void exec_fx_temporal(struct mad_exec *e, const struct mad_cmd *c) {
                   (long)n, p.input_content_width, p.input_content_height, en->cw, en->ch, en->ow, en->oh, p.jitter_offset_x, p.jitter_offset_y,
                   p.motion_vector_scale_x, p.motion_vector_scale_y, (int)p.reset, (int)p.depth_reversed, ex ? "texture" : en->autoexp ? "auto" : "none",
                   p.pre_exposure, e->mode);
+}
+
+/* ---- madeira-duo framegen (opt-in: madeira.cfg framegen = 1; needs a winemetal with MadeiraCtl ops 30-32) ----
+ * FRAME GENERATION FED BY THE GAME.
+ * Madeira's MADEIRA_FRAMEGEN (winemetal) interpolates finished drawables and
+ * has to guess everything: motion by block matching, a flat depth, a made-up
+ * camera, no idea where the HUD is, and all of it after the spatial upscale.
+ * This runtime replays the game's own frame, so it has the real things:
+ *
+ *   motion vectors, depth, camera   A game that runs FSR 3.1's upscaler runs
+ *       its passes through here as compute dispatches. The first one
+ *       (PrepareInputsCS) binds the motion vector and depth textures and FSR's
+ *       constant block (render size, jitter, motion vector scale, the
+ *       projection's depth terms). mad_fg_fsr reads them when that dispatch is
+ *       replayed: the two textures by what they are (a depth format; a
+ *       two-channel format), the lowest register of each, and the constants
+ *       by FSR 3.1's layout, checked against the textures' size.
+ *   the frame without its HUD       The first draw into a back buffer whose
+ *       pipeline blends (framegen-ui-ps = <pixel shader id> names another) is
+ *       taken as the first HUD draw: the pass is ended, a blit copies the back
+ *       buffer, and the pass goes on (a load). No such draw in a frame: the
+ *       copy is made at Present and the frame counts as having no HUD.
+ *   before the upscale              Present interpolates at the back buffer's
+ *       size and sends the generated frame through the same MetalFX spatial
+ *       scaler as the game's (metalfx-upscale).
+ *
+ * Present, per game frame: MetalFX's frame interpolator gets this frame's and
+ * the last frame's HUD-less colour, the motion and depth textures, and the
+ * finished frame as "the UI, composited" (it lifts the HUD off and puts it
+ * back unwarped), and writes a frame of our own. That one is presented first,
+ * the game's second (MadeiraCtl op 32 paces the pair).
+ * Ordering: the interpolator waits for the device fence and updates it, so it
+ * runs after everything the frame encoded and the next frame's first encoder
+ * (which waits, ml1111) runs after it; our own textures are hazard-tracked.
+ * Not with fence-chain 6. Game textures the interpolator reads are retained
+ * here and released eight presents after their last use.
+ * Nothing is generated while the game runs under framegen-min-fps (default
+ * 28): an interpolated frame between two frames 40 ms apart shows its seams,
+ * and the GPU has no time to spare there. The snapshot stops with it.
+ *
+ * madeira.cfg: framegen = 1; framegen-min-fps; framegen-ui = 0 (no HUD
+ * handling: the finished frame is the colour input); framegen-ui-ps;
+ * framegen-mv-x / -mv-y / -jitter-x / -jitter-y (multipliers on FSR's values;
+ * jitter x defaults to -1, as fx-temporal-jitter-x needed for this game);
+ * framegen-near / -far / -fov / -depth-reversed (override what FSR's
+ * constants give); framegen-mv-reg / -depth-reg (the t registers, when the
+ * formats do not tell); framegen-pass (the entry point's name);
+ * framegen-log = N (seconds between [framegen] lines,
+ * default 10); framegen-probe = N (every N seconds one frame's inputs are
+ * logged, also with framegen = 0: what FSR's first pass binds, its constants,
+ * and the draws into the back buffer by pipeline, [fg-probe]). */
+#define MAD_FG_BB 8
+enum { FG_OK, FG_SKIP_PRIME, FG_SKIP_SLOW, FG_SKIP_NOFSR, FG_SKIP_CONSTS, FG_SKIP_INTERP, FG_SKIP_DRAWABLE, FG_SKIP_MODE6, FG_SKIP_N };
+/* MadeiraCtl 30, 31, 32: shared with winemetal (struct madeira_fgi_*_req) */
+struct mad_fg_create_req {
+    UINT64 device;
+    UINT32 color_pf, output_pf, depth_pf, motion_pf, ui_pf;
+    UINT32 in_w, in_h, out_w, out_h;
+    UINT32 status;      /* out: 1 made, 2 this OS has no frame interpolator, 3 this GPU is not supported, 4 MetalFX refused */
+    UINT64 interp;      /* out */
+    UINT32 usage[5];    /* out: the MTLTextureUsage it asks of colour, depth, motion, UI, output */
+    UINT32 pad;
+};
+struct mad_fg_encode_req {
+    UINT64 cb, interp, color, prev_color, depth, motion, ui, output, fence;
+    float mv_scale_x, mv_scale_y, delta_time, near_plane, far_plane, fov_y, aspect, jitter_x, jitter_y;
+    UINT32 flags;       /* 1 depth reversed, 2 ui is the composited frame, 4 reset history */
+};
+struct mad_fg_present_req { UINT64 cb, first, second; double frame_s; UINT32 flags, pad; };
+_Static_assert(sizeof(struct mad_fg_create_req) == 80 && sizeof(struct mad_fg_encode_req) == 112 &&
+               sizeof(struct mad_fg_present_req) == 40, "framegen request layouts are shared with winemetal");
+struct mad_fg_tex { UINT64 id; obj_handle_t base, own, use; UINT w, h, serial; enum WMTPixelFormat pf; UINT8 cls; };   /* cls: 0 unusable, 1 depth, 2 two-channel (motion), 3 other; use: 0 when MetalFX could not take it as motion or depth */
+struct mad_fg_run { UINT ps, vs, n; UINT8 blend, snap; };
+static struct mad_fg {
+    int native;                         /* MadeiraCtl 30-32: -1 not asked, 0 not there, 1 there */
+    void *swap; struct mad_queue *queue;   /* the swapchain that generates, and its queue: only that queue's replays feed this */
+    int ui_mode, o_rev, log_s, probe_s, mv_reg, depth_reg; UINT ui_ps;
+    double min_fps, mul_mvx, mul_mvy, mul_jx, mul_jy, o_near, o_far, o_fov;
+    UINT bw, bh; enum WMTPixelFormat bpf;                      /* the back buffer our textures were made for */
+    obj_handle_t snap[2], out, bbv[MAD_FG_BB]; const void *bbv_of[MAD_FG_BB];
+    int cur;                            /* snap[cur]: the HUD-less colour of the frame being replayed; snap[cur ^ 1]: the last frame's */
+    UINT64 frame;                       /* presents seen */
+    int armed, snap_done, probe_frame, probe_ui; unsigned bb_draws;
+    UINT64 fsr_frame; int fsr_ok;       /* FSR's inputs were read in frame fsr_frame, and its constants made sense */
+    obj_handle_t f_mv, f_depth; enum WMTPixelFormat f_mpf, f_dpf; UINT f_w, f_h;
+    float f_mvx, f_mvy, f_jx, f_jy, f_near, f_far, f_fov, f_dt; int f_rev;
+    int prev_ok, gen_prev, paused; unsigned fast_n, slow_n;
+    LONG64 last_qpc, qpf, log_qpc, probe_qpc; double dt_ema;
+    obj_handle_t interp; UINT i_w, i_h, i_ow, i_oh; enum WMTPixelFormat i_cpf, i_dpf, i_mpf; int i_ui, i_bad;
+    struct mad_fg_tex tc[8]; unsigned tc_next; UINT64 tc_flushed;
+    struct { obj_handle_t h; UINT64 at; } dead[64]; unsigned ndead;
+    struct { obj_handle_t cb; UINT64 at; int gen; } cbs[8]; unsigned ncbs;
+    struct mad_fg_run runs[16]; unsigned nruns, run_more;
+    unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
+    LONG said_fsr, said_bad, said_tex;
+} g_fg;
+
+/* A Metal object a committed command buffer may still read: released eight presents on. */
+static void mad_fg_defer(obj_handle_t h) {
+    struct mad_fg *g = &g_fg;
+    if (!h) return;
+    if (g->ndead < sizeof g->dead / sizeof g->dead[0]) { g->dead[g->ndead].h = h; g->dead[g->ndead].at = g->frame + 8; g->ndead++; }
+    /* a full ring keeps the object: one leaked texture beats one released under the GPU */
+}
+static void mad_fg_reap(void) {
+    struct mad_fg *g = &g_fg; unsigned i, n = 0;
+    for (i = 0; i < g->ndead; i++) {
+        if (g->dead[i].at <= g->frame) NSObject_release(g->dead[i].h);
+        else g->dead[n++] = g->dead[i];
+    }
+    g->ndead = n;
+}
+static void mad_fg_cfg(void) {
+    struct mad_fg *g = &g_fg; char v[32]; int on, probe;
+    if (g_fg_on >= 0) return;
+    on = mad_cfg_int_pe("framegen", 0) > 0;   /* madeira-duo: 1 = frame generation from the game's own motion vectors and depth (FSR 3.1 games; needs MadeiraCtl ops 30-32 in winemetal) */
+    probe = (int)mad_cfg_int_pe("framegen-probe", 0);   /* madeira-duo: N > 0 = every N seconds log what FSR's first pass binds and the draws into the back buffer ([fg-probe]) */
+    g->probe_s = probe > 0 ? probe : 0;
+    g->log_s = (int)mad_cfg_int_pe("framegen-log", 10);   /* madeira-duo: seconds between [framegen] lines, 0 = none */
+    if (g->log_s < 0) g->log_s = 0;
+    g->ui_mode = mad_cfg_int_pe("framegen-ui", 1) > 0;   /* madeira-duo: 0 = no HUD handling, the finished frame is interpolated as it is */
+    g->ui_ps = 0;
+    if (mad_cfg_str_pe("framegen-ui-ps", v, sizeof v) && v[0]) g->ui_ps = (UINT)strtoul(v, NULL, 16);   /* madeira-duo: the pixel shader id (as in encoder labels) of the first HUD draw; unset = the first blending draw into the back buffer */
+    g->min_fps = mad_cfg_float_pe("framegen-min-fps", 28.0);   /* madeira-duo: no generated frames while the game runs slower than this */
+    g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
+    g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
+    g->mul_jx = mad_cfg_float_pe("framegen-jitter-x", -1.0);
+    g->mul_jy = mad_cfg_float_pe("framegen-jitter-y", 1.0);
+    g->o_near = mad_cfg_float_pe("framegen-near", 0.0);
+    g->o_far = mad_cfg_float_pe("framegen-far", 0.0);
+    g->o_fov = mad_cfg_float_pe("framegen-fov", 0.0);
+    g->o_rev = (int)mad_cfg_int_pe("framegen-depth-reversed", -1);
+    g->mv_reg = (int)mad_cfg_int_pe("framegen-mv-reg", -1);   /* madeira-duo: the t register of the motion vector texture in FSR's first pass; -1 = the lowest two-channel texture */
+    g->depth_reg = (int)mad_cfg_int_pe("framegen-depth-reg", -1);   /* madeira-duo: the t register of the depth texture; -1 = the lowest depth-format texture */
+    if (mad_cfg_str_pe("framegen-pass", v, sizeof v) && v[0]) lstrcpynA(g_fg_pass, v, sizeof g_fg_pass);   /* madeira-duo: the compute entry point whose inputs are the upscaler's (default PrepareInputsCS, FSR 3.1) */
+    g->native = -1;
+    g->fsr_frame = ~(UINT64)0;
+    g_fg_on = (on ? 1 : 0) | (g->probe_s ? 2 : 0);
+    if (g_fg_on)
+        d3d12_log("[framegen] framegen = %d, probe every %d s: min %.0f fps, HUD handling %s, mv x%.2f y%.2f, jitter x%.2f y%.2f\n",
+                  on, g->probe_s, g->min_fps, !g->ui_mode ? "off" : g->ui_ps ? "from the named pixel shader" : "from the first blending draw",
+                  g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy);
+}
+static obj_handle_t mad_fg_newtex(struct mad_device *d, enum WMTPixelFormat pf, UINT w, UINT h) {
+    struct WMTTextureInfo ti;
+    memset(&ti, 0, sizeof ti);
+    ti.pixel_format = pf; ti.width = w; ti.height = h; ti.depth = 1; ti.array_length = 1;
+    ti.type = WMTTextureType2D; ti.mipmap_level_count = 1; ti.sample_count = 1;
+    ti.usage = (enum WMTTextureUsage)(WMTTextureUsageRenderTarget | WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite);
+    ti.options = WMTResourceStorageModePrivate;
+    return MTLDevice_newTexture(d->mtl_device, &ti);
+}
+static void mad_fg_release_tex(void) {
+    struct mad_fg *g = &g_fg; unsigned k;
+    mad_fg_defer(g->snap[0]); mad_fg_defer(g->snap[1]); mad_fg_defer(g->out);
+    g->snap[0] = g->snap[1] = g->out = 0;
+    for (k = 0; k < MAD_FG_BB; k++) { mad_fg_defer(g->bbv[k]); g->bbv[k] = 0; g->bbv_of[k] = NULL; }
+    g->bw = g->bh = 0;
+}
+static void mad_fg_tc_flush(void) {
+    struct mad_fg *g = &g_fg; unsigned k;
+    for (k = 0; k < 8; k++) { mad_fg_defer(g->tc[k].own); mad_fg_defer(g->tc[k].base); }
+    memset(g->tc, 0, sizeof g->tc);
+    g->tc_flushed = g->frame;
+}
+/* The swapchain's buffers are going (ResizeBuffers, its last Release; its queue is drained). */
+static void mad_fg_drop(void *swap) {
+    struct mad_fg *g = &g_fg; unsigned k;
+    if (!swap || g->swap != swap) return;
+    mad_fg_release_tex();
+    mad_fg_tc_flush();
+    mad_fg_defer(g->interp); g->interp = 0; g->i_bad = 0;
+    for (k = 0; k < g->ncbs; k++) NSObject_release(g->cbs[k].cb);
+    g->ncbs = 0;
+    g->f_mv = g->f_depth = 0; g->fsr_frame = ~(UINT64)0; g->fsr_ok = 0;
+    g->armed = g->snap_done = g->prev_ok = g->gen_prev = 0;
+    g->last_qpc = 0; g->dt_ema = 0.0;
+    g->swap = NULL; g->queue = NULL;
+}
+/* A texture FSR's first pass binds, by descriptor id. Kept (retained) while it
+ * is in the table, so the id cannot come to name another texture meanwhile. */
+static const struct mad_fg_tex *mad_fg_tex_get(struct mad_device *d, UINT64 id) {
+    struct mad_fg *g = &g_fg; struct mad_fg_tex *t; struct mad_resource *r; unsigned k; int xv = -1;
+    for (k = 0; k < 8; k++) if (g->tc[k].id == id) return &g->tc[k];
+    t = &g->tc[g->tc_next++ % 8];
+    mad_fg_defer(t->own); mad_fg_defer(t->base);
+    memset(t, 0, sizeof *t);
+    t->id = id;
+    r = mad_texture_of_view(d, id, &xv);
+    if (!r || !r->texture || r->samples > 1 || r->tex_type == WMTTextureType3D) return t;
+    t->w = r->width; t->h = r->height; t->serial = r->serial; t->pf = r->tex_pf;
+    if (r->is_depth) t->cls = 1;
+    else {
+        enum WMTPixelFormat m = mad_fxt_mv_pf(r->tex_pf);
+        t->cls = (m == WMTPixelFormatRG16Float || m == WMTPixelFormatRG32Float) ? 2 : 3;
+        if (m == WMTPixelFormatInvalid) return t;   /* nothing MetalFX takes as motion: not kept */
+        t->pf = m;
+    }
+    NSObject_retain(r->texture);
+    t->base = r->texture; t->use = r->texture;
+    if (r->tex_type != WMTTextureType2D || t->pf != r->tex_pf) {   /* MetalFX takes plain 2D textures of the format it was made for */
+        t->own = mad_resolve_view(r, t->pf, 0, 0);
+        t->use = t->own;
+    }
+    return t;
+}
+/* FSR's fDeviceToViewDepth[0..1] back to the planes they were made from
+ * (FidelityFX SDK 1.1.4, ffx_fsr3upscaler.cpp, setupDeviceDepthToViewSpaceDepthParams). */
+static int mad_fg_planes(float a, float b, float *nearp, float *farp, int *rev) {
+    double fmin, fmax, q;
+    if (!isfinite(a) || !isfinite(b) || b == 0.0f) return 0;
+    if (fabsf(a) < 1e-5f) { *rev = 1; *nearp = b; *farp = b * 1e5f; return b > 0.0f; }               /* reversed depth, infinite far plane */
+    if (fabsf(a - 1.0f) < 1e-5f && b < 0.0f) { *rev = 0; *nearp = -b; *farp = -b * 1e5f; return 1; }   /* infinite far plane */
+    fmin = -(double)b / (double)a; q = -(double)a;
+    if (1.0 + q == 0.0) return 0;
+    fmax = q * fmin / (1.0 + q);
+    if (!(fmin > 0.0) || !(fmax > 0.0) || fmin == fmax) return 0;
+    *rev = fmin > fmax;
+    *nearp = (float)(fmin < fmax ? fmin : fmax); *farp = (float)(fmin < fmax ? fmax : fmin);
+    return 1;
+}
+/* FSR 3.1's first pass is being dispatched: its inputs are this frame's. */
+static void mad_fg_fsr(struct mad_exec *e) {
+    struct mad_fg *g = &g_fg; struct mad_device *d = e->q->device; const struct mad_rootsig *rs = e->crs; struct mad_heap *h = e->srv;
+    struct { UINT reg; UINT64 id; } tx[8]; unsigned ntx = 0, i, k, ri;
+    const unsigned char *cb = NULL; UINT64 cb_len = 0; UINT cb_reg = ~0u;
+    obj_handle_t mv = 0, dep = 0; UINT mv_reg = ~0u, dep_reg = ~0u, mw = 0, mh = 0, dw = 0, dh = 0;
+    enum WMTPixelFormat mpf = WMTPixelFormatInvalid, dpf = WMTPixelFormatInvalid;
+    UINT32 w[36]; float f[36]; const char *why = NULL; char line[900]; int n = 0;
+    if (e->q != g->queue || !rs) return;
+    /* Nothing can be generated (the key is off, or this app build has no interpolator): only the probe's frame looks. */
+    if (!g->probe_frame && (!(g_fg_on & 1) || g->native == 0)) return;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {
+        const struct madeira_ir_root_param *p = &rs->params[i]; UINT64 va = e->croot[i];
+        if (p->type == MADEIRA_IR_PARAM_CONSTANTS) {
+            if (p->num_constants >= 32 && p->shader_register < cb_reg) {
+                cb = (const unsigned char *)e->cconsts[i]; cb_len = (UINT64)(p->num_constants < 64 ? p->num_constants : 64) * 4; cb_reg = p->shader_register;
+            }
+            continue;
+        }
+        if (!va) continue;
+        if (p->type == MADEIRA_IR_PARAM_CBV) {
+            UINT64 off = 0; struct mad_resource *r = mad_resolve_address(d, va, &off);
+            if (r && r->cpu && off < r->size && p->shader_register < cb_reg) { cb = (const unsigned char *)r->cpu + off; cb_len = r->size - off; cb_reg = p->shader_register; }
+            continue;
+        }
+        if (p->type != MADEIRA_IR_PARAM_TABLE || !h || !h->cpu) continue;
+        if (va < h->gpu_address || va >= h->gpu_address + (UINT64)h->count * sizeof(struct mad_descriptor)) continue;
+        {
+            unsigned base = (unsigned)((va - h->gpu_address) / sizeof(struct mad_descriptor)), run = 0;
+            for (ri = 0; ri < p->num_ranges; ri++) {
+                const struct madeira_ir_root_range *rg; unsigned nd, off;
+                if (p->first_range + ri >= rs->nranges) break;
+                rg = &rs->ranges[p->first_range + ri];
+                nd = rg->num_descriptors;
+                off = rg->table_offset != 0xffffffffu ? rg->table_offset : run;
+                if (nd != 0xffffffffu) run = off + nd;
+                if (nd > 16) nd = 16;   /* FSR's passes declare a handful; an unbounded range: its first 16 */
+                if (rg->range_type != MADEIRA_IR_RANGE_SRV && rg->range_type != MADEIRA_IR_RANGE_CBV) continue;
+                for (k = 0; k < nd && base + off + k < h->count; k++) {
+                    const struct mad_descriptor *de = &h->cpu[base + off + k];
+                    if (rg->range_type == MADEIRA_IR_RANGE_CBV) {
+                        UINT64 boff = 0; struct mad_resource *r = de->gpu_va ? mad_resolve_address(d, de->gpu_va, &boff) : NULL;
+                        if (r && r->cpu && boff < r->size && rg->base_register + k < cb_reg) {
+                            cb = (const unsigned char *)r->cpu + boff; cb_len = r->size - boff; cb_reg = rg->base_register + k;
+                        }
+                    } else if (de->texture_view_id && !(de->metadata & MAD_DESC_TYPEDBUF) && ntx < 8) {
+                        tx[ntx].reg = rg->base_register + k; tx[ntx++].id = de->texture_view_id;
+                    }
+                }
+            }
+        }
+    }
+    if (g->probe_frame) n = snprintf(line, sizeof line, "[fg-probe] FSR first pass (%s), list #%u:", e->cpso->vs_name, g_list_seq);
+    for (i = 0; i < ntx; i++) {
+        const struct mad_fg_tex *t = mad_fg_tex_get(d, tx[i].id);   /* read at once: a later miss may reuse the slot */
+        if (g->probe_frame && n < (int)sizeof line - 96)
+            n += snprintf(line + n, sizeof line - n, " t%u=%s r#%u %ux%u pf%u;", tx[i].reg,
+                          t->cls == 1 ? "depth" : t->cls == 2 ? "motion" : t->cls == 3 ? "other" : "unusable", t->serial, t->w, t->h, (unsigned)t->pf);
+        if (g->depth_reg >= 0 ? (tx[i].reg == (UINT)g->depth_reg && t->cls == 1) : (t->cls == 1 && tx[i].reg < dep_reg)) {
+            dep = t->use; dep_reg = tx[i].reg; dw = t->w; dh = t->h; dpf = t->pf;
+        } else if (g->mv_reg >= 0 ? (tx[i].reg == (UINT)g->mv_reg && t->cls >= 2) : (t->cls == 2 && tx[i].reg < mv_reg)) {
+            mv = t->use; mv_reg = tx[i].reg; mw = t->w; mh = t->h; mpf = t->pf;
+        }
+    }
+    g->fsr_frame = g->frame; g->fsr_ok = 0;
+    g->f_mv = mv; g->f_depth = dep; g->f_mpf = mpf; g->f_dpf = dpf; g->f_w = mw; g->f_h = mh;
+    memset(w, 0, sizeof w);
+    if (cb && cb_len >= 128) memcpy(w, cb, cb_len < sizeof w ? (size_t)cb_len : sizeof w);
+    memcpy(f, w, sizeof f);
+    if (!mv || !dep) {
+        why = "no motion or depth texture among its inputs";
+        if (g->frame - g->tc_flushed > 120) mad_fg_tc_flush();   /* a stale entry, perhaps: look them all up again */
+    } else if (mw != dw || mh != dh) why = "motion and depth textures differ in size";
+    else if (!cb || cb_len < 128) why = "no constant block";
+    else if (w[0] != mw || w[1] != mh) why = "the constants' render size is not the textures' size";
+    else if (!isfinite(f[15]) || f[15] < 0.01f || f[15] > 20.0f || !isfinite(f[20]) || !isfinite(f[21]) || f[20] == 0.0f || f[21] == 0.0f ||
+             !isfinite(f[16]) || !isfinite(f[17])) why = "the constants are not FSR 3.1's";
+    else {
+        float nearp = 0, farp = 0; int rev = 0, planes = mad_fg_planes(f[12], f[13], &nearp, &farp, &rev);
+        if (g->o_near > 0.0 && g->o_far > g->o_near) { nearp = (float)g->o_near; farp = (float)g->o_far; planes = 1; }
+        if (g->o_rev >= 0) rev = g->o_rev != 0;
+        if (!planes) why = "the depth terms give no near and far plane";
+        else {
+            g->f_near = nearp; g->f_far = farp; g->f_rev = rev;
+            g->f_fov = g->o_fov > 0.0 ? (float)g->o_fov : (float)(2.0 * atan((double)f[15]) * 180.0 / 3.14159265358979323846);
+            g->f_mvx = (float)((double)f[20] * (double)mw * g->mul_mvx); g->f_mvy = (float)((double)f[21] * (double)mh * g->mul_mvy);
+            g->f_jx = (float)((double)f[16] * g->mul_jx); g->f_jy = (float)((double)f[17] * g->mul_jy);
+            g->f_dt = isfinite(f[28]) ? f[28] : 0.0f;
+            g->fsr_ok = 1;
+        }
+    }
+    if (g->probe_frame) {
+        if (n < (int)sizeof line - 420)
+            n += snprintf(line + n, sizeof line - n, " constants b%d %llu bytes: render %ux%u upscale %ux%u, depth terms %g %g %g %g, jitter %g %g, mv scale %g %g, "
+                          "tan half fov x %g, dt %g -> %s", cb ? (int)cb_reg : -1, (unsigned long long)cb_len, w[0], w[1], w[4], w[5],
+                          (double)f[12], (double)f[13], (double)f[14], (double)f[15], (double)f[16], (double)f[17], (double)f[20], (double)f[21],
+                          (double)f[26], (double)f[28], why ? why : "ok");
+        if (!why && n < (int)sizeof line - 160)
+            n += snprintf(line + n, sizeof line - n, ": near %g far %g%s, fov y %.2f, mv to pixels %g %g, jitter %g %g",
+                          (double)g->f_near, (double)g->f_far, g->f_rev ? " reversed" : "", (double)g->f_fov, (double)g->f_mvx, (double)g->f_mvy,
+                          (double)g->f_jx, (double)g->f_jy);
+        d3d12_log("%s\n", line);
+        if (why && cb && cb_len >= 128) {
+            n = snprintf(line, sizeof line, "[fg-probe] constant block words:");
+            for (i = 0; i < 36 && n < (int)sizeof line - 12; i++) n += snprintf(line + n, sizeof line - n, " %08x", w[i]);
+            d3d12_log("%s\n", line);
+        }
+    }
+    if (why) {
+        if (InterlockedIncrement(&g->said_bad) <= 6 || (g->said_bad % 2000) == 0)
+            d3d12_log("[framegen] FSR's inputs not usable (%s): motion %ux%u pf%u, depth %ux%u pf%u, %u textures bound, constants %llu bytes (%ld times)\n",
+                      why, mw, mh, (unsigned)mpf, dw, dh, (unsigned)dpf, ntx, (unsigned long long)cb_len, (long)g->said_bad);
+    } else if (InterlockedIncrement(&g->said_fsr) <= 3)
+        d3d12_log("[framegen] FSR inputs: motion t%u %ux%u pf%u, depth t%u pf%u, render %ux%u -> %ux%u; near %g far %g%s, fov y %.2f, mv to pixels %g %g, jitter %g %g, dt %g\n",
+                  mv_reg, mw, mh, (unsigned)mpf, dep_reg, (unsigned)dpf, w[0], w[1], w[4], w[5], (double)g->f_near, (double)g->f_far,
+                  g->f_rev ? " reversed" : "", (double)g->f_fov, (double)g->f_mvx, (double)g->f_mvy, (double)g->f_jx, (double)g->f_jy, (double)g->f_dt);
+}
+/* The back buffer as it is now, before the draw being replayed, into snap[cur].
+ * The open pass ends (stored: the draw that follows binds the same targets, so
+ * the look-ahead finds a use) and the next one loads. Both sides wait: the copy
+ * for the pass, the pass that goes on for the copy. */
+static void mad_fg_snapshot(struct mad_exec *e, struct mad_resource *bb) {
+    struct mad_fg *g = &g_fg; struct wmtcmd_blit_copy_from_texture_to_texture k;
+    if (!bb->texture || !g->snap[g->cur] || bb->width != g->bw || bb->height != g->bh || bb->tex_pf != g->bpf || bb->samples > 1) return;
+    exec_end(e);
+    while (e->npend) exec_flush_clear(e, 0);   /* a pending clear of what is copied goes first */
+    e->fence_needed = 1;
+    if (!exec_begin_blit(e)) return;
+    memset(&k, 0, sizeof k);
+    k.type = WMTBlitCommandCopyFromTextureToTexture;
+    k.src = bb->texture;
+    k.src_size.width = bb->width; k.src_size.height = bb->height; k.src_size.depth = 1;
+    k.dst = g->snap[g->cur];
+    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k);
+    exec_end(e);
+    e->fence_needed = 1;
+    g->snap_done = 1; g->n_split++;
+}
+/* A draw into a back buffer is about to be replayed. */
+static void mad_fg_draw(struct mad_exec *e) {
+    struct mad_fg *g = &g_fg; const struct mad_pso *p = e->pso; int ui;
+    if (e->q != g->queue) return;
+    ui = g->ui_ps ? p->ps_id == g->ui_ps : p->fg_blend0 != 0;
+    if (g->probe_frame) {
+        struct mad_fg_run *r = g->nruns ? &g->runs[g->nruns - 1] : NULL;
+        if (r && r->ps == p->ps_id && r->vs == p->vs_id && r->blend == p->fg_blend0) r->n++;
+        else if (g->nruns < sizeof g->runs / sizeof g->runs[0]) {
+            r = &g->runs[g->nruns++]; r->ps = p->ps_id; r->vs = p->vs_id; r->blend = p->fg_blend0; r->n = 1; r->snap = 0;
+        } else { g->run_more++; r = NULL; }
+        if (r && ui && g->ui_mode && !g->probe_ui && r->n == 1) { r->snap = 1; g->probe_ui = 1; }   /* where the copy is, or would be */
+    }
+    if (g->armed && g->ui_mode && !g->snap_done && ui && e->mode != 6) mad_fg_snapshot(e, e->rt[0]);
+    g->bb_draws++;
 }
 
 /* ---- madeira-duo dep-trace (diagnostic, opt-in: madeira.cfg dep-trace = N seconds, 0 = off) ----
@@ -22115,6 +22500,7 @@ static HRESULT device_CreateGraphicsPipelineState_impl(ID3D12Device *This,
         }
         rp.colors[i].pixel_format = pf;
         rp.colors[i].blending_enabled = b->BlendEnable != 0;
+        if (!i) p->fg_blend0 = b->BlendEnable != 0;   /* madeira-duo framegen */
         rp.colors[i].rgb_blend_operation = mad_blend_op(b->BlendOp);
         rp.colors[i].alpha_blend_operation = mad_blend_op(b->BlendOpAlpha);
         rp.colors[i].src_rgb_blend_factor = mad_blend_factor(b->SrcBlend);
@@ -24550,6 +24936,7 @@ static void mad_swap_make_fx(struct mad_swapchain *s) {
 
 static void mad_swap_release_buffers(struct mad_swapchain *s) {
     UINT i;
+    mad_fg_drop(s);   /* madeira-duo framegen: its textures are this swapchain's size */
     mad_swap_release_fx(s);
     for (i = 0; i < s->nbuf; i++)
         if (s->buffers[i]) { res_Release((ID3D12Resource *)s->buffers[i]); s->buffers[i] = NULL; }
@@ -24631,10 +25018,12 @@ static HRESULT mad_swap_make_buffers(struct mad_swapchain *s) {
         if (FAILED(hr)) { s->nbuf = i; mad_swap_release_buffers(s); return hr; }
         s->buffers[i] = (struct mad_resource *)out;
         s->buffers[i]->name = "Backbuffer";
+        s->buffers[i]->fg_bb = 1;   /* madeira-duo framegen */
     }
     s->nbuf = n;
     s->index = 0;
     mad_swap_make_fx(s);   /* optional MetalFX upscaling: the drawable takes its output size */
+    mad_fg_cfg();   /* madeira-duo framegen */
     /* The layer takes the same pixel format so the presenting blit is a plain
      * copy. framebuffer_only must be off: a framebuffer-only drawable cannot
      * be a blit destination. */
@@ -24954,6 +25343,232 @@ static HRESULT swap_Present_inner(IDXGISwapChain4 *T, UINT sync, UINT flags) {
     s->index = (s->index + 1) % s->nbuf;
     return S_OK;
 }
+/* madeira-duo framegen, the Present side (see the comment at struct mad_fg). */
+_Static_assert(MAD_FG_BB >= MAD_SWAP_MAX_BUFFERS, "mad_fg.bbv holds one view per back buffer");
+static int mad_fg_setup(struct mad_swapchain *s) {
+    struct mad_fg *g = &g_fg; struct mad_device *d = s->queue->device;
+    if (g->snap[0] && g->bw == s->desc.Width && g->bh == s->desc.Height && g->bpf == s->pf) return 1;
+    mad_fg_release_tex();
+    g->snap[0] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    g->snap[1] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    g->out = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    g->cur = 0; g->prev_ok = 0; g->gen_prev = 0;
+    if (!g->snap[0] || !g->snap[1] || !g->out) {
+        mad_fg_release_tex();
+        if (InterlockedIncrement(&g->said_tex) <= 3) d3d12_log("[framegen] could not make the %ux%u textures -- nothing is generated\n", s->desc.Width, s->desc.Height);
+        return 0;
+    }
+    g->bw = s->desc.Width; g->bh = s->desc.Height; g->bpf = s->pf;
+    d3d12_log("[framegen] textures for %ux%u format %u: two HUD-less frames and the generated one\n", g->bw, g->bh, (unsigned)g->bpf);
+    return 1;
+}
+/* The back buffer as a plain 2D texture (they are 2D arrays, ml932). */
+static obj_handle_t mad_fg_bbview(struct mad_swapchain *s, UINT idx) {
+    struct mad_fg *g = &g_fg; struct WMTTextureSwizzleChannels sw; UINT64 gid = 0;
+    if (s->fx_view[idx]) return s->fx_view[idx];
+    if (g->bbv[idx] && g->bbv_of[idx] == s->buffers[idx]) return g->bbv[idx];
+    mad_fg_defer(g->bbv[idx]);
+    memset(&sw, 0, sizeof sw);
+    sw.r = WMTTextureSwizzleRed; sw.g = WMTTextureSwizzleGreen; sw.b = WMTTextureSwizzleBlue; sw.a = WMTTextureSwizzleAlpha;
+    g->bbv[idx] = MTLTexture_newTextureView(s->buffers[idx]->texture, s->pf, WMTTextureType2D, 0, 1, 0, 1, sw, &gid);
+    g->bbv_of[idx] = s->buffers[idx];
+    return g->bbv[idx];
+}
+/* The interpolator for this frame's sizes and formats; made again when they change. */
+static obj_handle_t mad_fg_interp(struct mad_device *d) {
+    struct mad_fg *g = &g_fg; struct madeira_ctl_args a; struct mad_fg_create_req r;
+    int same = g->i_w == g->f_w && g->i_h == g->f_h && g->i_ow == g->bw && g->i_oh == g->bh && g->i_cpf == g->bpf &&
+               g->i_dpf == g->f_dpf && g->i_mpf == g->f_mpf && g->i_ui == g->ui_mode;
+    if (same && (g->interp || g->i_bad)) return g->interp;
+    mad_fg_defer(g->interp);
+    g->interp = 0; g->i_bad = 0; g->gen_prev = 0;
+    g->i_w = g->f_w; g->i_h = g->f_h; g->i_ow = g->bw; g->i_oh = g->bh; g->i_cpf = g->bpf; g->i_dpf = g->f_dpf; g->i_mpf = g->f_mpf; g->i_ui = g->ui_mode;
+    memset(&r, 0, sizeof r);
+    r.device = (UINT64)d->mtl_device;
+    r.color_pf = (UINT32)g->bpf; r.output_pf = (UINT32)g->bpf; r.depth_pf = (UINT32)g->f_dpf; r.motion_pf = (UINT32)g->f_mpf;
+    r.ui_pf = g->ui_mode ? (UINT32)g->bpf : 0;
+    r.in_w = g->f_w; r.in_h = g->f_h; r.out_w = g->bw; r.out_h = g->bh;
+    memset(&a, 0, sizeof a); a.op = 30; a.ptr = (UINT64)(ULONG_PTR)&r; a.len = sizeof r;
+    MadeiraCtl(&a);
+    if (a.ret && r.status == 1 && r.interp) g->interp = (obj_handle_t)r.interp; else g->i_bad = 1;
+    d3d12_log("[framegen] interpolator: motion and depth %ux%u (formats %u, %u), colour %ux%u format %u, UI texture %s -> %s; "
+              "usage asked: colour %#x depth %#x motion %#x UI %#x output %#x\n", g->f_w, g->f_h, (unsigned)g->f_mpf, (unsigned)g->f_dpf,
+              g->bw, g->bh, (unsigned)g->bpf, g->ui_mode ? "yes" : "no",
+              g->interp ? "made" : !a.ret ? "REFUSED (no MadeiraCtl 30)" : r.status == 2 ? "REFUSED (this OS has no frame interpolator)" :
+              r.status == 3 ? "REFUSED (this GPU is not supported)" : "REFUSED by MetalFX",
+              r.usage[0], r.usage[1], r.usage[2], r.usage[3], r.usage[4]);
+    return g->interp;
+}
+/* GPU time of the present command buffers of three presents ago, with and without a generated frame. */
+static void mad_fg_cb_poll(void) {
+    struct mad_fg *g = &g_fg; unsigned i, n = 0;
+    for (i = 0; i < g->ncbs; i++) {
+        if (g->cbs[i].at <= g->frame) {
+            struct { UINT64 cb; double start, end; } t; struct madeira_ctl_args a; int k = g->cbs[i].gen ? 1 : 0;
+            memset(&t, 0, sizeof t); t.cb = (UINT64)g->cbs[i].cb;
+            memset(&a, 0, sizeof a); a.op = 3; a.ptr = (UINT64)(ULONG_PTR)&t; a.len = sizeof t;
+            MadeiraCtl(&a);
+            if (a.ret && t.start > 0.0 && t.end > t.start) {
+                double ms = (t.end - t.start) * 1000.0;
+                g->cb_ms[k] += ms; g->n_cb[k]++;
+                if (ms > g->cb_max[k]) g->cb_max[k] = ms;
+            }
+            NSObject_release(g->cbs[i].cb);
+        } else g->cbs[n++] = g->cbs[i];
+    }
+    g->ncbs = n;
+}
+static void mad_fg_committed(obj_handle_t cb, int gen) {
+    struct mad_fg *g = &g_fg;
+    if (!(g_fg_on & 1) || !g->log_s || !cb || g->ncbs >= sizeof g->cbs / sizeof g->cbs[0]) return;
+    NSObject_retain(cb);
+    g->cbs[g->ncbs].cb = cb; g->cbs[g->ncbs].at = g->frame + 3; g->cbs[g->ncbs].gen = gen; g->ncbs++;
+}
+static void mad_fg_report(double secs) {
+    struct mad_fg *g = &g_fg;
+    d3d12_log("[framegen] %.1f s: %u frames, %u generated%s; not generated: starting %u, under %.0f fps %u, no FSR inputs %u, FSR constants %u, "
+              "interpolator %u, no second drawable %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present; frame %.1f ms; "
+              "present GPU time with a generated frame %.2f ms avg %.2f max (%u), without %.2f avg %.2f max (%u)\n",
+              secs, g->n_frames, g->n_gen, g->native == 1 ? "" : g->native == 0 ? " (this winemetal has no frame interpolator)" : "",
+              g->n_skip[FG_SKIP_PRIME], g->min_fps, g->n_skip[FG_SKIP_SLOW], g->n_skip[FG_SKIP_NOFSR], g->n_skip[FG_SKIP_CONSTS],
+              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_DRAWABLE], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->dt_ema * 1000.0,
+              g->n_cb[1] ? g->cb_ms[1] / g->n_cb[1] : 0.0, g->cb_max[1], g->n_cb[1], g->n_cb[0] ? g->cb_ms[0] / g->n_cb[0] : 0.0, g->cb_max[0], g->n_cb[0]);
+    g->n_frames = g->n_gen = g->n_split = g->n_late = 0;
+    memset(g->n_skip, 0, sizeof g->n_skip); memset(g->n_cb, 0, sizeof g->n_cb);
+    memset(g->cb_ms, 0, sizeof g->cb_ms); memset(g->cb_max, 0, sizeof g->cb_max);
+}
+static void mad_fg_probe_flush(struct mad_swapchain *s) {
+    struct mad_fg *g = &g_fg; char line[900]; int n; unsigned i;
+    n = snprintf(line, sizeof line, "[fg-probe] present #%llu: %u draws into the back buffer (%ux%u), by pipeline in order:",
+                 (unsigned long long)s->presents, g->bb_draws, s->desc.Width, s->desc.Height);
+    for (i = 0; i < g->nruns && n < (int)sizeof line - 64; i++)
+        n += snprintf(line + n, sizeof line - n, " %sps:%08x vs:%08x %s x%u;", g->runs[i].snap ? "[HUD starts] " : "", g->runs[i].ps, g->runs[i].vs,
+                      g->runs[i].blend ? "blend" : "opaque", g->runs[i].n);
+    if (g->run_more) snprintf(line + n, sizeof line - n, " and %u more runs", g->run_more);
+    d3d12_log("%s\n", line);
+}
+/* Once per Present, with the present command buffer open and nothing in it:
+ * encodes this frame's interpolation. 1 = g_fg.out will hold a generated frame. */
+static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
+    struct mad_fg *g = &g_fg; struct mad_device *d = s->queue->device; struct mad_resource *bb = s->buffers[idx];
+    LONG64 now = mad_qpc(); double dt = 0.0; int gen = 0, why = FG_SKIP_PRIME, have_snap = 0;
+    if (!g->swap) { g->swap = s; g->queue = s->queue; }
+    if (g->swap != s) return 0;
+    if (!g->qpf) { LARGE_INTEGER fq; QueryPerformanceFrequency(&fq); g->qpf = fq.QuadPart ? fq.QuadPart : 1; g->log_qpc = now; }
+    if (g->native < 0 && (g_fg_on & 1)) {
+        struct madeira_ctl_args a;
+        memset(&a, 0, sizeof a); a.op = 30;   /* no request: is there a frame interpolator? */
+        MadeiraCtl(&a);
+        g->native = a.ret ? 1 : 0;
+        d3d12_log("[framegen] MetalFX frame interpolator through MadeiraCtl 30-32: %s\n",
+                  g->native ? "there" : "NOT there (an older app build, or an OS without one) -- nothing is generated");
+    }
+    if (g->last_qpc) {
+        dt = (double)(now - g->last_qpc) / (double)g->qpf;
+        if (dt > 0.0 && dt < 0.25) g->dt_ema = g->dt_ema > 0.0 ? g->dt_ema * 0.9 + dt * 0.1 : dt;
+        else { g->prev_ok = 0; dt = 0.0; }   /* a stall: the last frame is no neighbour of this one */
+    }
+    g->last_qpc = now;
+    mad_fg_reap();
+    mad_fg_cb_poll();
+    if (g->armed && bb && bb->texture && g->snap[g->cur] && bb->width == g->bw && bb->height == g->bh) {
+        if (g->snap_done) have_snap = 1;
+        else {   /* no HUD draw this frame (or framegen-ui = 0): the finished frame is the colour input */
+            obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
+            if (enc) {
+                struct wmtcmd_blit_copy_from_texture_to_texture k;
+                g_enc_seq++;
+                memset(&k, 0, sizeof k);
+                k.type = WMTBlitCommandCopyFromTextureToTexture;
+                k.src = bb->texture;
+                k.src_size.width = bb->width; k.src_size.height = bb->height; k.src_size.depth = 1;
+                k.dst = g->snap[g->cur];
+                MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&k);
+                MTLCommandEncoder_endEncoding(enc);
+                have_snap = 1; g->n_late++;
+            }
+        }
+        if (!have_snap) why = FG_SKIP_PRIME;
+        else if (g_f6_used) why = FG_SKIP_MODE6;
+        else if (g->fsr_frame != g->frame || !g->f_mv || !g->f_depth) why = FG_SKIP_NOFSR;
+        else if (!g->fsr_ok) why = FG_SKIP_CONSTS;
+        else if (!g->prev_ok) why = FG_SKIP_PRIME;
+        else {
+            obj_handle_t fi = mad_fg_interp(d), ui = g->ui_mode ? mad_fg_bbview(s, idx) : 0;
+            if (!fi || (g->ui_mode && !ui)) why = FG_SKIP_INTERP;
+            else {
+                struct madeira_ctl_args a; struct mad_fg_encode_req r;
+                memset(&r, 0, sizeof r);
+                r.cb = (UINT64)cb; r.interp = (UINT64)fi;
+                r.color = (UINT64)g->snap[g->cur]; r.prev_color = (UINT64)g->snap[g->cur ^ 1];
+                r.depth = (UINT64)g->f_depth; r.motion = (UINT64)g->f_mv; r.ui = (UINT64)ui; r.output = (UINT64)g->out;
+                r.fence = mad_fence_mode(d) ? (UINT64)mad_enc_fence_obj(d) : 0;   /* after the frame's encoders; the next frame's first one waits for it */
+                r.mv_scale_x = g->f_mvx; r.mv_scale_y = g->f_mvy;
+                r.delta_time = (g->f_dt > 0.002f && g->f_dt < 0.25f) ? g->f_dt : (float)(dt > 0.0 ? dt : g->dt_ema);
+                r.near_plane = g->f_near; r.far_plane = g->f_far; r.fov_y = g->f_fov;
+                r.aspect = (float)g->bw / (float)g->bh;
+                r.jitter_x = g->f_jx; r.jitter_y = g->f_jy;
+                r.flags = (g->f_rev ? 1u : 0u) | (ui ? 2u : 0u) | (g->gen_prev ? 0u : 4u);
+                memset(&a, 0, sizeof a); a.op = 31; a.ptr = (UINT64)(ULONG_PTR)&r; a.len = sizeof r;
+                MadeiraCtl(&a);
+                if (a.ret) gen = 1; else why = FG_SKIP_INTERP;
+            }
+        }
+    } else if (g->paused) why = FG_SKIP_SLOW;
+    if (g_fg_on & 1) { g->n_frames++; if (gen) g->n_gen++; else g->n_skip[why]++; }
+    g->prev_ok = have_snap; g->gen_prev = gen;
+    if (have_snap) g->cur ^= 1;
+    if (g->probe_frame) { mad_fg_probe_flush(s); g->probe_frame = 0; }
+    else if (g->probe_s && (now - g->probe_qpc) / g->qpf >= g->probe_s) { g->probe_frame = 1; g->probe_ui = 0; g->probe_qpc = now; g->nruns = 0; g->run_more = 0; }
+    g->snap_done = 0; g->bb_draws = 0; g->frame++;
+    if (g->dt_ema > 0.0) {   /* the rate gate, with some hysteresis */
+        double fps = 1.0 / g->dt_ema;
+        if (!g->paused) { if (fps < g->min_fps) { if (++g->slow_n >= 20) { g->paused = 1; g->slow_n = 0; g->fast_n = 0; } } else g->slow_n = 0; }
+        else if (fps >= g->min_fps + 3.0) { if (++g->fast_n >= 40) { g->paused = 0; g->fast_n = 0; } } else g->fast_n = 0;
+    }
+    g->armed = (g_fg_on & 1) && g->native == 1 && !g->paused && mad_fg_setup(s);
+    if ((g_fg_on & 1) && g->log_s && (now - g->log_qpc) / g->qpf >= g->log_s) {
+        mad_fg_report((double)(now - g->log_qpc) / (double)g->qpf);
+        g->log_qpc = now;
+    }
+    return gen;
+}
+/* A frame that reached no drawable: its snapshot and inputs are not the next frame's. */
+static void mad_fg_lost(struct mad_swapchain *s) {
+    struct mad_fg *g = &g_fg;
+    if (g->swap != s) return;
+    g->snap_done = 0; g->bb_draws = 0; g->prev_ok = 0; g->gen_prev = 0; g->probe_frame = 0;
+    g->frame++;
+}
+/* The generated frame into a drawable, through the same spatial scaler as the game's frame. */
+static void mad_fg_show(struct mad_swapchain *s, obj_handle_t cb, obj_handle_t dst) {
+    struct mad_fg *g = &g_fg; struct wmtcmd_blit_copy_from_texture_to_texture t2t; obj_handle_t enc, from = g->out;
+    UINT w = g->bw, h = g->bh;
+    if (s->fx_scaler && s->fx_out) {
+        MTLCommandBuffer_encodeSpatialScale(cb, s->fx_scaler, g->out, s->fx_out, 0);
+        from = s->fx_out; w = s->fx_w; h = s->fx_h;
+    }
+    enc = MTLCommandBuffer_blitCommandEncoder(cb);
+    if (!enc) return;
+    g_enc_seq++;
+    memset(&t2t, 0, sizeof t2t);
+    t2t.type = WMTBlitCommandCopyFromTextureToTexture;
+    t2t.src = from;
+    t2t.src_size.width = w; t2t.src_size.height = h; t2t.src_size.depth = 1;
+    t2t.dst = dst;
+    MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
+    MTLCommandEncoder_endEncoding(enc);
+}
+/* The generated frame's drawable, then the game's. 0: winemetal did not take the pair. */
+static int mad_fg_present2(obj_handle_t cb, obj_handle_t first, obj_handle_t second) {
+    struct madeira_ctl_args a; struct mad_fg_present_req r;
+    memset(&r, 0, sizeof r);
+    r.cb = (UINT64)cb; r.first = (UINT64)first; r.second = (UINT64)second; r.frame_s = g_fg.dt_ema;
+    memset(&a, 0, sizeof a); a.op = 32; a.ptr = (UINT64)(ULONG_PTR)&r; a.len = sizeof r;
+    MadeiraCtl(&a);
+    return a.ret != 0;
+}
+
 /* ml1121: the Metal half of Present; runs on the queue's worker (async) or on the caller. */
 static void mad_mheap_reclaim(struct mad_device *d, int all);
 static void mad_present_run(struct mad_swapchain *s, UINT idx) {
@@ -25084,6 +25699,7 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
     if (!drawable) {
         static unsigned said;
         if (said++ < 3) d3d12_log("[madeira-d3d12] Present: the layer gave no drawable\n");
+        if (g_fg_on > 0) mad_fg_lost(s);   /* madeira-duo framegen */
         mad_swd_step(s->queue, 0);
         return;   /* a dropped frame, not an error the application can act on */
     }
@@ -25095,6 +25711,13 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
     if (cb && tex) {
         obj_handle_t copy_src = src->texture;
         UINT copy_w = src->width, copy_h = src->height;
+        obj_handle_t fg_second = 0, fg_dst = tex;   /* madeira-duo framegen: with a generated frame, the game's goes to a second drawable */
+        if (g_fg_on > 0 && mad_fg_frame(s, idx, cb)) {
+            fg_second = MetalLayer_nextDrawable(s->layer);
+            fg_dst = fg_second ? MetalDrawable_texture(fg_second) : 0;
+            if (fg_dst) mad_fg_show(s, cb, tex);   /* the generated frame is shown first */
+            else { fg_second = 0; fg_dst = tex; g_fg.n_gen--; g_fg.n_skip[FG_SKIP_DRAWABLE]++; }
+        }
         if (s->fx_scaler && s->fx_out && s->fx_view[idx]) {   /* MetalFX spatial, then the copy below */
             /* After fence-chain 6 work the scaler waits for the frame's batches on
              * the device fence and updates it, so the blit's wait below orders after it. */
@@ -25114,14 +25737,18 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
             t2t.src_size.width = copy_w;
             t2t.src_size.height = copy_h;
             t2t.src_size.depth = 1;
-            t2t.dst = tex;
+            t2t.dst = fg_dst;
             MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
             MTLCommandEncoder_endEncoding(enc);
         }
         /* Submitted after the frame's own command buffers on the same queue,
          * which is what orders the copy after the rendering. */
-        MTLCommandBuffer_presentDrawable(cb, drawable);
+        if (fg_second && !mad_fg_present2(cb, drawable, fg_second)) {   /* madeira-duo framegen: both, the plain way */
+            MTLCommandBuffer_presentDrawable(cb, drawable);
+            MTLCommandBuffer_presentDrawable(cb, fg_second);
+        } else if (!fg_second) MTLCommandBuffer_presentDrawable(cb, drawable);
         MTLCommandBuffer_commit(cb);
+        if (g_fg_on > 0) mad_fg_committed(cb, fg_second != 0);
     }
     InterlockedExchangeAdd64(&g_xp.t_cmt, mad_qpc() - tc); }
     mad_swd_step(s->queue, 0);
