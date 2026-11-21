@@ -23,6 +23,12 @@
    consumption (packet queue), keyframe seek + exact trim, stop, earliest-buffer mode, the
    MADEIRA_WG_VIDEO=0 path, unsupported video / audio codecs, compressed-output refusal, a backend
    that refuses to open, and the deduplicated, bounded log.
+4. Back-pressure, built again with small queue limits (soft 8 packets, hard 16, 400 ms): a slow
+   video reader and a fast audio reader on two threads lose no packet and get every picture; an
+   enabled video stream nobody reads holds the audio reader once, for 400 ms, and no longer; one
+   thread reading both streams (earliest-buffer mode) never waits for itself; disconnect wakes a
+   reader that waits. The same two-reader case built without back-pressure drops packets and
+   loses pictures.
 
 Environment: MADEIRA_FFMPEG_TARBALL (default: build/ffmpeg/src/ffmpeg-7.1.5.tar.xz, the tracked
 source tarball),
@@ -30,7 +36,9 @@ MADEIRA_HOST_FFMPEG (prefix of an existing host build), MADEIRA_TEST_MP3 (an .mp
 default: a Windows system MP3 under /mnt/c when present, otherwise the real-MP3 case is skipped).
 """
 from pathlib import Path
-import hashlib, os, re, subprocess, sys, tempfile
+import os, re, subprocess, sys, tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_ffmpeg import host_ffmpeg   # the shared host build, made under a lock
 
 root = Path(__file__).resolve().parents[2]
 core = root / "build/ntdll-unix/wg_parser_av_ios.c"
@@ -86,6 +94,11 @@ configure = glue[glue.index("static void wgp_configure(void)"):]
 configure = configure[:configure.index("\n}\n")]
 assert 'getenv( "MADEIRA_WG_VIDEO" )' in glue and "wg_video_switch_on()" in configure
 assert "mav_configure( video, &mav_apple_video_backend, &mav_apple_audio_backend, native )" in configure
+# rgb32 by default: the media session connects a source to its renderer with the native type only,
+# and DXMT has no YUV Direct3D 9 surface for the EVR's sample allocator (see the glue)
+native_fn = glue[glue.index("static enum mav_pixel_format wg_video_native_format(void)"):]
+native_fn = native_fn[:native_fn.index("\n}\n")]
+assert "if (!v || !*v) return MAV_PIX_BGRx;" in native_fn and native_fn.rstrip().endswith("return MAV_PIX_BGRx;"), native_fn
 assert '#include "wg_parser_av_ios.c"' in glue
 csrc = core.read_text()
 assert '#define MAV_TAG "[wg-parser] ml1990 "' in csrc and "#define MAV_MAX_LOGS 64" in csrc
@@ -126,24 +139,8 @@ FLAGS = [
     "--disable-avfilter", "--disable-postproc", "--enable-avformat", "--enable-avcodec", "--enable-swresample",
     "--disable-asm", "--disable-shared", "--enable-static", "--enable-pic", "--disable-debug",
 ]
-prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
-if not prefix:
-    key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
-    if not (Path(prefix) / "lib/libavformat.a").exists():
-        assert tarball and Path(tarball).exists(), "no FFmpeg tarball at build/ffmpeg/src (tracked) and no MADEIRA_FFMPEG_TARBALL"
-        src = Path(prefix + "-src")
-        src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.5/configure").exists():
-            subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
-        bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
-        print("building host FFmpeg into", prefix, flush=True)
-        log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
-                       cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-inc, lib = Path(prefix) / "include", Path(prefix) / "lib"
+prefix = host_ffmpeg(FLAGS, tarball, tag="", override=os.environ.get("MADEIRA_HOST_FFMPEG"))
+inc, lib = prefix / "include", prefix / "lib"
 
 # ------------------------------------------------------------------ 3. the core under ASan
 harness = r"""
@@ -163,6 +160,7 @@ static int failures;
 static uint8_t stub_avcc[] = { 0x01, 0x42, 0xc0, 0x1e, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1e,
                                0x01, 0x00, 0x02, 0x68, 0xce };
 static int stub_vdecodes, stub_vflushes, stub_verrors, stub_vlive, stub_vmapped;
+static int stub_vdelay_us;   /* a slow decoder: Senren Banka's 1080p WMV takes about 20 ms a picture */
 
 static int ref_y( int idx, int x, int y ) { (void)x; return 16 + (idx + y) % 200; }
 static int ref_u( int x, int y ) { (void)y; return 64 + (x / 2) % 128; }
@@ -192,6 +190,7 @@ static int stub_vdecode( void *handle, const uint8_t *data, uint32_t size, int64
     int x, y;
 
     stub_vdecodes++;
+    if (stub_vdelay_us) usleep( stub_vdelay_us );
     if (size != 9 || AV_RB32( data ) != 5 || (data[4] & 0x1f) != (key ? 5 : 1)) { stub_verrors++; return -5; }
     if (key) d->have_ref = 1;
     if (!d->have_ref) { stub_verrors++; return -6; }   /* a real decoder needs a keyframe after a flush */
@@ -301,7 +300,7 @@ struct source
 static void *read_thread( void *arg )
 {
     struct source *s = arg;
-    while (s->running)
+    while (__atomic_load_n( &s->running, __ATOMIC_ACQUIRE ))
     {
         uint64_t offset; uint32_t size;
         if (mav_get_next_read_offset( s->p, &offset, &size ))
@@ -333,7 +332,7 @@ static void src_start( struct source *s, struct mav_parser *p, const uint8_t *da
 static void src_stop( struct source *s )
 {
     mav_disconnect( s->p );
-    s->running = 0;
+    __atomic_store_n( &s->running, 0, __ATOMIC_RELEASE );
     pthread_join( s->thread, NULL );
 }
 
@@ -699,7 +698,7 @@ static int test_disconnect_wakes_reader( const uint8_t *data, size_t size )
         CHECK( t1.tv_sec - t0.tv_sec < 2, "reader was not woken" );
         usleep( 1000 );
     }
-    s.running = 0; pthread_join( s.thread, NULL );
+    __atomic_store_n( &s.running, 0, __ATOMIC_RELEASE ); pthread_join( s.thread, NULL );
     mav_disconnect( p );   /* idempotent, like quartz after a failed connect */
     mav_destroy( p );
     printf( "PASS: disconnect wakes a read thread blocked in get_next_read_offset\n" );
@@ -717,7 +716,9 @@ static int check_picture( const uint8_t *buf, uint32_t size, enum mav_pixel_form
     switch (fmt)
     {
     case MAV_PIX_NV12: case MAV_PIX_I420: case MAV_PIX_YV12: CHECK( l.stride[0] == ((W + 3) & ~3) && size == W * H * 3 / 2, "%s stride", what ); break;
-    case MAV_PIX_YUY2: CHECK( l.stride[0] == ((W * 2 + 3) & ~3), "%s stride", what ); break;
+    case MAV_PIX_YUY2: case MAV_PIX_UYVY: case MAV_PIX_YVYU: case MAV_PIX_RGB15: case MAV_PIX_RGB16:
+        CHECK( l.stride[0] == ((W * 2 + 3) & ~3), "%s stride", what ); break;
+    case MAV_PIX_BGR: CHECK( l.stride[0] == ((W * 3 + 3) & ~3), "%s stride", what ); break;
     default: CHECK( l.stride[0] == W * 4, "%s stride", what ); break;
     }
     for (y = 0; y < H; y++)
@@ -745,6 +746,40 @@ static int check_picture( const uint8_t *buf, uint32_t size, enum mav_pixel_form
                 CHECK( buf[ry * l.stride[0] + 2 * x] == Y && buf[ry * l.stride[0] + 4 * (x / 2) + 1] == U
                        && buf[ry * l.stride[0] + 4 * (x / 2) + 3] == V, "%s YUY2(%d,%d)", what, x, y );
                 break;
+            case MAV_PIX_UYVY:   /* U0 Y0 V0 Y1 */
+                CHECK( buf[ry * l.stride[0] + 4 * (x / 2) + 1 + 2 * (x & 1)] == Y && buf[ry * l.stride[0] + 4 * (x / 2)] == U
+                       && buf[ry * l.stride[0] + 4 * (x / 2) + 2] == V, "%s UYVY(%d,%d)", what, x, y );
+                break;
+            case MAV_PIX_YVYU:   /* Y0 V0 Y1 U0 */
+                CHECK( buf[ry * l.stride[0] + 2 * x] == Y && buf[ry * l.stride[0] + 4 * (x / 2) + 3] == U
+                       && buf[ry * l.stride[0] + 4 * (x / 2) + 1] == V, "%s YVYU(%d,%d)", what, x, y );
+                break;
+            case MAV_PIX_BGR: case MAV_PIX_RGB15: case MAV_PIX_RGB16:
+            {
+                double yy = 1.164383 * (Y - 16), r = yy + 1.596027 * (V - 128),
+                       g = yy - 0.391762 * (U - 128) - 0.812968 * (V - 128), b = yy + 2.017232 * (U - 128);
+                int rr = (int)lround( fmin( 255, fmax( 0, r ) ) ), rg = (int)lround( fmin( 255, fmax( 0, g ) ) ),
+                    rb = (int)lround( fmin( 255, fmax( 0, b ) ) );
+                if (fmt == MAV_PIX_BGR)
+                {
+                    const uint8_t *px = buf + ry * l.stride[0] + 3 * x;
+                    int er = abs( px[2] - rr ), eg = abs( px[1] - rg ), eb = abs( px[0] - rb );
+                    if (er > maxerr) maxerr = er;
+                    if (eg > maxerr) maxerr = eg;
+                    if (eb > maxerr) maxerr = eb;
+                }
+                else
+                {
+                    /* little-endian 16 bits; a component within one step of the 8-bit reference's */
+                    unsigned px = buf[ry * l.stride[0] + 2 * x] | buf[ry * l.stride[0] + 2 * x + 1] << 8;
+                    int six = fmt == MAV_PIX_RGB16;
+                    int R5 = six ? px >> 11 : (px >> 10) & 31, G = six ? (px >> 5) & 63 : (px >> 5) & 31, B5 = px & 31;
+                    CHECK( six || !(px & 0x8000), "%s: x bit set", what );
+                    CHECK( abs( R5 - (rr >> 3) ) <= 1 && abs( G - (six ? rg >> 2 : rg >> 3) ) <= 1 && abs( B5 - (rb >> 3) ) <= 1,
+                           "%s (%d,%d): %04x for %d %d %d", what, x, y, px, rr, rg, rb );
+                }
+                break;
+            }
             default:
             {
                 /* BT.601, limited range: the untagged, sub-720-line default */
@@ -911,6 +946,9 @@ static int test_mp4_formats( const uint8_t *mp4, size_t size )
         { MAV_PIX_NV12, 0, "nv12" }, { MAV_PIX_I420, 0, "i420" }, { MAV_PIX_YV12, 0, "yv12" }, { MAV_PIX_YUY2, 0, "yuy2" },
         { MAV_PIX_BGRx, 0, "bgrx" }, { MAV_PIX_BGRA, 0, "bgra" }, { MAV_PIX_RGBA, 0, "rgba" },
         { MAV_PIX_BGRx, 1, "bgrx bottom-up" }, { MAV_PIX_NV12, 1, "nv12 bottom-up" },
+        /* the WM reader's (wm_reader.c): bottom-up BGR by default, and the others it offers */
+        { MAV_PIX_BGR, 1, "bgr bottom-up" }, { MAV_PIX_BGR, 0, "bgr" }, { MAV_PIX_UYVY, 0, "uyvy" }, { MAV_PIX_YVYU, 0, "yvyu" },
+        { MAV_PIX_RGB16, 1, "rgb16 bottom-up" }, { MAV_PIX_RGB15, 1, "rgb15 bottom-up" },
     };
     struct mav_parser *p = mav_create( 0 ); struct source s; struct mav_stream_info vi; unsigned int i;
 
@@ -934,12 +972,13 @@ static int test_mp4_formats( const uint8_t *mp4, size_t size )
         o.width = W / 2;
         CHECK( mav_enable_video( p, 0, &o ) == MAV_E_PARAM, "another size refused (no scaler)" );
         CHECK( mav_get_buffer( p, 0, &(struct mav_buffer){0} ) == MAV_NO_BUFFER, "refused stream is disabled" );
-        o = vi.vnative; o.fmt = (enum mav_pixel_format)3;   /* BGR: not produced here */
+        o = vi.vnative; o.fmt = (enum mav_pixel_format)7;   /* AYUV: not produced here */
         CHECK( mav_enable_video( p, 0, &o ) == MAV_E_PARAM, "unsupported pixel format refused" );
         CHECK( mav_enable( p, 0, &(struct mav_output){ MAV_FMT_S16, 44100, 2, 3 } ) == MAV_E_STATE, "audio enable on video refused" );
     }
     src_stop( &s ); mav_destroy( p );
-    printf( "PASS: mp4 picture formats pixel-checked: nv12 i420 yv12 yuy2 bgrx bgra rgba (BT.601 within 1), bottom-up bgrx/nv12; "
+    printf( "PASS: mp4 picture formats pixel-checked: nv12 i420 yv12 yuy2 uyvy yvyu bgrx bgra rgba bgr (BT.601 within 1), "
+            "rgb16 rgb15 (within one step), bottom-up bgrx/nv12/bgr/rgb16/rgb15; "
             "other sizes and formats refused\n" );
     return 0;
 }
@@ -1042,6 +1081,200 @@ static uint8_t *read_file( const char *path, size_t *size )
     return b;
 }
 
+/* ================= back-pressure, run with small queue limits ("bp") ================= */
+
+struct reader { struct mav_parser *p; int stream, delay_us, count; volatile int done; pthread_t thread; };
+
+static void *reader_thread( void *arg )
+{
+    struct reader *r = arg; struct mav_buffer b;
+    while (mav_get_buffer( r->p, r->stream, &b ) == MAV_OK)
+    {
+        mav_release_buffer( r->p, r->stream ); r->count++;
+        if (r->delay_us) usleep( r->delay_us );
+    }
+    r->done = 1;
+    return NULL;
+}
+
+static long ms_since( const struct timespec *t0 )
+{
+    struct timespec t1;
+    clock_gettime( CLOCK_MONOTONIC, &t1 );
+    return (t1.tv_sec - t0->tv_sec) * 1000 + (t1.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+static int bp_open( struct mav_parser *p, struct source *s, const uint8_t *mp4, size_t size )
+{
+    struct mav_stream_info vi, ai;
+    src_start( s, p, mp4, size );
+    CHECK( mav_connect( p, size ) == MAV_OK && mav_stream_count( p ) == 2, "connect mp4" );
+    CHECK( mav_stream_info( p, 0, &vi ) == MAV_OK && mav_stream_info( p, 1, &ai ) == MAV_OK, "stream info" );
+    CHECK( mav_enable_video( p, 0, &vi.vnative ) == MAV_OK && mav_enable( p, 1, &ai.native ) == MAV_OK, "enable" );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek 0" );
+    return 0;
+}
+
+static int test_backpressure( const uint8_t *mp4, size_t size, int frames )
+{
+    struct mav_parser *p; struct source s; struct reader v, a; struct timespec t0; int waited;
+
+    /* 1. two threads, video slow: nothing dropped, every picture delivered */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    v = (struct reader){ p, 0, 3000 }; a = (struct reader){ p, 1, 0 };
+    pthread_create( &v.thread, NULL, reader_thread, &v );
+    pthread_create( &a.thread, NULL, reader_thread, &a );
+    pthread_join( a.thread, NULL ); pthread_join( v.thread, NULL );
+    printf( "BP1 %d %d\n", v.count, a.count );
+    CHECK( v.count == frames, "slow video reader: %d pictures of %d", v.count, frames );
+    CHECK( a.count > 0, "audio" );
+    src_stop( &s ); mav_destroy( p );
+
+    /* 2. video enabled and never read: the audio reader waits once, then reads to the end */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    a = (struct reader){ p, 1, 0 };
+    clock_gettime( CLOCK_MONOTONIC, &t0 );
+    reader_thread( &a );
+    CHECK( a.count > 0 && ms_since( &t0 ) < 3 * MAV_BACKPRESSURE_WAIT_MS, "audio alone finished in time (%ld ms)", ms_since( &t0 ) );
+    src_stop( &s ); mav_destroy( p );
+
+    /* 3. one thread, both streams (earliest-buffer mode): it never waits for itself */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    {
+        struct mav_buffer b; int n = 0;
+        clock_gettime( CLOCK_MONOTONIC, &t0 );
+        while (mav_get_buffer( p, -1, &b ) == MAV_OK) { mav_release_buffer( p, b.stream ); n += b.stream == 0; }
+        CHECK( n == frames && ms_since( &t0 ) < MAV_BACKPRESSURE_WAIT_MS, "earliest-buffer mode: %d pictures, %ld ms", n, ms_since( &t0 ) );
+    }
+    src_stop( &s ); mav_destroy( p );
+
+    /* 4. disconnect while a reader waits: it is woken, nothing is freed under it */
+    p = mav_create( 0 );
+    if (bp_open( p, &s, mp4, size )) return 1;
+    a = (struct reader){ p, 1, 0 };
+    pthread_create( &a.thread, NULL, reader_thread, &a );
+    for (waited = 0; waited < 200; waited++)
+    {
+        unsigned int w;
+        pthread_mutex_lock( &p->lock ); w = p->bp_waiters; pthread_mutex_unlock( &p->lock );
+        if (w) break;
+        usleep( 1000 );
+    }
+    CHECK( waited < 200, "the audio reader waits for the unread video stream" );
+    clock_gettime( CLOCK_MONOTONIC, &t0 );
+    src_stop( &s );
+    pthread_join( a.thread, NULL );
+    CHECK( a.done && ms_since( &t0 ) < MAV_BACKPRESSURE_WAIT_MS, "disconnect woke the waiting reader (%ld ms)", ms_since( &t0 ) );
+    mav_destroy( p );
+    printf( "PASS: back-pressure (soft %d packets, hard %d): a slow video reader on its own thread gets all %d pictures; "
+            "an unread stream holds the other reader once (%d ms) and no longer; one thread reading both never waits; "
+            "disconnect wakes a waiting reader\n", MAV_QUEUE_SOFT_PACKETS, MAV_QUEUE_MAX_PACKETS, frames,
+            MAV_BACKPRESSURE_WAIT_MS );
+    return 0;
+}
+
+static double ms_since_f( const struct timespec *t0 )
+{
+    struct timespec t1;
+    clock_gettime( CLOCK_MONOTONIC, &t1 );
+    return (t1.tv_sec - t0->tv_sec) * 1e3 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+/* Wine's media source asks for both streams on one thread, at the movie's pace.
+ * With a decoder that takes 20 ms a picture, a video request decoded on
+ * demand holds that thread (and the audio request after it) for 20 ms; with
+ * decode-ahead the picture is ready.  Every picture still comes, in order;
+ * a seek lands exactly; a disconnect while the worker decodes neither hangs
+ * nor frees anything under it. */
+static int test_mp4_ahead( const uint8_t *mp4, size_t size, int frames, int ahead, double *avg_ms, double *max_ms )
+{
+    struct mav_parser *p; struct source s; struct mav_stream_info vi, ai; struct drained da;
+    double total = 0, worst = 0; int n = 0, adone = 0, measured = 0;
+
+    mav_allow_video_ahead( ahead );
+    stub_vdelay_us = 20000;
+    p = mav_create( 0 );
+    src_start( &s, p, mp4, size );
+    CHECK( mav_connect( p, size ) == MAV_OK && mav_stream_info( p, 0, &vi ) == MAV_OK && mav_stream_info( p, 1, &ai ) == MAV_OK,
+           "connect" );
+    CHECK( mav_enable_video( p, 0, &vi.vnative ) == MAV_OK && mav_enable( p, 1, &ai.native ) == MAV_OK, "enable" );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek 0" );
+    memset( &da, 0, sizeof(da) );
+    for (;;)
+    {
+        struct timespec t0, pace; struct mav_buffer b; uint8_t *pic; int r;
+
+        clock_gettime( CLOCK_MONOTONIC, &pace );
+        clock_gettime( CLOCK_MONOTONIC, &t0 );
+        r = mav_get_buffer( p, 0, &b );
+        if (r != MAV_OK) { CHECK( r == MAV_NO_BUFFER, "video get_buffer %d", r ); break; }
+        if (n >= 4)
+        {
+            double ms = ms_since_f( &t0 );
+            total += ms; measured++;
+            if (ms > worst) worst = ms;
+        }
+        pic = malloc( b.size );
+        CHECK( mav_copy_buffer( p, 0, pic, 0, b.size ) == MAV_OK, "copy picture" );
+        CHECK( picture_index( pic, 0, MAV_PIX_NV12 ) == n % 200 && llabs( (long long)b.pts - n * 10000000ll / FPS ) <= 1,
+               "picture %d: index %d pts %llu", n, picture_index( pic, 0, MAV_PIX_NV12 ), (unsigned long long)b.pts );
+        free( pic );
+        mav_release_buffer( p, 0 );
+        n++;
+        /* the audio this picture's interval needs */
+        while (!adone && (!da.buffers || da.end_pts < (uint64_t)n * 10000000 / FPS))
+            if (drain_one( p, 1, &da, &adone )) return 1;
+        while (ms_since_f( &pace ) < 1000.0 / FPS) usleep( 500 );
+    }
+    while (!adone) if (drain_one( p, 1, &da, &adone )) return 1;
+    CHECK( n == frames && da.gaps == 0 && da.first_pts == 0, "%d pictures of %d, audio gaps %d", n, frames, da.gaps );
+    CHECK( stub_verrors == 0, "stub decoder saw %d bad packets", stub_verrors );
+
+    if (ahead)
+    {
+        /* a seek: the first picture after it is the target's, decoded ahead again */
+        struct mav_buffer b; uint8_t *pic;
+        CHECK( mav_seek( p, 0, 1, 10000000, 0, 0 ) == MAV_OK, "seek to 1 s" );
+        CHECK( mav_get_buffer( p, 0, &b ) == MAV_OK && b.pts == 10000000, "picture after the seek at %llu",
+               (unsigned long long)b.pts );
+        pic = malloc( b.size );
+        CHECK( mav_copy_buffer( p, 0, pic, 0, b.size ) == MAV_OK && picture_index( pic, 0, MAV_PIX_NV12 ) == FPS,
+               "the target picture" );
+        free( pic );
+        mav_release_buffer( p, 0 );
+        CHECK( mav_get_buffer( p, 0, &b ) == MAV_OK && llabs( (long long)b.pts - (FPS + 1) * 10000000ll / FPS ) <= 1, "and the next" );
+        mav_release_buffer( p, 0 );
+        /* disconnect while the worker is decoding */
+        usleep( 5000 );
+    }
+    src_stop( &s );
+    mav_destroy( p );
+    stub_vdelay_us = 0;
+    CHECK( stub_vmapped == 0 && stub_vlive == 0, "every picture unmapped (%d) and released (%d)", stub_vmapped, stub_vlive );
+    free( da.data );
+    *avg_ms = measured ? total / measured : 0;
+    *max_ms = worst;
+    mav_allow_video_ahead( 1 );
+    return 0;
+}
+
+static int test_ahead( const uint8_t *mp4, size_t size, int frames )
+{
+    double on_avg, on_max, off_avg, off_max;
+
+    if (test_mp4_ahead( mp4, size, frames, 1, &on_avg, &on_max )) return 1;
+    if (test_mp4_ahead( mp4, size, frames, 0, &off_avg, &off_max )) return 1;
+    CHECK( off_avg >= 15, "decoded on demand, a video request should take the decoder's 20 ms: %.1f ms", off_avg );
+    CHECK( on_avg < 5, "decoded ahead, a video request took %.1f ms on average (on demand: %.1f ms)", on_avg, off_avg );
+    printf( "PASS: decode-ahead: with a 20 ms decoder and one thread asking for both streams at %d fps, a video request "
+            "takes %.1f ms on average (max %.1f) instead of %.1f (max %.1f); every picture in order, the audio gap-free, "
+            "an exact seek, a disconnect mid-decode\n", FPS, on_avg, on_max, off_avg, off_max );
+    return 0;
+}
+
 int main( int argc, char **argv )
 {
     size_t mp2_size, wsize, mp4_size; uint8_t *mp2, *wav, *mp4;
@@ -1061,6 +1294,26 @@ int main( int argc, char **argv )
         return 0;
     }
     mav_configure( 1, &stub_video, &stub_audio, MAV_PIX_NV12 );
+    if (argc > 1 && !strcmp( argv[1], "bp" ))
+    {
+        int r;
+        setvbuf( stdout, NULL, _IONBF, 0 );
+        mp4 = make_mp4( &mp4_size, AV_CODEC_ID_H264, A_AAC, frames, seconds );
+        if (!mp4) { printf( "FAIL: could not synthesise the mp4\n" ); return 1; }
+        r = test_backpressure( mp4, mp4_size, frames );
+        av_free( mp4 );
+        return r || failures;
+    }
+    if (argc > 1 && !strcmp( argv[1], "threads" ))
+    {
+        /* the ThreadSanitizer build: the cases where a worker decodes beside the reader */
+        mp4 = make_mp4( &mp4_size, AV_CODEC_ID_H264, A_AAC, frames, seconds );
+        if (!mp4 || test_mp4_basic( mp4, mp4_size, frames, seconds ) || test_mp4_formats( mp4, mp4_size )
+            || test_ahead( mp4, mp4_size, frames ))
+            return 1;
+        av_free( mp4 );
+        return failures ? 1 : 0;
+    }
     mp2 = make_mp2( &mp2_size, 44100, 3.0 );
     if (!mp2) { printf( "FAIL: no mp2 encoder in the host build\n" ); return 1; }
     if (test_wav()) return 1;
@@ -1074,6 +1327,7 @@ int main( int argc, char **argv )
     if (test_mp4_basic( mp4, mp4_size, frames, seconds )) return 1;
     if (test_mp4_formats( mp4, mp4_size )) return 1;
     if (test_mp4_late_audio( mp4, mp4_size, seconds )) return 1;
+    if (test_ahead( mp4, mp4_size, frames )) return 1;
     if (test_mp4_refusals()) return 1;
     if (argc > 1)
     {
@@ -1100,10 +1354,14 @@ TAG = "[wg-parser] ml1990 "
 with tempfile.TemporaryDirectory() as t:
     c = Path(t) / "wgp.c"; c.write_text(harness)
     exe = Path(t) / "wgp"
-    subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=address,undefined",
-                    "-fno-sanitize-recover=undefined", "-I" + str(core.parent), "-I" + str(inc), str(c), "-o", str(exe),
-                    str(lib / "libavformat.a"), str(lib / "libavcodec.a"), str(lib / "libswresample.a"),
-                    str(lib / "libavutil.a"), "-lm", "-lpthread"], check=True)
+
+    def build(out, defines=()):
+        subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=address,undefined",
+                        "-fno-sanitize-recover=undefined", "-I" + str(core.parent), "-I" + str(inc), *defines, str(c),
+                        "-o", str(out), str(lib / "libavformat.a"), str(lib / "libavcodec.a"),
+                        str(lib / "libswresample.a"), str(lib / "libavutil.a"), "-lm", "-lpthread"], check=True)
+
+    build(exe)
     args = [str(exe)]
     if mp3:
         args += [mp3]
@@ -1126,6 +1384,9 @@ with tempfile.TemporaryDirectory() as t:
     assert any("connect refused" in l and "no enabled demuxer recognised the stream" in l for l in lines), lines
     assert any("connect container=mp4 stream=0 video codec=h264 backend=stub-video 320x240 fps=30/1 out=nv12" in l for l in lines), lines
     assert any("connect container=mp4 codec=aac layer=0 rate=44100 channels=2 mask=0x3 out=f32" in l and "stream=1 backend=stub-aac" in l for l in lines), lines
+    assert any(l.endswith("stream 0: first picture delivered (nv12 320x240)") for l in lines), lines
+    assert any(l.endswith("stream 0: decoding ahead on a thread of its own (3 pictures)") for l in lines), lines
+    assert any(l.endswith("stream 1: first audio buffer delivered") for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=0): container disabled by MADEIRA_WG_VIDEO=0" in l for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=1): compressed output requested" in l for l in lines), lines
     assert any("video codec h264 (codec id 27" in l and "stub: unexpected codec data" in l for l in lines), lines
@@ -1146,3 +1407,44 @@ with tempfile.TemporaryDirectory() as t:
           "ASan/UBSan clean" % (len(lines), len(set(re.sub(r" \(repeat #\d+\)$", "", l) for l in lines))))
     for l in lines:
         print("  " + l)
+
+    # ---------------------------------------------------------------- 4. back-pressure
+    bp, nobp = Path(t) / "wgp-bp", Path(t) / "wgp-nobp"
+    build(bp, ["-DMAV_QUEUE_SOFT_PACKETS=8", "-DMAV_QUEUE_SOFT_BYTES=65536", "-DMAV_QUEUE_MAX_PACKETS=16",
+               "-DMAV_BACKPRESSURE_WAIT_MS=400"])
+    out = subprocess.run([str(bp), "bp"], env=env, capture_output=True, text=True, timeout=300)
+    print(out.stdout.replace("BP1 ", "  (slow video, fast audio: pictures, audio buffers) "), end="")
+    assert out.returncode == 0, out.stdout + out.stderr[-4000:]
+    bp_lines = [l for l in out.stderr.splitlines() if l.startswith(TAG)]
+    # case 1 (two readers) drops nothing; case 2 (video never read) marks it unread once, then drops past the hard limit
+    first = out.stderr[:out.stderr.index("not read for")] if "not read for" in out.stderr else out.stderr
+    assert "dropping further packets" not in first, "a packet was dropped while both streams were read:\n" + first[-3000:]
+    assert sum("stream 0: not read for 400 ms while stream 1 reads ahead" in l for l in bp_lines) >= 1, bp_lines
+    assert "ERROR: AddressSanitizer" not in out.stderr and "runtime error" not in out.stderr, out.stderr[-4000:]
+    # the same two-reader case without back-pressure (the soft limit above the hard one) drops:
+    # the case it is for
+    build(nobp, ["-DMAV_QUEUE_SOFT_PACKETS=100000", "-DMAV_QUEUE_SOFT_BYTES=((size_t)1<<40)",
+                 "-DMAV_QUEUE_MAX_PACKETS=16", "-DMAV_BACKPRESSURE_WAIT_MS=400"])
+    out = subprocess.run([str(nobp), "bp"], env=env, capture_output=True, text=True, timeout=300)
+    assert "dropping further packets" in out.stderr and "FAIL test_backpressure" in out.stdout \
+        and "slow video reader" in out.stdout, out.stdout + out.stderr[-2000:]
+    print("PASS: without back-pressure the same slow-video case drops packets and loses pictures (%s)" %
+          re.search(r"slow video reader: \d+ pictures of \d+", out.stdout).group(0))
+    for l in bp_lines:
+        print("  " + l)
+
+    # ThreadSanitizer: the decode-ahead worker beside the reader, its seeks and its disconnect
+    tsan = Path(t) / "wgp-tsan"
+    r = subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=thread",
+                        "-I" + str(core.parent), "-I" + str(inc), str(c), "-o", str(tsan),
+                        str(lib / "libavformat.a"), str(lib / "libavcodec.a"), str(lib / "libswresample.a"),
+                        str(lib / "libavutil.a"), "-lm", "-lpthread"], capture_output=True, text=True)
+    if r.returncode:
+        print("NOTOOL: no ThreadSanitizer build here (%s)" % (r.stderr.strip().splitlines() or ["?"])[-1][:120])
+    else:
+        tenv = {k: v for k, v in env.items() if k != "ASAN_OPTIONS"}
+        tenv["TSAN_OPTIONS"] = "halt_on_error=1 second_deadlock_stack=1"
+        out = subprocess.run([str(tsan), "threads"], env=tenv, capture_output=True, text=True, timeout=600)
+        assert out.returncode == 0 and "WARNING: ThreadSanitizer" not in out.stderr, out.stdout + out.stderr[-6000:]
+        print("PASS: ThreadSanitizer clean: the interleaved readers, every picture format, and decode-ahead "
+              "(its seek and its disconnect mid-decode)")

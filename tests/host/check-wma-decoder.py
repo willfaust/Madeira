@@ -19,7 +19,9 @@ MADEIRA_WINE_BUILD (a configured Wine build tree whose include/ holds config.h a
 widl-generated headers; default: wine/build-macos, the tree build/ntdll-unix/build.sh uses).
 """
 from pathlib import Path
-import hashlib, os, subprocess, sys, tempfile
+import os, subprocess, sys, tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_ffmpeg import host_ffmpeg   # the shared host build, made under a lock
 
 root = Path(__file__).resolve().parents[2]
 ntdll_unix = root / "build/ntdll-unix"
@@ -72,24 +74,8 @@ FLAGS = [
     "--disable-avfilter", "--disable-postproc", "--enable-avformat", "--enable-avcodec", "--enable-swresample",
     "--disable-asm", "--disable-shared", "--enable-static", "--enable-pic", "--disable-debug",
 ]
-prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
-if not prefix:
-    key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
-    if not (Path(prefix) / "lib/libavcodec.a").exists():
-        assert Path(tarball).exists(), "no FFmpeg tarball at %s" % tarball
-        src = Path(prefix + "-src")
-        src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.5/configure").exists():
-            subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
-        bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
-        print("building host FFmpeg into", prefix, flush=True)
-        log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
-                       cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-inc, lib = Path(prefix) / "include", Path(prefix) / "lib"
+prefix = host_ffmpeg(FLAGS, tarball, tag="", override=os.environ.get("MADEIRA_HOST_FFMPEG"))
+inc, lib = prefix / "include", prefix / "lib"
 
 # ------------------------------------------------------------------ harness
 harness = r"""
@@ -220,7 +206,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
     create.output_type.major = madeira_MFMediaType_Audio;
     create.output_type.format_size = sizeof(WAVEFORMATEX);
     create.output_type.u.audio = &out.wfx;
-    CHECK( !wma_transform_create( &create ) && create.transform, "create failed" );
+    CHECK( !wg_transform_create( &create ) && create.transform, "create failed" );
 
     chunk = (size_t)s.block_align * packets_per_push;
     for (off = 0; off <= s.size; )
@@ -235,7 +221,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
             sample.data = (UINT64)(UINT_PTR)(s.data + off);
             push.transform = create.transform;
             push.sample = &sample;
-            CHECK( !wma_transform_push_data( &push ), "push_data failed" );
+            CHECK( !wg_transform_push_data( &push ), "push_data failed" );
             hr = push.result;
             if (hr == MF_E_NOTACCEPTING) goto drain_out;
             CHECK( hr == S_OK, "push result %#x", (unsigned)hr );
@@ -243,7 +229,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
         }
         else
         {
-            CHECK( !wma_transform_drain( &create.transform ), "drain failed" );
+            CHECK( !wg_transform_drain( &create.transform ), "drain failed" );
             off++;
         }
     drain_out:
@@ -254,7 +240,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
             sample.data = (UINT64)(UINT_PTR)outbuf;
             read.transform = create.transform;
             read.sample = &sample;
-            CHECK( !wma_transform_read_data( &read ), "read_data failed" );
+            CHECK( !wg_transform_read_data( &read ), "read_data failed" );
             if (read.result == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
             CHECK( read.result == S_OK && sample.size, "read result %#x size %u", (unsigned)read.result, sample.size );
             CHECK( sample.size % out.wfx.nBlockAlign == 0, "partial frame (%u bytes)", sample.size );
@@ -302,7 +288,7 @@ static int run( const char *name, enum AVCodecID id, WORD tag, int rate, int cha
         }
     }
 done:
-    if (create.transform) wma_transform_destroy( &create.transform );
+    if (create.transform) wg_transform_destroy( &create.transform );
     free( pcm );
     free( s.data );
     return 0;

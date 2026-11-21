@@ -10,12 +10,18 @@
 #
 #   - libavcodec: the WMA-family decoders behind the Windows WMA decoder
 #     MFT/DMO (wmav1, wmav2, wmapro, wmalossless, xma1, xma2), which FAudio
-#     uses for xWMA/XMA voices; MPEG-1 layer I/II/III and plain PCM decoders
-#     for the wg_parser.
-#   - libavformat: the wg_parser's demuxers -- mp3, wav and mov (MP4/MOV/M4A)
-#     -- and the mpegaudio parser the mp3 demuxer selects. No protocols: the
-#     parser reads through its own AVIOContext (the PE read thread's pull
-#     protocol), never a URL. No muxers.
+#     uses for xWMA/XMA voices, and the wg_parser uses for WMA audio in ASF;
+#     MPEG-1 layer I/II/III and plain PCM decoders for the wg_parser; and the
+#     Windows Media video decoders for its ASF files (wmv1, wmv2, wmv3, vc1,
+#     msmpeg4v1-v3): no platform decoder on iOS takes them, so the parser
+#     decodes them in software (wg_parser_av_ios.c, mav_lavc_video). A game's
+#     cutscenes played through the Windows Media Format reader (wmvcore) are
+#     such files; without these the reader failed to connect (0x80040265) and
+#     the game showed a white screen.
+#   - libavformat: the wg_parser's demuxers -- mp3, wav, mov (MP4/MOV/M4A)
+#     and asf (WMV/WMA) -- and the mpegaudio parser the mp3 demuxer selects. No
+#     protocols: the parser reads through its own AVIOContext (the PE read
+#     thread's pull protocol), never a URL. No muxers.
 #   - libswresample, libavutil.
 #
 # Deliberately NO H.264, HEVC or AAC decoder or parser: those streams are
@@ -113,7 +119,8 @@ CONFIG_ARGS=(
     --enable-decoder=wmav1,wmav2,wmapro,wmalossless,xma1,xma2
     --enable-decoder=mp1,mp2,mp3
     --enable-decoder=pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le
-    --enable-demuxer=mp3,wav,mov
+    --enable-decoder=wmv1,wmv2,wmv3,vc1,msmpeg4v1,msmpeg4v2,msmpeg4v3
+    --enable-demuxer=mp3,wav,mov,asf
     --enable-parser=mpegaudio
     --disable-programs
     --disable-doc

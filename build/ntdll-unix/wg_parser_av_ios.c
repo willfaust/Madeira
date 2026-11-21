@@ -48,24 +48,31 @@
  *     the failure) instead of being accepted and never producing a sample.
  *     An unsupported codec is logged with its libavcodec id.
  *
- *   - STREAMS.  An MP3/WAV file exposes its first audio stream.  An MP4
+ *   - STREAMS.  An MP3/WAV file exposes its first audio stream.  An MP4 or
+ *     an ASF (WMV/WMA, the Windows Media Format reader's files: wm_reader.c)
  *     exposes its first video stream and its first audio stream, in container
- *     order.  An MP4 whose video cannot be decoded is refused outright; one
- *     whose audio cannot be decoded exposes the video alone (logged).
+ *     order.  A file whose video cannot be decoded is refused outright; one
+ *     whose audio cannot be decoded exposes the video alone (logged).  An
+ *     ASF's Windows Media video is decoded here, in software, by libavcodec
+ *     (mav_lavc_video), its WMA by libavcodec like MPEG audio.
  *
  *   - one demuxer, several consumers.  wg_parser.c runs a GStreamer thread
  *     that parks one buffer per stream; here decoding is LAZY, on the thread
  *     that asks for a buffer, and a packet read for a stream other than the
- *     one being served is queued for that stream (dropped if it is disabled;
- *     bounded, with the overflow logged).  One buffer per stream is
+ *     one being served is queued for that stream (dropped if it is disabled).
+ *     A queue another thread reads holds back the reader that fills it once
+ *     it passes a soft limit (mav_wait_drain), so a stream that falls behind
+ *     no longer loses packets; past the hard limit (an unread stream only)
+ *     the overflow is dropped and logged.  One buffer per stream is
  *     outstanding until release_buffer; S_FALSE at end of stream.
  *
  *   - video.  The native format reported by get_current_format is 4:2:0 NV12
  *     at the coded display size (MADEIRA_WG_VIDEO_FORMAT can choose another,
  *     see the glue), which media_source.c turns into NV12 / YV12 / YUY2 /
  *     I420 / IYUV media types.  stream_enable accepts NV12, I420, YV12, YUY2,
- *     BGRx (RGB32), BGRA (ARGB32) and RGBA (ABGR32) at the native size, with
- *     a negative height meaning bottom-up rows, exactly as wg_format says.
+ *     UYVY, YVYU, BGRx (RGB32), BGRA (ARGB32), RGBA (ABGR32), BGR (RGB24, the
+ *     WM reader's default), RGB16 (565) and RGB15 (555) at the native size,
+ *     with a negative height meaning bottom-up rows, exactly as wg_format says.
  *     Frames are laid out the way GStreamer lays them out (4-byte aligned
  *     strides) because that is what wg_format_get_stride() / the PE side
  *     assume.  Decoded pictures come back in decode order and are re-ordered
@@ -75,7 +82,11 @@
  *   - "output_compressed" parsers (MPEG-I splitter, WAVE parser, AVI
  *     splitter) hand the COMPRESSED stream to a separate decoder filter.  This
  *     port has no such decoder filters, so they accept PCM only; MP3 and MP4
- *     are refused there and quartz then tries the decoding splitter.
+ *     are refused there and quartz then tries the decoding splitter.  The WM
+ *     reader's is the exception: an application that reads compressed samples
+ *     (KiriKiri's movie plugin, into the WMV / WMA decoder DMOs) gets an
+ *     ASF's Windows Media streams as the demuxer's packets
+ *     (mav_enable_compressed); its other streams are decoded as usual.
  *
  *   - seek is accurate: the demuxer seeks at or before the target (to a video
  *     keyframe when there is video), decoders are flushed, and decoded output
@@ -102,6 +113,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
@@ -136,11 +148,16 @@ enum mav_pixel_format
     MAV_PIX_UNKNOWN = 0,
     MAV_PIX_BGRA = 1,
     MAV_PIX_BGRx = 2,
+    MAV_PIX_BGR = 3,            /* 24-bit, B G R bytes: the WM reader's default output */
+    MAV_PIX_RGB15 = 4,          /* 16-bit x1r5g5b5, little-endian */
+    MAV_PIX_RGB16 = 5,          /* 16-bit r5g6b5, little-endian */
     MAV_PIX_RGBA = 6,
     MAV_PIX_I420 = 8,
     MAV_PIX_NV12 = 9,
+    MAV_PIX_UYVY = 11,
     MAV_PIX_YUY2 = 12,
     MAV_PIX_YV12 = 13,
+    MAV_PIX_YVYU = 14,
 };
 
 enum mav_status
@@ -167,6 +184,20 @@ enum mav_codec_kind
     MAV_CODEC_AAC = 3,
     MAV_CODEC_H264 = 4,
     MAV_CODEC_HEVC = 5,
+    MAV_CODEC_WMA = 6,          /* WMA v1/v2/Pro/Lossless in ASF, on libavcodec */
+    MAV_CODEC_WMV = 7,          /* WMV7/8/9, VC-1, MS-MPEG4 in ASF, on libavcodec (mav_lavc_video) */
+};
+
+/* Which Windows Media video a MAV_CODEC_WMV stream is (wg_format's WMV
+ * formats, mapped by the glue); 0 for the MS-MPEG4 family, which has none. */
+enum mav_wmv_format
+{
+    MAV_WMV_NONE = 0,
+    MAV_WMV_WMV1,
+    MAV_WMV_WMV2,
+    MAV_WMV_WMV3,
+    MAV_WMV_WMVA,
+    MAV_WMV_WVC1,
 };
 
 struct mav_output
@@ -196,7 +227,11 @@ struct mav_stream_info
     struct mav_output native;   /* audio: what the stream decodes to by default */
     struct mav_video_output vnative;   /* video: likewise */
     uint32_t profile, level;    /* H.264 */
-    uint32_t codec_data_len;    /* AAC: AudioSpecificConfig; H.264: avcC (if it fits) */
+    uint32_t version;           /* WMA: 1, 2, 3 (Pro) or 4 (Lossless) */
+    uint32_t block_align, depth;   /* WMA */
+    enum mav_wmv_format wmv;    /* WMV */
+    uint32_t codec_data_len;    /* AAC: AudioSpecificConfig; H.264: avcC; WMA / WMV: the
+                                 * WAVEFORMATEX / BITMAPINFOHEADER extra bytes (if they fit) */
     uint8_t codec_data[64];
     uint64_t duration;          /* 100 ns, 0 when unknown */
 };
@@ -217,6 +252,10 @@ struct mav_parser;
 
 static void mav_configure( int video_allowed, const struct mav_video_backend *video,
                            const struct mav_audio_backend *audio, enum mav_pixel_format native );
+/* 0: a compressed-output parser refuses an ASF too, as before the WM reader's compressed samples */
+static void mav_allow_compressed_asf( int allowed );
+/* 0: video is decoded on the thread that asks for a buffer, as before mav_ahead_main */
+static void mav_allow_video_ahead( int allowed );
 static struct mav_parser *mav_create( int output_compressed );
 static void mav_destroy( struct mav_parser *p );
 static int mav_connect( struct mav_parser *p, uint64_t file_size );
@@ -230,6 +269,9 @@ static int mav_current_video( struct mav_parser *p, unsigned int stream, struct 
 static int mav_enable( struct mav_parser *p, unsigned int stream, const struct mav_output *out );
 static int mav_enable_video( struct mav_parser *p, unsigned int stream, const struct mav_video_output *out );
 static void mav_disable( struct mav_parser *p, unsigned int stream );
+/* compressed-output parsers: can the stream hand out its packets, and do so */
+static int mav_can_pass_compressed( struct mav_parser *p, unsigned int stream );
+static int mav_enable_compressed( struct mav_parser *p, unsigned int stream );
 /* stream < 0: the earliest buffer of any enabled stream (buffer->stream says which) */
 static int mav_get_buffer( struct mav_parser *p, int stream, struct mav_buffer *buffer );
 static int mav_copy_buffer( struct mav_parser *p, unsigned int stream, void *dst, uint32_t offset, uint32_t size );
@@ -264,9 +306,32 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
 /* Pictures held for presentation-order output beyond what the decode-time
  * rule releases (a stream without decode times, or a broken one). */
 #define MAV_REORDER_MAX 16
+/* Decode-ahead (mav_ahead_main): pictures a video stream's worker keeps ready,
+ * plus the one handed out.  A 1080p RGB32 picture is 8 MB. */
+#ifndef MAV_AHEAD_SLOTS
+#define MAV_AHEAD_SLOTS 4
+#endif
 /* Packets queued for a stream nobody is reading from yet. */
+#ifndef MAV_QUEUE_MAX_PACKETS   /* tests/host/check-wg-parser.py and check-wg-parser-asf.py build with small limits */
 #define MAV_QUEUE_MAX_PACKETS 16384
+#endif
+#ifndef MAV_QUEUE_MAX_BYTES
 #define MAV_QUEUE_MAX_BYTES ((size_t)64 << 20)
+#endif
+/* Back-pressure (mav_wait_drain).  A stream whose queue passes these, while
+ * another thread reads it, holds the reader that demuxes for it until it has
+ * drained to three quarters of them; the hard limits above then only apply to
+ * a stream nobody reads (MAV_BACKPRESSURE_WAIT_MS without a read).  A packet
+ * dropped from a video stream breaks every picture up to its next keyframe. */
+#ifndef MAV_QUEUE_SOFT_PACKETS
+#define MAV_QUEUE_SOFT_PACKETS 1024
+#endif
+#ifndef MAV_QUEUE_SOFT_BYTES
+#define MAV_QUEUE_SOFT_BYTES ((size_t)16 << 20)
+#endif
+#ifndef MAV_BACKPRESSURE_WAIT_MS
+#define MAV_BACKPRESSURE_WAIT_MS 5000
+#endif
 #define MAV_MAX_DIMENSION 8192
 
 #define MAV_MOV_NAME "mov,mp4,m4a,3gp,3g2,mj2"
@@ -276,6 +341,8 @@ static int mav_video_allowed = 1;
 static const struct mav_video_backend *mav_vbackend;
 static const struct mav_audio_backend *mav_abackend;
 static enum mav_pixel_format mav_native_pix = MAV_PIX_NV12;
+static int mav_compressed_asf = 1;
+static int mav_video_ahead = 1;
 
 static void mav_configure( int video_allowed, const struct mav_video_backend *video,
                            const struct mav_audio_backend *audio, enum mav_pixel_format native )
@@ -284,6 +351,16 @@ static void mav_configure( int video_allowed, const struct mav_video_backend *vi
     mav_vbackend = video;
     mav_abackend = audio;
     mav_native_pix = native ? native : MAV_PIX_NV12;
+}
+
+static void mav_allow_compressed_asf( int allowed )
+{
+    mav_compressed_asf = !!allowed;
+}
+
+static void mav_allow_video_ahead( int allowed )
+{
+    mav_video_ahead = !!allowed;
 }
 
 /* ---- the log: bounded, and deduplicated ---- */
@@ -348,6 +425,221 @@ struct mav_vframe
     int64_t pts, duration;      /* stream time base */
 };
 
+/***********************************************************************
+ *           the libavcodec video backend (Windows Media video)
+ *
+ * WMV7/8 (wmv1, wmv2), WMV9 (wmv3), VC-1 (WMVA, WVC1) and MS-MPEG4 v1-v3 have
+ * no platform decoder on iOS, so they are decoded here, in software, by
+ * libavcodec, behind the same contract as the platform backend.  The decoders
+ * produce 4:2:0 planar pictures, copied into the NV12 layout the contract
+ * maps.  They reorder internally: pictures come out in presentation order
+ * with their own timestamps, so the core releases them at once (no decode
+ * timestamps in ASF to release them by), and they hold the last pictures back
+ * until mav_lavc_drain at the end of the stream.
+ */
+enum
+{
+    MAV_LAVC_WMV1 = 64, MAV_LAVC_WMV2, MAV_LAVC_WMV3, MAV_LAVC_VC1,
+    MAV_LAVC_MSMPEG4V1, MAV_LAVC_MSMPEG4V2, MAV_LAVC_MSMPEG4V3,
+};
+
+struct mav_lavc_vdec
+{
+    AVCodecContext *ctx;
+    AVPacket *pkt;
+    AVFrame *frame;
+    unsigned int bad_format_logged;
+};
+
+struct mav_lavc_picture
+{
+    uint8_t *data;              /* Y plane, then the interleaved CbCr plane */
+    uint32_t width, height, y_stride, uv_stride;
+    int full_range;
+};
+
+static enum AVCodecID mav_lavc_codec_id( int codec )
+{
+    switch (codec)
+    {
+    case MAV_LAVC_WMV1:      return AV_CODEC_ID_WMV1;
+    case MAV_LAVC_WMV2:      return AV_CODEC_ID_WMV2;
+    case MAV_LAVC_WMV3:      return AV_CODEC_ID_WMV3;
+    case MAV_LAVC_VC1:       return AV_CODEC_ID_VC1;
+    case MAV_LAVC_MSMPEG4V1: return AV_CODEC_ID_MSMPEG4V1;
+    case MAV_LAVC_MSMPEG4V2: return AV_CODEC_ID_MSMPEG4V2;
+    case MAV_LAVC_MSMPEG4V3: return AV_CODEC_ID_MSMPEG4V3;
+    default:                 return AV_CODEC_ID_NONE;
+    }
+}
+
+static int mav_lavc_supports( int codec )
+{
+    enum AVCodecID id = mav_lavc_codec_id( codec );
+    return id != AV_CODEC_ID_NONE && avcodec_find_decoder( id ) != NULL;
+}
+
+static void mav_lavc_close( void *handle )
+{
+    struct mav_lavc_vdec *d = handle;
+
+    if (!d) return;
+    avcodec_free_context( &d->ctx );
+    av_packet_free( &d->pkt );
+    av_frame_free( &d->frame );
+    free( d );
+}
+
+static void *mav_lavc_open( int codec, const uint8_t *extradata, uint32_t extradata_size,
+                            uint32_t width, uint32_t height, char *why, size_t why_size )
+{
+    const AVCodec *dec = avcodec_find_decoder( mav_lavc_codec_id( codec ) );
+    struct mav_lavc_vdec *d;
+
+    if (!dec)
+    {
+        snprintf( why, why_size, "no decoder in this build" );
+        return NULL;
+    }
+    if (!(d = calloc( 1, sizeof(*d) ))) return NULL;
+    if (!(d->ctx = avcodec_alloc_context3( dec )) || !(d->pkt = av_packet_alloc()) || !(d->frame = av_frame_alloc()))
+        goto fail;
+    d->ctx->opaque = MAV_DECODER_MARKER;
+    d->ctx->width = d->ctx->coded_width = (int)width;
+    d->ctx->height = d->ctx->coded_height = (int)height;
+    d->ctx->thread_count = 1;   /* every call is made under the parser's lock, one at a time */
+    if (extradata_size)
+    {
+        if (!(d->ctx->extradata = av_mallocz( (size_t)extradata_size + AV_INPUT_BUFFER_PADDING_SIZE ))) goto fail;
+        memcpy( d->ctx->extradata, extradata, extradata_size );
+        d->ctx->extradata_size = (int)extradata_size;
+    }
+    if (avcodec_open2( d->ctx, dec, NULL ) < 0)
+    {
+        snprintf( why, why_size, "decoder did not open" );
+        goto fail;
+    }
+    return d;
+fail:
+    mav_lavc_close( d );
+    return NULL;
+}
+
+/* One decoded picture into its own NV12 copy, handed to `emit`. */
+static void mav_lavc_emit( struct mav_lavc_vdec *d, const AVFrame *f, mav_vframe_emit emit, void *ctx )
+{
+    struct mav_lavc_picture *pic;
+    uint32_t w = (uint32_t)f->width, h = (uint32_t)f->height, cw = (w + 1) / 2, ch = (h + 1) / 2, x, y;
+    int64_t pts = f->pts != AV_NOPTS_VALUE ? f->pts : f->best_effort_timestamp;
+
+    if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P)
+    {
+        if (d->bad_format_logged++ < 3)
+            mav_log( "%s: picture in pixel format %d, not 4:2:0 planar; dropped", d->ctx->codec->name, f->format );
+        return;
+    }
+    if (!w || !h || w > MAV_MAX_DIMENSION || h > MAV_MAX_DIMENSION || !(pic = calloc( 1, sizeof(*pic) ))) return;
+    pic->width = w;
+    pic->height = h;
+    pic->y_stride = w;
+    pic->uv_stride = cw * 2;
+    pic->full_range = f->format == AV_PIX_FMT_YUVJ420P || f->color_range == AVCOL_RANGE_JPEG;
+    if (!(pic->data = malloc( (size_t)w * h + (size_t)pic->uv_stride * ch )))
+    {
+        free( pic );
+        return;
+    }
+    for (y = 0; y < h; y++) memcpy( pic->data + (size_t)y * w, f->data[0] + (size_t)y * f->linesize[0], w );
+    for (y = 0; y < ch; y++)
+    {
+        const uint8_t *u = f->data[1] + (size_t)y * f->linesize[1], *v = f->data[2] + (size_t)y * f->linesize[2];
+        uint8_t *uv = pic->data + (size_t)w * h + (size_t)y * pic->uv_stride;
+        for (x = 0; x < cw; x++)
+        {
+            uv[2 * x] = u[x];
+            uv[2 * x + 1] = v[x];
+        }
+    }
+    emit( ctx, pic, pts == AV_NOPTS_VALUE ? INT64_MIN : pts, f->duration > 0 ? f->duration : INT64_MIN );
+}
+
+static void mav_lavc_receive( struct mav_lavc_vdec *d, mav_vframe_emit emit, void *ctx )
+{
+    while (avcodec_receive_frame( d->ctx, d->frame ) >= 0)
+    {
+        mav_lavc_emit( d, d->frame, emit, ctx );
+        av_frame_unref( d->frame );
+    }
+}
+
+static int mav_lavc_decode( void *handle, const uint8_t *data, uint32_t size, int64_t pts, int64_t duration,
+                            int keyframe, mav_vframe_emit emit, void *ctx )
+{
+    struct mav_lavc_vdec *d = handle;
+    int err;
+
+    /* not reference-counted: libavcodec takes a padded copy */
+    d->pkt->data = (uint8_t *)data;
+    d->pkt->size = (int)size;
+    d->pkt->pts = pts == INT64_MIN ? AV_NOPTS_VALUE : pts;
+    d->pkt->dts = AV_NOPTS_VALUE;
+    d->pkt->duration = duration == INT64_MIN ? 0 : duration;
+    d->pkt->flags = keyframe ? AV_PKT_FLAG_KEY : 0;
+    while ((err = avcodec_send_packet( d->ctx, d->pkt )) == AVERROR(EAGAIN))
+        mav_lavc_receive( d, emit, ctx );
+    d->pkt->data = NULL;
+    d->pkt->size = 0;
+    if (err >= 0) mav_lavc_receive( d, emit, ctx );
+    return err < 0 ? -1 : 0;
+}
+
+/* End of the stream: the pictures the decoder still holds. */
+static void mav_lavc_drain( void *handle, mav_vframe_emit emit, void *ctx )
+{
+    struct mav_lavc_vdec *d = handle;
+
+    if (avcodec_send_packet( d->ctx, NULL ) >= 0) mav_lavc_receive( d, emit, ctx );
+}
+
+static int mav_lavc_map( void *frame, struct mav_vplanes *planes )
+{
+    struct mav_lavc_picture *pic = frame;
+
+    planes->y = pic->data;
+    planes->uv = pic->data + (size_t)pic->width * pic->height;
+    planes->y_stride = pic->y_stride;
+    planes->uv_stride = pic->uv_stride;
+    planes->width = pic->width;
+    planes->height = pic->height;
+    planes->full_range = pic->full_range;
+    return 0;
+}
+
+static void mav_lavc_unmap( void *frame )
+{
+    (void)frame;
+}
+
+static void mav_lavc_release( void *frame )
+{
+    struct mav_lavc_picture *pic = frame;
+
+    if (!pic) return;
+    free( pic->data );
+    free( pic );
+}
+
+static void mav_lavc_flush( void *handle )
+{
+    avcodec_flush_buffers( ((struct mav_lavc_vdec *)handle)->ctx );
+}
+
+static const struct mav_video_backend mav_lavc_video =
+{
+    "libavcodec", mav_lavc_supports, mav_lavc_open, mav_lavc_decode, mav_lavc_map, mav_lavc_unmap,
+    mav_lavc_release, mav_lavc_flush, mav_lavc_close,
+};
+
 struct mav_stream
 {
     unsigned int number;        /* index among the exposed streams */
@@ -370,6 +662,7 @@ struct mav_stream
     struct mav_output out;
 
     /* ---- video ---- */
+    const struct mav_video_backend *vbackend;   /* the platform's, or mav_lavc_video */
     void *vdec;
     struct mav_video_output vout;
     struct mav_vframe *reorder; /* sorted by pts */
@@ -385,6 +678,9 @@ struct mav_stream
     AVPacket **queue;
     unsigned int queue_head, queue_count, queue_cap;
     size_t queue_bytes;
+    pthread_t reader;           /* the thread that last asked for this stream's buffers */
+    int has_reader;
+    int unread;                 /* not read for MAV_BACKPRESSURE_WAIT_MS: queued without waiting */
 
     /* ---- the one outstanding output buffer ---- */
     uint8_t *buf;
@@ -393,9 +689,30 @@ struct mav_stream
     int has_buffer;
 
     int enabled, eos, draining, discontinuity;
+    int compressed;             /* hands out the demuxer's packets (mav_enable_compressed) */
+    unsigned int skipped;       /* compressed video: delta frames dropped after a seek */
+
+    /* ---- video decode-ahead (mav_ahead_main), all under the parser lock ---- */
+    struct mav_parser *parser;
+    struct mav_ahead_slot
+    {
+        uint8_t *buf;
+        size_t cap;
+        struct mav_buffer cur;
+    } ahead[MAV_AHEAD_SLOTS];
+    unsigned int ready[MAV_AHEAD_SLOTS];   /* slots holding pictures, oldest first */
+    unsigned int ready_count;
+    int out_slot;               /* the slot get_buffer handed out, -1 = none */
+    int ahead_on;               /* a worker decodes this stream's pictures */
+    int ahead_failed;           /* it could not be started: decoded on demand */
+    int ahead_eos;              /* the worker has no more pictures */
+    int ahead_stop;             /* the worker leaves */
+    int busy;                   /* the worker decodes or converts without the lock */
+    pthread_t ahead_thread;
     int64_t next_pts;           /* 100 ns */
     int64_t seek_target;        /* 100 ns, -1 = none */
     unsigned int decode_errors, errors_logged;
+    int delivered;              /* a buffer has been handed out (logged once) */
 };
 
 struct mav_parser
@@ -424,6 +741,7 @@ struct mav_parser
     AVFormatContext *fmt;
     AVPacket *read_pkt;
     int is_mov;
+    int is_asf;
     int ready;                  /* connected and streams exposed */
     int demux_eof;
     unsigned int read_errors_logged;
@@ -431,6 +749,17 @@ struct mav_parser
 
     struct mav_stream *streams[MAV_MAX_STREAMS];
     unsigned int stream_count;
+
+    /* ---- back-pressure (lock) ---- */
+    pthread_cond_t drain_cond;  /* a queue shrank, a stream changed state, or closing */
+    unsigned int bp_waiters;    /* readers inside mav_wait_drain */
+    unsigned int generation;    /* bumped by seek: a waiter re-checks everything */
+    int closing;                /* disconnect: waiters leave, then the streams go */
+
+    /* ---- decode-ahead (lock) ---- */
+    pthread_cond_t ahead_cond;  /* a picture is ready, a slot is free, a worker is idle, or closing */
+    unsigned int ahead_hold;    /* threads that wait for the workers to stop between pictures */
+    unsigned int ahead_waiters; /* get_buffer callers waiting for a picture */
 };
 
 /***********************************************************************
@@ -572,6 +901,8 @@ static struct mav_parser *mav_create( int output_compressed )
     pthread_cond_init( &p->read_cond, NULL );
     pthread_cond_init( &p->done_cond, NULL );
     pthread_mutex_init( &p->lock, NULL );
+    pthread_cond_init( &p->drain_cond, NULL );
+    pthread_cond_init( &p->ahead_cond, NULL );
     p->output_compressed = !!output_compressed;
     p->stop = -1;
     return p;
@@ -594,16 +925,88 @@ static void mav_reorder_clear( struct mav_stream *s )
     unsigned int i;
 
     for (i = 0; i < s->reorder_count; i++)
-        if (mav_vbackend) mav_vbackend->release( s->reorder[i].handle );
+        if (s->vbackend) s->vbackend->release( s->reorder[i].handle );
     s->reorder_count = 0;
+}
+
+/* ---- decode-ahead: the parts the rest of the parser needs ---- */
+
+/* A worker produces this stream's pictures; get_buffer hands out its slots. */
+static int mav_ahead_mode( const struct mav_stream *s )
+{
+    return s->ahead_on && !s->compressed;
+}
+
+/* The pictures the worker kept, and the one handed out, are dropped (a seek,
+ * a new format, a disable). */
+static void mav_ahead_reset( struct mav_stream *s )
+{
+    s->ready_count = 0;
+    s->out_slot = -1;
+    s->ahead_eos = 0;
+}
+
+/* The caller (holding the lock) owns every stream's decoder state once this
+ * returns: no worker is decoding or converting, and none starts a picture
+ * until mav_ahead_resume.  A worker finishes the picture it is on first. */
+static void mav_ahead_quiesce( struct mav_parser *p )
+{
+    unsigned int i;
+    int busy;
+
+    p->ahead_hold++;
+    for (;;)
+    {
+        for (busy = 0, i = 0; i < p->stream_count; i++) busy |= p->streams[i]->busy;
+        if (!busy) break;
+        pthread_cond_wait( &p->ahead_cond, &p->lock );
+    }
+}
+
+static void mav_ahead_resume( struct mav_parser *p )
+{
+    p->ahead_hold--;
+    pthread_cond_broadcast( &p->ahead_cond );
+}
+
+/* Disconnect: every worker leaves and is joined, and every get_buffer caller
+ * waiting for a picture has left, before the streams are freed.  Called with
+ * the lock and closing set; the lock is dropped while joining. */
+static void mav_ahead_stop_all( struct mav_parser *p )
+{
+    unsigned int i;
+
+    while (p->ahead_waiters)
+    {
+        pthread_cond_broadcast( &p->ahead_cond );
+        pthread_cond_wait( &p->drain_cond, &p->lock );
+    }
+    for (i = 0; i < p->stream_count; i++)
+    {
+        struct mav_stream *s = p->streams[i];
+        pthread_t thread;
+
+        if (!s->ahead_on) continue;
+        s->ahead_stop = 1;
+        thread = s->ahead_thread;
+        pthread_cond_broadcast( &p->ahead_cond );
+        pthread_cond_broadcast( &p->drain_cond );
+        pthread_mutex_unlock( &p->lock );
+        pthread_join( thread, NULL );
+        pthread_mutex_lock( &p->lock );
+        s->ahead_on = 0;
+    }
 }
 
 static void mav_stream_free( struct mav_stream *s )
 {
+    unsigned int i;
+
     if (!s) return;
+    for (i = 0; i < MAV_AHEAD_SLOTS; i++) free( s->ahead[i].buf );
     mav_reorder_clear( s );
     free( s->reorder );
-    if (s->vdec && mav_vbackend) mav_vbackend->close( s->vdec );
+    if (s->vdec && s->vbackend) s->vbackend->close( s->vdec );
     if (s->adec && mav_abackend) mav_abackend->close( s->adec );
     mav_queue_clear( s );
     free( s->queue );
@@ -634,7 +1037,7 @@ static void mav_teardown( struct mav_parser *p )
         av_freep( &p->avio->buffer );
         avio_context_free( &p->avio );
     }
-    p->ready = p->is_mov = p->demux_eof = 0;
+    p->ready = p->is_mov = p->is_asf = p->demux_eof = 0;
     p->read_errors_logged = 0;
     p->stop = -1;
 }
@@ -646,7 +1049,16 @@ static void mav_disconnect( struct mav_parser *p )
      * take the decode lock, which that read may be holding. */
     mav_set_connected( p, 0 );
     pthread_mutex_lock( &p->lock );
+    /* A reader held by back-pressure sleeps without the lock: wake it, and
+     * free nothing until it has left mav_wait_drain.  It finishes its request
+     * under the lock, before this thread gets the lock back. */
+    p->closing = 1;
+    pthread_cond_broadcast( &p->drain_cond );
+    pthread_cond_broadcast( &p->ahead_cond );
+    while (p->bp_waiters) pthread_cond_wait( &p->drain_cond, &p->lock );
+    mav_ahead_stop_all( p );
     mav_teardown( p );
+    p->closing = 0;
     pthread_mutex_unlock( &p->lock );
 }
 
@@ -654,6 +1066,8 @@ static void mav_destroy( struct mav_parser *p )
 {
     if (!p) return;
     mav_disconnect( p );
+    pthread_cond_destroy( &p->ahead_cond );
+    pthread_cond_destroy( &p->drain_cond );
     pthread_mutex_destroy( &p->lock );
     pthread_cond_destroy( &p->done_cond );
     pthread_cond_destroy( &p->read_cond );
@@ -704,11 +1118,16 @@ static const char *mav_pix_name( enum mav_pixel_format fmt )
     {
     case MAV_PIX_BGRA: return "bgra";
     case MAV_PIX_BGRx: return "bgrx";
+    case MAV_PIX_BGR:  return "bgr";
+    case MAV_PIX_RGB15: return "rgb15";
+    case MAV_PIX_RGB16: return "rgb16";
     case MAV_PIX_RGBA: return "rgba";
     case MAV_PIX_I420: return "i420";
     case MAV_PIX_NV12: return "nv12";
+    case MAV_PIX_UYVY: return "uyvy";
     case MAV_PIX_YUY2: return "yuy2";
     case MAV_PIX_YV12: return "yv12";
+    case MAV_PIX_YVYU: return "yvyu";
     default:           return "?";
     }
 }
@@ -745,7 +1164,15 @@ static size_t mav_video_layout( enum mav_pixel_format fmt, uint32_t w, uint32_t 
         l->size = l->offset[2] + (size_t)l->stride[2] * l->chroma_height;
         break;
     case MAV_PIX_YUY2:
+    case MAV_PIX_UYVY:
+    case MAV_PIX_YVYU:
+    case MAV_PIX_RGB15:
+    case MAV_PIX_RGB16:
         l->stride[0] = MAV_ALIGN4( w * 2 );
+        l->size = (size_t)l->stride[0] * h;
+        break;
+    case MAV_PIX_BGR:
+        l->stride[0] = MAV_ALIGN4( w * 3 );
         l->size = (size_t)l->stride[0] * h;
         break;
     case MAV_PIX_BGRA:
@@ -784,6 +1211,14 @@ static int mav_classify_audio( enum AVCodecID id, enum mav_codec_kind *kind, uin
         *kind = MAV_CODEC_AAC;
         *native = MAV_FMT_F32;
         return 1;
+    case AV_CODEC_ID_WMAV1:
+    case AV_CODEC_ID_WMAV2:
+    case AV_CODEC_ID_WMAPRO:
+    case AV_CODEC_ID_WMALOSSLESS:
+        /* libavcodec, reported as S16 like MPEG audio (the WM reader's default) */
+        *kind = MAV_CODEC_WMA;
+        *native = MAV_FMT_S16;
+        return 1;
     default: return 0;
     }
     *kind = MAV_CODEC_MPEG_AUDIO;
@@ -809,6 +1244,15 @@ static uint32_t mav_layout_mask( const AVChannelLayout *layout )
 static int64_t mav_to_100ns( const struct mav_stream *s, int64_t ts )
 {
     return av_rescale_q( ts - s->origin, s->time_base, (AVRational){ 1, 10000000 } );
+}
+
+/* A compressed-output parser's ASF hands out its Windows Media streams as
+ * they are: the formats wg_format can describe (WMA, WMV1/2/3, WMVA, WVC1),
+ * for the WM reader's compressed samples.  MS-MPEG4 has no wg_format. */
+static int mav_passes_compressed( const struct mav_parser *p, const struct mav_stream *s )
+{
+    return p->output_compressed && p->is_asf
+           && (s->info.kind == MAV_CODEC_WMA || (s->info.kind == MAV_CODEC_WMV && s->info.wmv != MAV_WMV_NONE));
 }
 
 /***********************************************************************
@@ -841,16 +1285,20 @@ static struct mav_stream *mav_stream_new( struct mav_parser *p, AVStream *st, en
     s->info.type = type;
     s->time_base = st->time_base;
     /* MP4 timestamps are already on the presentation timeline (edit lists
-     * applied by the demuxer); an MP3/WAV stream starts at its own start. */
-    s->origin = p->is_mov ? 0 : (st->start_time != AV_NOPTS_VALUE ? st->start_time : 0);
+     * applied by the demuxer), and so are ASF's (its preroll taken off by the
+     * demuxer), both on one clock for every stream; an MP3/WAV stream starts
+     * at its own start. */
+    s->origin = p->is_mov || p->is_asf ? 0 : (st->start_time != AV_NOPTS_VALUE ? st->start_time : 0);
     s->last_dts = s->last_vpts = INT64_MIN;
     s->seek_target = -1;
+    s->parser = p;
+    s->out_slot = -1;
     if (!(s->pkt = av_packet_alloc()))
     {
         free( s );
         return NULL;
     }
-    snprintf( s->info.container, sizeof(s->info.container), "%s", p->is_mov ? "mp4" : p->fmt->iformat->name );
+    snprintf( s->info.container, sizeof(s->info.container), "%s", p->is_mov ? "mp4" : p->fmt->iformat->name );   /* asf: "asf" */
     if (p->fmt->duration != AV_NOPTS_VALUE && p->fmt->duration > 0 && !p->is_mov)
         s->info.duration = (uint64_t)p->fmt->duration * 10;   /* AV_TIME_BASE is 1 us */
     else if (st->duration != AV_NOPTS_VALUE && st->duration > 0)
@@ -871,7 +1319,9 @@ static int mav_open_audio( struct mav_parser *p, struct mav_stream *s, AVStream 
         snprintf( why, why_size, "no decoder for it in this port" );
         return MAV_E_UNSUPPORTED;
     }
-    if (p->output_compressed && s->info.kind != MAV_CODEC_PCM)
+    /* An ASF's streams are all exposed either way (the WM reader asks for
+     * the same streams again with compressed output); see mav_passes_compressed. */
+    if (p->output_compressed && !p->is_asf && s->info.kind != MAV_CODEC_PCM)
     {
         snprintf( why, why_size, "compressed output requested and no decoder filter exists; "
                   "the decoding splitter is tried next" );
@@ -941,6 +1391,19 @@ static int mav_open_audio( struct mav_parser *p, struct mav_stream *s, AVStream 
         }
         snprintf( s->info.codec, sizeof(s->info.codec), "%s", codec->name );
         snprintf( s->info.backend, sizeof(s->info.backend), "libavcodec" );
+        if (s->info.kind == MAV_CODEC_WMA)
+        {
+            /* what wg_format describes a WMA stream by (the codec format) */
+            s->info.version = par->codec_id == AV_CODEC_ID_WMAV1 ? 1 : par->codec_id == AV_CODEC_ID_WMAV2 ? 2
+                              : par->codec_id == AV_CODEC_ID_WMAPRO ? 3 : 4;
+            s->info.block_align = par->block_align > 0 ? (uint32_t)par->block_align : 0;
+            s->info.depth = par->bits_per_coded_sample > 0 ? (uint32_t)par->bits_per_coded_sample : 16;
+            if (par->extradata && par->extradata_size <= (int)sizeof(s->info.codec_data))
+            {
+                memcpy( s->info.codec_data, par->extradata, par->extradata_size );
+                s->info.codec_data_len = par->extradata_size;
+            }
+        }
         s->info.native.rate = s->dec->sample_rate;
         s->info.native.channels = s->dec->ch_layout.nb_channels;
         s->info.native.channel_mask = mav_layout_mask( &s->dec->ch_layout );
@@ -956,17 +1419,39 @@ static int mav_open_video( struct mav_parser *p, struct mav_stream *s, AVStream 
     AVRational fps = st->avg_frame_rate;
     int codec;
 
-    (void)p;
+    /* H.264 / HEVC from an MP4 go to the platform decoder (avcC / hvcC codec
+     * data); Windows Media video from an ASF to libavcodec. */
+    s->vbackend = mav_vbackend;
     switch (par->codec_id)
     {
     case AV_CODEC_ID_H264: codec = MAV_BACKEND_H264; s->info.kind = MAV_CODEC_H264; break;
     case AV_CODEC_ID_HEVC: codec = MAV_BACKEND_HEVC; s->info.kind = MAV_CODEC_HEVC; break;
+    case AV_CODEC_ID_WMV1: codec = MAV_LAVC_WMV1; s->info.wmv = MAV_WMV_WMV1; break;
+    case AV_CODEC_ID_WMV2: codec = MAV_LAVC_WMV2; s->info.wmv = MAV_WMV_WMV2; break;
+    case AV_CODEC_ID_WMV3: codec = MAV_LAVC_WMV3; s->info.wmv = MAV_WMV_WMV3; break;
+    case AV_CODEC_ID_VC1:
+        codec = MAV_LAVC_VC1;
+        s->info.wmv = par->codec_tag == MKTAG('W','M','V','A') ? MAV_WMV_WMVA : MAV_WMV_WVC1;
+        break;
+    case AV_CODEC_ID_MSMPEG4V1: codec = MAV_LAVC_MSMPEG4V1; break;
+    case AV_CODEC_ID_MSMPEG4V2: codec = MAV_LAVC_MSMPEG4V2; break;
+    case AV_CODEC_ID_MSMPEG4V3: codec = MAV_LAVC_MSMPEG4V3; break;
     default:
         snprintf( why, why_size, "no decoder for it in this port" );
         return MAV_E_UNSUPPORTED;
     }
+    if (codec >= MAV_LAVC_WMV1)
+    {
+        s->info.kind = MAV_CODEC_WMV;
+        s->vbackend = &mav_lavc_video;
+    }
     snprintf( s->info.codec, sizeof(s->info.codec), "%s", avcodec_get_name( par->codec_id ) );
-    if (!mav_vbackend || !mav_vbackend->supports( codec ))
+    if (p->is_asf != (s->info.kind == MAV_CODEC_WMV))
+    {
+        snprintf( why, why_size, "not in this container here (H.264 / HEVC in MP4, Windows Media video in ASF)" );
+        return MAV_E_UNSUPPORTED;
+    }
+    if (!s->vbackend || !s->vbackend->supports( codec ))
     {
         snprintf( why, why_size, "no video decoder backend for it" );
         return MAV_E_UNSUPPORTED;
@@ -976,10 +1461,10 @@ static int mav_open_video( struct mav_parser *p, struct mav_stream *s, AVStream 
         snprintf( why, why_size, "unusable picture size %dx%d", par->width, par->height );
         return MAV_E_UNSUPPORTED;
     }
-    if (!(s->vdec = mav_vbackend->open( codec, par->extradata, par->extradata_size, par->width, par->height,
-                                        why, why_size )))
+    if (!(s->vdec = s->vbackend->open( codec, par->extradata, par->extradata_size, par->width, par->height,
+                                       why, why_size )))
         return MAV_E_UNSUPPORTED;
-    snprintf( s->info.backend, sizeof(s->info.backend), "%s", mav_vbackend->name );
+    snprintf( s->info.backend, sizeof(s->info.backend), "%s", s->vbackend->name );
 
     if (fps.num <= 0 || fps.den <= 0) fps = st->r_frame_rate;
     if (fps.num <= 0 || fps.den <= 0 || av_q2d( fps ) > 1000)
@@ -1043,19 +1528,22 @@ static int mav_connect_locked( struct mav_parser *p )
     name = p->fmt->iformat->name;
     is_mp3 = !strcmp( name, "mp3" );
     p->is_mov = !strcmp( name, MAV_MOV_NAME );
-    if (!is_mp3 && strcmp( name, "wav" ) && !(p->is_mov && mav_video_allowed))
-        return mav_refuse( p, MAV_E_UNSUPPORTED, p->is_mov ? "container disabled by MADEIRA_WG_VIDEO=0"
-                                                            : "container not in the allowlist" );
-    if (p->fmt->probe_score < (p->is_mov ? MAV_MIN_MOV_PROBE_SCORE : MAV_MIN_PROBE_SCORE))
+    p->is_asf = !strcmp( name, "asf" );
+    if (!is_mp3 && strcmp( name, "wav" ) && !((p->is_mov || p->is_asf) && mav_video_allowed))
+        return mav_refuse( p, MAV_E_UNSUPPORTED, p->is_mov || p->is_asf ? "container disabled by MADEIRA_WG_VIDEO=0"
+                                                                         : "container not in the allowlist" );
+    /* An ASF header object scores like a recognised MP4 (its GUID matches). */
+    if (p->fmt->probe_score < (p->is_mov || p->is_asf ? MAV_MIN_MOV_PROBE_SCORE : MAV_MIN_PROBE_SCORE))
     {
         snprintf( why, sizeof(why), "probe score %d below %d", p->fmt->probe_score,
-                  p->is_mov ? MAV_MIN_MOV_PROBE_SCORE : MAV_MIN_PROBE_SCORE );
+                  p->is_mov || p->is_asf ? MAV_MIN_MOV_PROBE_SCORE : MAV_MIN_PROBE_SCORE );
         return mav_refuse( p, MAV_E_UNSUPPORTED, why );
     }
-    /* The mp3 demuxer only ever carries MPEG audio and an MP4 only compressed
-     * streams: a compressed-output parser is refused before the stream
-     * analysis reads anything more. */
-    if (p->output_compressed && (is_mp3 || p->is_mov))
+    /* The mp3 demuxer only ever carries MPEG audio and an MP4 only
+     * compressed streams: a compressed-output parser is refused before the
+     * stream analysis reads anything more.  An ASF is the WM reader's, which
+     * asks for compressed samples of its Windows Media streams. */
+    if (p->output_compressed && (is_mp3 || p->is_mov || (p->is_asf && !mav_compressed_asf)))
         return mav_refuse( p, MAV_E_UNSUPPORTED,
                            "compressed output requested and no decoder filter exists; "
                            "the decoding splitter is tried next" );
@@ -1065,7 +1553,7 @@ static int mav_connect_locked( struct mav_parser *p )
     for (i = 0; i < p->fmt->nb_streams; i++)
     {
         enum AVMediaType type = p->fmt->streams[i]->codecpar->codec_type;
-        if (type != AVMEDIA_TYPE_AUDIO && !(p->is_mov && type == AVMEDIA_TYPE_VIDEO))
+        if (type != AVMEDIA_TYPE_AUDIO && !((p->is_mov || p->is_asf) && type == AVMEDIA_TYPE_VIDEO))
             p->fmt->streams[i]->discard = AVDISCARD_ALL;
     }
 
@@ -1080,12 +1568,13 @@ static int mav_connect_locked( struct mav_parser *p )
         if (s->disposition & AV_DISPOSITION_ATTACHED_PIC) continue;
         if (s->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
         {
-            if (!p->is_mov) return mav_refuse( p, MAV_E_UNSUPPORTED, "the file has a video stream" );
+            if (!p->is_mov && !p->is_asf) return mav_refuse( p, MAV_E_UNSUPPORTED, "the file has a video stream" );
             if (!vst) vst = s;
         }
         if (s->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && !ast) ast = s;
     }
-    if (!vst && !ast) return mav_refuse( p, MAV_E_UNSUPPORTED, p->is_mov ? "no audio or video stream" : "no audio stream" );
+    if (!vst && !ast) return mav_refuse( p, MAV_E_UNSUPPORTED, p->is_mov || p->is_asf ? "no audio or video stream"
+                                                                                     : "no audio stream" );
 
     if (!(p->read_pkt = av_packet_alloc())) return MAV_E_NOMEM;
 
@@ -1108,7 +1597,7 @@ static int mav_connect_locked( struct mav_parser *p )
         }
         if (status)
         {
-            /* An MP4's audio is optional; its video, or the only stream, is not. */
+            /* An MP4's or ASF's audio is optional; its video, or the only stream, is not. */
             if (st == ast && vst)
             {
                 char text[320];
@@ -1140,6 +1629,7 @@ static int mav_connect_locked( struct mav_parser *p )
         struct mav_stream *s = p->streams[i];
 
         s->enabled = 1;
+        s->compressed = mav_passes_compressed( p, s );
         s->discontinuity = 1;
         s->next_pts = 0;
         /* MP4 audio carries its encoder delay as packets before time 0
@@ -1150,14 +1640,15 @@ static int mav_connect_locked( struct mav_parser *p )
                      "duration=%llums bitrate=%u profile=%u level=%u",
                      s->info.container, i, s->info.codec, s->info.backend, s->info.vnative.width,
                      s->info.vnative.height, s->info.vnative.fps_n, s->info.vnative.fps_d,
-                     mav_pix_name( s->vout.fmt ), (unsigned long long)(s->info.duration / 10000),
+                     s->compressed ? "compressed" : mav_pix_name( s->vout.fmt ), (unsigned long long)(s->info.duration / 10000),
                      s->info.bitrate, s->info.profile, s->info.level );
         else
             mav_log( "connect container=%s codec=%s layer=%u rate=%u channels=%u mask=%#x out=%s "
                      "duration=%llums bitrate=%u compressed_out=%d stream=%u backend=%s",
                      s->info.container, s->info.codec, s->info.layer, s->info.native.rate,
                      s->info.native.channels, s->info.native.channel_mask,
-                     mav_format_name( s->out.fmt ), (unsigned long long)(s->info.duration / 10000),
+                     s->compressed ? "compressed" : mav_format_name( s->out.fmt ),
+                     (unsigned long long)(s->info.duration / 10000),
                      s->info.bitrate, p->output_compressed, i, s->info.backend );
     }
     p->stop = -1;
@@ -1271,13 +1762,14 @@ static int mav_enable( struct mav_parser *p, unsigned int stream, const struct m
     }
     else
     {
-        if (memcmp( out, &s->out, sizeof(*out) ))
+        if (memcmp( out, &s->out, sizeof(*out) ) || s->compressed)
         {
             /* the held buffer is in the old format */
             s->has_buffer = 0;
             swr_free( &s->swr );
             s->out = *out;
         }
+        s->compressed = 0;
         s->enabled = 1;
     }
     pthread_mutex_unlock( &p->lock );
@@ -1301,12 +1793,67 @@ static int mav_enable_video( struct mav_parser *p, unsigned int stream, const st
          * mav_video_layout knows.  The stream stays disabled. */
         s->enabled = 0;
         s->has_buffer = 0;
+        mav_ahead_reset( s );
         status = MAV_E_PARAM;
     }
     else
     {
-        if (out->fmt != s->vout.fmt || out->height != s->vout.height) s->has_buffer = 0;
+        mav_ahead_quiesce( p );
+        if (out->fmt != s->vout.fmt || out->height != s->vout.height || s->compressed)
+        {
+            s->has_buffer = 0;
+            mav_ahead_reset( s );
+        }
         s->vout = *out;
+        s->compressed = 0;
+        s->enabled = 1;
+        mav_ahead_resume( p );
+    }
+    pthread_mutex_unlock( &p->lock );
+    return status;
+}
+
+static int mav_can_pass_compressed( struct mav_parser *p, unsigned int stream )
+{
+    struct mav_stream *s;
+    int ret;
+
+    pthread_mutex_lock( &p->lock );
+    ret = (s = mav_get_stream( p, stream )) && mav_passes_compressed( p, s );
+    pthread_mutex_unlock( &p->lock );
+    return ret;
+}
+
+static int mav_enable_compressed( struct mav_parser *p, unsigned int stream )
+{
+    struct mav_stream *s;
+    int status = MAV_OK;
+
+    pthread_mutex_lock( &p->lock );
+    if (!(s = mav_get_stream( p, stream )))
+        status = MAV_E_STATE;
+    else if (!mav_passes_compressed( p, s ))
+    {
+        /* as a refused decoded format: the stream stays disabled */
+        s->enabled = 0;
+        s->has_buffer = 0;
+        mav_ahead_reset( s );
+        status = MAV_E_PARAM;
+    }
+    else
+    {
+        if (!s->compressed)
+        {
+            /* the held buffer, and what the decoder holds, were decoded output */
+            mav_ahead_quiesce( p );
+            s->has_buffer = 0;
+            mav_ahead_reset( s );
+            if (s->pkt_pending) av_packet_unref( s->pkt );
+            s->pkt_pending = 0;
+            mav_reorder_clear( s );
+            mav_ahead_resume( p );
+        }
+        s->compressed = 1;
         s->enabled = 1;
     }
     pthread_mutex_unlock( &p->lock );
@@ -1322,8 +1869,11 @@ static void mav_disable( struct mav_parser *p, unsigned int stream )
     {
         s->enabled = 0;
         s->has_buffer = 0;
+        mav_ahead_reset( s );
         /* its queued packets will not be read */
         mav_queue_clear( s );
+        if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
+        pthread_cond_broadcast( &p->ahead_cond );
     }
     pthread_mutex_unlock( &p->lock );
 }
@@ -1366,6 +1916,52 @@ static void mav_queue_push( struct mav_stream *s, AVPacket *pkt )
     s->queue_bytes += pkt->size;
 }
 
+static int mav_queue_over( const struct mav_stream *s, unsigned int num, unsigned int den )
+{
+    return s->queue_count > MAV_QUEUE_SOFT_PACKETS / den * num || s->queue_bytes > MAV_QUEUE_SOFT_BYTES / den * num;
+}
+
+/* Back-pressure.  `waiter` just queued a packet for
+ * `owner`, whose queue is past its soft limit while another thread reads it.
+ * Dropping would break the owner's pictures (or audio) up to its next
+ * keyframe, so the waiter sleeps -- WITHOUT the parser lock, which the owner's
+ * reader needs to drain its queue -- until that queue is back under three
+ * quarters of the limit.  The waiter holds no packet and no demuxer state
+ * while it sleeps; it re-checks its own queue when it wakes.  It also wakes on
+ * a seek (generation), a disable or end of the owner's stream, and disconnect
+ * (closing).  An owner not read for MAV_BACKPRESSURE_WAIT_MS is marked unread:
+ * its packets are queued again without waiting (and dropped past the hard
+ * limit, as before) until it is read. */
+static void mav_wait_drain( struct mav_parser *p, struct mav_stream *waiter, struct mav_stream *owner )
+{
+    unsigned int generation = p->generation;
+    struct timespec deadline;
+
+    clock_gettime( CLOCK_REALTIME, &deadline );
+    deadline.tv_sec += MAV_BACKPRESSURE_WAIT_MS / 1000;
+    deadline.tv_nsec += (long)(MAV_BACKPRESSURE_WAIT_MS % 1000) * 1000000;
+    if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000; }
+    p->bp_waiters++;
+    while (!p->closing && p->generation == generation && owner->enabled && !owner->eos && !owner->unread
+           && mav_queue_over( owner, 3, 4 ))
+    {
+        if (pthread_cond_timedwait( &p->drain_cond, &p->lock, &deadline ) == ETIMEDOUT)
+        {
+            if (!p->closing && p->generation == generation && owner->enabled && !owner->eos
+                && mav_queue_over( owner, 3, 4 ))
+            {
+                owner->unread = 1;
+                mav_log( "stream %u: not read for %d ms while stream %u reads ahead (%u packets, %zu bytes "
+                         "queued); queueing without waiting", owner->number, MAV_BACKPRESSURE_WAIT_MS,
+                         waiter->number, owner->queue_count, owner->queue_bytes );
+            }
+            break;
+        }
+    }
+    p->bp_waiters--;
+    if (p->closing) pthread_cond_broadcast( &p->drain_cond );   /* mav_disconnect waits for bp_waiters == 0 */
+}
+
 /* Moves the next packet of stream `s` into `dst`, reading (and queueing for
  * the other streams) as needed.  Returns 0 at the end of the data. */
 static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket *dst )
@@ -1373,21 +1969,24 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
     unsigned int i;
     int err;
 
-    if (s->queue_count)
-    {
-        AVPacket *q = s->queue[s->queue_head++];
-        s->queue_count--;
-        s->queue_bytes -= q->size;
-        if (!s->queue_count) s->queue_head = 0;
-        av_packet_move_ref( dst, q );
-        av_packet_free( &q );
-        return 1;
-    }
-    while (!p->demux_eof)
+    for (;;)
     {
         struct mav_stream *owner = NULL;
         AVPacket *copy;
 
+        if (s->queue_count)
+        {
+            AVPacket *q = s->queue[s->queue_head++];
+            s->queue_count--;
+            s->queue_bytes -= q->size;
+            if (!s->queue_count) s->queue_head = 0;
+            s->unread = 0;
+            av_packet_move_ref( dst, q );
+            av_packet_free( &q );
+            if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
+            return 1;
+        }
+        if (p->demux_eof || p->closing) return 0;
         if ((err = av_read_frame( p->fmt, p->read_pkt )) < 0)
         {
             if (err != AVERROR_EOF && err != AVERROR_EXIT && p->read_errors_logged < 3)
@@ -1396,12 +1995,13 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
                 mav_log( "read error %d at byte %llu; draining", err, (unsigned long long)p->pos );
             }
             p->demux_eof = 1;
-            break;
+            return 0;
         }
         for (i = 0; i < p->stream_count; i++)
             if (p->streams[i]->av_index == p->read_pkt->stream_index) owner = p->streams[i];
         if (owner == s)
         {
+            s->unread = 0;
             av_packet_move_ref( dst, p->read_pkt );
             return 1;
         }
@@ -1418,8 +2018,16 @@ static int mav_next_packet( struct mav_parser *p, struct mav_stream *s, AVPacket
         }
         av_packet_move_ref( copy, p->read_pkt );
         mav_queue_push( owner, copy );
+        /* Only for an owner another thread reads: one thread serving both
+         * streams (the earliest-buffer mode, or a caller that alternates)
+         * would wait for itself.  A decode-ahead worker reads for its
+         * stream's reader, so an owner that thread reads counts as its own:
+         * that thread may be waiting for the worker's picture. */
+        if (mav_queue_over( owner, 1, 1 ) && !owner->unread
+            && !(owner->has_reader && (pthread_equal( owner->reader, pthread_self() )
+                                       || (s->has_reader && pthread_equal( owner->reader, s->reader )))))
+            mav_wait_drain( p, s, owner );
     }
-    return 0;
 }
 
 /***********************************************************************
@@ -1721,7 +2329,7 @@ static void mav_vframe_emit_cb( void *ctx, void *handle, int64_t pts, int64_t du
         struct mav_vframe *grown = realloc( s->reorder, cap * sizeof(*grown) );
         if (!grown)
         {
-            mav_vbackend->release( handle );
+            s->vbackend->release( handle );
             return;
         }
         s->reorder = grown;
@@ -1766,31 +2374,38 @@ static void mav_yuv_coefs( int bt709, int full, struct mav_yuv_coefs *c )
     c->yoff = full ? 0 : 16;
 }
 
-/* Writes one decoded 4:2:0 bi-planar picture into `dst` in s->vout's format
- * and layout.  A picture smaller than the output is padded with black; a
- * larger one is cropped (the codec's cropping is the decoder's business). */
-static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes *src, uint8_t *dst,
-                                 const struct mav_layout *l )
+/* Writes one decoded 4:2:0 bi-planar picture into `dst` in `vout`'s format
+ * and layout, converting to RGB with the BT.709 matrix if `bt709`, else
+ * BT.601.  A picture smaller than the output is padded with black; a larger
+ * one is cropped (the codec's cropping is the decoder's business).  It takes
+ * the output description rather than a stream so that the wg_transform's WMV
+ * decoder (winegstreamer_unixlib_ios.c) writes its pictures with the same
+ * code. */
+static void mav_convert_picture( const struct mav_video_output *vout, int bt709, const struct mav_vplanes *src,
+                                 uint8_t *dst, const struct mav_layout *l )
 {
-    uint32_t w = s->vout.width, h = s->vout.height < 0 ? -s->vout.height : s->vout.height;
+    uint32_t w = vout->width, h = vout->height < 0 ? -vout->height : vout->height;
     uint32_t cw = src->width < w ? src->width : w, ch = src->height < h ? src->height : h;
     uint32_t ccw = (cw + 1) / 2, cch = (ch + 1) / 2, x, y;
-    int flip = s->vout.height < 0;
-    int yuv = s->vout.fmt == MAV_PIX_NV12 || s->vout.fmt == MAV_PIX_I420
-              || s->vout.fmt == MAV_PIX_YV12 || s->vout.fmt == MAV_PIX_YUY2;
+    int flip = vout->height < 0;
+    int planar = vout->fmt == MAV_PIX_NV12 || vout->fmt == MAV_PIX_I420 || vout->fmt == MAV_PIX_YV12;
+    int packed = vout->fmt == MAV_PIX_YUY2 || vout->fmt == MAV_PIX_UYVY || vout->fmt == MAV_PIX_YVYU;
 
     if (cw < w || ch < h)
     {
-        /* black: Y 16 / chroma 128, or opaque RGB black */
-        if (s->vout.fmt == MAV_PIX_YUY2)
+        /* black: Y 16 / chroma 128, or RGB black (opaque where there is alpha) */
+        if (packed)
             for (y = 0; y < h; y++)
                 for (x = 0; x < l->stride[0] / 4; x++)
-                    memcpy( dst + (size_t)y * l->stride[0] + x * 4, "\x10\x80\x10\x80", 4 );
-        else if (yuv)
+                    memcpy( dst + (size_t)y * l->stride[0] + x * 4,
+                            vout->fmt == MAV_PIX_UYVY ? "\x80\x10\x80\x10" : "\x10\x80\x10\x80", 4 );
+        else if (planar)
         {
             memset( dst, 16, l->offset[1] );
             memset( dst + l->offset[1], 128, l->size - l->offset[1] );
         }
+        else if (vout->fmt == MAV_PIX_BGR || vout->fmt == MAV_PIX_RGB15 || vout->fmt == MAV_PIX_RGB16)
+            memset( dst, 0, l->size );
         else
             for (y = 0; y < h; y++)
                 for (x = 0; x < w; x++)
@@ -1798,7 +2413,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     }
 
 #define DST_ROW(plane, row, rows) (dst + l->offset[plane] + (size_t)l->stride[plane] * (flip ? (rows) - 1 - (row) : (row)))
-    switch (s->vout.fmt)
+    switch (vout->fmt)
     {
     case MAV_PIX_NV12:
         for (y = 0; y < ch; y++) memcpy( DST_ROW( 0, y, h ), src->y + (size_t)y * src->y_stride, cw );
@@ -1807,7 +2422,7 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
     case MAV_PIX_I420:
     case MAV_PIX_YV12:
     {
-        int u_plane = s->vout.fmt == MAV_PIX_I420 ? 1 : 2, v_plane = 3 - u_plane;
+        int u_plane = vout->fmt == MAV_PIX_I420 ? 1 : 2, v_plane = 3 - u_plane;
         for (y = 0; y < ch; y++) memcpy( DST_ROW( 0, y, h ), src->y + (size_t)y * src->y_stride, cw );
         for (y = 0; y < cch; y++)
         {
@@ -1822,26 +2437,34 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
         break;
     }
     case MAV_PIX_YUY2:
+    case MAV_PIX_UYVY:
+    case MAV_PIX_YVYU:
+    {
+        /* byte offsets of Y0, U, Y1, V in each 4-byte pair */
+        int y0 = vout->fmt == MAV_PIX_UYVY ? 1 : 0, y1 = y0 + 2;
+        int uo = vout->fmt == MAV_PIX_YUY2 ? 1 : vout->fmt == MAV_PIX_UYVY ? 0 : 3;
+        int vo = vout->fmt == MAV_PIX_YUY2 ? 3 : vout->fmt == MAV_PIX_UYVY ? 2 : 1;
         for (y = 0; y < ch; y++)
         {
             const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
             uint8_t *o = DST_ROW( 0, y, h );
             for (x = 0; x < cw; x += 2)
             {
-                o[2 * x + 0] = yr[x];
-                o[2 * x + 1] = uv[x];
-                o[2 * x + 2] = x + 1 < cw ? yr[x + 1] : yr[x];
-                o[2 * x + 3] = uv[x + 1];
+                o[2 * x + y0] = yr[x];
+                o[2 * x + uo] = uv[x];
+                o[2 * x + y1] = x + 1 < cw ? yr[x + 1] : yr[x];
+                o[2 * x + vo] = uv[x + 1];
             }
         }
         break;
+    }
     case MAV_PIX_BGRA:
     case MAV_PIX_BGRx:
     case MAV_PIX_RGBA:
     {
         struct mav_yuv_coefs c;
-        int ri = s->vout.fmt == MAV_PIX_RGBA ? 0 : 2, bi = 2 - ri;
-        mav_yuv_coefs( s->bt709, src->full_range, &c );
+        int ri = vout->fmt == MAV_PIX_RGBA ? 0 : 2, bi = 2 - ri;
+        mav_yuv_coefs( bt709, src->full_range, &c );
         for (y = 0; y < ch; y++)
         {
             const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
@@ -1858,10 +2481,67 @@ static void mav_convert_picture( struct mav_stream *s, const struct mav_vplanes 
         }
         break;
     }
+    case MAV_PIX_BGR:
+    case MAV_PIX_RGB15:
+    case MAV_PIX_RGB16:
+    {
+        struct mav_yuv_coefs c;
+        mav_yuv_coefs( bt709, src->full_range, &c );
+        for (y = 0; y < ch; y++)
+        {
+            const uint8_t *yr = src->y + (size_t)y * src->y_stride, *uv = src->uv + (size_t)(y / 2) * src->uv_stride;
+            uint8_t *o = DST_ROW( 0, y, h );
+            for (x = 0; x < cw; x++)
+            {
+                int yy = (yr[x] - c.yoff) * c.y + 32768;
+                int u = uv[(x & ~1u)] - 128, v = uv[(x & ~1u) + 1] - 128;
+                uint8_t r = mav_clip8( (yy + c.rv * v) >> 16 );
+                uint8_t g = mav_clip8( (yy - c.gu * u - c.gv * v) >> 16 );
+                uint8_t b = mav_clip8( (yy + c.bu * u) >> 16 );
+                if (vout->fmt == MAV_PIX_BGR)
+                {
+                    o[3 * x] = b;
+                    o[3 * x + 1] = g;
+                    o[3 * x + 2] = r;
+                }
+                else
+                {
+                    uint16_t px = vout->fmt == MAV_PIX_RGB16
+                                  ? (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | b >> 3)
+                                  : (uint16_t)((r >> 3) << 10 | (g >> 3) << 5 | b >> 3);
+                    o[2 * x] = (uint8_t)px;
+                    o[2 * x + 1] = (uint8_t)(px >> 8);
+                }
+            }
+        }
+        break;
+    }
     default:
         break;
     }
 #undef DST_ROW
+}
+
+/* The worker decodes and converts without the parser lock, so a request for
+ * another stream (audio, on the same Media Foundation work queue thread) is
+ * not held up behind a picture; anyone else keeps the lock.  Nothing but the
+ * worker touches this stream's decoder, reorder queue and s->buf meanwhile:
+ * whoever would (seek, a new format, disable, disconnect) waits in
+ * mav_ahead_quiesce. */
+static int mav_heavy_begin( struct mav_parser *p, struct mav_stream *s )
+{
+    if (!s->ahead_on || !pthread_equal( s->ahead_thread, pthread_self() )) return 0;
+    s->busy = 1;
+    pthread_mutex_unlock( &p->lock );
+    return 1;
+}
+
+static void mav_heavy_end( struct mav_parser *p, struct mav_stream *s, int unlocked )
+{
+    if (!unlocked) return;
+    pthread_mutex_lock( &p->lock );
+    s->busy = 0;
+    pthread_cond_broadcast( &p->ahead_cond );
 }
 
 /* One picture out of the reorder queue, into s->buf.  Returns 1 if it is
@@ -1873,6 +2553,7 @@ static int mav_video_emit( struct mav_parser *p, struct mav_stream *s, struct ma
     struct mav_layout l;
     int64_t pts = mav_to_100ns( s, f->pts ), dur;
     size_t size;
+    int unlocked, mapped;
 
     dur = f->duration != INT64_MIN && f->duration > 0
           ? av_rescale_q( f->duration, s->time_base, (AVRational){ 1, 10000000 } ) : s->frame_duration;
@@ -1881,28 +2562,35 @@ static int mav_video_emit( struct mav_parser *p, struct mav_stream *s, struct ma
     {
         if (pts + dur <= s->seek_target)
         {
-            mav_vbackend->release( f->handle );
+            s->vbackend->release( f->handle );
             return 0;
         }
         s->seek_target = -1;
     }
     if (p->stop >= 0 && pts >= p->stop)
     {
-        mav_vbackend->release( f->handle );
+        s->vbackend->release( f->handle );
         s->eos = 1;
         return 0;
     }
     size = mav_video_layout( s->vout.fmt, s->vout.width, s->vout.height < 0 ? -s->vout.height : s->vout.height, &l );
     if (!size || size > UINT32_MAX || !mav_reserve( s, size ))
     {
-        mav_vbackend->release( f->handle );
+        s->vbackend->release( f->handle );
         s->eos = 1;
         mav_log( "stream %u: cannot hold a %zu-byte picture; ending the stream", s->number, size );
         return 0;
     }
-    if (mav_vbackend->map( f->handle, &planes ))
+    unlocked = mav_heavy_begin( p, s );
+    if ((mapped = !s->vbackend->map( f->handle, &planes )))
     {
-        mav_vbackend->release( f->handle );
+        mav_convert_picture( &s->vout, s->bt709, &planes, s->buf, &l );
+        s->vbackend->unmap( f->handle );
+    }
+    s->vbackend->release( f->handle );
+    mav_heavy_end( p, s, unlocked );
+    if (!mapped)
+    {
         if (s->errors_logged < 3)
         {
             s->errors_logged++;
@@ -1911,9 +2599,6 @@ static int mav_video_emit( struct mav_parser *p, struct mav_stream *s, struct ma
         s->discontinuity = 1;
         return 0;
     }
-    mav_convert_picture( s, &planes, s->buf, &l );
-    mav_vbackend->unmap( f->handle );
-    mav_vbackend->release( f->handle );
 
     s->next_pts = pts + dur;
     s->cur.pts = pts > 0 ? (uint64_t)pts : 0;
@@ -1938,6 +2623,7 @@ static int mav_video_next( struct mav_parser *p, struct mav_stream *s )
          * later packets decode at or after the last decode time, and a
          * picture never presents before it decodes. */
         if (s->reorder_count && (s->draining || s->reorder_count > MAV_REORDER_MAX
+                                 || s->vbackend == &mav_lavc_video   /* already in presentation order */
                                  || (s->last_dts != INT64_MIN && s->reorder[0].pts <= s->last_dts)))
         {
             struct mav_vframe f = s->reorder[0];
@@ -1953,13 +2639,24 @@ static int mav_video_next( struct mav_parser *p, struct mav_stream *s )
         }
         if (!mav_next_packet( p, s, s->pkt ))
         {
+            /* libavcodec holds its last pictures until it is drained */
+            if (s->vbackend == &mav_lavc_video && !p->closing)
+            {
+                int unlocked = mav_heavy_begin( p, s );
+                mav_lavc_drain( s->vdec, mav_vframe_emit_cb, s );
+                mav_heavy_end( p, s, unlocked );
+            }
             s->draining = 1;
             continue;
         }
-        err = mav_vbackend->decode( s->vdec, s->pkt->data, s->pkt->size,
-                                    s->pkt->pts != AV_NOPTS_VALUE ? s->pkt->pts : INT64_MIN,
-                                    s->pkt->duration > 0 ? s->pkt->duration : INT64_MIN,
-                                    !!(s->pkt->flags & AV_PKT_FLAG_KEY), mav_vframe_emit_cb, s );
+        {
+            int unlocked = mav_heavy_begin( p, s );
+            err = s->vbackend->decode( s->vdec, s->pkt->data, s->pkt->size,
+                                        s->pkt->pts != AV_NOPTS_VALUE ? s->pkt->pts : INT64_MIN,
+                                        s->pkt->duration > 0 ? s->pkt->duration : INT64_MIN,
+                                        !!(s->pkt->flags & AV_PKT_FLAG_KEY), mav_vframe_emit_cb, s );
+            mav_heavy_end( p, s, unlocked );
+        }
         s->last_dts = s->pkt->dts != AV_NOPTS_VALUE ? s->pkt->dts : INT64_MIN;
         av_packet_unref( s->pkt );
         if (err < 0)
@@ -1977,13 +2674,238 @@ static int mav_video_next( struct mav_parser *p, struct mav_stream *s )
 }
 
 /***********************************************************************
+ *           video decode-ahead
+ *
+ * Wine's media source asks for every stream's samples on one work-queue
+ * thread (a standard work queue has one thread), and so does the WM reader
+ * reading the earliest buffer.  Decoded on demand, each picture of a 1080p
+ * WMV (software decode and RGB conversion, about 20 ms) held up the audio
+ * request behind it, and the audio renderer ran short every few seconds
+ * (Senren Banka's movie).  GStreamer decodes in streaming threads of its own;
+ * here each decoded video stream gets a worker, started at its first request,
+ * that keeps up to MAV_AHEAD_SLOTS - 1 pictures ready.  It demuxes under the
+ * parser lock like any reader and decodes and converts without it
+ * (mav_heavy_begin); a request pops a ready picture.  MADEIRA_WG_VIDEO_AHEAD=0
+ * decodes on demand again.
+ */
+static int mav_ahead_free_slot( const struct mav_stream *s )
+{
+    unsigned int i, j;
+
+    for (i = 0; i < MAV_AHEAD_SLOTS; i++)
+    {
+        int used = (int)i == s->out_slot;
+        for (j = 0; j < s->ready_count && !used; j++) used = s->ready[j] == i;
+        if (!used) return i;
+    }
+    return -1;
+}
+
+static void *mav_ahead_main( void *arg )
+{
+    struct mav_stream *s = arg;
+    struct mav_parser *p = s->parser;
+
+    pthread_mutex_lock( &p->lock );
+    for (;;)
+    {
+        unsigned int generation;
+        int status, slot;
+
+        while (!p->closing && !s->ahead_stop
+               && (p->ahead_hold || !s->enabled || s->compressed || s->ahead_eos || mav_ahead_free_slot( s ) < 0))
+            pthread_cond_wait( &p->ahead_cond, &p->lock );
+        if (p->closing || s->ahead_stop) break;
+
+        generation = p->generation;
+        s->has_buffer = 0;
+        status = mav_video_next( p, s );
+        if (p->closing || s->ahead_stop) break;
+        if (generation != p->generation || !s->enabled || s->compressed)
+        {
+            /* a seek, a new format or a disable came while it waited for a
+             * queue to drain: what it made is not wanted */
+            s->has_buffer = 0;
+            continue;
+        }
+        if (status == MAV_OK && s->has_buffer && (slot = mav_ahead_free_slot( s )) >= 0)
+        {
+            struct mav_ahead_slot *a = &s->ahead[slot];
+            uint8_t *buf = a->buf;
+            size_t cap = a->cap;
+
+            /* the picture changes hands; its slot's old buffer is the next one made */
+            a->buf = s->buf;
+            a->cap = s->buf_cap;
+            a->cur = s->cur;
+            s->buf = buf;
+            s->buf_cap = cap;
+            s->ready[s->ready_count++] = slot;
+        }
+        else if (status != MAV_OK)
+            s->ahead_eos = 1;
+        s->has_buffer = 0;
+        pthread_cond_broadcast( &p->ahead_cond );
+    }
+    pthread_mutex_unlock( &p->lock );
+    return NULL;
+}
+
+/* Called by the first request, with the lock.  A worker that cannot be
+ * started leaves the stream decoded on demand. */
+static void mav_ahead_start( struct mav_parser *p, struct mav_stream *s )
+{
+    pthread_attr_t attr;
+    int err;
+
+    pthread_attr_init( &attr );
+    pthread_attr_setstacksize( &attr, 1024 * 1024 );
+    s->ahead_stop = 0;
+    s->ahead_eos = 0;
+    s->ready_count = 0;
+    s->out_slot = -1;
+    /* the worker waits for this lock, so ahead_thread is set before it runs */
+    if ((err = pthread_create( &s->ahead_thread, &attr, mav_ahead_main, s )))
+    {
+        s->ahead_failed = 1;
+        mav_log( "stream %u: no decode-ahead thread (%d); decoding on demand", s->number, err );
+    }
+    else
+    {
+        s->ahead_on = 1;
+        mav_log( "stream %u: decoding ahead on a thread of its own (%u pictures)", s->number,
+                 MAV_AHEAD_SLOTS - 1 );
+    }
+    pthread_attr_destroy( &attr );
+}
+
+static int mav_ahead_next( struct mav_parser *p, struct mav_stream *s )
+{
+    if (s->out_slot >= 0)
+    {
+        s->cur = s->ahead[s->out_slot].cur;
+        return MAV_OK;
+    }
+    for (;;)
+    {
+        if (p->closing || !s->enabled || s->compressed) return MAV_NO_BUFFER;
+        if (s->ready_count)
+        {
+            s->out_slot = s->ready[0];
+            memmove( s->ready, s->ready + 1, (s->ready_count - 1) * sizeof(*s->ready) );
+            s->ready_count--;
+            s->cur = s->ahead[s->out_slot].cur;
+            pthread_cond_broadcast( &p->ahead_cond );
+            return MAV_OK;
+        }
+        if (s->ahead_eos || !s->ahead_on) return MAV_NO_BUFFER;
+        p->ahead_waiters++;
+        pthread_cond_wait( &p->ahead_cond, &p->lock );
+        p->ahead_waiters--;
+        if (p->closing) pthread_cond_broadcast( &p->drain_cond );   /* mav_ahead_stop_all waits for it */
+    }
+}
+
+/***********************************************************************
+ *           compressed
+ */
+/* After a seek, this many delta frames are dropped at most while waiting for
+ * a keyframe (a file that flags none still plays). */
+#define MAV_MAX_SEEK_SKIP 300
+
+/* The next packet as it is, for the caller's decoder.  After a seek the
+ * demuxer is at or before the target, and everything from the first keyframe
+ * on is handed out, since a decoder needs it (the WM reader does not trim). */
+static int mav_compressed_next( struct mav_parser *p, struct mav_stream *s )
+{
+    int64_t ts, pts, dur;
+
+    for (;;)
+    {
+        if (s->eos) return MAV_NO_BUFFER;
+        if (!mav_next_packet( p, s, s->pkt ))
+        {
+            s->eos = 1;
+            return MAV_NO_BUFFER;
+        }
+        if (!s->pkt->size)
+        {
+            av_packet_unref( s->pkt );
+            continue;
+        }
+        if (s->seek_target >= 0 && s->type == MAV_STREAM_VIDEO && !(s->pkt->flags & AV_PKT_FLAG_KEY)
+            && s->skipped < MAV_MAX_SEEK_SKIP)
+        {
+            s->skipped++;
+            av_packet_unref( s->pkt );
+            continue;
+        }
+        if (s->skipped >= MAV_MAX_SEEK_SKIP && s->errors_logged < 3)
+        {
+            s->errors_logged++;
+            mav_log( "stream %u: no keyframe in %u packets after a seek; handing out delta frames", s->number,
+                     s->skipped );
+        }
+        s->seek_target = -1;
+        s->skipped = 0;
+        ts = s->pkt->pts != AV_NOPTS_VALUE ? s->pkt->pts : s->pkt->dts;
+        pts = ts != AV_NOPTS_VALUE ? mav_to_100ns( s, ts ) : s->next_pts;
+        dur = s->pkt->duration > 0 ? av_rescale_q( s->pkt->duration, s->time_base, (AVRational){ 1, 10000000 } )
+              : s->type == MAV_STREAM_VIDEO ? s->frame_duration : 0;
+        if (p->stop >= 0 && pts >= p->stop)
+        {
+            av_packet_unref( s->pkt );
+            s->eos = 1;
+            return MAV_NO_BUFFER;
+        }
+        if (!mav_reserve( s, (size_t)s->pkt->size ))
+        {
+            av_packet_unref( s->pkt );
+            s->eos = 1;
+            mav_log( "stream %u: cannot hold a %d-byte packet; ending the stream", s->number, s->pkt->size );
+            return MAV_NO_BUFFER;
+        }
+        memcpy( s->buf, s->pkt->data, s->pkt->size );
+        s->next_pts = pts + dur;
+        s->cur.pts = pts > 0 ? (uint64_t)pts : 0;
+        s->cur.duration = dur;
+        s->cur.size = (uint32_t)s->pkt->size;
+        s->cur.stream = s->number;
+        s->cur.discontinuity = s->discontinuity;
+        s->cur.delta = !(s->pkt->flags & AV_PKT_FLAG_KEY);
+        s->discontinuity = 0;
+        s->has_buffer = 1;
+        av_packet_unref( s->pkt );
+        return MAV_OK;
+    }
+}
+
+/***********************************************************************
  *           buffers
  */
 static int mav_stream_next( struct mav_parser *p, struct mav_stream *s )
 {
     if (!s->enabled) return MAV_NO_BUFFER;
+    if (s->compressed) return s->has_buffer ? MAV_OK : mav_compressed_next( p, s );
+    if (s->type == MAV_STREAM_VIDEO && mav_video_ahead && !s->ahead_on && !s->ahead_failed && !s->has_buffer)
+        mav_ahead_start( p, s );
+    if (mav_ahead_mode( s )) return mav_ahead_next( p, s );
     if (s->has_buffer) return MAV_OK;
     return s->type == MAV_STREAM_VIDEO ? mav_video_next( p, s ) : mav_audio_next( p, s );
+}
+
+/* The buffer get_buffer handed out is no longer the caller's. */
+static void mav_drop_held( struct mav_parser *p, struct mav_stream *s )
+{
+    if (mav_ahead_mode( s ))
+    {
+        if (s->out_slot >= 0)
+        {
+            s->out_slot = -1;
+            pthread_cond_broadcast( &p->ahead_cond );
+        }
+    }
+    else s->has_buffer = 0;
 }
 
 static int mav_get_buffer( struct mav_parser *p, int stream, struct mav_buffer *buffer )
@@ -1998,20 +2920,57 @@ static int mav_get_buffer( struct mav_parser *p, int stream, struct mav_buffer *
     else if (stream >= 0)
     {
         if (!(s = mav_get_stream( p, stream ))) status = MAV_E_STATE;
-        else status = mav_stream_next( p, s );
+        else
+        {
+            s->reader = pthread_self();
+            s->has_reader = 1;
+            status = mav_stream_next( p, s );
+            /* disabled while this reader slept in mav_wait_drain */
+            if (status == MAV_OK && !s->enabled)
+            {
+                mav_drop_held( p, s );
+                status = MAV_NO_BUFFER;
+            }
+        }
     }
     else
     {
-        /* wg_parser.c: the earliest buffer of all streams, by pts */
+        /* wg_parser.c: the earliest buffer of all streams, by pts.  This
+         * thread reads them all, so none waits for another (mav_wait_drain). */
+        for (i = 0; i < p->stream_count; i++)
+        {
+            p->streams[i]->reader = pthread_self();
+            p->streams[i]->has_reader = 1;
+        }
         for (i = 0; i < p->stream_count; i++)
         {
             struct mav_stream *c = p->streams[i];
-            if (mav_stream_next( p, c ) != MAV_OK) continue;
+            if (mav_stream_next( p, c ) != MAV_OK || !c->enabled) continue;
             if (!s || c->cur.pts < s->cur.pts) s = c;
         }
         status = s ? MAV_OK : MAV_NO_BUFFER;
     }
-    if (status == MAV_OK) *buffer = s->cur;
+    if (status == MAV_OK)
+    {
+        *buffer = s->cur;
+        /* One line per stream, so a device log tells a stream nobody asked
+         * for (a renderer the media session dropped) from one that fails to
+         * decode. */
+        if (!s->delivered)
+        {
+            s->delivered = 1;
+            if (s->compressed)
+                mav_log( "stream %u: first compressed packet delivered (%s, %u bytes)", s->number, s->info.codec,
+                         s->cur.size );
+            else if (s->type == MAV_STREAM_VIDEO)
+                mav_log( "stream %u: first picture delivered (%s %dx%d)", s->number, mav_pix_name( s->vout.fmt ),
+                         s->vout.width, s->vout.height );
+            else
+                mav_log( "stream %u: first audio buffer delivered", s->number );
+        }
+    }
+    /* a queue may have shrunk, or a stream ended: a waiter re-checks */
+    if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
     pthread_mutex_unlock( &p->lock );
     return status;
 }
@@ -2022,12 +2981,18 @@ static int mav_copy_buffer( struct mav_parser *p, unsigned int stream, void *dst
     int status = MAV_OK;
 
     pthread_mutex_lock( &p->lock );
-    if (!(s = mav_get_stream( p, stream )) || !s->has_buffer)
+    if (!(s = mav_get_stream( p, stream )) || (mav_ahead_mode( s ) ? s->out_slot < 0 : !s->has_buffer))
         status = MAV_E_STATE;
-    else if (offset > s->cur.size || size > s->cur.size - offset || (size && !dst))
-        status = MAV_E_PARAM;
     else
-        memcpy( dst, s->buf + offset, size );
+    {
+        const struct mav_buffer *cur = mav_ahead_mode( s ) ? &s->ahead[s->out_slot].cur : &s->cur;
+        const uint8_t *buf = mav_ahead_mode( s ) ? s->ahead[s->out_slot].buf : s->buf;
+
+        if (offset > cur->size || size > cur->size - offset || (size && !dst))
+            status = MAV_E_PARAM;
+        else
+            memcpy( dst, buf + offset, size );
+    }
     pthread_mutex_unlock( &p->lock );
     return status;
 }
@@ -2037,7 +3002,7 @@ static void mav_release_buffer( struct mav_parser *p, unsigned int stream )
     struct mav_stream *s;
 
     pthread_mutex_lock( &p->lock );
-    if ((s = mav_get_stream( p, stream ))) s->has_buffer = 0;
+    if ((s = mav_get_stream( p, stream ))) mav_drop_held( p, s );
     pthread_mutex_unlock( &p->lock );
 }
 
@@ -2057,6 +3022,8 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
         pthread_mutex_unlock( &p->lock );
         return MAV_E_STATE;
     }
+    /* the decoders, the demuxer and the decode-ahead pictures are this thread's until the end */
+    mav_ahead_quiesce( p );
     if (set_stop)
     {
         /* wg_parser.c: a stop at the duration means "no stop" */
@@ -2064,6 +3031,17 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
             p->stop = -1;
         else
             p->stop = stop > INT64_MAX ? -1 : (int64_t)stop;
+        /* pictures decoded ahead past a new stop are not handed out */
+        for (i = 0; i < p->stream_count && p->stop >= 0; i++)
+        {
+            struct mav_stream *c = p->streams[i];
+            unsigned int j, kept = 0;
+
+            for (j = 0; j < c->ready_count; j++)
+                if ((int64_t)c->ahead[c->ready[j]].cur.pts < p->stop) c->ready[kept++] = c->ready[j];
+            if (kept < c->ready_count) c->ahead_eos = 1;
+            c->ready_count = kept;
+        }
     }
     if (set_start)
     {
@@ -2098,7 +3076,7 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
                 if (c->vdec)
                 {
                     mav_reorder_clear( c );
-                    mav_vbackend->flush( c->vdec );
+                    c->vbackend->flush( c->vdec );
                 }
                 swr_free( &c->swr );
                 if (c->pkt_pending) av_packet_unref( c->pkt );
@@ -2106,15 +3084,20 @@ static int mav_seek( struct mav_parser *p, unsigned int stream, int set_start, u
                 mav_queue_clear( c );
                 c->apts_count = 0;
                 c->has_buffer = 0;
+                mav_ahead_reset( c );
                 c->eos = c->draining = 0;
                 c->decode_errors = 0;
                 c->discontinuity = 1;
                 c->seek_target = target;
+                c->skipped = 0;
                 c->next_pts = target;
                 c->last_dts = c->last_vpts = INT64_MIN;
             }
+            p->generation++;
+            if (p->bp_waiters) pthread_cond_broadcast( &p->drain_cond );
         }
     }
+    mav_ahead_resume( p );
     pthread_mutex_unlock( &p->lock );
     return status;
 }
