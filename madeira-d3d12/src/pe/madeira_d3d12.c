@@ -2188,7 +2188,7 @@ struct mad_cmd {
         struct { struct mad_resource *res; UINT64 off; enum WMTIndexType type; } ib;
         struct { UINT slot; struct mad_resource *res; UINT64 off; UINT stride; } vb;
         struct { struct mad_resource *rt[8]; UINT n; struct mad_resource *depth; struct mad_rtvp v[8], dv; } rts;   /* ml925: + sub-views */
-        struct { struct mad_resource *res[8]; UINT n; UINT all; UINT8 cls[8]; UINT8 cls_noref; } barrier;   /* ml1116: transitioned resources; all = UAV/aliasing/overflow; ml1137: state classes (BC_*) */
+        struct { struct mad_resource *res[8]; UINT n; UINT all; UINT8 cls[8]; UINT8 cls_noref; UINT8 after[7]; } barrier;   /* ml1116: transitioned resources; all = UAV/aliasing/overflow; ml1137: state classes (BC_*); madeira-duo dep-trace: after = StateAfter of the first seven (mad_dt_after_code), in what was padding */
         struct { struct mad_resource *res; float rgba[4]; float depth; UINT8 stencil; UINT8 flags; struct mad_rtvp v;
                  UINT nrect, rect_at; } clear;   /* ml904: flags = D3D12_CLEAR_FLAGS; ml925: v = the view cleared; madeira-bcd clear-rects: rectangles in cdata */
         struct { UINT vcount, icount, vstart, istart; } draw;
@@ -2211,6 +2211,7 @@ struct mad_cmd {
                  UINT32 in_w, in_h, flags; float jx, jy, mvx, mvy, pre_exposure; } fxt;   /* madeira-duo xess-metalfx: MADEIRA_TU_* flags */
     } u;
 };
+_Static_assert(sizeof(((struct mad_cmd *)0)->u.barrier) == 88, "dep-trace: barrier.after must fit the member's tail padding");
 
 #define MAD_ARG_RING_BYTES  (64u * 1024u)
 #define MAD_ARG_SLOT_BYTES  1088u  /* up to 64 dwords of root constants plus 32 root arguments, then ml912 draw params, then the ml927 vertex-buffer table */
@@ -2552,6 +2553,7 @@ struct mad_exec {
      * argument records are copied when it ends (mad_ic_encode) */
     struct { struct mad_resource *args; UINT64 off; UINT32 count, stride; UINT16 kind; const struct mad_pso *pso; } ic[64]; unsigned nic;
     struct mad_skinx *sk;   /* madeira-bcd skin-check: this replay's state, check frames only (mad_skin_begin) */
+    struct mad_dt *dt; char dt_wait;   /* madeira-duo dep-trace: set while this replay is traced; the fence wait the newest encoder was given (0 = none) */
     /* madeira-bcd static-cbv: the latest latch per bind point (0 graphics, 1
      * compute) and parameter (cdata offset + 1), and the table copy made for it
      * (in which ring chunk, for which table and latch) */
@@ -2876,6 +2878,7 @@ static void exec_fence_render(struct mad_exec *e, obj_handle_t enc, int update) 
         if (InterlockedExchange(&e->q->device->f5_nonrender, 0)) f.stages = (enum WMTRenderStages)(WMTRenderStageVertex | WMTRenderStageObject);
         else { f.stages = WMTRenderStageFragment; if (e->mode == 3) InterlockedIncrement(&g_fc3_frag_waits); }
     }
+    if (!update) e->dt_wait = f.stages == WMTRenderStageFragment ? 'F' : 'V';   /* madeira-duo dep-trace */
     MTLRenderCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&f);
     InterlockedIncrement(update ? &g_fence_updates : &g_fence_waits);
 }
@@ -2892,6 +2895,7 @@ static void exec_fence_blit(struct mad_exec *e, obj_handle_t enc, int update) {
     if (update) InterlockedExchange(&e->q->device->f5_nonrender, 1);   /* ml1118 */
     f.type = update ? WMTBlitCommandUpdateFence : WMTBlitCommandWaitForFence;
     f.fence = fence;
+    if (!update) e->dt_wait = 'W';   /* madeira-duo dep-trace */
     MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&f);
     InterlockedIncrement(update ? &g_fence_updates : &g_fence_waits);
 }
@@ -2908,6 +2912,7 @@ static void exec_fence_compute(struct mad_exec *e, obj_handle_t enc, int update)
     if (update) InterlockedExchange(&e->q->device->f5_nonrender, 1);   /* ml1118 */
     f.type = update ? WMTComputeCommandUpdateFence : WMTComputeCommandWaitForFence;
     f.fence = fence;
+    if (!update) e->dt_wait = 'W';   /* madeira-duo dep-trace */
     MTLComputeCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&f);
     InterlockedIncrement(update ? &g_fence_updates : &g_fence_waits);
 }
@@ -3141,8 +3146,12 @@ static void exec_vc_draw(struct mad_exec *e, const struct mad_cmd *c) {
 static volatile LONG g_fault_diag;   /* madeira-bcd: GPU fault attribution, below */
 static void mad_fault_label_render(struct mad_exec *e);
 static void exec_rp_late_store(struct mad_exec *e);   /* madeira-bcd rp-discard, below */
+static void mad_dt_enc_end(struct mad_exec *e);   /* madeira-duo dep-trace, above mad_exec_list */
+static void mad_dt_begin(struct mad_exec *e, char kind, UINT w, UINT h);
+static void mad_dt_clear_only(struct mad_exec *e, struct mad_resource *r, int is_depth, UINT w, UINT h);
 static void exec_end(struct mad_exec *e) {
     struct mad_resource *crt[8]; struct mad_resource *cdepth = NULL; struct mad_rtvp crtp[8], cdp; unsigned cn = 0, cseq = 0, cdraws = 0;   /* ml1098 */
+    if (e->dt) mad_dt_enc_end(e);   /* madeira-duo dep-trace */
     if (e->renc) exec_fence_render(e, e->renc, 1);     /* ml1091 */
     if (e->benc) exec_fence_blit(e, e->benc, 1);
     if (e->cenc) exec_fence_compute(e, e->cenc, 1);
@@ -4918,6 +4927,7 @@ static void exec_flush_clear(struct mad_exec *e, int i) {
     }
     e->f6_att[0] = e->pend[i].res; e->f6_natt = 1;   /* ml1134 */
     if (enc) { exec_fence_render(e, enc, 0); exec_fence_render(e, enc, 1); }   /* ml1091: a clear pass writes its target; keep it in the chain */
+    if (enc && e->dt) mad_dt_clear_only(e, e->pend[i].res, e->pend[i].is_depth, rpi.render_target_width, rpi.render_target_height);   /* madeira-duo dep-trace */
     e->f6_natt = 0;
     if (enc) MTLCommandEncoder_endEncoding(enc);
     exec_drop_pending(e, i);
@@ -5467,6 +5477,7 @@ static int exec_begin_render(struct mad_exec *e) {
     for (i = 0; i < e->nrt && e->f6_natt < 8; i++) if (e->rt[i]) e->f6_att[e->f6_natt++] = e->rt[i];
     if (e->depth) e->f6_att[e->f6_natt++] = e->depth;
     if (e->renc) exec_fence_render(e, e->renc, 0);   /* ml1091 */
+    if (e->renc && e->dt) mad_dt_begin(e, 'R', w, h);   /* madeira-duo dep-trace */
     if (e->renc) {   /* ml1070 */
         LONG64 bytes = 0;
         for (i = 0; i < e->nrt; i++) if (e->rt[i]) bytes += (LONG64)e->rt[i]->width * e->rt[i]->height * 4 * (e->rt[i]->samples ? e->rt[i]->samples : 1);
@@ -5496,6 +5507,7 @@ static int exec_begin_blit(struct mad_exec *e) {
     e->benc = MTLCommandBuffer_blitCommandEncoder(e->cb); if (e->benc) g_enc_seq++;
     if (g_enc_labels) mad_label(e->benc, "B#%u copy", g_enc_seq);   /* ml1142 */
     if (e->benc) exec_fence_blit(e, e->benc, 0);   /* ml1091 */
+    if (e->benc && e->dt) mad_dt_begin(e, 'B', 0, 0);   /* madeira-duo dep-trace */
     if (!e->benc) d3d12_log("[madeira-d3d12] no blit encoder\n");
     return e->benc != 0;
 }
@@ -11684,6 +11696,7 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
         else if (g_enc_labels) mad_label(e->cenc, "C#%u %s cs:%08x", g_enc_seq, e->cpso->vs_name, (unsigned)e->cpso->cs_hash);   /* ml1142; madeira-duo: + bytecode hash */
         if (!e->cenc) { d3d12_log("[madeira-d3d12] no compute encoder\n"); MAD_SKIP(e); return; }
         exec_fence_compute(e, e->cenc, 0);   /* ml1091 */
+        if (e->dt) mad_dt_begin(e, 'C', 0, 0);   /* madeira-duo dep-trace */
     }
     if (g_fault_diag) mad_fault_record_dispatch(e, c);   /* madeira-bcd */
     /* ml1008: a pipeline built by the DXBC backend reads two argument buffers of
@@ -12222,6 +12235,489 @@ static void exec_fx_temporal(struct mad_exec *e, const struct mad_cmd *c) {
                   p.pre_exposure, e->mode);
 }
 
+/* ---- madeira-duo dep-trace (diagnostic, opt-in: madeira.cfg dep-trace = N seconds, 0 = off) ----
+ * What each Metal encoder of a command buffer reads and writes, and the fence
+ * wait the replay gave it. gpu-pass-timing says how long every encoder ran and
+ * that a heavy frame's GPU is never idle; it cannot say which encoder had to
+ * wait for which, or whether a wait the replay encoded was needed. This is the
+ * other half, for the same command buffers: gpu-pass-timing times the command
+ * buffers whose first encoder is created in the first second of each of its
+ * periods on the device's uptime clock and lists the first three encoder by
+ * encoder; the trace takes the first three command buffers whose first list is
+ * replayed in the first second of each N on the same clock (QPC less the
+ * offset frame-timeline measures; with frame-timeline off the second is QPC's
+ * own and the two logs are of different frames). Set N to gpu-pass-timing's
+ * period. The reader joins the two by encoder order and label.
+ *
+ *   [dep] cb <n> begin: present #<p>, list #<l>, uptime <s>
+ *   [dep] E <i> R#<seq> ps:<id> vs:<id> <w>x<h> | wait=<V|F|-> draws=<n> ind=<n> verts=<n> psos=<n> static=<n> more=<n> | W <tokens> | R <tokens>
+ *   [dep] E <i> C#<seq> <name> cs:<hash> | wait=<W|-> disp=<n> ind=<n> groups=<sum> (<min>..<max>) tg=<x>x<y>x<z> psos=<hash>:<dispatches>:<groups>,... static=<n> more=<n> | W ... | R ...
+ *   [dep] E <i> B#<seq> copy | wait=<W|-> ops=<n> static=<n> more=<n> | W ... | R ...
+ *   [dep] E <i> K#<seq> clear <w>x<h> | wait=<V|F|-> | W <token> | R     (a clear that got a pass of its own)
+ *   [dep] + W|R <tokens>                                             (the line above, continued)
+ *   [dep] Y barrier at=<encoders begun so far> all=<0|1> hit=<0|1> open=<R|C|B|-> : r#<serial> <before>><after> ...
+ *   [dep] X resolve|metalfx ...
+ *   [dep] res r#<serial> buf <bytes>|tex <w>x<h> pf<n> mips<n>, <rt ds uav|-> heap<type>
+ *   [dep] cb <n> end: <encoders> encoders, <barriers> barriers, <lists> lists, <us> us spent tracing
+ *
+ * (cont) after a sequence number: the encoder's second record (a pass carried
+ * over a list boundary); (aux): an encoder the replay made for itself. A token
+ * is <how>:r#<serial>, then [lo..hi) for a buffer (the byte range its bindings
+ * cover; [lo..hi]+ where a view carries no size: hi is then the last offset)
+ * and x<n> when it was bound <n> times. how, written: rt and ds (attachments),
+ * uav (a UAV the encoder's draws or dispatches bind: written or read), cp (a
+ * copy or fill destination). how, read: v, p, vp (an SRV in a root parameter
+ * visible to the vertex stages, the pixel stage, or all stages), c (a compute
+ * SRV), cb (a constant buffer), vb, ib, ia (indirect arguments), cp (a copy
+ * source). Only resources the GPU can write are listed: created for
+ * render-target, depth-stencil or unordered-access use, or copied into earlier
+ * in the same command buffer. Bindings of anything else are counted in
+ * static=; more= counts what did not fit (1024 resources an encoder). A table
+ * is walked once per encoder, root parameter and address, and every descriptor
+ * of each range the root signature declares counts as used (unbounded ranges:
+ * the first 16), so the reads are an upper bound. A barrier line comes before
+ * the E line of the encoder that was open at it (open=; a compute or blit
+ * encoder ends there, a render pass goes on). hit: the next encoder will wait. Barrier states: before is the class the replay acts on (rar read to
+ * read, att attachment, cpy copy destination, uav, all), after the D3D12 state
+ * (vcb ib npsr psr ia cps uav other, 0 = COMMON, ? = not kept); uav>uav is a
+ * UAV barrier.
+ * Measurement only: nothing is encoded differently. Replaying a traced command
+ * buffer is slower (every descriptor is resolved); the end line says by how much. */
+#define MAD_DT_ENT 1024
+#define MAD_DT_TEXH 131072u
+enum { DT_W_RT = 1, DT_W_DS = 2, DT_W_UAV = 4, DT_W_CP = 8, DT_W_ANY = 15,
+       DT_R_V = 0x10, DT_R_P = 0x20, DT_R_C = 0x40, DT_R_CB = 0x80, DT_R_VB = 0x100, DT_R_IB = 0x200, DT_R_IA = 0x400, DT_R_CP = 0x800, DT_R_ANY = 0xff0,
+       DT_NOLEN_W = 0x1000, DT_BUF = 0x2000, DT_NOLEN_R = 0x4000 };
+struct mad_dt_ent { struct mad_resource *r; unsigned serial; UINT32 flags, n[2]; UINT64 lo[2], hi[2]; };   /* [0] written, [1] read */
+struct mad_dt {
+    int active; struct mad_queue *q; UINT64 batch; unsigned cb_no; LONG64 present;
+    char kind, wait; int carried; unsigned seq, idx;
+    UINT ps, vs, w, h, cs, tg[3]; char name[40];
+    unsigned draws, ind, disp, ops, nstatic, gmin, gmax; UINT64 verts, groups;
+    const struct mad_pso *pso[24]; UINT pso_cs[24]; unsigned pso_n[24]; UINT64 pso_g[24]; unsigned npso, pso_more;   /* pso: compared only */
+    struct mad_dt_ent ent[MAD_DT_ENT]; unsigned nent, more;
+    struct { const struct mad_rootsig *rs; UINT64 base; UINT32 param; } memo[96]; unsigned nmemo;
+    struct mad_resource *cpw[256]; unsigned ncpw;   /* copied into earlier in this command buffer */
+    unsigned encs, barriers, lists; LONG64 t_spent;
+};
+static struct mad_dt g_dt_st;
+static volatile LONG g_dt_busy;   /* one replay at a time owns g_dt_st and everything below */
+static int g_dt_secs = -1;
+static LONG64 g_dt_bucket = -1; static unsigned g_dt_bucket_cbs, g_dt_cb_no;
+static struct { UINT64 id; struct mad_resource *r; } *g_dt_texh; static unsigned g_dt_texh_n;
+static UINT32 g_dt_seen[1u << 15];   /* resources already described, by serial */
+
+static UINT8 mad_dt_after_code(UINT as) {
+    const UINT known = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_COPY_SOURCE |
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    UINT8 c = 0;
+    if (as & D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER) c |= 0x01;
+    if (as & D3D12_RESOURCE_STATE_INDEX_BUFFER) c |= 0x02;
+    if (as & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) c |= 0x04;
+    if (as & D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) c |= 0x08;
+    if (as & D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT) c |= 0x10;
+    if (as & D3D12_RESOURCE_STATE_COPY_SOURCE) c |= 0x20;
+    if (as & D3D12_RESOURCE_STATE_UNORDERED_ACCESS) c |= 0x40;
+    if (as & ~known) c |= 0x80;
+    return c;
+}
+static double mad_dt_uptime(void) {
+    double s = (double)mad_qpc() / (double)(g_xp.qpf ? g_xp.qpf : 10000000);
+    return g_ftl_off < 1e299 ? s - g_ftl_off : s;
+}
+static unsigned mad_dt_texh_slot(UINT64 id) { return (unsigned)((id * 0x9E3779B97F4A7C15ull) >> 47) & (MAD_DT_TEXH - 1); }
+static void mad_dt_texh_put(UINT64 id, struct mad_resource *r) {
+    unsigned i = mad_dt_texh_slot(id), k;
+    if (!id || !g_dt_texh || g_dt_texh_n >= MAD_DT_TEXH / 4 * 3) return;
+    for (k = 0; k < MAD_DT_TEXH; k++, i = (i + 1) & (MAD_DT_TEXH - 1)) {
+        if (g_dt_texh[i].id == id) { g_dt_texh[i].r = r; return; }
+        if (!g_dt_texh[i].id) { g_dt_texh[i].id = id; g_dt_texh[i].r = r; g_dt_texh_n++; return; }
+    }
+}
+/* Every texture a descriptor can name, by its own id and its views' ids: once per traced command buffer. */
+static void mad_dt_texh_build(struct mad_device *d) {
+    unsigned pass, i, k;
+    if (!g_dt_texh) g_dt_texh = VirtualAlloc(NULL, MAD_DT_TEXH * sizeof *g_dt_texh, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    else memset(g_dt_texh, 0, MAD_DT_TEXH * sizeof *g_dt_texh);
+    g_dt_texh_n = 0;
+    if (!g_dt_texh) return;
+    AcquireSRWLockShared(&d->list_lock);
+    for (pass = 0; pass < 2; pass++) {
+        struct mad_resource **list = pass ? d->uav_res : d->srv_res; unsigned n = pass ? d->nuav : d->nsrv;
+        for (i = 0; i < n; i++) {
+            struct mad_resource *r = list[i];
+            if (!r || !r->texture) continue;
+            mad_dt_texh_put(r->gpu_resource_id, r);
+            for (k = 0; k < r->nxview; k++) mad_dt_texh_put(r->xview[k].id, r);
+        }
+    }
+    ReleaseSRWLockShared(&d->list_lock);
+}
+static struct mad_resource *mad_dt_tex(struct mad_device *d, UINT64 id) {
+    struct mad_resource *r; int xv;
+    if (!id) return NULL;
+    if (g_dt_texh) {
+        unsigned i = mad_dt_texh_slot(id), k;
+        for (k = 0; k < MAD_DT_TEXH; k++, i = (i + 1) & (MAD_DT_TEXH - 1)) {
+            if (g_dt_texh[i].id == id) return g_dt_texh[i].r;
+            if (!g_dt_texh[i].id) break;
+        }
+    }
+    r = mad_texture_of_view(d, id, &xv);   /* a view made since the table was built; a miss is remembered too */
+    mad_dt_texh_put(id, r);
+    return r;
+}
+/* A resource pointer taken from a descriptor, a barrier or the texture table is
+ * only read after this: a descriptor in a range no shader uses may still name
+ * something the application has released. */
+static int mad_dt_live(const struct mad_resource *r) { return r && r->iid == &IID_ID3D12Resource; }
+static unsigned mad_dt_serial(const struct mad_resource *r) { return mad_dt_live(r) ? r->serial : 0; }
+static void mad_dt_res_once(const struct mad_resource *r) {
+    UINT f;
+    if (!mad_dt_live(r)) return;
+    if (r->serial < (1u << 20)) {
+        if (g_dt_seen[r->serial >> 5] & (1u << (r->serial & 31))) return;
+        g_dt_seen[r->serial >> 5] |= 1u << (r->serial & 31);
+    }
+    f = (UINT)r->desc.Flags;
+    if (r->texture)
+        d3d12_log("[dep] res r#%u tex %ux%u pf%u mips%u,%s%s%s%s heap%d\n", r->serial, (unsigned)r->width, (unsigned)r->height, (unsigned)r->tex_pf, (unsigned)r->tex_mips,
+                  (f & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ? " rt" : "", (f & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ? " ds" : "",
+                  (f & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ? " uav" : "", (f & 7) ? "" : " -", (int)r->heap);
+    else
+        d3d12_log("[dep] res r#%u buf %llu,%s%s heap%d\n", r->serial, (unsigned long long)r->size,
+                  (f & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ? " uav" : "", (f & 7) ? "" : " -", (int)r->heap);
+}
+static int mad_dt_gpuw(const struct mad_dt *t, const struct mad_resource *r) {
+    unsigned i;
+    if (r->desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return 1;
+    for (i = 0; i < t->ncpw; i++) if (t->cpw[i] == r) return 1;
+    return 0;
+}
+static void mad_dt_note(struct mad_dt *t, struct mad_resource *r, UINT32 flag, UINT64 off, UINT64 len, int has_len) {
+    struct mad_dt_ent *x; unsigned i; const int d = (flag & DT_W_ANY) ? 0 : 1;
+    if (!t->kind || !mad_dt_live(r)) return;
+    if (d && !mad_dt_gpuw(t, r)) { t->nstatic++; return; }
+    for (i = t->nent; i-- > 0;) if (t->ent[i].r == r) break;   /* newest first: a storm's dispatch rebinds what the last one bound */
+    if (i >= t->nent) {
+        if (t->nent >= MAD_DT_ENT) { t->more++; return; }
+        x = &t->ent[t->nent++];
+        memset(x, 0, sizeof *x); x->r = r; x->serial = r->serial; x->lo[0] = x->lo[1] = ~(UINT64)0;
+        if (!r->texture) x->flags |= DT_BUF;
+        mad_dt_res_once(r);
+    } else x = &t->ent[i];
+    x->flags |= flag; x->n[d]++;
+    if (x->flags & DT_BUF) {
+        if (off < x->lo[d]) x->lo[d] = off;
+        if (off + len > x->hi[d]) x->hi[d] = off + len;
+        if (!has_len) x->flags |= d ? DT_NOLEN_R : DT_NOLEN_W;
+    }
+}
+static void mad_dt_desc(struct mad_exec *e, const struct mad_descriptor *de, UINT32 flag) {
+    struct mad_device *d = e->q->device; struct mad_resource *r; UINT64 off = 0;
+    if (!de->gpu_va && !de->texture_view_id) return;
+    if ((de->metadata & MAD_DESC_TYPEDBUF) || !de->texture_view_id) {
+        int typed = (de->metadata & MAD_DESC_TYPEDBUF) != 0;
+        if (!de->gpu_va) return;
+        r = mad_resolve_address(d, de->gpu_va, &off);
+        mad_dt_note(e->dt, r, flag, off, typed ? 0 : (de->metadata & 0xffffffffu), !typed);
+    } else {
+        r = mad_dt_tex(d, de->texture_view_id);
+        mad_dt_note(e->dt, r, flag, 0, 0, 1);
+    }
+}
+/* The bindings one draw or dispatch reaches through its root signature. */
+static void mad_dt_tables(struct mad_exec *e, const struct mad_rootsig *rs, const UINT64 *root, int compute) {
+    struct mad_dt *t = e->dt; struct mad_heap *h = e->srv; struct mad_device *d = e->q->device;
+    unsigned i, j, k, m, nm;
+    if (!rs) return;
+    for (i = 0; i < rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {
+        const struct madeira_ir_root_param *pp = &rs->params[i];
+        UINT32 rd = compute ? DT_R_C : pp->visibility == MADEIRA_IR_VIS_PIXEL ? DT_R_P : pp->visibility == MADEIRA_IR_VIS_ALL ? (DT_R_V | DT_R_P) : DT_R_V;
+        UINT64 base = root[i];
+        if (pp->type == MADEIRA_IR_PARAM_CONSTANTS || !base) continue;
+        nm = t->nmemo < 96 ? t->nmemo : 96;
+        for (m = 0; m < nm; m++) if (t->memo[m].base == base && t->memo[m].param == i && t->memo[m].rs == rs) break;
+        if (m < nm) continue;
+        m = t->nmemo++ % 96; t->memo[m].rs = rs; t->memo[m].param = i; t->memo[m].base = base;
+        if (pp->type != MADEIRA_IR_PARAM_TABLE) {
+            UINT64 off = 0; struct mad_resource *r = mad_resolve_address(d, base, &off);
+            mad_dt_note(t, r, pp->type == MADEIRA_IR_PARAM_UAV ? DT_W_UAV : pp->type == MADEIRA_IR_PARAM_CBV ? DT_R_CB : rd, off, 0, 0);
+            continue;
+        }
+        {
+            unsigned running = 0, tidx;
+            if (!h || !h->cpu || base < h->gpu_address || (base - h->gpu_address) % sizeof(struct mad_descriptor)) continue;
+            if ((base - h->gpu_address) / sizeof(struct mad_descriptor) >= h->count) continue;
+            tidx = (unsigned)((base - h->gpu_address) / sizeof(struct mad_descriptor));
+            for (j = 0; j < pp->num_ranges; j++) {
+                unsigned ri = pp->first_range + j, roff, cnt;
+                const struct madeira_ir_root_range *rr;
+                if (ri >= rs->nranges) break;
+                rr = &rs->ranges[ri];
+                roff = rr->table_offset == 0xffffffffu ? running : rr->table_offset;
+                if (rr->num_descriptors != ~0u) running = roff + rr->num_descriptors;
+                if (rr->range_type == MADEIRA_IR_RANGE_SAMPLER) continue;
+                cnt = rr->num_descriptors == ~0u ? 16 : rr->num_descriptors < 64 ? rr->num_descriptors : 64;
+                for (k = 0; k < cnt && tidx + roff + k < h->count; k++)
+                    mad_dt_desc(e, &h->cpu[tidx + roff + k], rr->range_type == MADEIRA_IR_RANGE_UAV ? DT_W_UAV : rr->range_type == MADEIRA_IR_RANGE_CBV ? DT_R_CB : rd);
+            }
+        }
+    }
+}
+static int mad_dt_how(char *o, UINT32 f, int rd) {
+    static const struct { UINT32 bit; const char *s; } wn[4] = { { DT_W_RT, "rt" }, { DT_W_DS, "ds" }, { DT_W_UAV, "uav" }, { DT_W_CP, "cp" } },
+        rn[6] = { { DT_R_C, "c" }, { DT_R_CB, "cb" }, { DT_R_VB, "vb" }, { DT_R_IB, "ib" }, { DT_R_IA, "ia" }, { DT_R_CP, "cp" } };
+    int m = 0; unsigned k;
+    if (rd) {
+        if (f & DT_R_V) o[m++] = 'v';
+        if (f & DT_R_P) o[m++] = 'p';
+        for (k = 0; k < 6; k++) if (f & rn[k].bit) { const char *s = rn[k].s; if (m) o[m++] = '+'; while (*s) o[m++] = *s++; }
+    } else
+        for (k = 0; k < 4; k++) if (f & wn[k].bit) { const char *s = wn[k].s; if (m) o[m++] = '+'; while (*s) o[m++] = *s++; }
+    o[m] = 0;
+    return m;
+}
+/* The open record, as one [dep] E line (and [dep] + lines when it is long). */
+static void mad_dt_flush(struct mad_dt *t) {
+    char line[960], tok[128]; int n, pass; unsigned i;
+    const char *tag = t->carried == 1 ? "(cont)" : t->carried == 2 ? "(aux)" : "";
+    if (!t->kind) return;
+    if (t->kind == 'R')
+        n = snprintf(line, sizeof line, "[dep] E %u R#%u%s ps:%08x vs:%08x %ux%u | wait=%c draws=%u ind=%u verts=%llu psos=%u static=%u more=%u |",
+                     t->idx, t->seq, tag, t->ps, t->vs, t->w, t->h, t->wait, t->draws, t->ind, (unsigned long long)t->verts, t->npso + t->pso_more, t->nstatic, t->more);
+    else if (t->kind == 'C') {
+        n = snprintf(line, sizeof line, "[dep] E %u C#%u%s %s cs:%08x | wait=%c disp=%u ind=%u groups=%llu (%u..%u) tg=%ux%ux%u psos=",
+                     t->idx, t->seq, tag, t->name[0] ? t->name : "helper", t->cs, t->wait, t->disp, t->ind, (unsigned long long)t->groups,
+                     t->disp ? t->gmin : 0, t->gmax, t->tg[0], t->tg[1], t->tg[2]);
+        for (i = 0; i < t->npso && i < 8; i++)
+            n += snprintf(line + n, sizeof line - n, "%s%08x:%u:%llu", i ? "," : "", t->pso_cs[i], t->pso_n[i], (unsigned long long)t->pso_g[i]);
+        if (t->npso > 8 || t->pso_more) n += snprintf(line + n, sizeof line - n, ",+%u", (t->npso > 8 ? t->npso - 8 : 0) + t->pso_more);
+        n += snprintf(line + n, sizeof line - n, " static=%u more=%u |", t->nstatic, t->more);
+    } else
+        n = snprintf(line, sizeof line, "[dep] E %u B#%u%s copy | wait=%c ops=%u static=%u more=%u |", t->idx, t->seq, tag, t->wait, t->ops, t->nstatic, t->more);
+    for (pass = 0; pass < 2; pass++) {
+        const char *sec = pass ? " R" : " W";
+        n += snprintf(line + n, sizeof line - n, "%s%s", pass ? " |" : "", sec);
+        for (i = 0; i < t->nent; i++) {
+            const struct mad_dt_ent *x = &t->ent[i];
+            UINT32 f = x->flags & (pass ? DT_R_ANY : DT_W_ANY); int m = 0;
+            if (!f) continue;
+            tok[m++] = ' ';
+            m += mad_dt_how(tok + m, f, pass);
+            m += snprintf(tok + m, sizeof tok - m, ":r#%u", x->serial);
+            if ((x->flags & DT_BUF) && x->lo[pass] != ~(UINT64)0)
+                m += snprintf(tok + m, sizeof tok - m, "[%llu..%llu%s", (unsigned long long)x->lo[pass], (unsigned long long)x->hi[pass],
+                              (x->flags & (pass ? DT_NOLEN_R : DT_NOLEN_W)) ? "]+" : ")");
+            if (x->n[pass] > 1) m += snprintf(tok + m, sizeof tok - m, "x%u", x->n[pass]);
+            if (n + m > 880) { d3d12_log("%s\n", line); n = snprintf(line, sizeof line, "[dep] +%s", sec); }
+            memcpy(line + n, tok, (size_t)m + 1); n += m;
+        }
+    }
+    d3d12_log("%s\n", line);
+    t->kind = 0;
+}
+/* carried: 0 an encoder the replay just created, 1 one that was open before this
+ * record could start (a pass carried over a list boundary), 2 an encoder of the
+ * replay's own that ended without a record. */
+static void mad_dt_open(struct mad_exec *e, char kind, UINT w, UINT h, int carried) {
+    struct mad_dt *t = e->dt; unsigned i;
+    if (t->kind) mad_dt_flush(t);
+    t->kind = kind; t->carried = carried; t->wait = (!carried && e->dt_wait) ? e->dt_wait : '-';
+    t->idx = (carried == 1 && t->encs) ? t->encs - 1 : t->encs++;
+    t->draws = t->ind = t->disp = t->ops = t->nstatic = t->nent = t->more = t->nmemo = t->npso = t->pso_more = 0;
+    t->verts = t->groups = 0; t->gmin = ~0u; t->gmax = 0;
+    t->ps = t->vs = t->w = t->h = t->cs = t->seq = 0; t->tg[0] = t->tg[1] = t->tg[2] = 0; t->name[0] = 0;
+    if (kind == 'R') {
+        t->seq = e->renc_seq; t->ps = e->pso ? e->pso->ps_id : 0; t->vs = e->pso ? e->pso->vs_id : 0; t->w = w; t->h = h;
+        if (carried) {
+            for (i = 0; i < e->enc_nrt && i < 8; i++) mad_dt_note(t, e->enc_rt[i], DT_W_RT, 0, 0, 1);
+            mad_dt_note(t, e->enc_depth, DT_W_DS, 0, 0, 1);
+        } else {
+            for (i = 0; i < e->nrt && i < 8; i++) mad_dt_note(t, e->rt[i], DT_W_RT, 0, 0, 1);
+            mad_dt_note(t, e->depth, DT_W_DS, 0, 0, 1);
+        }
+    } else if (kind == 'C') {
+        t->seq = e->cenc_seq;
+        if (e->cenc_pso) {
+            snprintf(t->name, sizeof t->name, "%s", e->cenc_pso->vs_name); t->cs = (UINT)e->cenc_pso->cs_hash;
+            t->tg[0] = e->cenc_pso->tg[0]; t->tg[1] = e->cenc_pso->tg[1]; t->tg[2] = e->cenc_pso->tg[2];
+        }
+    } else t->seq = g_enc_seq;
+}
+static void mad_dt_need(struct mad_exec *e, char kind) {
+    if (e->dt->kind != kind) mad_dt_open(e, kind, kind == 'R' ? e->enc_w : 0, kind == 'R' ? e->enc_h : 0, 1);
+}
+static void mad_dt_begin(struct mad_exec *e, char kind, UINT w, UINT h) {
+    LONG64 t0 = mad_qpc();
+    mad_dt_open(e, kind, w, h, 0);
+    e->dt->t_spent += mad_qpc() - t0;
+}
+/* exec_end: whatever encoder is open ends here. */
+static void mad_dt_enc_end(struct mad_exec *e) {
+    struct mad_dt *t = e->dt;
+    if (!t->kind && (e->renc || e->cenc || e->benc)) mad_dt_open(e, e->renc ? 'R' : e->cenc ? 'C' : 'B', e->enc_w, e->enc_h, 2);
+    if (t->kind) mad_dt_flush(t);
+    e->dt_wait = 0;
+}
+static void mad_dt_pso(struct mad_dt *t, const struct mad_pso *p, UINT64 groups) {
+    unsigned i;
+    for (i = 0; i < t->npso; i++) if (t->pso[i] == p) { t->pso_n[i]++; t->pso_g[i] += groups; return; }
+    if (t->npso < 24) { t->pso[t->npso] = p; t->pso_cs[t->npso] = (UINT)p->cs_hash; t->pso_n[t->npso] = 1; t->pso_g[t->npso] = groups; t->npso++; }
+    else t->pso_more++;   /* later uses of a pipeline that did not fit count again: an upper bound */
+}
+static void mad_dt_draw_reads(struct mad_exec *e, int indexed) {
+    struct mad_dt *t = e->dt; unsigned sl;
+    mad_dt_pso(t, e->pso, 0);
+    for (sl = 0; sl < 16; sl++)
+        if (e->vb[sl].res && (e->pso->vb_mask & (1u << sl))) mad_dt_note(t, e->vb[sl].res, DT_R_VB, e->vb[sl].off, 0, 0);
+    if (indexed && e->ib) mad_dt_note(t, e->ib, DT_R_IB, e->ib_off, 0, 0);
+    mad_dt_tables(e, e->rs, e->root, 0);
+}
+static void mad_dt_draw(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_dt *t = e->dt; LONG64 t0;
+    if (!e->renc || !e->pso) return;
+    t0 = mad_qpc();
+    mad_dt_need(e, 'R');
+    t->draws++;
+    t->verts += c->kind == MC_DRAW ? (UINT64)c->u.draw.vcount * c->u.draw.icount : (UINT64)c->u.drawi.icount * c->u.drawi.inst;
+    mad_dt_draw_reads(e, c->kind == MC_DRAW_INDEXED);
+    t->t_spent += mad_qpc() - t0;
+}
+static void mad_dt_indirect(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_dt *t = e->dt; LONG64 t0 = mad_qpc();
+    if (c->kind == MC_DISPATCH_INDIRECT) {
+        if (!e->cenc || !e->cpso) return;
+        mad_dt_need(e, 'C');
+        mad_dt_pso(t, e->cpso, 0);
+        mad_dt_tables(e, e->crs, e->croot, 1);
+    } else {
+        if (!e->renc || !e->pso) return;
+        mad_dt_need(e, 'R');
+        mad_dt_draw_reads(e, c->kind == MC_DRAW_INDEXED_INDIRECT);
+    }
+    t->ind += c->u.ind.count;
+    mad_dt_note(t, c->u.ind.args, DT_R_IA, c->u.ind.off, (UINT64)c->u.ind.count * c->u.ind.stride, 1);
+    if (c->u.ind.cnt) mad_dt_note(t, c->u.ind.cnt, DT_R_IA, c->u.ind.cnt_off, 4, 1);
+    t->t_spent += mad_qpc() - t0;
+}
+static void mad_dt_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_dt *t = e->dt; UINT64 g; LONG64 t0;
+    if (!e->cenc || !e->cpso) return;
+    t0 = mad_qpc();
+    mad_dt_need(e, 'C');
+    g = (UINT64)c->u.dispatch.x * c->u.dispatch.y * c->u.dispatch.z;
+    t->disp++; t->groups += g;
+    if (g < t->gmin) t->gmin = g > 0xffffffffu ? 0xffffffffu : (unsigned)g;
+    if (g > t->gmax) t->gmax = g > 0xffffffffu ? 0xffffffffu : (unsigned)g;
+    mad_dt_pso(t, e->cpso, g);
+    mad_dt_tables(e, e->crs, e->croot, 1);
+    t->t_spent += mad_qpc() - t0;
+}
+static void mad_dt_cpw(struct mad_dt *t, struct mad_resource *r) {
+    unsigned i;
+    if (!mad_dt_live(r)) return;
+    for (i = 0; i < t->ncpw; i++) if (t->cpw[i] == r) return;
+    if (t->ncpw < 256) t->cpw[t->ncpw++] = r;
+}
+static void mad_dt_copy(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_dt *t = e->dt; struct mad_resource *dst = NULL, *src = NULL; UINT64 doff = 0, soff = 0, len = 0;
+    if (!e->benc) return;
+    mad_dt_need(e, 'B');
+    t->ops++;
+    switch (c->kind) {
+    case MC_COPY_BB: dst = c->u.bb.dst; src = c->u.bb.src; doff = c->u.bb.doff; soff = c->u.bb.soff; len = c->u.bb.len; break;
+    case MC_COPY_B2T: dst = c->u.bt.tex; src = c->u.bt.buf; soff = c->u.bt.off; break;
+    case MC_COPY_T2B: dst = c->u.bt.buf; src = c->u.bt.tex; doff = c->u.bt.off; break;
+    case MC_COPY_T2T: dst = c->u.tt.dst; src = c->u.tt.src; break;
+    case MC_FILL_BB: dst = c->u.fill.res; doff = c->u.fill.off; len = c->u.fill.len; break;
+    case MC_FILL_TEX: dst = c->u.filltex.res; break;
+    case MC_WBI: dst = c->u.wbi.res; doff = c->u.wbi.off; len = 4; break;
+    default: break;
+    }
+    mad_dt_note(t, dst, DT_W_CP, doff, len, len != 0);
+    mad_dt_cpw(t, dst);
+    mad_dt_note(t, src, DT_R_CP, soff, len, len != 0);
+}
+static void mad_dt_x(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_dt *t = e->dt;
+    if (c->kind == MC_RESOLVE) {
+        mad_dt_res_once(c->u.tt.src); mad_dt_res_once(c->u.tt.dst); mad_dt_cpw(t, c->u.tt.dst);
+        d3d12_log("[dep] X resolve r#%u -> r#%u, after %u encoders\n", mad_dt_serial(c->u.tt.src), mad_dt_serial(c->u.tt.dst), t->encs);
+    } else if (c->kind == MC_FX_TEMPORAL) {
+        mad_dt_res_once(c->u.fxt.color); mad_dt_res_once(c->u.fxt.depth); mad_dt_res_once(c->u.fxt.motion); mad_dt_res_once(c->u.fxt.output);
+        d3d12_log("[dep] X metalfx color r#%u depth r#%u motion r#%u -> r#%u, after %u encoders\n", mad_dt_serial(c->u.fxt.color),
+                  mad_dt_serial(c->u.fxt.depth), mad_dt_serial(c->u.fxt.motion), mad_dt_serial(c->u.fxt.output), t->encs);
+    }
+}
+static void mad_dt_clear_only(struct mad_exec *e, struct mad_resource *r, int is_depth, UINT w, UINT h) {
+    struct mad_dt *t = e->dt;
+    if (t->kind) mad_dt_flush(t);
+    mad_dt_res_once(r);
+    d3d12_log("[dep] E %u K#%u clear %ux%u | wait=%c | W %s:r#%u | R\n", t->encs++, g_enc_seq, w, h, e->dt_wait ? e->dt_wait : '-', is_depth ? "ds" : "rt", mad_dt_serial(r));
+    e->dt_wait = 0;
+}
+static void mad_dt_barrier(struct mad_exec *e, const struct mad_cmd *c) {
+    static const char *bc[5] = { "rar", "att", "cpy", "uav", "all" };
+    static const char *an[8] = { "vcb", "ib", "npsr", "psr", "ia", "cps", "uav", "other" };
+    struct mad_dt *t = e->dt; char line[960]; int n; unsigned k, b;
+    if (t->barriers++ >= 800) return;
+    n = snprintf(line, sizeof line, "[dep] Y barrier at=%u all=%u hit=%d open=%c :", t->encs, c->u.barrier.all ? 1u : 0u, e->fence_needed ? 1 : 0,
+                 e->cenc ? 'C' : e->benc ? 'B' : e->renc ? 'R' : '-');
+    for (k = 0; k < c->u.barrier.n && k < 8; k++) {
+        UINT8 cls = c->u.barrier.cls[k], a = k < 7 ? c->u.barrier.after[k] : 0; int first = 1;
+        mad_dt_res_once(c->u.barrier.res[k]);
+        n += snprintf(line + n, sizeof line - n, " r#%u %s>", mad_dt_serial(c->u.barrier.res[k]), cls < 5 ? bc[cls] : "?");
+        if (k >= 7) n += snprintf(line + n, sizeof line - n, "?");
+        else if (!a) n += snprintf(line + n, sizeof line - n, "0");
+        else for (b = 0; b < 8; b++) if (a & (1u << b)) { n += snprintf(line + n, sizeof line - n, "%s%s", first ? "" : "+", an[b]); first = 0; }
+    }
+    if (c->u.barrier.all) n += snprintf(line + n, sizeof line - n, " noref=%s", c->u.barrier.cls_noref < 5 ? bc[c->u.barrier.cls_noref] : "none");
+    d3d12_log("%s\n", line);
+}
+static void mad_dt_end_trace(struct mad_dt *t) {
+    if (t->kind) mad_dt_flush(t);
+    d3d12_log("[dep] cb %u end: %u encoders, %u barriers, %u lists, %.0f us spent tracing\n", t->cb_no, t->encs, t->barriers, t->lists,
+              (double)t->t_spent * 1e6 / (double)(g_xp.qpf ? g_xp.qpf : 10000000));
+    t->active = 0;
+}
+static void mad_dt_list_begin(struct mad_exec *e, struct mad_queue *q) {
+    struct mad_dt *t = &g_dt_st; UINT64 batch = q->batches + 1;
+    if (g_dt_secs < 0) {
+        long long s = mad_cfg_int_pe("dep-trace", 0);   /* madeira-duo diagnostic: seconds between dependency traces (0 = off) */
+        g_dt_secs = s <= 0 ? 0 : s > 3600 ? 3600 : (int)s;
+        if (g_dt_secs) d3d12_log("[madeira-d3d12] dep-trace = %d: [dep] lines for the first three command buffers begun in the first second of every %d s "
+                                 "(what each encoder reads and writes, its fence wait, the barriers)\n", g_dt_secs, g_dt_secs);
+    }
+    if (!g_dt_secs) return;
+    if (InterlockedCompareExchange(&g_dt_busy, 1, 0)) return;   /* another replay is being traced */
+    if (t->active && ((t->q == q && t->batch != batch) || g_presents_now > t->present + 2)) mad_dt_end_trace(t);
+    if (!t->active && !q->open_lists) {
+        double up = mad_dt_uptime(); LONG64 sec = (LONG64)up;
+        if (sec % g_dt_secs == 0) {
+            if (sec != g_dt_bucket) { g_dt_bucket = sec; g_dt_bucket_cbs = 0; }
+            if (g_dt_bucket_cbs < 3) {
+                LONG64 t0 = mad_qpc();
+                g_dt_bucket_cbs++;
+                t->active = 1; t->q = q; t->batch = batch; t->cb_no = ++g_dt_cb_no; t->present = g_presents_now;
+                t->kind = 0; t->encs = t->barriers = t->lists = t->ncpw = 0;
+                mad_dt_texh_build(q->device);
+                t->t_spent = mad_qpc() - t0;
+                d3d12_log("[dep] cb %u begin: present #%lld, list #%u, uptime %.3f s%s\n", t->cb_no, (long long)g_presents_now, g_list_seq, up,
+                          g_ftl_off < 1e299 ? "" : " (QPC's own: frame-timeline is off)");
+            }
+        }
+    }
+    if (t->active && t->q == q && t->batch == batch) { e->dt = t; t->lists++; return; }
+    InterlockedExchange(&g_dt_busy, 0);
+}
+static void mad_dt_list_end(struct mad_exec *e) {
+    if (e->dt->kind) mad_dt_flush(e->dt);
+    e->dt = NULL;
+    InterlockedExchange(&g_dt_busy, 0);
+}
+
 static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t cb) {
     g_list_seq++;
     struct mad_exec e;
@@ -12240,6 +12736,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
     l->ring_q = q; l->ring_batch = q->batches + 1;   /* ml1061: the batch this replay belongs to */
     e.topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     if (g_skin_now) mad_skin_begin(&e);   /* madeira-bcd skin-check */
+    if (g_dt_secs) mad_dt_list_begin(&e, q);   /* madeira-duo dep-trace */
     if (g_ffx_exp < 0) mad_ffx_load();   /* cs-split, fi-setup-zero, fi-field-check */
     exec_rp_list_begin(&e);   /* madeira-bcd rp-carry: the pass the previous list handed over */
     for (i = 0; i < l->ncmds; i++) {
@@ -12328,12 +12825,15 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
                     for (wi = 0; wi < e.nwr; wi++) if (e.wr[wi] == c->u.barrier.res[bi]) { hit = 1; break; }
                 if (hit) e.fence_needed = 1;
             } else e.fence_needed = 1;   /* ml1111 */
+            if (e.dt) mad_dt_barrier(&e, c);   /* madeira-duo dep-trace */
             if (e.cenc || e.benc || (g_barrier_render && e.renc)) { if (e.renc) InterlockedIncrement(&g_barrier_renc_closed); exec_end(&e); }
             break;
         case MC_QUERY_BEGIN: exec_query_begin(&e, c); break;     /* ml1088 */
         case MC_QUERY_END: exec_query_end(&e, c); break;
         case MC_QUERY_RESOLVE: exec_query_resolve(&e, c); break;
-        case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); mad_gw_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c); break;   /* madeira-bcd vis-trace */
+        case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); mad_gw_draw(&e, c); if (g_vt_on > 0) mad_vt_draw(&e, c);   /* madeira-bcd vis-trace */
+            if (e.dt) mad_dt_draw(&e, c);   /* madeira-duo dep-trace */
+            break;
         case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: case MC_DISPATCH_INDIRECT: {
             struct mad_cmd t = *c; UINT k; UINT64 toff = 0;
             int tess = 0;
@@ -12357,16 +12857,18 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
             }
             e.tind_buf = 0; e.tind_off = 0;
             if (g_sd_state > 0 && g_ic_frames) mad_ic_note(&e, c);   /* madeira-bcd: ind-count */
+            if (e.dt) mad_dt_indirect(&e, c);   /* madeira-duo dep-trace */
             break;
         }
         case MC_COPY_BB: case MC_COPY_B2T: case MC_COPY_T2B: case MC_COPY_T2T: case MC_FILL_BB: case MC_FILL_TEX: case MC_WBI: exec_copy(&e, c);
+            if (e.dt) mad_dt_copy(&e, c);   /* madeira-duo dep-trace */
             if (g_vt_on > 0) InterlockedIncrement(&g_vt_copy_q[q->type & 3]);   /* madeira-bcd vis-trace */
             break;
         case MC_BLEND_FACTOR: memcpy(e.blend, c->u.blend.rgba, sizeof e.blend); e.has_blend = 1; break;
-        case MC_DISPATCH: exec_dispatch(&e, c); mad_gw_dispatch(&e, c); if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;   /* madeira-bcd vis-trace */
-        case MC_RESOLVE: exec_resolve(&e, c); break;
+        case MC_DISPATCH: exec_dispatch(&e, c); mad_gw_dispatch(&e, c); if (e.dt) mad_dt_dispatch(&e, c); /* madeira-duo dep-trace */ if (g_vt_on > 0) { InterlockedIncrement(&g_vt_disp); InterlockedIncrement(&g_vt_disp_q[q->type & 3]); } break;   /* madeira-bcd vis-trace */
+        case MC_RESOLVE: exec_resolve(&e, c); if (e.dt) mad_dt_x(&e, c); break;   /* madeira-duo dep-trace */
         case MC_DISCARD: break;   /* madeira-bcd rp-discard: exec_rp_note above */
-        case MC_FX_TEMPORAL: exec_fx_temporal(&e, c); break;   /* madeira-duo xess-metalfx */
+        case MC_FX_TEMPORAL: exec_fx_temporal(&e, c); if (e.dt) mad_dt_x(&e, c); break;   /* madeira-duo xess-metalfx; dep-trace */
         }
         if (g_ffx_exp > 0 && c->kind == MC_DISPATCH) mad_ffx_after(&e, c);   /* cs-split, fi-field-check */
         if (rs) {   /* madeira-bcd: replay split, summed per list */
@@ -12380,6 +12882,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t 
     if (e.renc) InterlockedIncrement(&g_pass_end_list);
     exec_end(&e);
     while (e.npend) exec_flush_clear(&e, 0);
+    if (e.dt) mad_dt_list_end(&e);   /* madeira-duo dep-trace */
     if (rs) {
         int b;
         rs_sum[RS_LISTEND] += (LONG64)(mad_tick() - rs_t); rs_cnt[RS_LISTEND]++;
@@ -22644,12 +23147,13 @@ static void STDMETHODCALLTYPE list_ResourceBarrier(ID3D12GraphicsCommandList *Th
     if (c->u.barrier.n == 0 && !c->u.barrier.all) c->u.barrier.cls_noref = BC_NONE;
     for (i = 0; i < n; i++) {   /* ml1116: fence-chain = 3 waits only for resources an encoder in flight wrote */
         struct mad_resource *r = NULL;
-        UINT8 cls = BC_ALL;
+        UINT8 cls = BC_ALL, acode = 0;   /* madeira-duo dep-trace: acode */
         const UINT W = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_DEPTH_WRITE |
                        D3D12_RESOURCE_STATE_STREAM_OUT | D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RESOLVE_DEST;
         if (b[i].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
             UINT bs = (UINT)b[i].Transition.StateBefore, as = (UINT)b[i].Transition.StateAfter;
             r = (struct mad_resource *)b[i].Transition.pResource;
+            acode = mad_dt_after_code(as);
             /* ml1137: COMMON on either side and any write after are "wait for everything" */
             if (b[i].Flags & D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY) cls = BC_RAR;
             else if (!as || (as & W) || !bs) cls = BC_ALL;
@@ -22660,13 +23164,14 @@ static void STDMETHODCALLTYPE list_ResourceBarrier(ID3D12GraphicsCommandList *Th
         } else if (b[i].Type == D3D12_RESOURCE_BARRIER_TYPE_UAV) {
             r = (struct mad_resource *)b[i].UAV.pResource;
             cls = BC_RAW_UAV;   /* UAV accesses happen only in compute and render encoders */
+            acode = 0x40;       /* madeira-duo dep-trace: uav > uav is a UAV barrier */
         }
         if (!r) {
             c->u.barrier.all = 1;
             if (c->u.barrier.cls_noref == BC_NONE || cls > c->u.barrier.cls_noref) c->u.barrier.cls_noref = cls;
             continue;
         }
-        if (c->u.barrier.n < 8) { c->u.barrier.cls[c->u.barrier.n] = cls; c->u.barrier.res[c->u.barrier.n++] = r; }
+        if (c->u.barrier.n < 8) { if (c->u.barrier.n < 7) c->u.barrier.after[c->u.barrier.n] = acode; c->u.barrier.cls[c->u.barrier.n] = cls; c->u.barrier.res[c->u.barrier.n++] = r; }
         else { c->u.barrier.all = 1; c->u.barrier.cls_noref = BC_ALL; }
     }
 }
