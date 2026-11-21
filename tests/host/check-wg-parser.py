@@ -160,6 +160,7 @@ static int failures;
 static uint8_t stub_avcc[] = { 0x01, 0x42, 0xc0, 0x1e, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1e,
                                0x01, 0x00, 0x02, 0x68, 0xce };
 static int stub_vdecodes, stub_vflushes, stub_verrors, stub_vlive, stub_vmapped;
+static int stub_vdelay_us;   /* a slow decoder: Senren Banka's 1080p WMV takes about 20 ms a picture */
 
 static int ref_y( int idx, int x, int y ) { (void)x; return 16 + (idx + y) % 200; }
 static int ref_u( int x, int y ) { (void)y; return 64 + (x / 2) % 128; }
@@ -189,6 +190,7 @@ static int stub_vdecode( void *handle, const uint8_t *data, uint32_t size, int64
     int x, y;
 
     stub_vdecodes++;
+    if (stub_vdelay_us) usleep( stub_vdelay_us );
     if (size != 9 || AV_RB32( data ) != 5 || (data[4] & 0x1f) != (key ? 5 : 1)) { stub_verrors++; return -5; }
     if (key) d->have_ref = 1;
     if (!d->have_ref) { stub_verrors++; return -6; }   /* a real decoder needs a keyframe after a flush */
@@ -298,7 +300,7 @@ struct source
 static void *read_thread( void *arg )
 {
     struct source *s = arg;
-    while (s->running)
+    while (__atomic_load_n( &s->running, __ATOMIC_ACQUIRE ))
     {
         uint64_t offset; uint32_t size;
         if (mav_get_next_read_offset( s->p, &offset, &size ))
@@ -330,7 +332,7 @@ static void src_start( struct source *s, struct mav_parser *p, const uint8_t *da
 static void src_stop( struct source *s )
 {
     mav_disconnect( s->p );
-    s->running = 0;
+    __atomic_store_n( &s->running, 0, __ATOMIC_RELEASE );
     pthread_join( s->thread, NULL );
 }
 
@@ -696,7 +698,7 @@ static int test_disconnect_wakes_reader( const uint8_t *data, size_t size )
         CHECK( t1.tv_sec - t0.tv_sec < 2, "reader was not woken" );
         usleep( 1000 );
     }
-    s.running = 0; pthread_join( s.thread, NULL );
+    __atomic_store_n( &s.running, 0, __ATOMIC_RELEASE ); pthread_join( s.thread, NULL );
     mav_disconnect( p );   /* idempotent, like quartz after a failed connect */
     mav_destroy( p );
     printf( "PASS: disconnect wakes a read thread blocked in get_next_read_offset\n" );
@@ -1174,6 +1176,105 @@ static int test_backpressure( const uint8_t *mp4, size_t size, int frames )
     return 0;
 }
 
+static double ms_since_f( const struct timespec *t0 )
+{
+    struct timespec t1;
+    clock_gettime( CLOCK_MONOTONIC, &t1 );
+    return (t1.tv_sec - t0->tv_sec) * 1e3 + (t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+/* Wine's media source asks for both streams on one thread, at the movie's pace.
+ * With a decoder that takes 20 ms a picture, a video request decoded on
+ * demand holds that thread (and the audio request after it) for 20 ms; with
+ * decode-ahead the picture is ready.  Every picture still comes, in order;
+ * a seek lands exactly; a disconnect while the worker decodes neither hangs
+ * nor frees anything under it. */
+static int test_mp4_ahead( const uint8_t *mp4, size_t size, int frames, int ahead, double *avg_ms, double *max_ms )
+{
+    struct mav_parser *p; struct source s; struct mav_stream_info vi, ai; struct drained da;
+    double total = 0, worst = 0; int n = 0, adone = 0, measured = 0;
+
+    mav_allow_video_ahead( ahead );
+    stub_vdelay_us = 20000;
+    p = mav_create( 0 );
+    src_start( &s, p, mp4, size );
+    CHECK( mav_connect( p, size ) == MAV_OK && mav_stream_info( p, 0, &vi ) == MAV_OK && mav_stream_info( p, 1, &ai ) == MAV_OK,
+           "connect" );
+    CHECK( mav_enable_video( p, 0, &vi.vnative ) == MAV_OK && mav_enable( p, 1, &ai.native ) == MAV_OK, "enable" );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek 0" );
+    memset( &da, 0, sizeof(da) );
+    for (;;)
+    {
+        struct timespec t0, pace; struct mav_buffer b; uint8_t *pic; int r;
+
+        clock_gettime( CLOCK_MONOTONIC, &pace );
+        clock_gettime( CLOCK_MONOTONIC, &t0 );
+        r = mav_get_buffer( p, 0, &b );
+        if (r != MAV_OK) { CHECK( r == MAV_NO_BUFFER, "video get_buffer %d", r ); break; }
+        if (n >= 4)
+        {
+            double ms = ms_since_f( &t0 );
+            total += ms; measured++;
+            if (ms > worst) worst = ms;
+        }
+        pic = malloc( b.size );
+        CHECK( mav_copy_buffer( p, 0, pic, 0, b.size ) == MAV_OK, "copy picture" );
+        CHECK( picture_index( pic, 0, MAV_PIX_NV12 ) == n % 200 && llabs( (long long)b.pts - n * 10000000ll / FPS ) <= 1,
+               "picture %d: index %d pts %llu", n, picture_index( pic, 0, MAV_PIX_NV12 ), (unsigned long long)b.pts );
+        free( pic );
+        mav_release_buffer( p, 0 );
+        n++;
+        /* the audio this picture's interval needs */
+        while (!adone && (!da.buffers || da.end_pts < (uint64_t)n * 10000000 / FPS))
+            if (drain_one( p, 1, &da, &adone )) return 1;
+        while (ms_since_f( &pace ) < 1000.0 / FPS) usleep( 500 );
+    }
+    while (!adone) if (drain_one( p, 1, &da, &adone )) return 1;
+    CHECK( n == frames && da.gaps == 0 && da.first_pts == 0, "%d pictures of %d, audio gaps %d", n, frames, da.gaps );
+    CHECK( stub_verrors == 0, "stub decoder saw %d bad packets", stub_verrors );
+
+    if (ahead)
+    {
+        /* a seek: the first picture after it is the target's, decoded ahead again */
+        struct mav_buffer b; uint8_t *pic;
+        CHECK( mav_seek( p, 0, 1, 10000000, 0, 0 ) == MAV_OK, "seek to 1 s" );
+        CHECK( mav_get_buffer( p, 0, &b ) == MAV_OK && b.pts == 10000000, "picture after the seek at %llu",
+               (unsigned long long)b.pts );
+        pic = malloc( b.size );
+        CHECK( mav_copy_buffer( p, 0, pic, 0, b.size ) == MAV_OK && picture_index( pic, 0, MAV_PIX_NV12 ) == FPS,
+               "the target picture" );
+        free( pic );
+        mav_release_buffer( p, 0 );
+        CHECK( mav_get_buffer( p, 0, &b ) == MAV_OK && llabs( (long long)b.pts - (FPS + 1) * 10000000ll / FPS ) <= 1, "and the next" );
+        mav_release_buffer( p, 0 );
+        /* disconnect while the worker is decoding */
+        usleep( 5000 );
+    }
+    src_stop( &s );
+    mav_destroy( p );
+    stub_vdelay_us = 0;
+    CHECK( stub_vmapped == 0 && stub_vlive == 0, "every picture unmapped (%d) and released (%d)", stub_vmapped, stub_vlive );
+    free( da.data );
+    *avg_ms = measured ? total / measured : 0;
+    *max_ms = worst;
+    mav_allow_video_ahead( 1 );
+    return 0;
+}
+
+static int test_ahead( const uint8_t *mp4, size_t size, int frames )
+{
+    double on_avg, on_max, off_avg, off_max;
+
+    if (test_mp4_ahead( mp4, size, frames, 1, &on_avg, &on_max )) return 1;
+    if (test_mp4_ahead( mp4, size, frames, 0, &off_avg, &off_max )) return 1;
+    CHECK( off_avg >= 15, "decoded on demand, a video request should take the decoder's 20 ms: %.1f ms", off_avg );
+    CHECK( on_avg < 5, "decoded ahead, a video request took %.1f ms on average (on demand: %.1f ms)", on_avg, off_avg );
+    printf( "PASS: decode-ahead: with a 20 ms decoder and one thread asking for both streams at %d fps, a video request "
+            "takes %.1f ms on average (max %.1f) instead of %.1f (max %.1f); every picture in order, the audio gap-free, "
+            "an exact seek, a disconnect mid-decode\n", FPS, on_avg, on_max, off_avg, off_max );
+    return 0;
+}
+
 int main( int argc, char **argv )
 {
     size_t mp2_size, wsize, mp4_size; uint8_t *mp2, *wav, *mp4;
@@ -1203,6 +1304,16 @@ int main( int argc, char **argv )
         av_free( mp4 );
         return r || failures;
     }
+    if (argc > 1 && !strcmp( argv[1], "threads" ))
+    {
+        /* the ThreadSanitizer build: the cases where a worker decodes beside the reader */
+        mp4 = make_mp4( &mp4_size, AV_CODEC_ID_H264, A_AAC, frames, seconds );
+        if (!mp4 || test_mp4_basic( mp4, mp4_size, frames, seconds ) || test_mp4_formats( mp4, mp4_size )
+            || test_ahead( mp4, mp4_size, frames ))
+            return 1;
+        av_free( mp4 );
+        return failures ? 1 : 0;
+    }
     mp2 = make_mp2( &mp2_size, 44100, 3.0 );
     if (!mp2) { printf( "FAIL: no mp2 encoder in the host build\n" ); return 1; }
     if (test_wav()) return 1;
@@ -1216,6 +1327,7 @@ int main( int argc, char **argv )
     if (test_mp4_basic( mp4, mp4_size, frames, seconds )) return 1;
     if (test_mp4_formats( mp4, mp4_size )) return 1;
     if (test_mp4_late_audio( mp4, mp4_size, seconds )) return 1;
+    if (test_ahead( mp4, mp4_size, frames )) return 1;
     if (test_mp4_refusals()) return 1;
     if (argc > 1)
     {
@@ -1273,6 +1385,7 @@ with tempfile.TemporaryDirectory() as t:
     assert any("connect container=mp4 stream=0 video codec=h264 backend=stub-video 320x240 fps=30/1 out=nv12" in l for l in lines), lines
     assert any("connect container=mp4 codec=aac layer=0 rate=44100 channels=2 mask=0x3 out=f32" in l and "stream=1 backend=stub-aac" in l for l in lines), lines
     assert any(l.endswith("stream 0: first picture delivered (nv12 320x240)") for l in lines), lines
+    assert any(l.endswith("stream 0: decoding ahead on a thread of its own (3 pictures)") for l in lines), lines
     assert any(l.endswith("stream 1: first audio buffer delivered") for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=0): container disabled by MADEIRA_WG_VIDEO=0" in l for l in lines), lines
     assert any("connect refused (mov,mp4,m4a,3gp,3g2,mj2, compressed_out=1): compressed output requested" in l for l in lines), lines
@@ -1319,3 +1432,19 @@ with tempfile.TemporaryDirectory() as t:
           re.search(r"slow video reader: \d+ pictures of \d+", out.stdout).group(0))
     for l in bp_lines:
         print("  " + l)
+
+    # ThreadSanitizer: the decode-ahead worker beside the reader, its seeks and its disconnect
+    tsan = Path(t) / "wgp-tsan"
+    r = subprocess.run(["cc", "-std=gnu11", "-O1", "-g", "-Wall", "-Wno-unused-function", "-fsanitize=thread",
+                        "-I" + str(core.parent), "-I" + str(inc), str(c), "-o", str(tsan),
+                        str(lib / "libavformat.a"), str(lib / "libavcodec.a"), str(lib / "libswresample.a"),
+                        str(lib / "libavutil.a"), "-lm", "-lpthread"], capture_output=True, text=True)
+    if r.returncode:
+        print("NOTOOL: no ThreadSanitizer build here (%s)" % (r.stderr.strip().splitlines() or ["?"])[-1][:120])
+    else:
+        tenv = {k: v for k, v in env.items() if k != "ASAN_OPTIONS"}
+        tenv["TSAN_OPTIONS"] = "halt_on_error=1 second_deadlock_stack=1"
+        out = subprocess.run([str(tsan), "threads"], env=tenv, capture_output=True, text=True, timeout=600)
+        assert out.returncode == 0 and "WARNING: ThreadSanitizer" not in out.stderr, out.stdout + out.stderr[-6000:]
+        print("PASS: ThreadSanitizer clean: the interleaved readers, every picture format, and decode-ahead "
+              "(its seek and its disconnect mid-decode)")

@@ -149,9 +149,9 @@ now libswresample:
 It logs one `[resampler] created ...` line per transform.
 `MADEIRA_WG_RESAMPLER=0` refuses it again.
 
-**One demuxer, several readers: back-pressure.** Each stream is read on its
-own thread by quartz and Media Foundation; a packet read for another stream
-is queued for it. A stream whose reader falls behind (a video decoded slower
+**One demuxer, several readers: back-pressure.** Quartz reads each stream on
+its own thread (Media Foundation's source does not; see decode-ahead below); a
+packet read for another stream is queued for it. A stream whose reader falls behind (a video decoded slower
 than real time) used to lose packets once its queue passed 16,384 packets or
 64 MB, which breaks every picture up to the next keyframe. Now, once a queue
 passes 1,024 packets or 16 MB while another thread reads that stream, the
@@ -162,7 +162,25 @@ past the old hard limits, as before) until it is read again; one thread
 reading both streams (the WM reader's earliest-buffer mode) never waits for
 itself; a seek, a disable or disconnect wakes a waiting reader.
 
-The PE half of winegstreamer is upstream's and unchanged. Wine's configure
+**Decode-ahead.** Wine's media source asks for every stream's samples on one
+work-queue thread (a standard work queue has one thread), and so does the WM
+reader reading the earliest buffer. Decoded on demand, each picture held that
+thread. Senren Banka's 1080p WMV needs about 20 ms a picture in software, so
+the audio request behind it was late, and the audio renderer ran short for 6
+to 17% of each 10 s (`[ios_audio] ... client wrote 8.33 s of audio in 10.01 s`).
+GStreamer decodes in streaming threads of its own. Here each decoded video
+stream gets a worker at its first request:
+- it keeps up to three pictures ready, and a request pops one;
+- it demuxes under the parser lock like any reader;
+- it decodes and converts without that lock, so the audio request is
+  answered meanwhile;
+- a seek, a new format or a disconnect waits for the picture the worker is
+  on, and it starts no new one until they are done.
+
+Each such stream logs `decoding ahead on a thread of its own` once.
+`MADEIRA_WG_VIDEO_AHEAD=0` decodes on the requesting thread again.
+
+The PE half of winegstreamer is upstream's but for `wm_reader.c` (above). Wine's configure
 disables the module when GStreamer is missing, so a PE build tree has to be
 configured with `--enable-winegstreamer` (`build/wine-pe/build-ntdll.sh` does
 this for the arm64ec tree) and only the PE target is built. A 32-bit
@@ -182,6 +200,7 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 | `MADEIRA_WG_WMV_TRANSFORM` | on | `0`: every video `wg_transform` is refused at create again, so the WMVideo Decoder DMO/MFT cannot be created, as before. Read once per process. WMA is unaffected. |
 | `MADEIRA_WG_RESAMPLER` | on | `0`: the resampler transform is refused at create, as before. |
 | `MADEIRA_WG_COMPRESSED` | on | `0`: a compressed-output parser refuses an ASF, as before: the WM reader's compressed samples are not available (see above). |
+| `MADEIRA_WG_VIDEO_AHEAD` | on | `0`: video is decoded on the thread that asks for it, as before; a Media Foundation movie's audio then waits behind each picture (see above). |
 | `MADEIRA_WG_VIDEO_FORMAT` | `rgb32` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32` (see above for why the default is `rgb32`). |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
@@ -198,10 +217,16 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`, `[wmv]` and
   tables, wow64 thunks, kill switches, FFmpeg configuration and app link; then
   builds a host FFmpeg from the same tarball and runs the parser core under
   ASan/UBSan against MP3, MPEG layer II, WAV and synthetic MP4 (stub video and
-  AAC backends); then, built with small queue limits, the back-pressure cases
-  (a slow video reader loses nothing, while the same build without
-  back-pressure drops pictures; an unread stream holds the other reader once;
-  one thread reading both never waits; disconnect wakes a waiting reader).
+  AAC backends), every picture format pixel by pixel; then, built with small
+  queue limits, the back-pressure cases (a slow video reader loses nothing,
+  while the same build without back-pressure drops pictures; an unread stream
+  holds the other reader once; one thread reading both never waits; disconnect
+  wakes a waiting reader). Decode-ahead: with a stub decoder that takes 20 ms
+  a picture and one thread asking for both streams at 30 fps (the media
+  source's way), a video request takes 0.0 ms instead of 21. Every picture
+  still comes in order, the audio has no gaps, a seek lands exactly, and a
+  disconnect mid-decode is clean. The threaded cases run again under
+  ThreadSanitizer.
 - `tests/host/check-wg-parser-asf.py` (Linux): builds a host FFmpeg from the
   same tarball with the port's demuxers and decoders and test-only WMV/WMA
   encoders and the asf muxer, synthesises WMV7, WMV8 and MS-MPEG4 v3 files
@@ -211,13 +236,16 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`, `[wmv]` and
   format it offers after a keyframe seek; a WMV3 stream of garbage; and, with
   small queue limits, the back-pressure cases (a slow video reader loses
   nothing, while the same build without back-pressure drops pictures; an
-  unread stream; one thread reading both; disconnect while a reader waits).
+  unread stream; one thread reading both, and the worker decoding ahead for
+  it; disconnect while a reader waits).
   Compressed output: every packet of WMV7, WMV8, the WMV3 garbage stream and
   WMA2 against an independent demux of the same file (bytes, keyframe flags,
   timestamps); compressed video with decoded audio; a seek starting at a
   keyframe; back to decoded pictures, bit-exact; MS-MPEG4 refused compressed;
   `MADEIRA_WG_COMPRESSED=0`. Also source checks on Wine's reader (per-stream
-  compressed reading, no `free_streams` in a failed reinit).
+  compressed reading, no `free_streams` in a failed reinit). With video
+  decoded ahead (the default), every case above runs again under
+  ThreadSanitizer, the back-pressure ones included.
   WMV9/VC-1 streams themselves are not covered: FFmpeg cannot encode them.
 - `tests/host/check-wma-decoder.py` (Linux or macOS, needs a configured
   Wine tree for the generated headers): compiles the production

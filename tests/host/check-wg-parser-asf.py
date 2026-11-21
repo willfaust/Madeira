@@ -125,7 +125,7 @@ struct source { const uint8_t *data; size_t size; volatile int running; struct m
 static void *read_thread( void *arg )
 {
     struct source *s = arg;
-    while (s->running)
+    while (__atomic_load_n( &s->running, __ATOMIC_ACQUIRE ))
     {
         uint64_t offset; uint32_t size;
         if (mav_get_next_read_offset( s->p, &offset, &size )) { usleep( 200 ); continue; }
@@ -140,7 +140,7 @@ static void src_start( struct source *s, struct mav_parser *p, const uint8_t *da
     memset( s, 0, sizeof(*s) ); s->data = data; s->size = size; s->p = p; s->running = 1;
     pthread_create( &s->thread, NULL, read_thread, s );
 }
-static void src_stop( struct source *s ) { mav_disconnect( s->p ); s->running = 0; pthread_join( s->thread, NULL ); }
+static void src_stop( struct source *s ) { mav_disconnect( s->p ); __atomic_store_n( &s->running, 0, __ATOMIC_RELEASE ); pthread_join( s->thread, NULL ); }
 
 /* ---- inputs: an ASF made by libavformat's asf muxer in memory ---- */
 struct membuf { uint8_t *data; size_t size, cap, pos; };
@@ -575,6 +575,23 @@ static int test_backpressure( const uint8_t *asf, size_t size )
     }
     src_stop( &s ); mav_destroy( p );
 
+    /* 5. one thread that read the audio once, then only the video (decoded ahead): the worker
+     *    reads for that thread, so it never waits for the audio that thread would drain */
+    p = mav_create( 0 ); src_start( &s, p, asf, size );
+    CHECK( mav_connect( p, size ) == MAV_OK, "connect" );
+    {
+        struct mav_buffer b; int n = 0;
+        CHECK( mav_get_buffer( p, 1, &b ) == MAV_OK, "one audio buffer" );
+        mav_release_buffer( p, 1 );
+        clock_gettime( CLOCK_MONOTONIC, &t0 );
+        while (mav_get_buffer( p, 0, &b ) == MAV_OK) { mav_release_buffer( p, 0 ); n++; }
+        clock_gettime( CLOCK_MONOTONIC, &t1 );
+        CHECK( n == FRAMES && (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < MAV_BACKPRESSURE_WAIT_MS,
+               "video alone after an audio read: %d pictures, %ld ms", n,
+               (long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000) );
+    }
+    src_stop( &s ); mav_destroy( p );
+
     /* 4. disconnect while a reader waits: it is woken, nothing is freed under it */
     p = mav_create( 0 ); src_start( &s, p, asf, size );
     CHECK( mav_connect( p, size ) == MAV_OK, "connect" );
@@ -596,8 +613,8 @@ static int test_backpressure( const uint8_t *asf, size_t size )
            "disconnect woke the waiting reader at once" );
     mav_destroy( p );
     printf( "PASS: back-pressure (soft %d packets, hard %d): a slow video reader on its own thread gets all %d pictures; "
-            "an unread stream holds the other reader once (%d ms) and no longer; one thread reading both never waits; "
-            "disconnect wakes a waiting reader\n", MAV_QUEUE_SOFT_PACKETS, MAV_QUEUE_MAX_PACKETS, FRAMES,
+            "an unread stream holds the other reader once (%d ms) and no longer; one thread reading both never waits, "
+            "nor does the worker decoding ahead for it; disconnect wakes a waiting reader\n", MAV_QUEUE_SOFT_PACKETS, MAV_QUEUE_MAX_PACKETS, FRAMES,
             MAV_BACKPRESSURE_WAIT_MS );
     return 0;
 }
@@ -870,5 +887,21 @@ with tempfile.TemporaryDirectory() as t:
         out.stdout + out.stderr[-2000:]
     print("PASS: without back-pressure the same slow-video case drops packets and loses pictures (%s)" %
           re.search(r"slow video reader: \d+ pictures of \d+", out.stdout).group(0))
+
+    # ThreadSanitizer: the decode-ahead worker beside the WM reader's and the back-pressure readers
+    tsan_flags = [f for f in base if not f.startswith("-fsanitize") and f != "-fno-sanitize-recover=undefined"]
+    tsan = Path(t) / "asf-tsan"
+    r = subprocess.run(tsan_flags + ["-fsanitize=thread", "-o", str(tsan)] + libs, capture_output=True, text=True)
+    tsan_bp = Path(t) / "asf-tsan-bp"
+    r2 = subprocess.run(tsan_flags + small + ["-fsanitize=thread", "-o", str(tsan_bp)] + libs, capture_output=True, text=True)
+    if r.returncode or r2.returncode:
+        print("NOTOOL: no ThreadSanitizer build here")
+    else:
+        tenv = {k: v for k, v in env.items() if k != "ASAN_OPTIONS"}
+        tenv["TSAN_OPTIONS"] = "halt_on_error=1"
+        for exe_, args_ in [(tsan, []), (tsan_bp, ["bp"])]:
+            out = subprocess.run([str(exe_)] + args_, env=tenv, capture_output=True, text=True, timeout=900)
+            assert out.returncode == 0 and "WARNING: ThreadSanitizer" not in out.stderr, out.stdout + out.stderr[-6000:]
+        print("PASS: ThreadSanitizer clean: every ASF case above, the back-pressure ones included, with video decoded ahead")
     for l in lines + bp_lines:
         print("  " + l)

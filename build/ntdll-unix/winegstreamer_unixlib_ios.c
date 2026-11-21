@@ -3822,6 +3822,15 @@ static BOOL wg_video_switch_on(void)
     return !(v && v[0] == '0' && !v[1]);
 }
 
+/* Each decoded video stream decodes ahead on a thread of its own, so a request
+ * for another stream on the same thread is not held up behind a picture
+ * (mav_ahead_main).  0 decodes on the requesting thread, as before. */
+static BOOL wg_video_ahead_switch_on(void)
+{
+    const char *v = getenv( "MADEIRA_WG_VIDEO_AHEAD" );
+    return !(v && v[0] == '0' && !v[1]);
+}
+
 /* The WM reader's compressed samples of an ASF's WMV / WMA streams, for an
  * application's own decoder (KiriKiri's movie plugin and the decoder DMOs).
  * 0 refuses them as before: the reader then keeps its decoded streams. */
@@ -3859,6 +3868,9 @@ static void wgp_configure(void)
     mav_allow_compressed_asf( wg_compressed_switch_on() );
     if (!wg_compressed_switch_on())
         mav_log( "compressed ASF output disabled by MADEIRA_WG_COMPRESSED=0" );
+    mav_allow_video_ahead( wg_video_ahead_switch_on() );
+    if (!wg_video_ahead_switch_on())
+        mav_log( "video decode-ahead disabled by MADEIRA_WG_VIDEO_AHEAD=0: video decodes on the requesting thread" );
 
 #ifdef __APPLE__
     mav_configure( video, &mav_apple_video_backend, &mav_apple_audio_backend, native );
