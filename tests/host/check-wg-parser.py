@@ -36,7 +36,9 @@ MADEIRA_HOST_FFMPEG (prefix of an existing host build), MADEIRA_TEST_MP3 (an .mp
 default: a Windows system MP3 under /mnt/c when present, otherwise the real-MP3 case is skipped).
 """
 from pathlib import Path
-import hashlib, os, re, subprocess, sys, tempfile
+import os, re, subprocess, sys, tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_ffmpeg import host_ffmpeg   # the shared host build, made under a lock
 
 root = Path(__file__).resolve().parents[2]
 core = root / "build/ntdll-unix/wg_parser_av_ios.c"
@@ -137,24 +139,8 @@ FLAGS = [
     "--disable-avfilter", "--disable-postproc", "--enable-avformat", "--enable-avcodec", "--enable-swresample",
     "--disable-asm", "--disable-shared", "--enable-static", "--enable-pic", "--disable-debug",
 ]
-prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
-if not prefix:
-    key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
-    if not (Path(prefix) / "lib/libavformat.a").exists():
-        assert tarball and Path(tarball).exists(), "no FFmpeg tarball at build/ffmpeg/src (tracked) and no MADEIRA_FFMPEG_TARBALL"
-        src = Path(prefix + "-src")
-        src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.5/configure").exists():
-            subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
-        bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
-        print("building host FFmpeg into", prefix, flush=True)
-        log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
-                       cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-inc, lib = Path(prefix) / "include", Path(prefix) / "lib"
+prefix = host_ffmpeg(FLAGS, tarball, tag="", override=os.environ.get("MADEIRA_HOST_FFMPEG"))
+inc, lib = prefix / "include", prefix / "lib"
 
 # ------------------------------------------------------------------ 3. the core under ASan
 harness = r"""

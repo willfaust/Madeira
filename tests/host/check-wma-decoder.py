@@ -19,7 +19,9 @@ MADEIRA_WINE_BUILD (a configured Wine build tree whose include/ holds config.h a
 widl-generated headers; default: wine/build-macos, the tree build/ntdll-unix/build.sh uses).
 """
 from pathlib import Path
-import hashlib, os, subprocess, sys, tempfile
+import os, subprocess, sys, tempfile
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_ffmpeg import host_ffmpeg   # the shared host build, made under a lock
 
 root = Path(__file__).resolve().parents[2]
 ntdll_unix = root / "build/ntdll-unix"
@@ -72,24 +74,8 @@ FLAGS = [
     "--disable-avfilter", "--disable-postproc", "--enable-avformat", "--enable-avcodec", "--enable-swresample",
     "--disable-asm", "--disable-shared", "--enable-static", "--enable-pic", "--disable-debug",
 ]
-prefix = os.environ.get("MADEIRA_HOST_FFMPEG")
-if not prefix:
-    key = hashlib.sha256(" ".join(FLAGS).encode()).hexdigest()[:12]
-    prefix = str(Path.home() / ".cache/madeira-host-ffmpeg" / ("7.1.5-" + key))
-    if not (Path(prefix) / "lib/libavcodec.a").exists():
-        assert Path(tarball).exists(), "no FFmpeg tarball at %s" % tarball
-        src = Path(prefix + "-src")
-        src.mkdir(parents=True, exist_ok=True)
-        if not (src / "ffmpeg-7.1.5/configure").exists():
-            subprocess.run(["tar", "-xJf", tarball, "-C", str(src)], check=True)
-        bld = Path(prefix + "-build"); bld.mkdir(parents=True, exist_ok=True)
-        print("building host FFmpeg into", prefix, flush=True)
-        log = open(str(bld) + ".log", "w")
-        subprocess.run([str(src / "ffmpeg-7.1.5/configure"), "--prefix=" + prefix, "--cc=cc"] + FLAGS,
-                       cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "-j%d" % (os.cpu_count() or 4)], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-        subprocess.run(["make", "install"], cwd=bld, check=True, stdout=log, stderr=subprocess.STDOUT)
-inc, lib = Path(prefix) / "include", Path(prefix) / "lib"
+prefix = host_ffmpeg(FLAGS, tarball, tag="", override=os.environ.get("MADEIRA_HOST_FFMPEG"))
+inc, lib = prefix / "include", prefix / "lib"
 
 # ------------------------------------------------------------------ harness
 harness = r"""
