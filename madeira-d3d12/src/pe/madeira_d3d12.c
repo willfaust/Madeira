@@ -12323,13 +12323,18 @@ static struct mad_fg {
     obj_handle_t f_mv, f_depth; enum WMTPixelFormat f_mpf, f_dpf; UINT f_w, f_h;
     float f_mvx, f_mvy, f_jx, f_jy, f_near, f_far, f_fov, f_dt; int f_rev;
     int prev_ok, gen_prev, paused; unsigned fast_n, slow_n;
+    double cap;                         /* framegen-cap: the frame cap the game runs under, 0 = none known */
+    unsigned resume_need, gen_run; UINT64 resumed_at;   /* frames at speed before the gate reopens; generated frames in a row */
     LONG64 last_qpc, qpf, log_qpc, probe_qpc; double dt_ema;
     obj_handle_t interp; UINT i_w, i_h, i_ow, i_oh; enum WMTPixelFormat i_cpf, i_dpf, i_mpf; int i_ui, i_bad;
     struct mad_fg_tex tc[8]; unsigned tc_next; UINT64 tc_flushed;
     struct { obj_handle_t h; UINT64 at; } dead[64]; unsigned ndead;
-    struct { obj_handle_t cb; UINT64 at; int gen; } cbs[8]; unsigned ncbs;
+    struct { obj_handle_t cb; UINT64 at; int gen; } cbs[12]; unsigned ncbs;
+    int dump_left, dump_plain; unsigned dump_burst, dump_n; LONG64 dump_qpc;   /* framegen-dump */
+    struct { obj_handle_t cb, buf; void *cpu; UINT w, h, pf, bpp; char name[32]; } dq[16]; unsigned ndq;
     struct mad_fg_run runs[16]; unsigned nruns, run_more;
     unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
+    unsigned n_lost, n_pause, n_draw2; LONG64 t_draw2;   /* the same: game frames that got no drawable, gate closings, waits for the second drawable */
     LONG said_fsr, said_bad, said_tex;
 } g_fg;
 
@@ -12360,6 +12365,10 @@ static void mad_fg_cfg(void) {
     g->ui_ps = 0;
     if (mad_cfg_str_pe("framegen-ui-ps", v, sizeof v) && v[0]) g->ui_ps = (UINT)strtoul(v, NULL, 16);   /* madeira-duo: the pixel shader id (as in encoder labels) of the first HUD draw; unset = the first blending draw into the back buffer */
     g->min_fps = mad_cfg_float_pe("framegen-min-fps", 28.0);   /* madeira-duo: no generated frames while the game runs slower than this */
+    g->cap = mad_cfg_float_pe("framegen-cap", 0.0);   /* madeira-duo: the frame cap the game runs under while frames are generated (30 = locked 30 -> 60); 0 = none, the pair is paced by the measured frame time */
+    if (!(g->cap >= 10.0 && g->cap <= 240.0)) g->cap = 0.0;
+    g->dump_left = (int)mad_cfg_int_pe("framegen-dump", 0);   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
+    g->resume_need = 40;
     g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
     g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
     g->mul_jx = mad_cfg_float_pe("framegen-jitter-x", -1.0);
@@ -12375,9 +12384,10 @@ static void mad_fg_cfg(void) {
     g->fsr_frame = ~(UINT64)0;
     g_fg_on = (on ? 1 : 0) | (g->probe_s ? 2 : 0);
     if (g_fg_on)
-        d3d12_log("[framegen] framegen = %d, probe every %d s: min %.0f fps, HUD handling %s, mv x%.2f y%.2f, jitter x%.2f y%.2f\n",
-                  on, g->probe_s, g->min_fps, !g->ui_mode ? "off" : g->ui_ps ? "from the named pixel shader" : "from the first blending draw",
-                  g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy);
+        d3d12_log("[framegen] framegen = %d, probe every %d s: min %.0f fps, cap %.0f fps, HUD handling %s, mv x%.2f y%.2f, jitter x%.2f y%.2f, "
+                  "frame dumps %d\n",
+                  on, g->probe_s, g->min_fps, g->cap, !g->ui_mode ? "off" : g->ui_ps ? "from the named pixel shader" : "from the first blending draw",
+                  g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy, g->dump_left);
 }
 static obj_handle_t mad_fg_newtex(struct mad_device *d, enum WMTPixelFormat pf, UINT w, UINT h) {
     struct WMTTextureInfo ti;
@@ -25424,16 +25434,95 @@ static void mad_fg_committed(obj_handle_t cb, int gen) {
     NSObject_retain(cb);
     g->cbs[g->ncbs].cb = cb; g->cbs[g->ncbs].at = g->frame + 3; g->cbs[g->ncbs].gen = gen; g->ncbs++;
 }
+/* How long each drawable of a pair stays up at least: well under half the game's frame, so the next refresh at or
+ * after half a frame takes it (a minimum of exactly half a frame can miss that refresh by a hair and cost a whole one). */
+static double mad_fg_hold(void) {
+    struct mad_fg *g = &g_fg; double t = g->cap > 0.0 ? 1.0 / g->cap : g->dt_ema;
+    if (!(t > 0.004)) return 0.0;
+    if (t > 0.1) t = 0.1;
+    return t * 0.42;
+}
+/* framegen-dump: textures as they were when a generated frame was made, for looking at off the device.
+ * C:\madeira-fg\bNN-fK-<what>.raw: "MFG1", width, height, WMTPixelFormat, bytes per pixel (five UINT32), then the rows. */
+static void mad_fg_dump_tex(struct mad_device *d, obj_handle_t benc, obj_handle_t cb, obj_handle_t tex, UINT w, UINT h, UINT pf, const char *what, unsigned step) {
+    struct mad_fg *g = &g_fg; struct wmtcmd_blit_copy_from_texture_to_buffer k; void *cpu = NULL; obj_handle_t buf; UINT bpp = mad_pf_bytes(pf);
+    if (!tex || !w || !h || !bpp || bpp > 16 || g->ndq >= sizeof g->dq / sizeof g->dq[0]) return;
+    buf = mad_capbuf_alloc(d, (UINT64)w * h * bpp, &cpu);
+    if (!buf) return;
+    memset(&k, 0, sizeof k);
+    k.type = WMTBlitCommandCopyFromTextureToBuffer;
+    k.src = tex; k.slice = 0; k.level = 0;
+    k.size.width = w; k.size.height = h; k.size.depth = 1;
+    k.dst = buf; k.offset = 0; k.bytes_per_row = w * bpp; k.bytes_per_image = w * h * bpp;
+    MTLBlitCommandEncoder_encodeCommands(benc, (const struct wmtcmd_base *)&k);
+    NSObject_retain(cb);
+    g->dq[g->ndq].cb = cb; g->dq[g->ndq].buf = buf; g->dq[g->ndq].cpu = cpu;
+    g->dq[g->ndq].w = w; g->dq[g->ndq].h = h; g->dq[g->ndq].pf = pf; g->dq[g->ndq].bpp = bpp;
+    snprintf(g->dq[g->ndq].name, sizeof g->dq[g->ndq].name, "b%02u-f%u-%s", g->dump_n, step, what);
+    g->ndq++;
+}
+/* Written once the burst is over and the command buffers have completed: three frames' files are not written between them. */
+static void mad_fg_dump_poll(void) {
+    struct mad_fg *g = &g_fg; unsigned i, n = 0;
+    if (!g->ndq || g->dump_burst || g->dump_plain) return;
+    for (i = 0; i < g->ndq; i++) {
+        enum WMTCommandBufferStatus st = MTLCommandBuffer_status(g->dq[i].cb);
+        struct mad_capbuf t;
+        if (st < WMTCommandBufferStatusCompleted) { g->dq[n++] = g->dq[i]; continue; }
+        if (st == WMTCommandBufferStatusCompleted) {
+            char path[80]; HANDLE f; DWORD wr = 0; UINT32 hdr[5];
+            CreateDirectoryA("C:\\madeira-fg", NULL);
+            snprintf(path, sizeof path, "C:\\madeira-fg\\%s.raw", g->dq[i].name);
+            f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (f != INVALID_HANDLE_VALUE) {
+                hdr[0] = 0x3147464du; hdr[1] = g->dq[i].w; hdr[2] = g->dq[i].h; hdr[3] = g->dq[i].pf; hdr[4] = g->dq[i].bpp;
+                WriteFile(f, hdr, sizeof hdr, &wr, NULL);
+                WriteFile(f, g->dq[i].cpu, (DWORD)(g->dq[i].w * g->dq[i].h * g->dq[i].bpp), &wr, NULL);
+                CloseHandle(f);
+            } else d3d12_log("[fg-dump] could not write %s\n", path);
+        } else d3d12_log("[fg-dump] %s: its command buffer failed, nothing written\n", g->dq[i].name);
+        memset(&t, 0, sizeof t); t.buf = g->dq[i].buf; t.own = g->dq[i].cpu; mad_capbuf_free(&t);
+        NSObject_release(g->dq[i].cb);
+    }
+    g->ndq = n;
+}
+/* A generated frame was just encoded into cb: copy it and what it was made from, three frames in a row. */
+static void mad_fg_dump_frame(struct mad_device *d, obj_handle_t cb, struct mad_resource *bb, obj_handle_t ui, LONG64 now, UINT64 present) {
+    struct mad_fg *g = &g_fg; obj_handle_t enc; unsigned step;
+    if (!g->dump_burst) {   /* a new burst: generation has been steady for 90 frames, and the last burst is 15 s back */
+        if (g->gen_run < 90 || g->ndq || (g->dump_qpc && (now - g->dump_qpc) / g->qpf < 15)) return;
+        g->dump_burst = 3; g->dump_n++;
+    }
+    step = 4 - g->dump_burst;
+    enc = MTLCommandBuffer_blitCommandEncoder(cb);
+    if (enc) {
+        g_enc_seq++;
+        mad_fg_dump_tex(d, enc, cb, g->snap[g->cur], g->bw, g->bh, (UINT)g->bpf, "hudless", step);
+        mad_fg_dump_tex(d, enc, cb, ui ? ui : bb->texture, g->bw, g->bh, (UINT)g->bpf, "hud", step);
+        mad_fg_dump_tex(d, enc, cb, g->out, g->bw, g->bh, (UINT)g->bpf, "gen", step);
+        mad_fg_dump_tex(d, enc, cb, g->f_mv, g->f_w, g->f_h, (UINT)g->f_mpf, "mv", step);
+        MTLCommandEncoder_endEncoding(enc);
+    }
+    d3d12_log("[fg-dump] burst %u frame %u, present #%llu: hudless, hud, gen %ux%u pf%u, mv %ux%u pf%u; mv to pixels %g %g, jitter %g %g, "
+              "dt %g, near %g far %g fov y %.2f, depth %s\n", g->dump_n, step, (unsigned long long)present, g->bw, g->bh, (unsigned)g->bpf,
+              g->f_w, g->f_h, (unsigned)g->f_mpf, g->f_mvx, g->f_mvy, g->f_jx, g->f_jy, g->f_dt, g->f_near, g->f_far, g->f_fov,
+              g->f_rev ? "reversed" : "not reversed");
+    if (!--g->dump_burst) g->dump_plain = 1;   /* then one frame as the game drew it, with no copy before its HUD */
+}
 static void mad_fg_report(double secs) {
     struct mad_fg *g = &g_fg;
     d3d12_log("[framegen] %.1f s: %u frames, %u generated%s; not generated: starting %u, under %.0f fps %u, no FSR inputs %u, FSR constants %u, "
-              "interpolator %u, no second drawable %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present; frame %.1f ms; "
-              "present GPU time with a generated frame %.2f ms avg %.2f max (%u), without %.2f avg %.2f max (%u)\n",
+              "interpolator %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present; frame %.1f ms; "
+              "command buffer GPU time: generated frame's %.2f ms avg %.2f max (%u), game frame's %.2f avg %.2f max (%u); "
+              "wait for the game frame's drawable %.2f ms avg (%u), game frames that got none %u; hold %.1f ms each; "
+              "gate closed %u times, reopens after %u frames at speed\n",
               secs, g->n_frames, g->n_gen, g->native == 1 ? "" : g->native == 0 ? " (this winemetal has no frame interpolator)" : "",
               g->n_skip[FG_SKIP_PRIME], g->min_fps, g->n_skip[FG_SKIP_SLOW], g->n_skip[FG_SKIP_NOFSR], g->n_skip[FG_SKIP_CONSTS],
-              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_DRAWABLE], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->dt_ema * 1000.0,
-              g->n_cb[1] ? g->cb_ms[1] / g->n_cb[1] : 0.0, g->cb_max[1], g->n_cb[1], g->n_cb[0] ? g->cb_ms[0] / g->n_cb[0] : 0.0, g->cb_max[0], g->n_cb[0]);
-    g->n_frames = g->n_gen = g->n_split = g->n_late = 0;
+              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->dt_ema * 1000.0,
+              g->n_cb[1] ? g->cb_ms[1] / g->n_cb[1] : 0.0, g->cb_max[1], g->n_cb[1], g->n_cb[0] ? g->cb_ms[0] / g->n_cb[0] : 0.0, g->cb_max[0], g->n_cb[0],
+              g->n_draw2 ? (double)g->t_draw2 * 1000.0 / (double)g->qpf / g->n_draw2 : 0.0, g->n_draw2, g->n_lost, mad_fg_hold() * 1000.0,
+              g->n_pause, g->resume_need);
+    g->n_frames = g->n_gen = g->n_split = g->n_late = g->n_lost = g->n_pause = g->n_draw2 = 0; g->t_draw2 = 0;
     memset(g->n_skip, 0, sizeof g->n_skip); memset(g->n_cb, 0, sizeof g->n_cb);
     memset(g->cb_ms, 0, sizeof g->cb_ms); memset(g->cb_max, 0, sizeof g->cb_max);
 }
@@ -25471,6 +25560,16 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
     g->last_qpc = now;
     mad_fg_reap();
     mad_fg_cb_poll();
+    mad_fg_dump_poll();
+    if (g->dump_plain && bb && bb->texture && !g->armed) {   /* framegen-dump: the frame after a burst, untouched by us */
+        obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
+        if (enc) {
+            g_enc_seq++;
+            mad_fg_dump_tex(d, enc, cb, bb->texture, bb->width, bb->height, (UINT)bb->tex_pf, "plain", 4);
+            MTLCommandEncoder_endEncoding(enc);
+        }
+        g->dump_plain = 0; g->dump_left--; g->dump_qpc = now;
+    }
     if (g->armed && bb && bb->texture && g->snap[g->cur] && bb->width == g->bw && bb->height == g->bh) {
         if (g->snap_done) have_snap = 1;
         else {   /* no HUD draw this frame (or framegen-ui = 0): the finished frame is the colour input */
@@ -25512,21 +25611,37 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
                 memset(&a, 0, sizeof a); a.op = 31; a.ptr = (UINT64)(ULONG_PTR)&r; a.len = sizeof r;
                 MadeiraCtl(&a);
                 if (a.ret) gen = 1; else why = FG_SKIP_INTERP;
+                if (gen && g->dump_left > 0) mad_fg_dump_frame(d, cb, bb, ui, now, s->presents);
             }
         }
     } else if (g->paused) why = FG_SKIP_SLOW;
     if (g_fg_on & 1) { g->n_frames++; if (gen) g->n_gen++; else g->n_skip[why]++; }
     g->prev_ok = have_snap; g->gen_prev = gen;
+    g->gen_run = gen ? g->gen_run + 1 : 0;
+    if (!gen && g->dump_burst) { g->dump_burst = 0; g->dump_left--; g->dump_qpc = now; }   /* a burst cut short still counts */
     if (have_snap) g->cur ^= 1;
     if (g->probe_frame) { mad_fg_probe_flush(s); g->probe_frame = 0; }
     else if (g->probe_s && (now - g->probe_qpc) / g->qpf >= g->probe_s) { g->probe_frame = 1; g->probe_ui = 0; g->probe_qpc = now; g->nruns = 0; g->run_more = 0; }
     g->snap_done = 0; g->bb_draws = 0; g->frame++;
     if (g->dt_ema > 0.0) {   /* the rate gate, with some hysteresis */
-        double fps = 1.0 / g->dt_ema;
-        if (!g->paused) { if (fps < g->min_fps) { if (++g->slow_n >= 20) { g->paused = 1; g->slow_n = 0; g->fast_n = 0; } } else g->slow_n = 0; }
-        else if (fps >= g->min_fps + 3.0) { if (++g->fast_n >= 40) { g->paused = 0; g->fast_n = 0; } } else g->fast_n = 0;
+        /* It reopens 3 fps over the floor, or just under the cap when that is lower (a 30 cap never shows 31). A gate
+         * that closes again within 600 frames of reopening waits twice as long the next time, up to 1280 frames, so
+         * a scene where generating itself costs the rate does not switch back and forth every second. */
+        double fps = 1.0 / g->dt_ema, up = g->min_fps + 3.0;
+        if (g->cap > 0.0 && up > g->cap - 1.0) up = g->cap - 1.0;
+        if (up < g->min_fps) up = g->min_fps;
+        if (!g->paused) {
+            if (fps < g->min_fps) {
+                if (++g->slow_n >= 20) {
+                    g->paused = 1; g->slow_n = 0; g->fast_n = 0; g->n_pause++;
+                    if (g->resumed_at && g->frame - g->resumed_at < 600) { if (g->resume_need < 1280) g->resume_need *= 2; }
+                    else g->resume_need = 40;
+                }
+            } else g->slow_n = 0;
+        } else if (fps >= up) { if (++g->fast_n >= g->resume_need) { g->paused = 0; g->fast_n = 0; g->resumed_at = g->frame; } }
+        else g->fast_n = 0;
     }
-    g->armed = (g_fg_on & 1) && g->native == 1 && !g->paused && mad_fg_setup(s);
+    g->armed = (g_fg_on & 1) && g->native == 1 && !g->paused && !g->dump_plain && mad_fg_setup(s);
     if ((g_fg_on & 1) && g->log_s && (now - g->log_qpc) / g->qpf >= g->log_s) {
         mad_fg_report((double)(now - g->log_qpc) / (double)g->qpf);
         g->log_qpc = now;
@@ -25559,14 +25674,28 @@ static void mad_fg_show(struct mad_swapchain *s, obj_handle_t cb, obj_handle_t d
     MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
     MTLCommandEncoder_endEncoding(enc);
 }
-/* The generated frame's drawable, then the game's. 0: winemetal did not take the pair. */
-static int mad_fg_present2(obj_handle_t cb, obj_handle_t first, obj_handle_t second) {
-    struct madeira_ctl_args a; struct mad_fg_present_req r;
-    memset(&r, 0, sizeof r);
-    r.cb = (UINT64)cb; r.first = (UINT64)first; r.second = (UINT64)second; r.frame_s = g_fg.dt_ema;
-    memset(&a, 0, sizeof a); a.op = 32; a.ptr = (UINT64)(ULONG_PTR)&r; a.len = sizeof r;
-    MadeiraCtl(&a);
-    return a.ret != 0;
+/* A generated frame is in g_fg.out. It goes out now, on the command buffer that made it, and the game's own frame
+ * follows on a command buffer of its own once the layer has a drawable for it: at any time one drawable is up, one
+ * is queued and one is being filled, as at any 60 fps present. (One command buffer for the pair, MadeiraCtl 32, made
+ * every generated frame wait for two of the layer's three drawables before anything was committed, and that cost a
+ * refresh: run-1122b, 50 ms frames under a 30 cap.) Each of the two is held mad_fg_hold() at least, which is what
+ * caps the game: two drawables a frame, a refresh each.
+ * Returns the command buffer for the game's frame, with its drawable and texture; 0 when the layer had none (the
+ * generated frame is still shown, the game's is not). */
+static obj_handle_t mad_fg_pair(struct mad_swapchain *s, obj_handle_t cb, obj_handle_t drawable, obj_handle_t tex,
+                                obj_handle_t *second, obj_handle_t *second_tex) {
+    struct mad_fg *g = &g_fg; LONG64 t0; obj_handle_t cb2 = 0;
+    mad_fg_show(s, cb, tex);
+    MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, drawable, mad_fg_hold());
+    MTLCommandBuffer_commit(cb);
+    mad_fg_committed(cb, 1);
+    t0 = mad_qpc();
+    *second = MetalLayer_nextDrawable(s->layer);
+    g->t_draw2 += mad_qpc() - t0; g->n_draw2++;
+    *second_tex = *second ? MetalDrawable_texture(*second) : 0;
+    if (*second_tex) cb2 = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
+    if (!cb2) g->n_lost++;
+    return cb2;
 }
 
 /* ml1121: the Metal half of Present; runs on the queue's worker (async) or on the caller. */
@@ -25712,12 +25841,13 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
         obj_handle_t copy_src = src->texture;
         UINT copy_w = src->width, copy_h = src->height;
         obj_handle_t fg_second = 0, fg_dst = tex;   /* madeira-duo framegen: with a generated frame, the game's goes to a second drawable */
-        if (g_fg_on > 0 && mad_fg_frame(s, idx, cb)) {
-            fg_second = MetalLayer_nextDrawable(s->layer);
-            fg_dst = fg_second ? MetalDrawable_texture(fg_second) : 0;
-            if (fg_dst) mad_fg_show(s, cb, tex);   /* the generated frame is shown first */
-            else { fg_second = 0; fg_dst = tex; g_fg.n_gen--; g_fg.n_skip[FG_SKIP_DRAWABLE]++; }
+        int fg_pair = 0;
+        if (g_fg_on > 0 && mad_fg_frame(s, idx, cb)) {   /* the generated frame is committed and shown first */
+            cb = mad_fg_pair(s, cb, drawable, tex, &fg_second, &fg_dst);
+            if (cb && g_sd_state > 0 && g_fence_strict) mad_strict_cb_wait(s->queue->device, cb);
+            fg_pair = 1;
         }
+        if (!cb) goto fg_no_second;   /* the layer had no drawable for the game's frame */
         if (s->fx_scaler && s->fx_out && s->fx_view[idx]) {   /* MetalFX spatial, then the copy below */
             /* After fence-chain 6 work the scaler waits for the frame's batches on
              * the device fence and updates it, so the blit's wait below orders after it. */
@@ -25743,12 +25873,11 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
         }
         /* Submitted after the frame's own command buffers on the same queue,
          * which is what orders the copy after the rendering. */
-        if (fg_second && !mad_fg_present2(cb, drawable, fg_second)) {   /* madeira-duo framegen: both, the plain way */
-            MTLCommandBuffer_presentDrawable(cb, drawable);
-            MTLCommandBuffer_presentDrawable(cb, fg_second);
-        } else if (!fg_second) MTLCommandBuffer_presentDrawable(cb, drawable);
+        if (fg_pair) MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, fg_second, mad_fg_hold());   /* madeira-duo framegen */
+        else MTLCommandBuffer_presentDrawable(cb, drawable);
         MTLCommandBuffer_commit(cb);
-        if (g_fg_on > 0) mad_fg_committed(cb, fg_second != 0);
+        if (g_fg_on > 0) mad_fg_committed(cb, 0);
+        fg_no_second: ;
     }
     InterlockedExchangeAdd64(&g_xp.t_cmt, mad_qpc() - tc); }
     mad_swd_step(s->queue, 0);
