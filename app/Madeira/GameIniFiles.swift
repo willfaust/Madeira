@@ -101,14 +101,23 @@ struct IniDocument: Equatable {
     var text: String { lines.joined(separator: newline) + (endsWithNewline ? newline : "") }
 }
 
-/// A file's bytes as text, and back in the same encoding (UTF-8, with or
-/// without a byte order mark, else Windows Latin 1, which every byte decodes as).
+/// A file's bytes as text, and back in the same encoding (UTF-16 LE with its
+/// byte order mark, UTF-8 with or without one, else Windows Latin 1, which
+/// every byte decodes as).
 struct IniFileText: Equatable {
     var text: String
     let bom: Bool
     let utf8: Bool
+    let utf16: Bool
 
     init?(data: Data) {
+        // FF FE is what Windows calls "Unicode"; WritePrivateProfileStringW keeps writing such a file as UTF-16 LE.
+        if data.starts(with: [0xFF, 0xFE]) {
+            guard let s = String(data: Data(data.dropFirst(2)), encoding: .utf16LittleEndian) else { return nil }
+            text = s; bom = true; utf8 = false; utf16 = true
+            return
+        }
+        utf16 = false
         let marker = Data([0xEF, 0xBB, 0xBF])
         bom = data.starts(with: marker)
         let body = bom ? data.dropFirst(3) : data[...]
@@ -118,6 +127,7 @@ struct IniFileText: Equatable {
     }
 
     func data(_ text: String) -> Data? {
+        if utf16 { return text.data(using: .utf16LittleEndian).map { Data([0xFF, 0xFE]) + $0 } }
         guard let body = text.data(using: utf8 ? .utf8 : .windowsCP1252) ?? text.data(using: .isoLatin1) else { return nil }
         return (bom ? Data([0xEF, 0xBB, 0xBF]) : Data()) + body
     }

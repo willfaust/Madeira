@@ -49,7 +49,8 @@ enum MadeiraConfig {
         cache.lock.lock()
         defer { cache.lock.unlock() }
         if let hit = cache.value, cache.stamp == stamp { return hit }
-        let parsed = stamp.isEmpty ? [:] : ((try? String(contentsOf: u, encoding: .utf8)).map(parse) ?? [:])
+        // A byte that is not UTF-8 reads as U+FFFD rather than hiding the whole file: build/madeira_cfg.h still applies it.
+        let parsed = stamp.isEmpty ? [:] : ((try? Data(contentsOf: u)).map { parse(String(decoding: $0, as: UTF8.self)) } ?? [:])
         cache.value = parsed; cache.stamp = stamp; cache.exists = !stamp.isEmpty
         return parsed
     }
@@ -184,22 +185,34 @@ enum MadeiraConfig {
     /// value is appended; a nil value removes the key. Without madeira.cfg the
     /// legacy files are migrated first, so writing one key never hides the
     /// switches that still live in madeira-*.txt files.
+    ///
+    /// Works on bytes, like build/madeira_cfg.h: a line that is not UTF-8 (a
+    /// comment saved as Windows-1252 by a PC editor) is kept byte for byte, and
+    /// a file that exists but cannot be read is left alone (returns false)
+    /// instead of being rewritten with only this key.
     @discardableResult
     static func set(_ key: String, _ value: String?) -> Bool {
         guard let u = url else { return false }
         if !present { migrateLegacy(log: { _ in }) }
-        let text = (try? String(contentsOf: u, encoding: .utf8)) ?? ""
-        var lines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }).map(String.init)
-        if lines.last == "" { lines.removeLast() }
+        var data = Data()
+        if FileManager.default.fileExists(atPath: u.path) {
+            guard let d = try? Data(contentsOf: u) else { return false }
+            data = d
+        }
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false).map { line -> Data in
+            line.last == 0x0D ? Data(line.dropLast()) : Data(line)
+        }
+        if lines.last?.isEmpty == true { lines.removeLast() }
         lines.removeAll { line in
-            let t = line.trimmingCharacters(in: .whitespaces)
+            let t = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces)
             guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { return false }
             return t[..<eq].trimmingCharacters(in: .whitespaces) == key
         }
-        if let value { lines.append("\(key) = \(value)") }
-        let out = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        if let value { lines.append(Data("\(key) = \(value)".utf8)) }
+        var out = Data(lines.joined(separator: [0x0A]))
+        if !lines.isEmpty { out.append(0x0A) }
         defer { invalidate() }
-        do { try out.write(to: u, atomically: true, encoding: .utf8); return true } catch { return false }
+        do { try out.write(to: u, options: .atomic); return true } catch { return false }
     }
 
     /// An app-side switch spelled like the native ones: `env.NAME = value` in

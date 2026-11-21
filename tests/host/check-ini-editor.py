@@ -79,6 +79,14 @@ print("latin=\(t.utf8),\(t.text == "a=é\n"),\(t.data(t.text) == latin)")
 let bom = Data([0xEF, 0xBB, 0xBF, 0x61, 0x3D, 0x31, 0x0A])
 let u = IniFileText(data: bom)!
 print("bom=\(u.bom),\(u.text == "a=1\n"),\(u.data(u.text) == bom)")
+let wide = Data([0xFF, 0xFE]) + "[Display]\r\niSize W=1280\r\niSize H=720\r\n".data(using: .utf16LittleEndian)!
+let w = IniFileText(data: wide)!
+var wd = IniDocument(text: w.text)
+let wideOpened = wd.sections.map(\.name) == ["Display"] && wd.value(section: "Display", key: "iSize W") == "1280"
+wd.set(line: 1, to: "1600")
+let wideSaved = w.data(wd.text)
+print("utf16=\(w.utf16),\(wideOpened),\(w.data(w.text) == wide),\(wideSaved == Data([0xFF, 0xFE]) + "[Display]\r\niSize W=1600\r\niSize H=720\r\n".data(using: .utf16LittleEndian)!)")
+print("utf16odd=\(IniFileText(data: Data([0xFF, 0xFE, 0x61])) == nil)")
 print("label=" + GameIniFiles.label("users/steamuser/Documents/My Games/FalloutNV/Fallout.ini", gameFolder: nil) + "|" +
       GameIniFiles.label("Program Files (x86)/Steam/steamapps/common/Fallout New Vegas/Fallout_default.ini",
                          gameFolder: "Program Files (x86)/Steam/steamapps/common/Fallout New Vegas"))
@@ -132,6 +140,8 @@ else:
         check(out['switch'] == 'true,false,false', 'Bethesda 0/1 switches (bName) show as switches')
         check(out['latin'] == 'false,true,true', 'a Windows Latin 1 file is saved in Latin 1')
         check(out['bom'] == 'true,true,true', 'a UTF-8 byte order mark is kept')
+        check(out['utf16'] == 'true,true,true,true', 'a UTF-16 LE file (FF FE) opens with its sections and is saved as UTF-16 LE')
+        check(out['utf16odd'] == 'true', 'a broken UTF-16 file does not open, so it is never saved damaged')
         check(out['label'] == 'My Games\\FalloutNV\\Fallout.ini|Fallout New Vegas\\Fallout_default.ini', 'short names')
         check(out['folder'] == 'Games/NV|Games/NV', "the game's folder: the program's, or a Steam install folder")
         check(out['list'] == 'x/B.ini', 'each game keeps its own list, once per file')

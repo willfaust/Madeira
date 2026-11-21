@@ -1915,7 +1915,13 @@ static void *wine_process_thread(void *arg) {
                 NSString *text = nil;
                 if (madeira_cfg_present()) {
                     NSMutableString *acc = [NSMutableString string];
-                    NSString *cfg = [NSString stringWithContentsOfFile:[docs stringByAppendingPathComponent:@MADEIRA_CFG_FILE] encoding:NSUTF8StringEncoding error:nil];
+                    /* A byte that is not UTF-8 (a comment saved as Windows-1252) used to make the whole
+                     * file nil, so no env line was exported though madeira_cfg.h applied the rest.
+                     * shortcut: such a file is read as Latin 1, so a non-ASCII value in it is exported
+                     * re-encoded rather than byte for byte; fine while env values are ASCII. */
+                    NSData *cfgData = [NSData dataWithContentsOfFile:[docs stringByAppendingPathComponent:@MADEIRA_CFG_FILE]];
+                    NSString *cfg = cfgData ? ([[NSString alloc] initWithData:cfgData encoding:NSUTF8StringEncoding]
+                                               ?: [[NSString alloc] initWithData:cfgData encoding:NSISOLatin1StringEncoding]) : nil;
                     for (NSString *raw in [cfg componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
                         NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
                         NSRange eq = [line rangeOfString:@"="];
