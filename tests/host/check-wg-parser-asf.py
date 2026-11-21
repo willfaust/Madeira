@@ -21,6 +21,13 @@ wm_reader.c offers, its default first: bottom-up 24-bit BGR.
      pixel-checked; keyframe seek with exact trim; the codec formats (WMV2, WMA v2);
    - WMV7 (wmv1) and MS-MPEG4 v3 video decode bit-exact;
    - a WMV3 stream of undecodable data ends the stream (no crash, no hang);
+   - compressed output (the WM reader's compressed samples: KiriKiri's movie plugin feeds them to the
+     WMV / WMA decoder DMOs): a compressed-output parser exposes the same streams, and every
+     packet of WMV8, WMV9 (the undecodable WMV3 too: it is not decoded here) and WMA2 comes out with
+     the file's bytes, keyframe flags and timestamps, in order, to the end; compressed video next
+     to decoded S16 audio; a seek starts the video at a keyframe; back to decoded pictures, bit-exact;
+     MS-MPEG4 (no wg_format) is refused compressed and still decodes; MADEIRA_WG_COMPRESSED=0's
+     refusal;
    and, built with small queue limits (a stream that falls behind used to lose packets):
    - a slow video reader and a fast audio reader on two threads: no packet dropped, every picture
      delivered (the same file without back-pressure drops);
@@ -48,12 +55,34 @@ for bad in ["h264", "hevc", "aac"]:
 for flag in ["--disable-gpl", "--disable-nonfree", "--disable-version3", "--disable-everything"]:
     assert flag in args, ("LGPL-only configuration", flag)
 assert "(int)MAV_PIX_BGR == (int)WG_VIDEO_FORMAT_BGR" in glue and "(int)MAV_PIX_YVYU == (int)WG_VIDEO_FORMAT_YVYU" in glue
-codec_fmt = glue[glue.index("static NTSTATUS wgp_get_codec_format("):]
+codec_fmt = glue[glue.rindex("static NTSTATUS wgp_get_codec_format("):]   # the definition, after a declaration
 codec_fmt = codec_fmt[:codec_fmt.index("\n}\n")]
 assert "case MAV_CODEC_WMA:" in codec_fmt and "WG_MAJOR_TYPE_AUDIO_WMA" in codec_fmt
 assert "case MAV_CODEC_WMV:" in codec_fmt and "WG_MAJOR_TYPE_VIDEO_WMV" in codec_fmt
+enable = glue[glue.index("static NTSTATUS wgp_enable("):]
+enable = enable[:enable.index("\n}\n")]
+assert "WG_MAJOR_TYPE_VIDEO_WMV" in enable and "WG_MAJOR_TYPE_AUDIO_WMA" in enable and "mav_enable_compressed(" in enable, \
+    "stream_enable takes the compressed formats"
+current = glue[glue.index("static NTSTATUS wgp_get_current_format("):]
+current = current[:current.index("\n}\n")]
+assert "mav_can_pass_compressed(" in current and "wgp_get_codec_format(" in current, \
+    "a compressed-output parser's current format is the codec format"
+assert 'getenv( "MADEIRA_WG_COMPRESSED" )' in glue and "mav_allow_compressed_asf(" in glue
+# Wine's WM reader (the submodule): compressed reading per stream, and a failed reinit keeps the streams
+wm = root / "wine/dlls/winegstreamer/wm_reader.c"
+if wm.exists():
+    w = wm.read_text()
+    reinit = w[w.index("static HRESULT reinit_stream("):]
+    reinit = reinit[:reinit.index("\n}\n")]
+    assert "free_streams(" not in reinit, "a failed reinit must not free the reader's streams"
+    assert "stream->read_compressed ? &format : &stream->format" in reinit, "compressed reading is per stream"
+    assert "assert(reader->stream_count == wg_parser_get_stream_count" not in reinit, "a stream count mismatch fails, not aborts"
+    sss = w[w.index("static HRESULT WINAPI reader_SetReadStreamSamples("):]
+    sss = sss[:sss.index("\n}\n")]
+    assert "old_compressed" in sss, "SetReadStreamSamples goes back to the previous parser on failure"
+    print("PASS: Wine's WM reader reads compressed per stream and keeps its streams when a reinit fails")
 print("PASS: FFmpeg has the asf demuxer and the Windows Media decoders (still no H.264/HEVC/AAC); "
-      "the glue maps the new pixel formats and the WMV / WMA codec formats")
+      "the glue maps the new pixel formats, the WMV / WMA codec formats and compressed output")
 
 # ------------------------------------------------------------------ 2. host FFmpeg
 tarball = os.environ.get("MADEIRA_FFMPEG_TARBALL") or str(root / "build/ffmpeg/src/ffmpeg-7.1.5.tar.xz")
@@ -586,6 +615,189 @@ static int test_backpressure( const uint8_t *asf, size_t size )
     return 0;
 }
 
+
+/* ================= compressed output (the WM reader's compressed samples) ================= */
+struct refpkt { int stream, key, size; int64_t pts; uint8_t *data; };
+static struct refpkt *ref_pkts;
+static int ref_pkt_count;
+
+static void free_packet_reference( void )
+{
+    int i;
+    for (i = 0; i < ref_pkt_count; i++) free( ref_pkts[i].data );
+    free( ref_pkts ); ref_pkts = NULL; ref_pkt_count = 0;
+}
+
+/* every packet of the file, as libavformat demuxes it on its own */
+static int make_packet_reference( const uint8_t *data, size_t size )
+{
+    struct membuf m = { (uint8_t *)data, size, size, 0 };
+    AVFormatContext *fc = avformat_alloc_context(); AVPacket *pkt = av_packet_alloc();
+
+    free_packet_reference();
+    fc->pb = avio_alloc_context( av_malloc( 4096 ), 4096, 0, &m, mem_read, NULL, mem_seek );
+    CHECK( avformat_open_input( &fc, NULL, NULL, NULL ) == 0 && avformat_find_stream_info( fc, NULL ) >= 0, "reference open" );
+    while (av_read_frame( fc, pkt ) >= 0)
+    {
+        if (pkt->size)
+        {
+            struct refpkt *r;
+            ref_pkts = realloc( ref_pkts, (ref_pkt_count + 1) * sizeof(*ref_pkts) );
+            r = &ref_pkts[ref_pkt_count++];
+            r->stream = pkt->stream_index; r->key = !!(pkt->flags & AV_PKT_FLAG_KEY); r->size = pkt->size;
+            r->pts = av_rescale_q( pkt->pts, fc->streams[pkt->stream_index]->time_base, (AVRational){ 1, 10000000 } );
+            r->data = malloc( pkt->size ); memcpy( r->data, pkt->data, pkt->size );
+        }
+        av_packet_unref( pkt );
+    }
+    av_packet_free( &pkt );
+    av_freep( &fc->pb->buffer ); avio_context_free( &fc->pb ); avformat_close_input( &fc );
+    return 0;
+}
+
+/* KiriKiri's way: both streams compressed, earliest-buffer reads to the end */
+static int test_compressed( const uint8_t *asf, size_t size, const char *codec, int streams )
+{
+    struct mav_parser *p = mav_create( 1 ); struct source s; struct mav_stream_info vi; struct mav_buffer b;
+    uint8_t *buf = malloc( 1 << 20 ); int next[2] = { 0, 0 }, count[2] = { 0, 0 }, want[2] = { 0, 0 }, i;
+    int64_t last_v = -1;
+
+    CHECK( !make_packet_reference( asf, size ), "packet reference" );
+    for (i = 0; i < ref_pkt_count; i++) want[ref_pkts[i].stream]++;
+    src_start( &s, p, asf, size );
+    CHECK( mav_connect( p, size ) == MAV_OK, "%s: a compressed-output parser connects", codec );
+    CHECK( (int)mav_stream_count( p ) == streams, "%s: %u streams, as decoded", codec, mav_stream_count( p ) );
+    CHECK( mav_stream_info( p, 0, &vi ) == MAV_OK && vi.kind == MAV_CODEC_WMV && !strcmp( vi.codec, codec )
+           && vi.vnative.width == W && vi.vnative.height == H, "%s: video info", codec );
+    for (i = 0; i < streams; i++)
+    {
+        CHECK( mav_can_pass_compressed( p, i ), "%s: stream %d passes compressed", codec, i );
+        CHECK( mav_enable_compressed( p, i ) == MAV_OK, "%s: stream %d enabled compressed", codec, i );
+    }
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek to 0 (wm_reader.c after enabling)" );
+    while (mav_get_buffer( p, -1, &b ) == MAV_OK)
+    {
+        int st = b.stream; const struct refpkt *r;
+        CHECK( st < streams, "stream %d", st );
+        while (next[st] < ref_pkt_count && ref_pkts[next[st]].stream != st) next[st]++;
+        CHECK( next[st] < ref_pkt_count, "%s: stream %d: more packets than the file has", codec, st );
+        r = &ref_pkts[next[st]++];
+        CHECK( b.size == (uint32_t)r->size && b.size <= (1 << 20) && mav_copy_buffer( p, st, buf, 0, b.size ) == MAV_OK
+               && !memcmp( buf, r->data, b.size ), "%s: stream %d packet %d: the file's %d bytes (got %u)", codec, st,
+               count[st], r->size, b.size );
+        CHECK( b.delta == !r->key, "%s: stream %d packet %d: keyframe flag", codec, st, count[st] );
+        CHECK( llabs( (long long)b.pts - (long long)(r->pts > 0 ? r->pts : 0) ) <= 1, "%s: stream %d packet %d: pts %llu, file %lld",
+               codec, st, count[st], (unsigned long long)b.pts, (long long)r->pts );
+        if (!count[st]) CHECK( b.discontinuity, "%s: stream %d starts with a discontinuity", codec, st );
+        else CHECK( !b.discontinuity, "%s: stream %d packet %d: no discontinuity", codec, st, count[st] );
+        if (st == 0)
+        {
+            if (!count[0]) CHECK( !b.delta, "%s: the first picture is a keyframe", codec );
+            CHECK( (int64_t)b.pts > last_v && b.duration == 10000000 / FPS, "%s: picture %d pts %llu dur %llu", codec,
+                   count[0], (unsigned long long)b.pts, (unsigned long long)b.duration );
+            last_v = b.pts;
+        }
+        count[st]++;
+        mav_release_buffer( p, st );
+    }
+    CHECK( count[0] == FRAMES && count[0] == want[0], "%s: %d pictures, the file has %d", codec, count[0], want[0] );
+    if (streams > 1) CHECK( count[1] == want[1] && count[1] > 0, "%s: %d WMA packets, the file has %d", codec, count[1], want[1] );
+    src_stop( &s ); mav_destroy( p ); free( buf );
+    printf( "PASS: compressed %s%s in ASF: all %d pictures%s with the file's bytes, keyframe flags and timestamps, in order\n",
+            codec, streams > 1 ? " + WMA2" : "", count[0], streams > 1 ? " and WMA packets" : "" );
+    return 0;
+}
+
+/* compressed video next to decoded audio; a seek; back to decoded video */
+static int test_compressed_mixed( const uint8_t *asf, size_t size )
+{
+    struct mav_parser *p = mav_create( 1 ); struct source s; struct mav_stream_info vi; struct mav_buffer b;
+    uint8_t *buf = malloc( 1 << 20 ); int pictures = 0, n = 0; int64_t samples = 0, target = 2 * 10000000LL; double sq = 0;
+
+    CHECK( !make_reference( asf, size ) && ref_count == FRAMES, "reference" );
+    src_start( &s, p, asf, size );
+    CHECK( mav_connect( p, size ) == MAV_OK && mav_stream_info( p, 0, &vi ) == MAV_OK, "connect" );
+    CHECK( mav_enable_compressed( p, 0 ) == MAV_OK, "video compressed" );
+    CHECK( mav_enable( p, 1, &(struct mav_output){ MAV_FMT_S16, RATE, 2, 3 } ) == MAV_OK, "audio decoded in the same parser" );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek to 0" );
+    while (mav_get_buffer( p, -1, &b ) == MAV_OK)
+    {
+        CHECK( b.size <= (1 << 20) && mav_copy_buffer( p, b.stream, buf, 0, b.size ) == MAV_OK, "copy" );
+        if (b.stream == 0) pictures++;
+        else
+        {
+            int k; const int16_t *pcm = (const int16_t *)buf;
+            for (k = 0; k < (int)(b.size / 2); k++) sq += (double)pcm[k] * pcm[k];
+            samples += b.size / 4;
+        }
+        mav_release_buffer( p, b.stream );
+    }
+    CHECK( pictures == FRAMES, "%d packets", pictures );
+    CHECK( llabs( samples - (int64_t)RATE * FRAMES / FPS ) < 4096 && sqrt( sq / (samples * 2) ) > 4000,
+           "%lld audio frames of the tone", (long long)samples );
+
+    /* a seek: the video starts at a keyframe at or before the target */
+    CHECK( mav_seek( p, 0, 1, (uint64_t)target, 0, 0 ) == MAV_OK, "seek to 2 s" );
+    CHECK( mav_get_buffer( p, 0, &b ) == MAV_OK && !b.delta && b.discontinuity && (int64_t)b.pts <= target + 10000
+           && (int64_t)b.pts > target - 2 * GOP * 10000000LL / FPS, "after the seek: delta %d disc %d pts %llu", b.delta,
+           b.discontinuity, (unsigned long long)b.pts );
+    mav_release_buffer( p, 0 );
+
+    /* decoded pictures again: a seek to 0 and every picture bit-exact */
+    {
+        struct mav_video_output o = vi.vnative; o.fmt = MAV_PIX_NV12;
+        CHECK( mav_enable_video( p, 0, &o ) == MAV_OK, "back to NV12" );
+    }
+    mav_disable( p, 1 );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek to 0" );
+    while (mav_get_buffer( p, 0, &b ) == MAV_OK)
+    {
+        CHECK( mav_copy_buffer( p, 0, buf, 0, b.size ) == MAV_OK, "copy" );
+        if (check_picture( buf, b.size, MAV_PIX_NV12, 0, n, "nv12 after compressed" )) return 1;
+        mav_release_buffer( p, 0 ); n++;
+    }
+    CHECK( n == FRAMES, "%d pictures after compressed reading", n );
+    src_stop( &s ); mav_destroy( p ); free( buf );
+    printf( "PASS: compressed WMV8 next to decoded S16 (%.2f s, rms %.0f) in one parser; a seek to 2 s starts the video "
+            "at a keyframe; back to decoded, %d pictures bit-exact\n", (double)samples / RATE, sqrt( sq / (samples * 2) ), n );
+    return 0;
+}
+
+/* MS-MPEG4 has no wg_format: refused compressed, decoded in the same parser; the kill switch */
+static int test_compressed_refusals( const uint8_t *mp43, size_t n3, const uint8_t *wmv2, size_t n2 )
+{
+    struct mav_parser *p = mav_create( 1 ); struct source s; struct mav_stream_info vi; struct mav_buffer b; int n = 0;
+
+    src_start( &s, p, mp43, n3 );
+    CHECK( mav_connect( p, n3 ) == MAV_OK && mav_stream_count( p ) == 2 && mav_stream_info( p, 0, &vi ) == MAV_OK,
+           "msmpeg4v3: a compressed-output parser connects, both streams" );
+    CHECK( !mav_can_pass_compressed( p, 0 ) && mav_can_pass_compressed( p, 1 ), "msmpeg4v3 video is not passed compressed, WMA is" );
+    CHECK( mav_enable_compressed( p, 0 ) == MAV_E_PARAM, "msmpeg4v3: compressed refused" );
+    CHECK( mav_get_buffer( p, 0, &b ) == MAV_NO_BUFFER, "and the stream is disabled" );
+    {
+        struct mav_video_output o = vi.vnative; o.fmt = MAV_PIX_NV12;
+        CHECK( mav_enable_video( p, 0, &o ) == MAV_OK, "msmpeg4v3 decoded" );
+    }
+    mav_disable( p, 1 );
+    CHECK( mav_seek( p, 0, 1, 0, 0, 0 ) == MAV_OK, "seek" );
+    while (mav_get_buffer( p, 0, &b ) == MAV_OK) { CHECK( b.size == W * H * 3 / 2, "nv12 size" ); mav_release_buffer( p, 0 ); n++; }
+    CHECK( n == FRAMES, "%d msmpeg4v3 pictures", n );
+    src_stop( &s ); mav_destroy( p );
+
+    mav_allow_compressed_asf( 0 );
+    p = mav_create( 1 ); src_start( &s, p, wmv2, n2 );
+    CHECK( mav_connect( p, n2 ) == MAV_E_UNSUPPORTED, "MADEIRA_WG_COMPRESSED=0: a compressed-output parser refuses an ASF" );
+    src_stop( &s ); mav_destroy( p );
+    mav_allow_compressed_asf( 1 );
+    p = mav_create( 0 ); src_start( &s, p, wmv2, n2 );
+    CHECK( mav_connect( p, n2 ) == MAV_OK && !mav_can_pass_compressed( p, 0 ) && mav_enable_compressed( p, 0 ) == MAV_E_PARAM,
+           "a decoding parser does not pass compressed" );
+    src_stop( &s ); mav_destroy( p );
+    printf( "PASS: MS-MPEG4 refused compressed and decoded in the same parser (%d pictures); MADEIRA_WG_COMPRESSED=0 "
+            "refuses the ASF; a decoding parser never passes compressed\n", n );
+    return 0;
+}
+
 int main( int argc, char **argv )
 {
     size_t n2, n1, n3, ng;
@@ -610,6 +822,11 @@ int main( int argc, char **argv )
     CHECK( mav_lavc_supports( MAV_LAVC_WMV3 ) && mav_lavc_supports( MAV_LAVC_VC1 ), "WMV9 / VC-1 decoders are built" );
     if (test_wmv( wmv2, n2, "wmv2" ) || test_wm_reader( wmv2, n2 ) || test_formats( wmv2, n2 )) return 1;
     if (test_wmv( wmv1, n1, "wmv1" ) || test_wmv( mp43, n3, "msmpeg4v3" ) || test_garbage_wmv3( garbage, ng )) return 1;
+    if (test_compressed( wmv2, n2, "wmv2", 2 ) || test_compressed( wmv1, n1, "wmv1", 2 )
+        || test_compressed( garbage, ng, "wmv3", 1 ) || test_compressed_mixed( wmv2, n2 )
+        || test_compressed_refusals( mp43, n3, wmv2, n2 ))
+        return 1;
+    free_packet_reference();
     free( wmv2 ); free( wmv1 ); free( mp43 ); free( garbage ); free( ref_frames );
     return failures != 0;
 }
@@ -639,6 +856,11 @@ with tempfile.TemporaryDirectory() as t:
     assert any("video codec=wmv1 backend=libavcodec" in l for l in lines) and any("video codec=msmpeg4v3 backend=libavcodec" in l for l in lines), lines
     assert any("wmv3" in l and ("packet rejected" in l or "undecodable" in l or "connect refused" in l) for l in lines), lines
     assert not any("dropping further packets" in l for l in lines), lines
+    assert any("connect container=asf stream=0 video codec=wmv2 backend=libavcodec 320x240 fps=25/1 out=compressed" in l
+               for l in lines), lines
+    assert any("first compressed packet delivered (wmv2" in l for l in lines) and \
+        any("first compressed packet delivered (wmav2" in l for l in lines), lines
+    assert any("connect refused (asf, compressed_out=1): compressed output requested" in l for l in lines), lines
     assert "ERROR: AddressSanitizer" not in out.stderr and "runtime error" not in out.stderr, out.stderr[-4000:]
 
     out = subprocess.run([str(bp), "bp"], env=env, capture_output=True, text=True, timeout=300)

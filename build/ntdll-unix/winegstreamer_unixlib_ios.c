@@ -3330,6 +3330,15 @@ static BOOL wg_video_switch_on(void)
     return !(v && v[0] == '0' && !v[1]);
 }
 
+/* The WM reader's compressed samples of an ASF's WMV / WMA streams, for an
+ * application's own decoder (KiriKiri's movie plugin and the decoder DMOs).
+ * 0 refuses them as before: the reader then keeps its decoded streams. */
+static BOOL wg_compressed_switch_on(void)
+{
+    const char *v = getenv( "MADEIRA_WG_COMPRESSED" );
+    return !(v && v[0] == '0' && !v[1]);
+}
+
 static enum mav_pixel_format wg_video_native_format(void)
 {
     static const struct { const char *name; enum mav_pixel_format fmt; } names[] =
@@ -3354,6 +3363,10 @@ static void wgp_configure(void)
 {
     BOOL video = wg_video_switch_on();
     enum mav_pixel_format native = wg_video_native_format();
+
+    mav_allow_compressed_asf( wg_compressed_switch_on() );
+    if (!wg_compressed_switch_on())
+        mav_log( "compressed ASF output disabled by MADEIRA_WG_COMPRESSED=0" );
 
 #ifdef __APPLE__
     mav_configure( video, &mav_apple_video_backend, &mav_apple_audio_backend, native );
@@ -3545,6 +3558,8 @@ static NTSTATUS wgp_get_stream( void *args )
     return S_OK;
 }
 
+static NTSTATUS wgp_get_codec_format( wg_parser_stream_t handle, struct wg_format *format );
+
 static NTSTATUS wgp_get_current_format( wg_parser_stream_t handle, struct wg_format *format )
 {
     UINT32 index;
@@ -3555,6 +3570,9 @@ static NTSTATUS wgp_get_current_format( wg_parser_stream_t handle, struct wg_for
 
     if (!parser) return STATUS_INVALID_HANDLE;
     if (!format) return STATUS_INVALID_PARAMETER;
+    /* wg_parser.c: a compressed-output parser's pad has the compressed caps
+     * (what the WM reader enables a compressed-reading stream with) */
+    if (mav_can_pass_compressed( parser->core, index )) return wgp_get_codec_format( handle, format );
     /* wg_parser.c: a stream without caps reports an all-zero format (UNKNOWN) */
     memset( format, 0, sizeof(*format) );
     if (mav_stream_info( parser->core, index, &info )) return S_OK;
@@ -3678,13 +3696,31 @@ static NTSTATUS wgp_enable( wg_parser_stream_t handle, const struct wg_format *f
     if (!format) return STATUS_INVALID_PARAMETER;
     if (mav_stream_info( parser->core, index, &info )) return VFW_E_WRONG_STATE;
 
+    if (format->major_type == WG_MAJOR_TYPE_VIDEO_WMV || format->major_type == WG_MAJOR_TYPE_AUDIO_WMA)
+    {
+        /* the demuxer's packets, as get_current_format describes them */
+        if ((format->major_type == WG_MAJOR_TYPE_VIDEO_WMV) != (info.type == MAV_STREAM_VIDEO))
+            status = MAV_E_PARAM;
+        else
+            status = mav_enable_compressed( parser->core, index );
+        if (status)
+        {
+            mav_disable( parser->core, index );
+            mav_log( "stream %u: enable refused: compressed output (major type %u) of %s", index,
+                     format->major_type, info.codec );
+            return wgp_status( status );
+        }
+        return S_OK;
+    }
+
     if (info.type == MAV_STREAM_VIDEO)
     {
         struct mav_video_output out;
 
         if (format->major_type != WG_MAJOR_TYPE_VIDEO)
         {
-            /* only decoded pictures are produced here; the stream stays disabled */
+            /* only decoded pictures and Windows Media packets are produced
+             * here; the stream stays disabled */
             mav_disable( parser->core, index );
             mav_log( "stream %u: enable refused: major type %u is not raw video", index, format->major_type );
             return STATUS_NOT_SUPPORTED;
@@ -3709,7 +3745,8 @@ static NTSTATUS wgp_enable( wg_parser_stream_t handle, const struct wg_format *f
 
         if (format->major_type != WG_MAJOR_TYPE_AUDIO)
         {
-            /* only decoded PCM is produced here; the stream stays disabled */
+            /* only decoded PCM and Windows Media packets are produced here;
+             * the stream stays disabled */
             mav_disable( parser->core, index );
             mav_log( "enable refused: major type %u is not PCM audio", format->major_type );
             return STATUS_NOT_SUPPORTED;

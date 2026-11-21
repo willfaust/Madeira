@@ -77,6 +77,29 @@ asks for NV12 still gets it from the YUV types listed after the native one.
 `stream N: first picture delivered` (or `first audio buffer delivered`) once,
 so a device log shows whether any sample was ever requested.
 
+**Compressed samples from the WM reader.** An application can ask the WM
+reader (`IWMSyncReader::SetReadStreamSamples`) for a stream's compressed
+samples and decode them itself. KiriKiri's movie plugin (`krmovie.dll`) does
+this for both streams of a WMV and feeds them to the WMV and WMA decoder DMOs
+(Sabbat of the Witch's video CGs). The reader then opens a compressed-output
+parser. This port's parser refused every compressed-output parser for an ASF,
+and Wine's reader freed its streams when that reinit failed but kept their
+count, so the next call wrote through a NULL array. Now:
+- a compressed-output parser exposes an ASF's streams as the decoding one does
+  (Wine's reader asserts the counts match);
+- its WMA, WMV1/2/3, WMVA and WVC1 streams report their codec format as the
+  current format and, enabled with it, hand out the demuxer's packets as they
+  are: the file's bytes, keyframe flags (`delta`) and timestamps;
+- after a seek the video starts at a keyframe;
+- a stream enabled with a raw format in the same parser is decoded as usual
+  (MS-MPEG4, which has no `wg_format`, always is);
+- Wine's reader (in the wine submodule) chooses compressed or decoded per
+  stream, keeps its streams when a reinit fails, goes back to the previous
+  parser, and fails instead of asserting when the stream counts differ.
+
+Each compressed stream logs `first compressed packet delivered` once.
+`MADEIRA_WG_COMPRESSED=0` refuses compressed output for an ASF again.
+
 **The WMV decoder (`wg_transform`).** `video_decoder.c` probes a WMV3
 1920x1080 to I420 transform without codec private data when the DMO is
 created (`check_video_transform_support`), and libavcodec cannot open `wmv3`
@@ -141,6 +164,7 @@ Environment variables (`env.NAME = value` in `madeira.cfg`):
 | `MADEIRA_WG_PARSER` | on | `0`: `wg_parser_create` returns `STATUS_NOT_IMPLEMENTED` again, as before this series; quartz and the MF source then fail the way they did. The WMA decoder is unaffected. |
 | `MADEIRA_WG_VIDEO` | on | `0`: MP3/WAV only; an MP4/MOV or ASF is refused at connect. |
 | `MADEIRA_WG_WMV_TRANSFORM` | on | `0`: every video `wg_transform` is refused at create again, so the WMVideo Decoder DMO/MFT cannot be created, as before. Read once per process. WMA is unaffected. |
+| `MADEIRA_WG_COMPRESSED` | on | `0`: a compressed-output parser refuses an ASF, as before: the WM reader's compressed samples are not available (see above). |
 | `MADEIRA_WG_VIDEO_FORMAT` | `rgb32` | Native format a video stream reports: `nv12`, `i420`, `yv12`, `yuy2`, `rgb32`, `argb32` or `abgr32` (see above for why the default is `rgb32`). |
 | `MADEIRA_WMA_SEARCH` | on | `0`: keep the WMA v1/v2 decoder at the bit rate and flags it opened with; no search over other candidates when a bit-reservoir stream fails. A packet that fails is concealed with silence of its length and the next one is decoded as usual. (An xWMA stream still opens at the rate libavformat's xWMA table normalises to.) |
 | `MADEIRA_WMA_DUMP` | off | Set: write each WMA decoder's input to `wma-dump-<n>.bin` in the Documents folder, for reproducing a decode failure on a host. |
@@ -170,6 +194,12 @@ and `[wmv]` caps).
   small queue limits, the back-pressure cases (a slow video reader loses
   nothing, while the same build without back-pressure drops pictures; an
   unread stream; one thread reading both; disconnect while a reader waits).
+  Compressed output: every packet of WMV7, WMV8, the WMV3 garbage stream and
+  WMA2 against an independent demux of the same file (bytes, keyframe flags,
+  timestamps); compressed video with decoded audio; a seek starting at a
+  keyframe; back to decoded pictures, bit-exact; MS-MPEG4 refused compressed;
+  `MADEIRA_WG_COMPRESSED=0`. Also source checks on Wine's reader (per-stream
+  compressed reading, no `free_streams` in a failed reinit).
   WMV9/VC-1 streams themselves are not covered: FFmpeg cannot encode them.
 - `tests/host/check-wma-decoder.py` (Linux or macOS, needs a configured
   Wine tree for the generated headers): compiles the production
