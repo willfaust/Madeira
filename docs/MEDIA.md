@@ -180,6 +180,23 @@ stream gets a worker at its first request:
 Each such stream logs `decoding ahead on a thread of its own` once.
 `MADEIRA_WG_VIDEO_AHEAD=0` decodes on the requesting thread again.
 
+**The video renderer on DXMT.** A Media Foundation movie reaches the EVR
+through Wine's sample copier and the EVR mixer, both on Direct3D 9 surfaces
+that Wine's DXVA2 creates. Two of Wine's choices only worked on wined3d, which
+is lenient where native d3d9 and DXMT are not. Both are fixed in the wine
+submodule:
+- **A black picture.** `CreateSurface` made every surface an offscreen plain
+  surface. The mixer's targets are the size of the video window (Senren:
+  1920x1080 into 2360x1328), and `StretchRect` does not stretch into a
+  surface that is not a render target, so the mixer left only its black
+  background. `DXVA2_VideoProcessorRenderTarget` surfaces are now lockable
+  render targets, and a scaled blit is filtered (`D3DTEXF_LINEAR`).
+- **A GPU wait per frame.** The copier's `ContiguousCopyFrom` locked its
+  target without flags, so DXMT read the surface back first and waited for
+  the GPU: 9 to 12 ms per frame (`[d9-drain] ... avg-us=9300`), on the
+  session thread that also feeds the audio. It now locks with
+  `D3DLOCK_DISCARD`, since it overwrites every byte.
+
 The PE half of winegstreamer is upstream's but for `wm_reader.c` (above). Wine's configure
 disables the module when GStreamer is missing, so a PE build tree has to be
 configured with `--enable-winegstreamer` (`build/wine-pe/build-ntdll.sh` does
@@ -247,6 +264,13 @@ rate-limited per process (`MADEIRA_DIAG=1` lifts the `[wma]`, `[wmv]` and
   decoded ahead (the default), every case above runs again under
   ThreadSanitizer, the back-pressure ones included.
   WMV9/VC-1 streams themselves are not covered: FFmpeg cannot encode them.
+- `tests/host/check-mf-video-render.py`: source checks on the path a Media
+  Foundation movie takes to the screen:
+  - DXMT's StretchRect rule the DXVA2 fix answers, and its discard lock;
+  - Wine's DXVA2 render targets and filtered scaling;
+  - mfplat's discard copy;
+  - the allocators that ask for `DXVA2_VideoProcessorRenderTarget`;
+  - the one-thread work queue that makes decode-ahead necessary.
 - `tests/host/check-wma-decoder.py` (Linux or macOS, needs a configured
   Wine tree for the generated headers): compiles the production
   `winegstreamer_unixlib_ios.c` under ASan/UBSan against a host FFmpeg built
