@@ -1042,6 +1042,72 @@ static void mad_es_label(obj_handle_t e, obj_handle_t s) {
     (MTLCommandEncoder_setLabel)(e, s);
 }
 static long long mad_cfg_int_pe(const char *key, long long dflt);
+/* A replay starts on this thread (mad_ecl_run): encode-batch and draw-dedup
+ * apply until mad_es_finish. NULL when both are off. */
+static struct mad_eb *mad_es_begin(void) {
+    struct mad_eb *b;
+    LONG i;
+    if (g_eb_on < 0 || g_dd_on < 0) {
+        g_eb_on = mad_cfg_int_pe("encode-batch", 1) ? 1 : 0;   /* one encodeCommands call per encoder instead of one per draw; 0 = one per draw, as before */
+        g_dd_on = mad_cfg_int_pe("draw-dedup", 1) ? 1 : 0;   /* draws leave out state the render encoder already holds; 0 = every draw sends all of it, as before */
+        d3d12_log("[madeira-d3d12] encode-batch = %d, draw-dedup = %d (madeira.cfg; 0 turns either off)\n", g_eb_on, g_dd_on);
+    }
+    if (g_eb_on <= 0 && g_dd_on <= 0) return NULL;
+    if ((i = g_eb_tls) < 0) {
+        DWORD n = TlsAlloc();
+        int in_place = 0;
+        if (n != TLS_OUT_OF_INDEXES && n < 64) {   /* only the TEB's first 64 slots are read in place */
+            TlsSetValue(n, (void *)&g_eb_tls);     /* the slot read in place must show what TlsSetValue stored */
+            in_place = MAD_EB_SLOT(n) == (void *)&g_eb_tls;
+            TlsSetValue(n, NULL);
+        }
+        if (!in_place) {
+            if (n != TLS_OUT_OF_INDEXES) TlsFree(n);
+            g_eb_on = g_dd_on = 0;
+            d3d12_log("[madeira-d3d12] encode-batch / draw-dedup off: no thread-local slot this runtime can read in place\n");
+            return NULL;
+        }
+        i = InterlockedCompareExchange(&g_eb_tls, (LONG)n, -1);
+        if (i >= 0) TlsFree(n); else i = (LONG)n;
+    }
+    b = (struct mad_eb *)MAD_EB_SLOT(i);
+    if (!b) {
+        if (!(b = calloc(1, sizeof *b))) return NULL;
+        TlsSetValue((DWORD)i, b);
+    }
+    if (!b->active++) b->dd.enc = 0;   /* encoder handles may be reused once the replay's pool drained */
+    return b;
+}
+static void mad_es_finish(struct mad_eb *b) {
+    unsigned k;
+    if (!b) return;
+    mad_eb_flush(b, EBF_OTHER);
+    if (--b->active > 0) return;
+    b->dd.enc = 0;
+    if (b->chains) { InterlockedExchangeAdd(&g_eb_chains, b->chains); b->chains = 0; }
+    if (b->calls) { InterlockedExchangeAdd(&g_eb_calls, b->calls); b->calls = 0; }
+    if (b->alone) { InterlockedExchangeAdd(&g_eb_alone, b->alone); b->alone = 0; }
+    for (k = 0; k < EBF_N; k++) if (b->why[k]) { InterlockedExchangeAdd(&g_eb_why[k], b->why[k]); b->why[k] = 0; }
+    if (b->dd.sets) { InterlockedExchangeAdd(&g_dd_sets, b->dd.sets); b->dd.sets = 0; }
+    if (b->dd.elided) { InterlockedExchangeAdd(&g_dd_elided, b->dd.elided); b->dd.elided = 0; }
+    if (b->dd.offsets) { InterlockedExchangeAdd(&g_dd_offsets, b->dd.offsets); b->dd.offsets = 0; }
+}
+static void mad_es_thread_exit(void) {   /* DLL_THREAD_DETACH: the thread's state goes with it */
+    LONG i = g_eb_tls;
+    struct mad_eb *b;
+    if (i < 0 || !(b = (struct mad_eb *)MAD_EB_SLOT(i)) || b->active) return;
+    TlsSetValue((DWORD)i, NULL);
+    free(b);
+}
+#define MTLRenderCommandEncoder_encodeCommands(e_, c_) mad_es_rce((e_), (c_))
+#define MTLComputeCommandEncoder_encodeCommands(e_, c_) mad_es_cce((e_), (c_))
+#define MTLBlitCommandEncoder_encodeCommands(e_, c_) mad_es_bce((e_), (c_))
+#define MTLCommandBuffer_renderCommandEncoder(cb_, i_) mad_es_renc((cb_), (i_))
+#define MTLCommandBuffer_computeCommandEncoder(cb_, c_) mad_es_cenc((cb_), (c_))
+#define MTLCommandBuffer_blitCommandEncoder(cb_) mad_es_benc((cb_))
+#define MTLCommandEncoder_endEncoding(e_) mad_es_end((e_))
+#define NSObject_release(o_) mad_es_release((o_))
+#define MTLCommandEncoder_setLabel(e_, s_) mad_es_label((e_), (s_))
 /* madeira-duo FRAME TIMELINE (madeira.cfg frame-timeline = 1, default 0; measurement
  * only). One [ftl] line per presented frame, written by the submission worker four
  * frames late so that the GPU's own times for the frame's command buffers are in:
@@ -1225,72 +1291,6 @@ static void mad_pso_slow(const char *what, LONG64 ticks, const char *name) {
               (double)ticks * 1000.0 / (double)qpf, (unsigned long)GetCurrentThreadId(), (long long)g_ftl_no + 1, (long long)g_ftl_wcur,
               name && name[0] ? ": " : "", name && name[0] ? name : "");
 }
-/* A replay starts on this thread (mad_ecl_run): encode-batch and draw-dedup
- * apply until mad_es_finish. NULL when both are off. */
-static struct mad_eb *mad_es_begin(void) {
-    struct mad_eb *b;
-    LONG i;
-    if (g_eb_on < 0 || g_dd_on < 0) {
-        g_eb_on = mad_cfg_int_pe("encode-batch", 1) ? 1 : 0;   /* one encodeCommands call per encoder instead of one per draw; 0 = one per draw, as before */
-        g_dd_on = mad_cfg_int_pe("draw-dedup", 1) ? 1 : 0;   /* draws leave out state the render encoder already holds; 0 = every draw sends all of it, as before */
-        d3d12_log("[madeira-d3d12] encode-batch = %d, draw-dedup = %d (madeira.cfg; 0 turns either off)\n", g_eb_on, g_dd_on);
-    }
-    if (g_eb_on <= 0 && g_dd_on <= 0) return NULL;
-    if ((i = g_eb_tls) < 0) {
-        DWORD n = TlsAlloc();
-        int in_place = 0;
-        if (n != TLS_OUT_OF_INDEXES && n < 64) {   /* only the TEB's first 64 slots are read in place */
-            TlsSetValue(n, (void *)&g_eb_tls);     /* the slot read in place must show what TlsSetValue stored */
-            in_place = MAD_EB_SLOT(n) == (void *)&g_eb_tls;
-            TlsSetValue(n, NULL);
-        }
-        if (!in_place) {
-            if (n != TLS_OUT_OF_INDEXES) TlsFree(n);
-            g_eb_on = g_dd_on = 0;
-            d3d12_log("[madeira-d3d12] encode-batch / draw-dedup off: no thread-local slot this runtime can read in place\n");
-            return NULL;
-        }
-        i = InterlockedCompareExchange(&g_eb_tls, (LONG)n, -1);
-        if (i >= 0) TlsFree(n); else i = (LONG)n;
-    }
-    b = (struct mad_eb *)MAD_EB_SLOT(i);
-    if (!b) {
-        if (!(b = calloc(1, sizeof *b))) return NULL;
-        TlsSetValue((DWORD)i, b);
-    }
-    if (!b->active++) b->dd.enc = 0;   /* encoder handles may be reused once the replay's pool drained */
-    return b;
-}
-static void mad_es_finish(struct mad_eb *b) {
-    unsigned k;
-    if (!b) return;
-    mad_eb_flush(b, EBF_OTHER);
-    if (--b->active > 0) return;
-    b->dd.enc = 0;
-    if (b->chains) { InterlockedExchangeAdd(&g_eb_chains, b->chains); b->chains = 0; }
-    if (b->calls) { InterlockedExchangeAdd(&g_eb_calls, b->calls); b->calls = 0; }
-    if (b->alone) { InterlockedExchangeAdd(&g_eb_alone, b->alone); b->alone = 0; }
-    for (k = 0; k < EBF_N; k++) if (b->why[k]) { InterlockedExchangeAdd(&g_eb_why[k], b->why[k]); b->why[k] = 0; }
-    if (b->dd.sets) { InterlockedExchangeAdd(&g_dd_sets, b->dd.sets); b->dd.sets = 0; }
-    if (b->dd.elided) { InterlockedExchangeAdd(&g_dd_elided, b->dd.elided); b->dd.elided = 0; }
-    if (b->dd.offsets) { InterlockedExchangeAdd(&g_dd_offsets, b->dd.offsets); b->dd.offsets = 0; }
-}
-static void mad_es_thread_exit(void) {   /* DLL_THREAD_DETACH: the thread's state goes with it */
-    LONG i = g_eb_tls;
-    struct mad_eb *b;
-    if (i < 0 || !(b = (struct mad_eb *)MAD_EB_SLOT(i)) || b->active) return;
-    TlsSetValue((DWORD)i, NULL);
-    free(b);
-}
-#define MTLRenderCommandEncoder_encodeCommands(e_, c_) mad_es_rce((e_), (c_))
-#define MTLComputeCommandEncoder_encodeCommands(e_, c_) mad_es_cce((e_), (c_))
-#define MTLBlitCommandEncoder_encodeCommands(e_, c_) mad_es_bce((e_), (c_))
-#define MTLCommandBuffer_renderCommandEncoder(cb_, i_) mad_es_renc((cb_), (i_))
-#define MTLCommandBuffer_computeCommandEncoder(cb_, c_) mad_es_cenc((cb_), (c_))
-#define MTLCommandBuffer_blitCommandEncoder(cb_) mad_es_benc((cb_))
-#define MTLCommandEncoder_endEncoding(e_) mad_es_end((e_))
-#define NSObject_release(o_) mad_es_release((o_))
-#define MTLCommandEncoder_setLabel(e_, s_) mad_es_label((e_), (s_))
 /* madeira-bcd: where pipeline creation time goes -- the "Compiling shaders"
  * screen and the stalls at first draw. QPC ticks, summed over all threads. */
 static volatile LONG64 g_pt_gfx, g_pt_cs, g_pt_conv, g_pt_lib, g_pt_rs, g_pt_realize;
