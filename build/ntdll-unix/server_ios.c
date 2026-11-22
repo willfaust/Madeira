@@ -3007,7 +3007,7 @@ static void ios_xprobe_main( void )
     {
         thread_act_array_t th = NULL; mach_msg_type_number_t nth = 0, k;
         uint64_t now; double dt_ms, sum_thr_ms = 0; int nrows = 0, i, j;
-        char ttl[1400], ttwall[16]; int ttn = 0, tt;   /* madeira-duo thread table */
+        char ttl[1000], ttwall[16]; int ttn = 0, tt;   /* madeira-duo thread table */
 #define XP_MS(ticks) ((double)(ticks) * tb.numer / tb.denom / 1e6)
         usleep( 250000 );
         now = mach_absolute_time();
@@ -3016,7 +3016,7 @@ static void ios_xprobe_main( void )
         /* madeira-duo thread table, about every 30 s: one [xp-thr] entry for every thread with at
          * least half a second of CPU so far -- Windows thread id, Mach thread id (the m<id> of
          * [xp-t]), name, scheduled / base priority, policy, and its CPU so far on P and E cores in
-         * ms. It names the threads [xp-t], [wake-census] and [srv-req] show by id only. */
+         * ms. It names the threads [xp-t] and [srv-req] show by id only. */
         tt = (gen % 120) == 8; ttwall[0] = 0;
         if (tt)
         {
@@ -3187,8 +3187,7 @@ static void ios_xprobe_main( void )
             if (!(gen & 3))
             {   /* madeira-duo [xp-vm], ~1 s: where the page-ins come from. The system's counters since the
                  * last line (decompressions = pages brought back from the memory compressor, pageins =
-                 * pages read from files) and this process's resident memory by kind. Last, the [xp] line's
-                 * run= value read as nanoseconds instead of Mach ticks, to settle its unit. */
+                 * pages read from files) and this process's resident memory by kind. */
                 static vm_statistics64_data_t pvm; static int have_vm; static mach_port_t hport;
                 vm_statistics64_data_t vm; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
                 task_vm_info_data_t ti; mach_msg_type_number_t tic = TASK_VM_INFO_COUNT;
@@ -3201,25 +3200,16 @@ static void ios_xprobe_main( void )
                     if (have_vm)
                         wine_log_write( "[xp-vm] %s system: decompressions %llu compressions %llu pageins %llu faults %llu cow %llu zero-fill %llu, "
                                         "free %llu MB, compressor %llu MB | process: internal %llu MB, compressed %llu MB, external %llu MB, "
-                                        "footprint %llu MB | run-as-ns %.1f ms",
+                                        "footprint %llu MB",
                                         wall, (unsigned long long)(vm.decompressions - pvm.decompressions),
                                         (unsigned long long)(vm.compressions - pvm.compressions), (unsigned long long)(vm.pageins - pvm.pageins),
                                         (unsigned long long)(vm.faults - pvm.faults), (unsigned long long)(vm.cow_faults - pvm.cow_faults),
                                         (unsigned long long)(vm.zero_fill_count - pvm.zero_fill_count),
                                         ((unsigned long long)vm.free_count * pg) >> 20, ((unsigned long long)vm.compressor_page_count * pg) >> 20,
                                         (unsigned long long)(ti.internal >> 20), (unsigned long long)(ti.compressed >> 20),
-                                        (unsigned long long)(ti.external >> 20), (unsigned long long)(ti.phys_footprint >> 20),
-                                        (double)(ru.ri_runnable_time - pru.ri_runnable_time) / 1e6 );
+                                        (unsigned long long)(ti.external >> 20), (unsigned long long)(ti.phys_footprint >> 20) );
                     pvm = vm; have_vm = 1;
                 }
-            }
-            if (!(gen % 40))
-            {   /* madeira-duo [wake-census], ~10 s (unix/sync.c ios_wc_format) */
-                extern void ios_wc_format( char *out, size_t size, const char *wall, double seconds );
-                static uint64_t wc_prev; char wl[1400];
-                ios_wc_format( wl, sizeof(wl), wall, wc_prev ? XP_MS( now - wc_prev ) / 1000.0 : 0.0 );
-                wc_prev = now;
-                if (wl[0]) wine_log_write( "%s", wl );
             }
             if (ios_power_probe_on)   /* madeira-bcd power probe: every 5 s; ri_penergy_nj is the uint64 after ri_energy_nj in v6 */
                 ios_power_probe_tick( wall, ios_bg_now_ns(), dt_ms, (double)(ru.ri_energy_nj - pru.ri_energy_nj) / 1e6,
