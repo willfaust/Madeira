@@ -104,6 +104,8 @@ void *const mad_jr_count_tramps[MAD_JR_SLOTS];
 const struct mad_jr_method mad_jr_x64_methods[1];
 char mad_res_gva_x64[1];
 
+extern IMAGE_DOS_HEADER __ImageBase;   /* jr-pe-entries: the journal resolves its x64 entries against the image */
+#include "madeira_graphics_entry.h"
 #include "madeira_list_journal.inc.c"
 
 /* ---- what the harness needs ----------------------------------------------------- */
