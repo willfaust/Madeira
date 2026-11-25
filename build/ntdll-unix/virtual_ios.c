@@ -1603,6 +1603,12 @@ static void *ios_pool_warmer_thread( void *arg )
                 static const char *band_name[B_MAX] =
                     { "poolRX", "poolRW", "hostlow", "guest", "pa", "fex", "other" };
                 unsigned long long band_dirty[B_MAX], band_res[B_MAX];
+                /* madeira-duo (diag2): what sits in the compressor by band, and the guest band's regions by
+                 * size and backing (anonymous, or mapped from the swap file), so a run says which memory a
+                 * lower swap floor would move out of the compressor. Index: [file-backed][size class]. The
+                 * kernel merges neighbouring anonymous mappings, so a region is not always one allocation. */
+                static const char * const gz_name[6] = { "<64K", "64K-1M", "1-4M", "4-16M", "16-64M", ">=64M" };
+                unsigned long long band_swap[B_MAX], gz_n[2][6], gz_res[2][6], gz_swap[2][6];
                 /* ml1074: the four dirtiest regions of the two bands nobody can name
                  * from the totals (hostlow = everything below 64 GB that is not the
                  * pool; pa = 0x74..0x7c). The overall top-12 is always the game's own
@@ -1635,6 +1641,8 @@ static void *ios_pool_warmer_thread( void *arg )
                 memset( swap_by_tag, 0, sizeof(swap_by_tag) );
                 memset( band_dirty, 0, sizeof(band_dirty) );
                 memset( band_res, 0, sizeof(band_res) );
+                memset( band_swap, 0, sizeof(band_swap) );
+                memset( gz_n, 0, sizeof(gz_n) ); memset( gz_res, 0, sizeof(gz_res) ); memset( gz_swap, 0, sizeof(gz_swap) );
                 struct timespec pm_t0, pm_t1;   /* madeira-bcd: what the walk costs */
                 clock_gettime( CLOCK_MONOTONIC, &pm_t0 );
                 for (;;)
@@ -1667,6 +1675,16 @@ static void *ios_pool_warmer_thread( void *arg )
                         else b = B_OTHER;
                         band_dirty[b] += d;
                         band_res[b] += (unsigned long long)info.pages_resident << 14;
+                        band_swap[b] += (unsigned long long)info.pages_swapped_out << 14;   /* diag2 */
+                        if (b == B_GUEST)
+                        {
+                            int fb = info.external_pager ? 1 : 0;
+                            int zc = rsize < (64u << 10) ? 0 : rsize < (1u << 20) ? 1 : rsize < (4u << 20) ? 2 :
+                                     rsize < (16u << 20) ? 3 : rsize < (64u << 20) ? 4 : 5;
+                            gz_n[fb][zc]++;
+                            gz_res[fb][zc] += (unsigned long long)info.pages_resident << 14;
+                            gz_swap[fb][zc] += (unsigned long long)info.pages_swapped_out << 14;
+                        }
                         if (b == B_HOST_LOW || b == B_PA)
                         {
                             int w = 0, q;
@@ -1763,6 +1781,17 @@ static void *ios_pool_warmer_thread( void *arg )
                     dprintf(2, " %s=%llu/%llu", band_name[ti],
                             band_dirty[ti] >> 20, band_res[ti] >> 20);
                 dprintf(2, "\n");
+                dprintf(2, "[phys-map] compressed MB by band (diag2):");
+                for (ti = 0; ti < B_MAX; ti++) dprintf(2, " %s=%llu", band_name[ti], band_swap[ti] >> 20);
+                dprintf(2, "\n");
+                for (tj = 0; tj < 2; tj++)
+                {
+                    dprintf(2, "[phys-map] guest %s regions by size (diag2), count resident/compressed MB:",
+                            tj ? "file-backed" : "anonymous");
+                    for (ti = 0; ti < 6; ti++)
+                        dprintf(2, " %s %llu %llu/%llu", gz_name[ti], gz_n[tj][ti], gz_res[tj][ti] >> 20, gz_swap[tj][ti] >> 20);
+                    dprintf(2, "\n");
+                }
                 for (ti = 0; ti < B_MAX; ti++)
                 {
                     int q;
@@ -23153,6 +23182,15 @@ static void ios_dc_census_take( const void *addr, size_t len, struct ios_dc_cens
  * Extent bookkeeping runs under virtual_mutex like the callers. */
 #include <fcntl.h>
 /* swap-tier core begin (tests/host/check-swap-coverage.py compiles the code up to "core end") */
+/* madeira-duo [xp-va] (diag2): what the Windows side asks of the address space and what the tier does
+ * with it, as running totals that the sampler (server_ios.c) turns into one line a second. Pairs of
+ * calls and bytes: 0 commit, 1 reserve only, 2 decommit, 3 release, 4 reset, 5 donor pool pieces
+ * mapped, 6 donor pool pieces given back (each zeroed with MADV_ZERO, so its next use is a zero-fill
+ * fault a page), 7 file holes punched by a decommit inside a backed reservation.
+ * Counting only: relaxed atomic adds, no lock taken, nothing printed here. */
+unsigned long long ios_va_census[16];
+#define IOS_VA_NOTE( k, n ) do { __atomic_fetch_add( &ios_va_census[2 * (k)], 1, __ATOMIC_RELAXED ); \
+                                 __atomic_fetch_add( &ios_va_census[2 * (k) + 1], (unsigned long long)(n), __ATOMIC_RELAXED ); } while (0)
 static int      ios_swap_fd = -1;
 static uint64_t ios_swap_cap, ios_swap_bump;
 /* resv: the extent maps a whole reservation (wide at reserve time, broad), so a
@@ -23640,6 +23678,7 @@ static void ios_donor_give( uint64_t off, size_t len )
                                      len, (unsigned long long)off );
         }
     }
+    IOS_VA_NOTE( 6, len );   /* [xp-va] */
     ios_donor_bytes -= len;
     ios_donor_free_insert( off, len );
 }
@@ -24153,6 +24192,7 @@ static size_t ios_swap_donor_pieces( char *hs, size_t len, int unix_prot, size_t
         }
         ios_donor_bytes += got; if (ios_donor_bytes > ios_donor_peak) ios_donor_peak = ios_donor_bytes;
         ios_donor_takes++;
+        IOS_VA_NOTE( 5, got );   /* [xp-va] */
         ios_swap_record( hs + done, got, off | IOS_DONOR_FLAG, key );
         done += got;
     }
@@ -24368,6 +24408,7 @@ static int ios_swap_punch_resv( char *lo, size_t len )
             return 0;
         }
         mprotect( lo, len, PROT_READ | PROT_WRITE );
+        IOS_VA_NOTE( 7, len );   /* [xp-va] */
         if (++ios_swap_holes <= 8 || (ios_swap_holes % 1024) == 0)
             dprintf( 2, "[swap] ml1257 decommit %p+0x%zx punched in place (%llu holes)\n", lo, len, ios_swap_holes );
         return 1;
@@ -31864,6 +31905,7 @@ static void ios_vm_note_alloc( void *base, SIZE_T size, ULONG type, ULONG protec
     static int log_all = -1;
     static unsigned long special_logged;
     int special = viol || zbits;
+    IOS_VA_NOTE( (type & MEM_COMMIT) ? 0 : (type & MEM_RESET) ? 4 : 1, size );   /* [xp-va]: every successful request */
     if (log_all < 0) { const char *e = getenv( "MADEIRA_VALLOC_LOG_ALL" ); log_all = e && e[0] == '1'; }
     if (!log_all && !covers && is_wow64()) return;
     if (b < 0x100000000ull && !viol && !zbits) return;
@@ -31889,6 +31931,8 @@ static void ios_vm_note_free( void *base, SIZE_T size, ULONG type )
 {
     UINT64 b = (UINT64)(ULONG_PTR)base, w = ios_vm_watch();
     int hits = (w && b <= w && (size == 0 || w < b + size));
+    /* [xp-va]: the calls here; the bytes where NtFreeVirtualMemory succeeds and knows the size */
+    __atomic_fetch_add( &ios_va_census[(type & MEM_DECOMMIT) ? 4 : 6], 1, __ATOMIC_RELAXED );
     if (b < 0x100000000ull) return;
     if (hits || ios_vm_free_logged < 3000)
     {
@@ -36132,6 +36176,7 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         *addr_ptr = base;
         *size_ptr = size;
 #ifdef WINE_IOS
+        __atomic_fetch_add( &ios_va_census[(type & MEM_DECOMMIT) ? 5 : 7], (unsigned long long)size, __ATOMIC_RELAXED );   /* [xp-va] */
         if ((type & MEM_RELEASE) && ios_thin_live_n) ios_thin_released( base );
 #endif
     }

@@ -2982,6 +2982,141 @@ static void ios_power_probe_tick( const char *wall, uint64_t now_ns, double dt_m
     ios_pp.ms = ios_pp.cpu_mj = ios_pp.cpu_p_mj = ios_pp.billed_mj = ios_pp.serviced_mj = 0;
 }
 
+/* madeira-duo [xp-vmcall] (diag2): who maps and unmaps memory in this task, by call stack.
+ * env.MADEIRA_VMCALL_CENSUS = 1 turns it on; unset or 0 (the default) installs nothing.
+ *
+ * Why: in a Path of Exile 2 map the phone zero-fills 6,600-13,000 pages a second (100-200 MB of fresh
+ * memory) and the log names no caller. [xp-va] counts what the Windows side asks for; this counts
+ * what every native caller asks of the kernel: Metal, IOKit, CoreAnimation, malloc's large blocks and
+ * our own unix side.
+ *
+ * How: libsystem_kernel's wrappers (mmap, munmap, mach_vm_allocate, mach_vm_deallocate, mach_vm_map,
+ * vm_allocate, ...) call the function pointer __syscall_logger when it is set; malloc stack logging
+ * uses the same hook (xnu libsyscall/mach/mach_vm.c, wrappers/unix03/mmap.c). An allocation arrives
+ * as type 16 | 128 (file or shared memory) | the VM tag in the top byte, arg2 = size, result =
+ * address; a deallocation as type 32, arg2 = address, arg3 = size. The hook runs inside the wrapper
+ * on the calling thread, so it takes no lock, allocates nothing and prints nothing: it reads the
+ * stack with backtrace() (which stays inside the thread's own stack bounds) and adds the call to a
+ * fixed table keyed by the stack. The sampler names the busiest stacks every ~10 s with dladdr.
+ * A hook that was already set keeps getting every call. */
+#include <execinfo.h>
+#define IOS_VMC_SLOTS  512
+#define IOS_VMC_FRAMES 6
+typedef void (ios_vmc_logger_t)( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip );
+struct ios_vmc_slot { uint64_t key, calls, bytes; uintptr_t pc[IOS_VMC_FRAMES]; uint32_t type; };
+static struct ios_vmc_slot ios_vmc_tab[IOS_VMC_SLOTS];
+static uint64_t ios_vmc_lost, ios_vmc_total[4];   /* total: allocate calls, bytes, deallocate calls, bytes */
+static ios_vmc_logger_t *ios_vmc_prev;
+static int ios_vmc_on;
+
+static void ios_vmc_logger( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip )
+{
+    void *pcs[IOS_VMC_FRAMES + 2];
+    uintptr_t pc[IOS_VMC_FRAMES];
+    uint64_t key, bytes, seen;
+    unsigned i, h;
+    int n;
+
+    if (ios_vmc_prev) ios_vmc_prev( type, arg1, arg2, arg3, result, skip + 1 );
+    if (arg1 != (uintptr_t)mach_task_self()) return;
+    bytes = (type & 32) ? arg3 : arg2;
+    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 2 : 0], 1, __ATOMIC_RELAXED );
+    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 3 : 1], bytes, __ATOMIC_RELAXED );
+    /* pc[0]: the wrapper that called us, always known. pc[1..]: its callers, as far as backtrace()
+     * can follow them (pcs[0] is this function and pcs[1] the wrapper again). */
+    for (i = 0; i < IOS_VMC_FRAMES; i++) pc[i] = 0;
+    pc[0] = (uintptr_t)__builtin_return_address( 0 );
+    n = backtrace( pcs, IOS_VMC_FRAMES + 2 );
+    for (i = 2; i < (unsigned)n && i < IOS_VMC_FRAMES + 1; i++) pc[i - 1] = (uintptr_t)pcs[i];
+    key = ((uint64_t)(type & 0xff0000b0u) + 1) * 0x9e3779b97f4a7c15ull;
+    for (i = 0; i < IOS_VMC_FRAMES; i++) key = (key ^ pc[i]) * 0x100000001b3ull;
+    if (!key) key = 1;
+    for (h = (unsigned)(key >> 40), i = 0; i < 24; i++, h++)
+    {
+        struct ios_vmc_slot *s = &ios_vmc_tab[h & (IOS_VMC_SLOTS - 1)];
+        seen = __atomic_load_n( &s->key, __ATOMIC_RELAXED );
+        if (!seen && __atomic_compare_exchange_n( &s->key, &seen, key, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+        {
+            unsigned f;
+            for (f = 0; f < IOS_VMC_FRAMES; f++) s->pc[f] = pc[f];
+            s->type = type;
+            seen = key;
+        }
+        if (seen == key)
+        {
+            __atomic_fetch_add( &s->calls, 1, __ATOMIC_RELAXED );
+            __atomic_fetch_add( &s->bytes, bytes, __ATOMIC_RELAXED );
+            return;
+        }
+    }
+    __atomic_fetch_add( &ios_vmc_lost, 1, __ATOMIC_RELAXED );
+}
+
+static void ios_vmc_install( void )
+{
+    const char *e = getenv( "MADEIRA_VMCALL_CENSUS" );   /* 1: [xp-vmcall] census of the task's mmap/vm_allocate callers; unset/0: off */
+    ios_vmc_logger_t **hook;
+    if (!e || e[0] != '1') return;
+    hook = (ios_vmc_logger_t **)dlsym( RTLD_DEFAULT, "__syscall_logger" );
+    if (!hook) { wine_log_write( "[xp-vmcall] __syscall_logger is not exported here: no census" ); return; }
+    ios_vmc_prev = *hook;
+    *hook = ios_vmc_logger;
+    ios_vmc_on = 1;
+    wine_log_write( "[xp-vmcall] on (MADEIRA_VMCALL_CENSUS=1): a line set every ~10 s; a hook was %s before", ios_vmc_prev ? "set" : "not set" );
+}
+
+/* one frame as "image+0xoffset(symbol+0xoffset)"; the image offset is what atos wants */
+static int ios_vmc_name( char *out, size_t size, uintptr_t pc )
+{
+    Dl_info di;
+    const char *base;
+    if (!pc) return 0;
+    if (!dladdr( (void *)pc, &di ) || !di.dli_fname) return snprintf( out, size, " < %#lx", (unsigned long)pc );
+    base = strrchr( di.dli_fname, '/' );
+    base = base ? base + 1 : di.dli_fname;
+    if (di.dli_sname)
+        return snprintf( out, size, " < %s+%#lx(%s+%#lx)", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase), di.dli_sname,
+                         (unsigned long)(pc - (uintptr_t)di.dli_saddr) );
+    return snprintf( out, size, " < %s+%#lx", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase) );
+}
+
+static void ios_vmc_report( const char *wall, double seconds )
+{
+    static uint64_t pcalls[IOS_VMC_SLOTS], pbytes[IOS_VMC_SLOTS], ptotal[4], plost;
+    static uint64_t dcalls[IOS_VMC_SLOTS], dbytes[IOS_VMC_SLOTS];
+    uint64_t total[4], lost;
+    int i, shown, used = 0;
+
+    if (!ios_vmc_on || seconds <= 0) return;
+    for (i = 0; i < 4; i++) { uint64_t v = __atomic_load_n( &ios_vmc_total[i], __ATOMIC_RELAXED ); total[i] = v - ptotal[i]; ptotal[i] = v; }
+    lost = __atomic_load_n( &ios_vmc_lost, __ATOMIC_RELAXED );
+    for (i = 0; i < IOS_VMC_SLOTS; i++)
+    {
+        uint64_t c = __atomic_load_n( &ios_vmc_tab[i].calls, __ATOMIC_RELAXED ), b = __atomic_load_n( &ios_vmc_tab[i].bytes, __ATOMIC_RELAXED );
+        dcalls[i] = c - pcalls[i]; dbytes[i] = b - pbytes[i]; pcalls[i] = c; pbytes[i] = b;
+        if (ios_vmc_tab[i].key) used++;
+    }
+    wine_log_write( "[xp-vmcall] %s %.1f s: mapped %llu calls %llu KB, unmapped %llu calls %llu KB, %d stacks known, %llu calls not counted by stack",
+                    wall, seconds, (unsigned long long)total[0], (unsigned long long)(total[1] >> 10), (unsigned long long)total[2],
+                    (unsigned long long)(total[3] >> 10), used, (unsigned long long)(lost - plost) );
+    plost = lost;
+    for (shown = 0; shown < 12; shown++)
+    {
+        char line[1100];
+        int best = -1, n, f;
+        for (i = 0; i < IOS_VMC_SLOTS; i++)
+            if (dcalls[i] && (best < 0 || dbytes[i] > dbytes[best] || (dbytes[i] == dbytes[best] && dcalls[i] > dcalls[best]))) best = i;
+        if (best < 0) break;
+        n = snprintf( line, sizeof(line), "[xp-vmcall]   %s tag %u%s: %llu calls %llu KB |", (ios_vmc_tab[best].type & 32) ? "unmap" : "map",
+                      (unsigned)(ios_vmc_tab[best].type >> 24), (ios_vmc_tab[best].type & 128) ? " file/shared" : "",
+                      (unsigned long long)dcalls[best], (unsigned long long)(dbytes[best] >> 10) );
+        for (f = 0; f < IOS_VMC_FRAMES && n < (int)sizeof(line) - 200; f++)
+            n += ios_vmc_name( line + n, sizeof(line) - n, ios_vmc_tab[best].pc[f] );
+        wine_log_write( "%s", line );
+        dcalls[best] = 0;
+    }
+}
+
 static void ios_xprobe_main( void )
 {
     static struct ios_xp_row rows[1024];
@@ -3003,6 +3138,7 @@ static void ios_xprobe_main( void )
                     nlev, n0, n1, ru_rc, ru_rc ? errno : 0, tb.numer, tb.denom );
     t_start = t_prev = mach_absolute_time();
     memset( &ppe, 0, sizeof(ppe) );
+    ios_vmc_install();   /* madeira-duo [xp-vmcall], opt-in */
     for (;;)
     {
         thread_act_array_t th = NULL; mach_msg_type_number_t nth = 0, k;
@@ -3208,8 +3344,116 @@ static void ios_xprobe_main( void )
                                         ((unsigned long long)vm.free_count * pg) >> 20, ((unsigned long long)vm.compressor_page_count * pg) >> 20,
                                         (unsigned long long)(ti.internal >> 20), (unsigned long long)(ti.compressed >> 20),
                                         (unsigned long long)(ti.external >> 20), (unsigned long long)(ti.phys_footprint >> 20) );
+                    /* madeira-duo [xp-vm2] (diag2), beside each [xp-vm] line. System: what the compressor
+                     * holds against the memory it occupies (stored / compressor = how well it compresses)
+                     * and the rest of the phone's RAM by kind. Process: its own faults, page-ins,
+                     * decompressions, system calls and context switches since the last line (the [xp-vm]
+                     * figures are the whole system's), its CPU time split into user and kernel, and its
+                     * graphics and purgeable ledgers as resident+compressed MB. */
+                    {
+                        static task_events_info_data_t pte; static unsigned int ptdec; static long long ptswap;
+                        static uint64_t puser, pkern;
+                        task_events_info_data_t te; mach_msg_type_number_t tec = TASK_EVENTS_INFO_COUNT;
+                        unsigned int tdec = 0; long long tswap = 0, gfx = -1, gfxc = -1, gfxn = -1, gfxnc = -1, purg = -1, purgc = -1;
+                        unsigned long long left = 0;
+                        memset( &te, 0, sizeof(te) );
+                        task_info( mach_task_self(), TASK_EVENTS_INFO, (task_info_t)&te, &tec );
+#ifdef TASK_VM_INFO_REV3_COUNT
+                        gfx = ti.ledger_tag_graphics_footprint >> 20; gfxc = ti.ledger_tag_graphics_footprint_compressed >> 20;
+                        gfxn = ti.ledger_tag_graphics_nofootprint >> 20; gfxnc = ti.ledger_tag_graphics_nofootprint_compressed >> 20;
+                        purg = ti.ledger_purgeable_nonvolatile >> 20; purgc = ti.ledger_purgeable_novolatile_compressed >> 20;
+#endif
+#ifdef TASK_VM_INFO_REV4_COUNT
+                        left = ti.limit_bytes_remaining >> 20;
+#endif
+#ifdef TASK_VM_INFO_REV5_COUNT
+                        tdec = (unsigned int)ti.decompressions;
+#endif
+#ifdef TASK_VM_INFO_REV6_COUNT
+                        tswap = ti.ledger_swapins;
+#endif
+                        if (have_vm)
+                        wine_log_write( "[xp-vm2] %s system: stored %llu MB in compressor %llu MB, wired %llu MB, anonymous %llu MB, "
+                                        "file-backed %llu MB, purgeable %llu MB, swapins %llu swapouts %llu | process: faults %u pageins %u "
+                                        "cow %u decompressions %u swapins %lld, mach calls %u unix calls %u context switches %u, "
+                                        "cpu user %.0f ms kernel %.0f ms | resident %llu MB, reusable %llu MB, device %llu MB, graphics "
+                                        "%lld+%lld MB in the footprint and %lld+%lld MB outside it, purgeable %lld+%lld MB, %llu MB left "
+                                        "before the limit, %d regions",
+                                        wall, ((unsigned long long)vm.total_uncompressed_pages_in_compressor * pg) >> 20,
+                                        ((unsigned long long)vm.compressor_page_count * pg) >> 20, ((unsigned long long)vm.wire_count * pg) >> 20,
+                                        ((unsigned long long)vm.internal_page_count * pg) >> 20, ((unsigned long long)vm.external_page_count * pg) >> 20,
+                                        ((unsigned long long)vm.purgeable_count * pg) >> 20,
+                                        (unsigned long long)(vm.swapins - pvm.swapins), (unsigned long long)(vm.swapouts - pvm.swapouts),
+                                        (unsigned int)te.faults - (unsigned int)pte.faults, (unsigned int)te.pageins - (unsigned int)pte.pageins,
+                                        (unsigned int)te.cow_faults - (unsigned int)pte.cow_faults, tdec - ptdec, tswap - ptswap,
+                                        (unsigned int)te.syscalls_mach - (unsigned int)pte.syscalls_mach,
+                                        (unsigned int)te.syscalls_unix - (unsigned int)pte.syscalls_unix,
+                                        (unsigned int)te.csw - (unsigned int)pte.csw, XP_MS( ru.ri_user_time - puser ), XP_MS( ru.ri_system_time - pkern ),
+                                        (unsigned long long)(ti.resident_size >> 20), (unsigned long long)(ti.reusable >> 20),
+                                        (unsigned long long)(ti.device >> 20), gfx, gfxc, gfxn, gfxnc, purg, purgc, left, (int)ti.region_count );
+                        pte = te; ptdec = tdec; ptswap = tswap; puser = ru.ri_user_time; pkern = ru.ri_system_time;
+                    }
                     pvm = vm; have_vm = 1;
                 }
+            }
+            if (!(gen & 3))
+            {   /* madeira-duo [xp-cpu] (diag2), ~1 s: how busy every core of the phone was since the last line,
+                 * whoever used it (this task, the kernel's compressor, other processes): busy %/kernel % a core,
+                 * from the host's tick counters (100 a second, so a line is good to a few percent). */
+                static unsigned int pticks[64][4]; static int have_cpu, cpu_dead; static mach_port_t chost;
+                natural_t ncpu = 0; processor_info_array_t pinfo = NULL; mach_msg_type_number_t pcnt = 0;
+                if (!cpu_dead)
+                {
+                    if (!chost) chost = mach_host_self();
+                    if (host_processor_info( chost, PROCESSOR_CPU_LOAD_INFO, &ncpu, &pinfo, &pcnt ) == KERN_SUCCESS && pinfo)
+                    {
+                        processor_cpu_load_info_t li = (processor_cpu_load_info_t)pinfo;
+                        char cl[512]; int cn, c;
+                        cn = snprintf( cl, sizeof(cl), "[xp-cpu] %s busy/kernel %% of each core:", wall );
+                        for (c = 0; c < (int)ncpu && c < 64 && cn < (int)sizeof(cl) - 24; c++)
+                        {
+                            unsigned int du = li[c].cpu_ticks[CPU_STATE_USER] - pticks[c][0], ds = li[c].cpu_ticks[CPU_STATE_SYSTEM] - pticks[c][1],
+                                         di = li[c].cpu_ticks[CPU_STATE_IDLE] - pticks[c][2], dn = li[c].cpu_ticks[CPU_STATE_NICE] - pticks[c][3];
+                            unsigned int tot = du + ds + di + dn;
+                            pticks[c][0] = li[c].cpu_ticks[CPU_STATE_USER]; pticks[c][1] = li[c].cpu_ticks[CPU_STATE_SYSTEM];
+                            pticks[c][2] = li[c].cpu_ticks[CPU_STATE_IDLE]; pticks[c][3] = li[c].cpu_ticks[CPU_STATE_NICE];
+                            cn += snprintf( cl + cn, sizeof(cl) - cn, " %d:%u/%u", c, tot ? 100 * (du + ds + dn) / tot : 0, tot ? 100 * ds / tot : 0 );
+                        }
+                        if (have_cpu) wine_log_write( "%s", cl );
+                        have_cpu = 1;
+                        vm_deallocate( mach_task_self(), (vm_address_t)pinfo, pcnt * sizeof(integer_t) );
+                    }
+                    else { cpu_dead = 1; wine_log_write( "[xp-cpu] host_processor_info is not available here: no per-core line" ); }
+                }
+            }
+            if (!(gen & 3))
+            {   /* madeira-duo [xp-va] (diag2), ~1 s, only when something moved: the Windows side's
+                 * address-space requests since the last line as calls/KB (unix/virtual_ios.c ios_va_census).
+                 * Commit, reserve and reset are the sizes of successful requests (a commit of memory that
+                 * was committed already counts too); decommit and release count every call, and the KB of
+                 * those that succeeded on the ordinary path. */
+                extern unsigned long long ios_va_census[16];
+                static unsigned long long pva[16]; static int have_va;
+                unsigned long long dv[16]; int q, moved = 0;
+                for (q = 0; q < 16; q++)
+                {
+                    unsigned long long v = __atomic_load_n( &ios_va_census[q], __ATOMIC_RELAXED );
+                    dv[q] = v - pva[q]; pva[q] = v;
+                    if (dv[q]) moved = 1;
+                }
+                if (have_va && moved)
+                    wine_log_write( "[xp-va] %s commit %llu/%llu KB, reserve %llu/%llu KB, decommit %llu/%llu KB, release %llu/%llu KB, "
+                                    "reset %llu/%llu KB | donor pool: mapped %llu/%llu KB, given back and zeroed %llu/%llu KB | "
+                                    "file holes punched %llu/%llu KB",
+                                    wall, dv[0], dv[1] >> 10, dv[2], dv[3] >> 10, dv[4], dv[5] >> 10, dv[6], dv[7] >> 10, dv[8], dv[9] >> 10,
+                                    dv[10], dv[11] >> 10, dv[12], dv[13] >> 10, dv[14], dv[15] >> 10 );
+                have_va = 1;
+            }
+            if (!(gen % 40))
+            {   /* madeira-duo [xp-vmcall], ~10 s, opt-in */
+                static uint64_t vmc_prev;
+                ios_vmc_report( wall, vmc_prev ? XP_MS( now - vmc_prev ) / 1000.0 : 0.0 );
+                vmc_prev = now;
             }
             if (ios_power_probe_on)   /* madeira-bcd power probe: every 5 s; ri_penergy_nj is the uint64 after ri_energy_nj in v6 */
                 ios_power_probe_tick( wall, ios_bg_now_ns(), dt_ms, (double)(ru.ri_energy_nj - pru.ri_energy_nj) / 1e6,
@@ -3726,7 +3970,11 @@ static void ios_stuck_store_check( void )
  *       code, 1 = ARM64EC image copy in the pool, 2 = native, 0xfe = time mark:
  *       pc = mach time ns, rip = wall clock ms), u8 flags (bit 0: guest rip valid,
  *       bit 1: running when sampled; a thread that ran and then blocked is caught in
- *       its wait, so its pc says nothing about where the weight was spent).
+ *       its wait, so its pc says nothing about where the weight was spent; bits 2-7
+ *       (diag2): the share of the weight that was kernel time, in 63rds. A page fault
+ *       is kernel time at the user pc of the access that faulted, so a function whose
+ *       samples carry a high share spends that part of its time in faults or system
+ *       calls, not in its own code. 0 on files written before diag2).
  *   madeira-prof-<time>.txt  "T slot port name" thread names, "S key fbase file
  *       symbol+off" dladdr names of native pc/lr (16-byte keys), "J rx size" pool,
  *       "P slot peb" the Wine process of a thread (its TEB's PEB) and "M peb base size
@@ -3737,7 +3985,7 @@ static void ios_stuck_store_check( void )
  * ios_guest_rip_profile): records are buffered and written after the resume. */
 #define IOS_PROF_SLOTS 256
 #define IOS_PROF_SYMS  16384
-struct ios_prof_slot { mach_port_t port; int used, idle, seen, peb_done, skip; uint64_t cpu_ns, peb; char name[64]; };
+struct ios_prof_slot { mach_port_t port; int used, idle, seen, peb_done, skip; uint64_t cpu_ns, sys_ns, peb; char name[64]; };
 struct ios_prof_rec { uint64_t pc, rip, extra; uint32_t weight_ns; uint16_t slot; uint8_t cls, flags; };
 
 static void ios_prof_symbolize( FILE *txt, uint64_t *keys, uint64_t a )
@@ -3903,9 +4151,10 @@ static void ios_prof_main(void)
             struct ios_prof_slot *sl = &slots[s];
             thread_extended_info_data_t xi; mach_msg_type_number_t xc = THREAD_EXTENDED_INFO_COUNT;
             arm_thread_state64_t st; mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
-            uint64_t cpu, delta, rip = 0;
+            uint64_t cpu, delta, dsys, rip = 0;
             uintptr_t pe_at = 0;
             int got, cls = 2;
+            unsigned sys6;
 
             if (!sl->used) continue;
             if (sl->skip && pass % hz) continue;   /* MADEIRA_PROF_THREADS: not a wanted thread; its name is read again once a second */
@@ -3920,11 +4169,13 @@ static void ios_prof_main(void)
                 if (sl->skip) { sl->cpu_ns = ~0ull; continue; }
             }
             cpu = xi.pth_user_time + xi.pth_system_time;
-            if (sl->cpu_ns == ~0ull || cpu < sl->cpu_ns) { sl->cpu_ns = cpu; continue; }
+            if (sl->cpu_ns == ~0ull || cpu < sl->cpu_ns) { sl->cpu_ns = cpu; sl->sys_ns = xi.pth_system_time; continue; }
             delta = cpu - sl->cpu_ns;
-            sl->cpu_ns = cpu;
+            dsys = xi.pth_system_time >= sl->sys_ns ? xi.pth_system_time - sl->sys_ns : 0;
+            sl->cpu_ns = cpu; sl->sys_ns = xi.pth_system_time;
             if (!delta) { sl->idle++; continue; }
             sl->idle = 0;
+            sys6 = dsys >= delta ? 63 : (unsigned)(dsys * 63 / delta);   /* diag2: kernel share of this sample's weight */
             if (delta > 2ull * period_us * 1000) { capped_ns += delta - 2ull * period_us * 1000; delta = 2ull * period_us * 1000; }
 
             if (thread_suspend( sl->port ) != KERN_SUCCESS) continue;
@@ -3945,7 +4196,7 @@ static void ios_prof_main(void)
             recs[nrec].weight_ns = (uint32_t)delta;
             recs[nrec].slot = (uint16_t)s;
             recs[nrec].cls = (uint8_t)cls;
-            recs[nrec].flags = (rip ? 1 : 0) | (xi.pth_run_state == TH_STATE_RUNNING ? 2 : 0);
+            recs[nrec].flags = (uint8_t)((rip ? 1 : 0) | (xi.pth_run_state == TH_STATE_RUNNING ? 2 : 0) | (sys6 << 2));
             kept_ns[cls] += delta;
             nrec++;
         }
