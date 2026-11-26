@@ -12339,7 +12339,7 @@ struct mad_fg_present_req { UINT64 cb, first, second; double frame_s; UINT32 fla
 _Static_assert(sizeof(struct mad_fg_create_req) == 80 && sizeof(struct mad_fg_encode_req) == 112 &&
                sizeof(struct mad_fg_present_req) == 40, "framegen request layouts are shared with winemetal");
 struct mad_fg_tex { UINT64 id; obj_handle_t base, own, use; UINT w, h, serial; enum WMTPixelFormat pf; UINT8 cls; };   /* cls: 0 unusable, 1 depth, 2 two-channel (motion), 3 other; use: 0 when MetalFX could not take it as motion or depth */
-struct mad_fg_run { UINT ps, vs, n; UINT8 blend, snap; };
+struct mad_fg_run { UINT ps, vs, n; UINT8 blend, snap; };   /* snap: 1 the HUD-less copy, 2 a copy again after world draws (framegen-ui-world-ps) */
 static struct mad_fg {
     int native;                         /* MadeiraCtl 30-32: -1 not asked, 0 not there, 1 there */
     void *swap; struct mad_queue *queue;   /* the swapchain that generates, and its queue: only that queue's replays feed this */
@@ -12350,6 +12350,7 @@ static struct mad_fg {
     int cur;                            /* snap[cur]: the HUD-less colour of the frame being replayed; snap[cur ^ 1]: the last frame's */
     UINT64 frame;                       /* presents seen */
     int armed, snap_done, probe_frame, probe_ui; unsigned bb_draws;
+    UINT world_ps[8]; int n_world, world_run; unsigned world_copies;   /* framegen-ui-world-ps: HUD draws that are part of the world (labels) */
     UINT64 fsr_frame; int fsr_ok;       /* FSR's inputs were read in frame fsr_frame, and its constants made sense */
     obj_handle_t f_mv, f_depth; enum WMTPixelFormat f_mpf, f_dpf; UINT f_w, f_h;
     float f_mvx, f_mvy, f_jx, f_jy, f_near, f_far, f_fov, f_dt; int f_rev;
@@ -12363,8 +12364,8 @@ static struct mad_fg {
     struct { obj_handle_t cb; UINT64 at; int gen; } cbs[12]; unsigned ncbs;
     int dump_left, dump_plain; unsigned dump_burst, dump_n; LONG64 dump_qpc;   /* framegen-dump */
     struct { obj_handle_t cb, buf; void *cpu; UINT w, h, pf, bpp; char name[32]; } dq[16]; unsigned ndq;
-    struct mad_fg_run runs[16]; unsigned nruns, run_more;
-    unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
+    struct mad_fg_run runs[40]; unsigned nruns, run_more;
+    unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_world_copy, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
     unsigned n_lost, n_pause, n_draw2; LONG64 t_draw2;   /* the same: game frames that got no drawable, gate closings, waits for the second drawable */
     LONG said_fsr, said_bad, said_tex;
 } g_fg;
@@ -12395,6 +12396,20 @@ static void mad_fg_cfg(void) {
     g->ui_mode = mad_cfg_int_pe("framegen-ui", 1) > 0;   /* madeira-duo: 0 = no HUD handling, the finished frame is interpolated as it is */
     g->ui_ps = 0;
     if (mad_cfg_str_pe("framegen-ui-ps", v, sizeof v) && v[0]) g->ui_ps = (UINT)strtoul(v, NULL, 16);   /* madeira-duo: the pixel shader id (as in encoder labels) of the first HUD draw; unset = the first blending draw into the back buffer */
+    /* madeira-duo split1: framegen-ui-world-ps = id[,id...] (up to 8, hex as in encoder labels): HUD draws that belong to the
+     * world, such as PoE2's ground labels and names (ps 4b98ff22, drawn with a vertex shader of their own). They stay in
+     * the interpolated picture: after each run of them the HUD-less copy is taken again, so the labels move with the
+     * ground while panels, the stash and the map overlay drawn after them come whole from the newer game frame. */
+    g->n_world = 0;
+    if (mad_cfg_str_pe("framegen-ui-world-ps", v, sizeof v) && v[0]) {
+        char *c = v;
+        while (*c && g->n_world < 8) {
+            char *end; UINT id = (UINT)strtoul(c, &end, 16);
+            if (end == c) { c++; continue; }
+            if (id) g->world_ps[g->n_world++] = id;
+            c = end;
+        }
+    }
     g->min_fps = mad_cfg_float_pe("framegen-min-fps", 28.0);   /* madeira-duo: no generated frames while the game runs slower than this */
     g->cap = mad_cfg_float_pe("framegen-cap", 0.0);   /* madeira-duo: the frame cap the game runs under while frames are generated (30 = locked 30 -> 60); 0 = none, the pair is paced by the measured frame time */
     if (!(g->cap >= 10.0 && g->cap <= 240.0)) g->cap = 0.0;
@@ -12416,9 +12431,9 @@ static void mad_fg_cfg(void) {
     g_fg_on = (on ? 1 : 0) | (g->probe_s ? 2 : 0);
     if (g_fg_on)
         d3d12_log("[framegen] framegen = %d, probe every %d s: min %.0f fps, cap %.0f fps, HUD handling %s, mv x%.2f y%.2f, jitter x%.2f y%.2f, "
-                  "frame dumps %d\n",
+                  "frame dumps %d, world HUD shaders %d (copied again after each run of them)\n",
                   on, g->probe_s, g->min_fps, g->cap, !g->ui_mode ? "off" : g->ui_ps ? "from the named pixel shader" : "from the first blending draw",
-                  g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy, g->dump_left);
+                  g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy, g->dump_left, g->ui_mode ? g->n_world : 0);
 }
 static obj_handle_t mad_fg_newtex(struct mad_device *d, enum WMTPixelFormat pf, UINT w, UINT h) {
     struct WMTTextureInfo ti;
@@ -12638,9 +12653,14 @@ static void mad_fg_snapshot(struct mad_exec *e, struct mad_resource *bb) {
 }
 /* A draw into a back buffer is about to be replayed. */
 static void mad_fg_draw(struct mad_exec *e) {
-    struct mad_fg *g = &g_fg; const struct mad_pso *p = e->pso; int ui;
+    struct mad_fg *g = &g_fg; const struct mad_pso *p = e->pso; int ui, world = 0, i, copy_again;
     if (e->q != g->queue) return;
+    for (i = 0; i < g->n_world; i++) if (p->ps_id == g->world_ps[i]) { world = 1; break; }
     ui = g->ui_ps ? p->ps_id == g->ui_ps : p->fg_blend0 != 0;
+    if (world) ui = 0;   /* a world draw never starts the HUD */
+    /* split1: the first draw after a run of world draws that came after the HUD-less copy takes the copy again
+     * (at most 4 times a frame: each copy splits the pass and costs a 1152x720 blit) */
+    copy_again = g->snap_done && g->world_run && !world && g->world_copies < 4;
     if (g->probe_frame) {
         struct mad_fg_run *r = g->nruns ? &g->runs[g->nruns - 1] : NULL;
         if (r && r->ps == p->ps_id && r->vs == p->vs_id && r->blend == p->fg_blend0) r->n++;
@@ -12648,8 +12668,16 @@ static void mad_fg_draw(struct mad_exec *e) {
             r = &g->runs[g->nruns++]; r->ps = p->ps_id; r->vs = p->vs_id; r->blend = p->fg_blend0; r->n = 1; r->snap = 0;
         } else { g->run_more++; r = NULL; }
         if (r && ui && g->ui_mode && !g->probe_ui && r->n == 1) { r->snap = 1; g->probe_ui = 1; }   /* where the copy is, or would be */
+        else if (r && copy_again && g->ui_mode && r->n == 1 && !r->snap) r->snap = 2;
     }
     if (g->armed && g->ui_mode && !g->snap_done && ui && e->mode != 6) mad_fg_snapshot(e, e->rt[0]);
+    else if (g->armed && g->ui_mode && copy_again && e->mode != 6) {
+        unsigned first_copies = g->n_split;
+        mad_fg_snapshot(e, e->rt[0]);
+        if (g->n_split != first_copies) { g->n_split = first_copies; g->world_copies++; g->n_world_copy++; }   /* it counts every copy as a first one */
+        else g->world_copies = 4;   /* refused (the back buffer changed): no more tries this frame */
+    }
+    if (g->ui_mode && g->n_world) g->world_run = world && g->snap_done;
     g->bb_draws++;
 }
 
@@ -25596,26 +25624,27 @@ static void mad_fg_dump_frame(struct mad_device *d, obj_handle_t cb, struct mad_
 static void mad_fg_report(double secs) {
     struct mad_fg *g = &g_fg;
     d3d12_log("[framegen] %.1f s: %u frames, %u generated%s; not generated: starting %u, under %.0f fps %u, no FSR inputs %u, FSR constants %u, "
-              "interpolator %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present; frame %.1f ms; "
+              "interpolator %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present, %u again after world HUD draws; frame %.1f ms; "
               "command buffer GPU time: generated frame's %.2f ms avg %.2f max (%u), game frame's %.2f avg %.2f max (%u); "
               "wait for the game frame's drawable %.2f ms avg (%u), game frames that got none %u; hold %.1f ms each; "
               "gate closed %u times, reopens after %u frames at speed\n",
               secs, g->n_frames, g->n_gen, g->native == 1 ? "" : g->native == 0 ? " (this winemetal has no frame interpolator)" : "",
               g->n_skip[FG_SKIP_PRIME], g->min_fps, g->n_skip[FG_SKIP_SLOW], g->n_skip[FG_SKIP_NOFSR], g->n_skip[FG_SKIP_CONSTS],
-              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->dt_ema * 1000.0,
+              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->n_world_copy, g->dt_ema * 1000.0,
               g->n_cb[1] ? g->cb_ms[1] / g->n_cb[1] : 0.0, g->cb_max[1], g->n_cb[1], g->n_cb[0] ? g->cb_ms[0] / g->n_cb[0] : 0.0, g->cb_max[0], g->n_cb[0],
               g->n_draw2 ? (double)g->t_draw2 * 1000.0 / (double)g->qpf / g->n_draw2 : 0.0, g->n_draw2, g->n_lost, mad_fg_hold() * 1000.0,
               g->n_pause, g->resume_need);
-    g->n_frames = g->n_gen = g->n_split = g->n_late = g->n_lost = g->n_pause = g->n_draw2 = 0; g->t_draw2 = 0;
+    g->n_frames = g->n_gen = g->n_split = g->n_late = g->n_world_copy = g->n_lost = g->n_pause = g->n_draw2 = 0; g->t_draw2 = 0;
     memset(g->n_skip, 0, sizeof g->n_skip); memset(g->n_cb, 0, sizeof g->n_cb);
     memset(g->cb_ms, 0, sizeof g->cb_ms); memset(g->cb_max, 0, sizeof g->cb_max);
 }
 static void mad_fg_probe_flush(struct mad_swapchain *s) {
-    struct mad_fg *g = &g_fg; char line[900]; int n; unsigned i;
+    struct mad_fg *g = &g_fg; char line[1800]; int n; unsigned i;
     n = snprintf(line, sizeof line, "[fg-probe] present #%llu: %u draws into the back buffer (%ux%u), by pipeline in order:",
                  (unsigned long long)s->presents, g->bb_draws, s->desc.Width, s->desc.Height);
     for (i = 0; i < g->nruns && n < (int)sizeof line - 64; i++)
-        n += snprintf(line + n, sizeof line - n, " %sps:%08x vs:%08x %s x%u;", g->runs[i].snap ? "[HUD starts] " : "", g->runs[i].ps, g->runs[i].vs,
+        n += snprintf(line + n, sizeof line - n, " %sps:%08x vs:%08x %s x%u;",
+                      g->runs[i].snap == 1 ? "[HUD starts] " : g->runs[i].snap == 2 ? "[copied again] " : "", g->runs[i].ps, g->runs[i].vs,
                       g->runs[i].blend ? "blend" : "opaque", g->runs[i].n);
     if (g->run_more) snprintf(line + n, sizeof line - n, " and %u more runs", g->run_more);
     d3d12_log("%s\n", line);
@@ -25655,8 +25684,8 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
         g->dump_plain = 0; g->dump_left--; g->dump_qpc = now;
     }
     if (g->armed && bb && bb->texture && g->snap[g->cur] && bb->width == g->bw && bb->height == g->bh) {
-        if (g->snap_done) have_snap = 1;
-        else {   /* no HUD draw this frame (or framegen-ui = 0): the finished frame is the colour input */
+        if (g->snap_done && !g->world_run) have_snap = 1;
+        else {   /* no HUD draw this frame (or framegen-ui = 0), or the frame ended in world HUD draws (split1): the finished frame is the colour input */
             obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
             if (enc) {
                 struct wmtcmd_blit_copy_from_texture_to_texture k;
@@ -25706,7 +25735,7 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
     if (have_snap) g->cur ^= 1;
     if (g->probe_frame) { mad_fg_probe_flush(s); g->probe_frame = 0; }
     else if (g->probe_s && (now - g->probe_qpc) / g->qpf >= g->probe_s) { g->probe_frame = 1; g->probe_ui = 0; g->probe_qpc = now; g->nruns = 0; g->run_more = 0; }
-    g->snap_done = 0; g->bb_draws = 0; g->frame++;
+    g->snap_done = 0; g->bb_draws = 0; g->world_run = 0; g->world_copies = 0; g->frame++;
     if (g->dt_ema > 0.0) {   /* the rate gate, with some hysteresis */
         /* It reopens 3 fps over the floor, or just under the cap when that is lower (a 30 cap never shows 31). A gate
          * that closes again within 600 frames of reopening waits twice as long the next time, up to 1280 frames, so
@@ -25736,7 +25765,7 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
 static void mad_fg_lost(struct mad_swapchain *s) {
     struct mad_fg *g = &g_fg;
     if (g->swap != s) return;
-    g->snap_done = 0; g->bb_draws = 0; g->prev_ok = 0; g->gen_prev = 0; g->probe_frame = 0;
+    g->snap_done = 0; g->bb_draws = 0; g->world_run = 0; g->world_copies = 0; g->prev_ok = 0; g->gen_prev = 0; g->probe_frame = 0;
     g->frame++;
 }
 /* The generated frame into a drawable, through the same spatial scaler as the game's frame. */
