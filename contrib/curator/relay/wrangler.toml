@@ -1,0 +1,24 @@
+name = "triptych-curator-relay"
+main = "worker.js"
+compatibility_date = "2025-11-28"
+preview_urls = false
+
+[vars]
+TRACKER_REPO = "RageMC/triptych-issues"
+
+[[kv_namespaces]]
+binding = "SIGNATURES"
+id = "eddd6631fbf7417b8312c19b02c8c2fb"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "Relay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Relay"]
+
+# Uncomment after configuring a private bucket with a 30-day lifecycle rule.
+# [[r2_buckets]]
+# binding = "LOGS"
+# bucket_name = "REPLACE_WITH_PRIVATE_BUCKET"
