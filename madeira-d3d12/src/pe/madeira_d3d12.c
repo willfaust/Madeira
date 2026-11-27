@@ -12363,7 +12363,8 @@ static struct mad_fg {
     struct { obj_handle_t h; UINT64 at; } dead[64]; unsigned ndead;
     struct { obj_handle_t cb; UINT64 at; int gen; } cbs[12]; unsigned ncbs;
     int dump_left, dump_plain; unsigned dump_burst, dump_n; LONG64 dump_qpc;   /* framegen-dump */
-    struct { obj_handle_t cb, buf; void *cpu; UINT w, h, pf, bpp; char name[32]; } dq[16]; unsigned ndq;
+    struct { obj_handle_t cb, buf; void *cpu; UINT w, h, pf, bpp; char name[32]; } dq[48]; unsigned ndq;   /* rundump1: 48 (was 16) */
+    int rundump_left, rundump_on, rundump_next; unsigned rundump_n, rundump_imgs;   /* framegen-run-dump */
     struct mad_fg_run runs[40]; unsigned nruns, run_more;
     unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_world_copy, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
     unsigned n_lost, n_pause, n_draw2; LONG64 t_draw2;   /* the same: game frames that got no drawable, gate closings, waits for the second drawable */
@@ -12413,7 +12414,8 @@ static void mad_fg_cfg(void) {
     g->min_fps = mad_cfg_float_pe("framegen-min-fps", 28.0);   /* madeira-duo: no generated frames while the game runs slower than this */
     g->cap = mad_cfg_float_pe("framegen-cap", 0.0);   /* madeira-duo: the frame cap the game runs under while frames are generated (30 = locked 30 -> 60); 0 = none, the pair is paced by the measured frame time */
     if (!(g->cap >= 10.0 && g->cap <= 240.0)) g->cap = 0.0;
-    g->dump_left = (int)mad_cfg_int_pe("framegen-dump", 0);   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
+    g->dump_left = (int)mad_cfg_int_pe("framegen-dump", 0);
+    g->rundump_left = (int)mad_cfg_int_pe("framegen-run-dump", 0);   /* madeira-duo rundump1: N > 0 = N frames a session, the back buffer before each run of draws to C:\\madeira-fg ([fg-rundump]) */   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
     g->resume_need = 40;
     g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
     g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
@@ -12634,6 +12636,21 @@ static void mad_fg_fsr(struct mad_exec *e) {
  * The open pass ends (stored: the draw that follows binds the same targets, so
  * the look-ahead finds a use) and the next one loads. Both sides wait: the copy
  * for the pass, the pass that goes on for the copy. */
+static void mad_fg_dump_tex(struct mad_device *d, obj_handle_t benc, obj_handle_t cb, obj_handle_t tex, UINT w, UINT h, UINT pf, const char *what, unsigned step);
+/* rundump1: the back buffer as the runs before this draw left it, to a file (step 9: named rd<n>-<what>). Splits the
+ * pass like the HUD-less copy does; one frame a time, a diagnostic. */
+static void mad_fg_rundump(struct mad_exec *e, struct mad_resource *bb, const char *what) {
+    struct mad_fg *g = &g_fg;
+    if (!bb || !bb->texture || bb->samples > 1) return;
+    exec_end(e);
+    while (e->npend) exec_flush_clear(e, 0);   /* a pending clear of what is copied goes first */
+    e->fence_needed = 1;
+    if (!exec_begin_blit(e)) return;
+    mad_fg_dump_tex(e->q->device, e->benc, e->cb, bb->texture, bb->width, bb->height, (UINT)bb->tex_pf, what, 9);
+    exec_end(e);
+    e->fence_needed = 1;
+    g->rundump_imgs++;
+}
 static void mad_fg_snapshot(struct mad_exec *e, struct mad_resource *bb) {
     struct mad_fg *g = &g_fg; struct wmtcmd_blit_copy_from_texture_to_texture k;
     if (!bb->texture || !g->snap[g->cur] || bb->width != g->bw || bb->height != g->bh || bb->tex_pf != g->bpf || bb->samples > 1) return;
@@ -12669,6 +12686,12 @@ static void mad_fg_draw(struct mad_exec *e) {
         } else { g->run_more++; r = NULL; }
         if (r && ui && g->ui_mode && !g->probe_ui && r->n == 1) { r->snap = 1; g->probe_ui = 1; }   /* where the copy is, or would be */
         else if (r && copy_again && g->ui_mode && r->n == 1 && !r->snap) r->snap = 2;
+        /* rundump1: this draw starts a new run, so the back buffer now holds everything up to the run before it */
+        if (g->rundump_on && r && r->n == 1 && g->nruns >= 2 && g->rundump_imgs < 40 && e->mode != 6) {
+            char what[24];
+            snprintf(what, sizeof what, "%02u-%08x", g->nruns - 2, g->runs[g->nruns - 2].ps);
+            mad_fg_rundump(e, e->rt[0], what);
+        }
     }
     if (g->armed && g->ui_mode && !g->snap_done && ui && e->mode != 6) mad_fg_snapshot(e, e->rt[0]);
     else if (g->armed && g->ui_mode && copy_again && e->mode != 6) {
@@ -25570,7 +25593,8 @@ static void mad_fg_dump_tex(struct mad_device *d, obj_handle_t benc, obj_handle_
     NSObject_retain(cb);
     g->dq[g->ndq].cb = cb; g->dq[g->ndq].buf = buf; g->dq[g->ndq].cpu = cpu;
     g->dq[g->ndq].w = w; g->dq[g->ndq].h = h; g->dq[g->ndq].pf = pf; g->dq[g->ndq].bpp = bpp;
-    snprintf(g->dq[g->ndq].name, sizeof g->dq[g->ndq].name, "b%02u-f%u-%s", g->dump_n, step, what);
+    if (step == 9) snprintf(g->dq[g->ndq].name, sizeof g->dq[g->ndq].name, "rd%u-%s", g->rundump_n, what);   /* rundump1 */
+    else snprintf(g->dq[g->ndq].name, sizeof g->dq[g->ndq].name, "b%02u-f%u-%s", g->dump_n, step, what);
     g->ndq++;
 }
 /* Written once the burst is over and the command buffers have completed: three frames' files are not written between them. */
@@ -25683,6 +25707,21 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
         }
         g->dump_plain = 0; g->dump_left--; g->dump_qpc = now;
     }
+    if (g->rundump_on && bb && bb->texture) {   /* rundump1: and the finished frame, after the last run */
+        obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
+        if (enc) {
+            char what[24];
+            g_enc_seq++;
+            snprintf(what, sizeof what, "%02u-%08x-end", g->nruns ? g->nruns - 1 : 0, g->nruns ? g->runs[g->nruns - 1].ps : 0);
+            mad_fg_dump_tex(d, enc, cb, bb->texture, bb->width, bb->height, (UINT)bb->tex_pf, what, 9);
+            MTLCommandEncoder_endEncoding(enc);
+            g->rundump_imgs++;
+        }
+        d3d12_log("[fg-rundump] %u: present #%llu, %u images %ux%u pf%u in C:\\madeira-fg as rd%u-<run>-<ps of that run>.raw, each the back buffer "
+                  "after that run (the last one is the finished frame); the runs are the [fg-probe] line that follows\n",
+                  g->rundump_n, (unsigned long long)s->presents, g->rundump_imgs, bb->width, bb->height, (unsigned)bb->tex_pf, g->rundump_n);
+        g->rundump_on = 0; g->rundump_left--;
+    }
     if (g->armed && bb && bb->texture && g->snap[g->cur] && bb->width == g->bw && bb->height == g->bh) {
         if (g->snap_done && !g->world_run) have_snap = 1;
         else {   /* no HUD draw this frame (or framegen-ui = 0), or the frame ended in world HUD draws (split1): the finished frame is the colour input */
@@ -25733,7 +25772,19 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
     g->gen_run = gen ? g->gen_run + 1 : 0;
     if (!gen && g->dump_burst) { g->dump_burst = 0; g->dump_left--; g->dump_qpc = now; }   /* a burst cut short still counts */
     if (have_snap) g->cur ^= 1;
-    if (g->probe_frame) { mad_fg_probe_flush(s); g->probe_frame = 0; }
+    if (g->probe_frame) {
+        unsigned i, w, map_frame = 0;
+        mad_fg_probe_flush(s); g->probe_frame = 0;
+        /* rundump1: a probe frame with a world HUD shader in it (framegen-ui-world-ps: maps only) makes the next frame
+         * the dump, which is a probe frame too, so its runs are logged with it */
+        for (i = 0; i < g->nruns; i++) for (w = 0; w < (unsigned)g->n_world; w++) if (g->runs[i].ps == g->world_ps[w]) map_frame = 1;
+        if (g->rundump_left > 0 && map_frame && !g->rundump_next) g->rundump_next = 2;
+        else if (g->rundump_next == 1) g->rundump_next = 0;   /* this probe frame was the dump */
+        if (g->rundump_next == 2) {
+            g->rundump_next = 1; g->rundump_on = 1; g->rundump_n++; g->rundump_imgs = 0;
+            g->probe_frame = 1; g->probe_ui = 0; g->nruns = 0; g->run_more = 0;
+        }
+    }
     else if (g->probe_s && (now - g->probe_qpc) / g->qpf >= g->probe_s) { g->probe_frame = 1; g->probe_ui = 0; g->probe_qpc = now; g->nruns = 0; g->run_more = 0; }
     g->snap_done = 0; g->bb_draws = 0; g->world_run = 0; g->world_copies = 0; g->frame++;
     if (g->dt_ema > 0.0) {   /* the rate gate, with some hysteresis */
