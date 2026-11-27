@@ -1,0 +1,21 @@
+{
+  "name": "triptych-curator-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "fflate": "0.8.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "miniflare": "4.20251128.0",
+    "vitest": "3.2.4",
+    "wrangler": "4.51.0"
+  }
+}
