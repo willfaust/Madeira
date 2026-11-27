@@ -10286,6 +10286,7 @@ static struct wmtcmd_base *mad_dd_buf(struct mad_dd *d, struct wmtcmd_render_set
     return (struct wmtcmd_base *)s;
 }
 static int g_fg_on = -1;   /* madeira-duo framegen (mad_fg, below): -1 not read, bit 0 generate, bit 1 probe */
+static int g_fgp_slots;    /* madeira-duo fgp1: framegen-presenter, 0 = the worker presents the pair itself, 1-2 = slots of the presenter thread */
 static void mad_fg_draw(struct mad_exec *e);
 static void mad_fg_fsr(struct mad_exec *e);
 static char g_fg_pass[64] = "PrepareInputsCS";   /* the compute entry point whose inputs are read (madeira.cfg framegen-pass) */
@@ -12428,6 +12429,8 @@ static void mad_fg_cfg(void) {
     g->rundump_left = (int)mad_cfg_int_pe("framegen-run-dump", 0);
     g->label_runs = (int)mad_cfg_int_pe("framegen-ui-label-runs", 0);   /* madeira-duo split2: runs after the framegen-ui-world-ps layer that join the interpolated picture (PoE2: 1, its world labels); 0 = split1 */
     if (g->label_runs < 0 || g->label_runs > 8) g->label_runs = 0;   /* madeira-duo rundump1: N > 0 = N frames a session, the back buffer before each run of draws to C:\\madeira-fg ([fg-rundump]) */   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
+    g_fgp_slots = (int)mad_cfg_int_pe("framegen-presenter", 0);   /* madeira-duo fgp1: 1-2 = a presenter thread waits for the drawables, the worker goes on to the next frame */
+    if (g_fgp_slots < 0 || g_fgp_slots > 2) g_fgp_slots = 0;
     g->resume_need = 40;
     g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
     g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
@@ -12448,6 +12451,9 @@ static void mad_fg_cfg(void) {
                   "frame dumps %d, world HUD shaders %d (copied again after each run of them)\n",
                   on, g->probe_s, g->min_fps, g->cap, !g->ui_mode ? "off" : g->ui_ps ? "from the named pixel shader" : "from the first blending draw",
                   g->mul_mvx, g->mul_mvy, g->mul_jx, g->mul_jy, g->dump_left, g->ui_mode ? g->n_world : 0);
+    if (g_fg_on & 1)
+        d3d12_log("[framegen] fgp1 presenter: %s\n", g_fgp_slots ? (g_fgp_slots == 2 ? "on, 2 slots (the worker can be two frames ahead of the screen)" : "on, 1 slot")
+                                                         : "off (framegen-presenter = 0): the worker waits for both drawables itself");
 }
 static obj_handle_t mad_fg_newtex(struct mad_device *d, enum WMTPixelFormat pf, UINT w, UINT h) {
     struct WMTTextureInfo ti;
@@ -25132,8 +25138,11 @@ static void mad_swap_make_fx(struct mad_swapchain *s) {
     d3d12_log("[madeira-d3d12] metalfx-upscale %s: %ux%u -> %ux%u (MetalFX spatial)\n", v, s->desc.Width, s->desc.Height, ow, oh);
 }
 
+static void mad_fgp_release(struct mad_swapchain *s);   /* madeira-duo fgp1, below */
+static void mad_fgp_drain(void);
 static void mad_swap_release_buffers(struct mad_swapchain *s) {
     UINT i;
+    mad_fgp_release(s);   /* madeira-duo fgp1: nothing of this swapchain left with the presenter, its textures go */
     mad_fg_drop(s);   /* madeira-duo framegen: its textures are this swapchain's size */
     mad_swap_release_fx(s);
     for (i = 0; i < s->nbuf; i++)
@@ -25159,6 +25168,7 @@ static void mad_swap_apply_layer(struct mad_swapchain *s) {
     unsigned old_pf;
     UINT64 t0;
     LONG seq;
+    mad_fgp_drain();   /* madeira-duo fgp1: the presenter is not using the layer while it changes */
     memset(&props, 0, sizeof props);
     MetalLayer_getProps(s->layer, &props);
     old_w = props.drawable_width; old_h = props.drawable_height; old_pf = (unsigned)props.pixel_format;
@@ -25950,6 +25960,233 @@ static obj_handle_t mad_fg_pair(struct mad_swapchain *s, obj_handle_t cb, obj_ha
     return cb2;
 }
 
+/* madeira-duo fgp1: framegen-presenter = 1 or 2. With a generated frame the worker used to wait for the layer's
+ * drawable for the game's own frame (mad_fg_pair), and the layer gives that drawable back only once the generated
+ * frame is on the glass, which is once the GPU has finished the game's frame: run-1127g's heavy maps waited 19-21 ms
+ * a frame there ([framegen] "wait for the game frame's drawable"), the worker was busy ~44 ms of each ~49 ms frame
+ * (replay 15 + present 29), and Present held the game's render thread 9-11 ms a frame. The CPU's next frame and
+ * the GPU's current one took turns instead of overlapping.
+ * Now the worker draws both pictures into textures of its own (a slot: the generated frame, then the game's, each as
+ * the drawable would get it, MetalFX spatial scale included), commits that, hands the slot to a presenter thread and
+ * goes on. The presenter takes a drawable for each, copies, presents with the same holds as before and commits.
+ * Command buffers of one queue run in commit order: the slot's own command buffer is committed before the slot is
+ * handed over, so the presenter's copies read finished pictures; a slot is filled again only after the presenter
+ * has committed its copies, so a refill lands after them. With 2 slots the worker can be one frame further ahead.
+ * Costs: the slot textures (2 per slot at the drawable size) and one extra full-screen copy per picture. */
+struct mad_fgp_slot {
+    volatile LONG state;   /* 0 free, 1 handed to the presenter */
+    struct mad_swapchain *s;
+    obj_handle_t gen_tex, game_tex;
+    UINT w, h;
+    int gen;
+    double hold;
+};
+static struct {
+    SRWLOCK lock;
+    CONDITION_VARIABLE posted, freed;
+    HANDLE thread;
+    int nslots, next, failed;
+    struct mad_swapchain *tex_for;
+    UINT tex_w, tex_h; enum WMTPixelFormat tex_pf;
+    struct mad_fgp_slot slot[2];
+    /* stats, read and reset by mad_fgp_report (worker); the presenter adds with Interlocked */
+    volatile LONG64 t_slot_wait, t_d1, t_d2;
+    volatile LONG n_slot_wait, n_pairs, n_single, n_lost;
+    LONG64 log_qpc;
+} g_fgp = { SRWLOCK_INIT, CONDITION_VARIABLE_INIT, CONDITION_VARIABLE_INIT };
+
+static void mad_fgp_blit(obj_handle_t cb, obj_handle_t src, obj_handle_t dst, UINT w, UINT h) {
+    struct wmtcmd_blit_copy_from_texture_to_texture t2t;
+    obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
+    if (!enc) return;
+    g_enc_seq++;
+    memset(&t2t, 0, sizeof t2t);
+    t2t.type = WMTBlitCommandCopyFromTextureToTexture;
+    t2t.src = src;
+    t2t.src_size.width = w; t2t.src_size.height = h; t2t.src_size.depth = 1;
+    t2t.dst = dst;
+    MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
+    MTLCommandEncoder_endEncoding(enc);
+}
+/* One slot onto the glass: a drawable for the generated picture (held mad_fg_hold() as before), then one for the
+ * game's. A drawable the layer does not give (nil after its 1 s wait) is a picture not shown. */
+static void mad_fgp_show(struct mad_fgp_slot *sl) {
+    struct mad_swapchain *s = sl->s;
+    obj_handle_t q = s->queue->device->mtl_queue, d, tex, cb;
+    LONG64 t0;
+    if (sl->gen) {
+        t0 = mad_qpc();
+        d = MetalLayer_nextDrawable(s->layer);
+        InterlockedExchangeAdd64(&g_fgp.t_d1, mad_qpc() - t0);
+        tex = d ? MetalDrawable_texture(d) : 0;
+        cb = tex ? MTLCommandQueue_commandBuffer(q) : 0;
+        if (cb) {
+            mad_fgp_blit(cb, sl->gen_tex, tex, sl->w, sl->h);
+            MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, d, sl->hold);
+            MTLCommandBuffer_commit(cb);
+        } else InterlockedIncrement(&g_fgp.n_lost);
+    }
+    t0 = mad_qpc();
+    d = MetalLayer_nextDrawable(s->layer);
+    InterlockedExchangeAdd64(&g_fgp.t_d2, mad_qpc() - t0);
+    tex = d ? MetalDrawable_texture(d) : 0;
+    cb = tex ? MTLCommandQueue_commandBuffer(q) : 0;
+    if (cb) {
+        mad_fgp_blit(cb, sl->game_tex, tex, sl->w, sl->h);
+        if (sl->gen) MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, d, sl->hold);
+        else MTLCommandBuffer_presentDrawable(cb, d);
+        MTLCommandBuffer_commit(cb);
+    } else InterlockedIncrement(&g_fgp.n_lost);
+    InterlockedIncrement(sl->gen ? &g_fgp.n_pairs : &g_fgp.n_single);
+}
+static DWORD WINAPI mad_fgp_thread(void *arg) {
+    int cur = 0;
+    (void)arg;
+    mad_name_self(L"MadeiraPresent");   /* classed by MADEIRA_THREAD_QOS; unnamed it would run user-interactive anyway */
+    for (;;) {
+        struct mad_fgp_slot *sl = &g_fgp.slot[cur];
+        obj_handle_t pool;
+        AcquireSRWLockExclusive(&g_fgp.lock);
+        while (sl->state != 1) SleepConditionVariableSRW(&g_fgp.posted, &g_fgp.lock, INFINITE, 0);
+        ReleaseSRWLockExclusive(&g_fgp.lock);
+        pool = NSAutoreleasePool_alloc_init();   /* the drawables and command buffers are autoreleased: drained every slot */
+        mad_fgp_show(sl);
+        if (pool) NSObject_release(pool);
+        AcquireSRWLockExclusive(&g_fgp.lock);
+        sl->state = 0;
+        ReleaseSRWLockExclusive(&g_fgp.lock);
+        WakeAllConditionVariable(&g_fgp.freed);
+        cur = (cur + 1) % (g_fgp.nslots > 0 ? g_fgp.nslots : 1);
+    }
+    return 0;
+}
+/* Until every handed-over slot is on its way to the glass (its copies committed). */
+static void mad_fgp_drain(void) {
+    int k;
+    if (!g_fgp.thread) return;
+    AcquireSRWLockExclusive(&g_fgp.lock);
+    for (k = 0; k < 2; k++)
+        while (g_fgp.slot[k].state) SleepConditionVariableSRW(&g_fgp.freed, &g_fgp.lock, INFINITE, 0);
+    ReleaseSRWLockExclusive(&g_fgp.lock);
+}
+static void mad_fgp_release(struct mad_swapchain *s) {
+    int k;
+    if (!g_fgp.thread || (s && g_fgp.tex_for != s)) return;
+    mad_fgp_drain();
+    for (k = 0; k < 2; k++) {
+        if (g_fgp.slot[k].gen_tex) { NSObject_release(g_fgp.slot[k].gen_tex); g_fgp.slot[k].gen_tex = 0; }
+        if (g_fgp.slot[k].game_tex) { NSObject_release(g_fgp.slot[k].game_tex); g_fgp.slot[k].game_tex = 0; }
+    }
+    g_fgp.tex_for = NULL; g_fgp.tex_w = g_fgp.tex_h = 0;
+}
+/* The slot textures for this swapchain's presented size, and the thread; 0 = the old path this time. */
+static int mad_fgp_ready(struct mad_swapchain *s, UINT w, UINT h) {
+    int k;
+    if (g_fgp.failed) return 0;
+    if (!g_fgp.thread) {
+        g_fgp.nslots = g_fgp_slots;
+        g_fgp.thread = CreateThread(NULL, 256 << 10, mad_fgp_thread, NULL, 0, NULL);
+        if (!g_fgp.thread) {
+            g_fgp.failed = 1;
+            d3d12_log("[framegen] fgp1: no presenter thread (error %lu) -- the worker presents as before\n", GetLastError());
+            return 0;
+        }
+        g_fgp.log_qpc = mad_qpc();
+        d3d12_log("[framegen] fgp1: presenter thread started, %d slot(s) of %ux%u\n", g_fgp.nslots, w, h);
+    }
+    if (g_fgp.tex_for != s || g_fgp.tex_w != w || g_fgp.tex_h != h || g_fgp.tex_pf != s->pf) {
+        mad_fgp_release(NULL);
+        for (k = 0; k < g_fgp.nslots; k++) {
+            g_fgp.slot[k].gen_tex = mad_fg_newtex(s->dev, s->pf, w, h);
+            g_fgp.slot[k].game_tex = mad_fg_newtex(s->dev, s->pf, w, h);
+            if (!g_fgp.slot[k].gen_tex || !g_fgp.slot[k].game_tex) {
+                d3d12_log("[framegen] fgp1: no slot textures (%ux%u format %u) -- the worker presents as before\n", w, h, (unsigned)s->pf);
+                mad_fgp_release(NULL);
+                g_fgp.failed = 1;
+                return 0;
+            }
+        }
+        g_fgp.tex_for = s; g_fgp.tex_w = w; g_fgp.tex_h = h; g_fgp.tex_pf = s->pf;
+    }
+    return 1;
+}
+static void mad_fgp_report(void) {
+    LONG64 now = mad_qpc(), qpf, d1, d2, sw;
+    LARGE_INTEGER fq;
+    LONG pairs, single, lost, nw, shown;
+    double secs, ms;
+    if (!g_fgp.thread || !g_fg.log_s) return;
+    QueryPerformanceFrequency(&fq); qpf = fq.QuadPart ? fq.QuadPart : 1;
+    secs = (double)(now - g_fgp.log_qpc) / (double)qpf;
+    if (secs < g_fg.log_s) return;
+    g_fgp.log_qpc = now;
+    ms = 1000.0 / (double)qpf;
+    pairs = InterlockedExchange(&g_fgp.n_pairs, 0); single = InterlockedExchange(&g_fgp.n_single, 0);
+    lost = InterlockedExchange(&g_fgp.n_lost, 0); nw = InterlockedExchange(&g_fgp.n_slot_wait, 0);
+    d1 = InterlockedExchange64(&g_fgp.t_d1, 0); d2 = InterlockedExchange64(&g_fgp.t_d2, 0); sw = InterlockedExchange64(&g_fgp.t_slot_wait, 0);
+    shown = pairs + single;
+    d3d12_log("[framegen] fgp1 %.1f s: presenter showed %ld pairs and %ld single frames, %ld pictures got no drawable; "
+              "presenter waits for drawables %.2f ms (generated) + %.2f ms (game) a slot; worker waited for a free slot %ld times, %.2f ms a frame\n",
+              secs, (long)pairs, (long)single, (long)lost, pairs ? (double)d1 * ms / pairs : 0.0, shown ? (double)d2 * ms / shown : 0.0,
+              (long)nw, shown ? (double)sw * ms / shown : 0.0);
+}
+/* The worker's half of a framegen present with the presenter on: 1 = done (pictures in a slot, slot handed over),
+ * 0 = take the old path (no thread, no textures, no command buffer). */
+static int mad_fgp_present(struct mad_swapchain *s, UINT idx, struct mad_resource *src) {
+    struct mad_fgp_slot *sl;
+    obj_handle_t cb, enc, copy_src = src->texture;
+    UINT w = src->width, h = src->height;
+    int gen, fx = s->fx_scaler && s->fx_out && s->fx_view[idx];
+    LONG64 t0;
+    if (fx) { w = s->fx_w; h = s->fx_h; }
+    if (!copy_src || !mad_fgp_ready(s, w, h)) return 0;
+    sl = &g_fgp.slot[g_fgp.next];
+    t0 = mad_qpc();
+    AcquireSRWLockExclusive(&g_fgp.lock);
+    if (sl->state) {
+        InterlockedIncrement(&g_fgp.n_slot_wait);
+        while (sl->state) SleepConditionVariableSRW(&g_fgp.freed, &g_fgp.lock, INFINITE, 0);
+    }
+    ReleaseSRWLockExclusive(&g_fgp.lock);
+    InterlockedExchangeAdd64(&g_fgp.t_slot_wait, mad_qpc() - t0);
+    cb = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
+    if (!cb) return 0;
+    if (g_sd_state > 0 && g_fence_strict) mad_strict_cb_wait(s->queue->device, cb);
+    gen = mad_fg_frame(s, idx, cb);
+    if (gen) mad_fg_show(s, cb, sl->gen_tex);   /* the generated picture as mad_fg_pair showed it, into the slot */
+    if (fx) {
+        obj_handle_t ff = (g_f6_used && s->queue->device->enc_fence) ? s->queue->device->enc_fence : 0;
+        MTLCommandBuffer_encodeSpatialScale(cb, s->fx_scaler, s->fx_view[idx], s->fx_out, ff);
+        copy_src = s->fx_out;
+    }
+    enc = MTLCommandBuffer_blitCommandEncoder(cb);
+    if (enc) {
+        struct wmtcmd_blit_copy_from_texture_to_texture t2t;
+        g_enc_seq++;
+        if (g_f6_used && s->queue->device->enc_fence) {   /* as the old path: after every committed batch */
+            obj_handle_t df = s->queue->device->enc_fence;
+            f6_encode(enc, F6_BLIT, &df, 1, 0);
+        }
+        memset(&t2t, 0, sizeof t2t);
+        t2t.type = WMTBlitCommandCopyFromTextureToTexture;
+        t2t.src = copy_src;
+        t2t.src_size.width = w; t2t.src_size.height = h; t2t.src_size.depth = 1;
+        t2t.dst = sl->game_tex;
+        MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
+        MTLCommandEncoder_endEncoding(enc);
+    }
+    MTLCommandBuffer_commit(cb);
+    mad_fg_committed(cb, gen);
+    sl->s = s; sl->w = w; sl->h = h; sl->gen = gen; sl->hold = gen ? mad_fg_hold() : 0.0;
+    AcquireSRWLockExclusive(&g_fgp.lock);
+    sl->state = 1;
+    ReleaseSRWLockExclusive(&g_fgp.lock);
+    WakeConditionVariable(&g_fgp.posted);
+    g_fgp.next = (g_fgp.next + 1) % g_fgp.nslots;
+    mad_fgp_report();
+    return 1;
+}
+
 /* ml1121: the Metal half of Present; runs on the queue's worker (async) or on the caller. */
 static void mad_mheap_reclaim(struct mad_device *d, int all);
 static void mad_present_run(struct mad_swapchain *s, UINT idx) {
@@ -26073,6 +26310,13 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
         mad_swd_step(s->queue, 'A');
         mad_swap_apply_layer(s);
     }
+    if (g_fg_on > 0 && g_fgp_slots > 0) {   /* madeira-duo fgp1: the presenter thread waits for the drawables */
+        int done;
+        mad_swd_step(s->queue, 'C');
+        { LONG64 tc = mad_qpc(); done = mad_fgp_present(s, idx, src); InterlockedExchangeAdd64(&g_xp.t_cmt, mad_qpc() - tc); }
+        if (done) goto fgp_presented;
+        mad_fgp_drain();   /* the old path presents now: nothing older may still be on its way to the glass */
+    }
     mad_swd_step(s->queue, 'D');
     { LONG64 td = mad_qpc();   /* ml1128 */
     drawable = MetalLayer_nextDrawable(s->layer);
@@ -26132,6 +26376,7 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
         fg_no_second: ;
     }
     InterlockedExchangeAdd64(&g_xp.t_cmt, mad_qpc() - tc); }
+    fgp_presented:   /* madeira-duo fgp1 */
     mad_swd_step(s->queue, 0);
     /* ml1056: no release -- the drawable was never ours (see swap_Present). */
     s->presents++;
