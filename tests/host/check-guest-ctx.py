@@ -66,6 +66,9 @@ static int mach_vm_read_overwrite( int task, mach_vm_address_t a, mach_vm_size_t
 }
 ''' + code + r'''
 static int fails;
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE MAP_FIXED   /* Darwin: force the address; the fixture's GUEST base is fresh */
+#endif
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
 
 int main(void)

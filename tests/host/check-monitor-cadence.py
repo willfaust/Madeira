@@ -57,7 +57,11 @@ int main( int argc, char **argv )
         if (c == 1 || (ios_warmer_sweep_cycles() == 5 ? (c % 15) == 0 : (c % ios_warmer_sweep_cycles()) == 0))
             inventories++;
     }
-    pthread_setname_np( pthread_self(), "probe-me" );
+#ifdef __APPLE__
+    pthread_setname_np( "probe-me" );
+#else
+    pthread_setname_np( pthread_self(), "probe-me" );   /* glibc names a given thread */
+#endif
     ios_xp_name_native( pthread_self(), 981493 );
     ios_xp_name_native( pthread_self(), 981493 );
     ios_xp_name_native( pthread_self(), 981492 );

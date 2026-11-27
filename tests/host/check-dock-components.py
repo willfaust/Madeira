@@ -30,9 +30,15 @@ assert 'url?.host == "client-update.akamai.steamstatic.com"' in text and 'url?.s
 print('PASS: three pinned packages from one HTTPS Valve host; redirects stay on it')
 with tempfile.TemporaryDirectory(prefix='madeira-runtime-') as tmp:
     tmp = Path(tmp)
-    (tmp/'module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" export * link "z" }')
+    if sys.platform != 'darwin':
+        # macOS SDKs ship a zlib module already; the shim would redefine it
+        (tmp/'module.modulemap').write_text('module zlib [system] { header "/usr/include/zlib.h" export * link "z" }')
     main = r'''
 import Foundation
+// the app's bridging header supplies these; the standalone host build stubs them
+@_cdecl("wine_process_is_running") func wine_process_is_running() -> Int32 { 0 }
+@_cdecl("wineserver_is_running") func wineserver_is_running() -> Int32 { 0 }
+@_cdecl("madeira_seed_prefix_if_needed") func madeira_seed_prefix_if_needed(_ prefix_path: UnsafePointer<CChar>?) { _ = prefix_path }
 let fm = FileManager.default
 let mode = CommandLine.arguments[1]
 if mode == "registry" {

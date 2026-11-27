@@ -139,7 +139,7 @@ try:
         if out.exists():
             shutil.rmtree(out)
         out.mkdir(parents=True)
-        env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:abort_on_error=0", UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
+        env = dict(os.environ, ASAN_OPTIONS=("detect_leaks=0" if sys.platform == "darwin" else "detect_leaks=1") + ":abort_on_error=0", UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1")
         return subprocess.run([str(exe), str(archive), str(out)], capture_output=True, text=True, env=env, timeout=120)
 
     def same(a, b):

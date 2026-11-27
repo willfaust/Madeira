@@ -1108,7 +1108,7 @@ with tempfile.TemporaryDirectory() as t:
     if mp3:
         args += [mp3]
     env = {k: v for k, v in os.environ.items() if not k.startswith("MADEIRA_")}
-    env["ASAN_OPTIONS"] = "detect_leaks=1"
+    env["ASAN_OPTIONS"] = "detect_leaks=0" if sys.platform == "darwin" else "detect_leaks=1"
     if mp3:
         # first pass: learn the stream's duration from the parser's own connect line
         probe = subprocess.run(args + ["0"], env=env, capture_output=True, text=True)

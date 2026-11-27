@@ -48,7 +48,9 @@ sc_run_install:
     restore_volatile
     mov rax, qword ptr [rcx]
     jmp install_return
-.balign 16, 0x90
+/* 16-byte alignment of sc_run_restore is a no-op here (already aligned); the
+ * .balign 16, 0x90 is spelled as zero bytes so both GNU as (which releases a
+ * 0x90 fill as multi-byte NOPs) and other assemblers emit identical bytes. */
 sc_run_restore:
     mov qword ptr [rbx+0x40], rdi
     save_volatile
@@ -59,7 +61,10 @@ sc_run_restore:
     restore_volatile
     mov rbx, qword ptr [rsp+0x50]
     jmp restore_return
-.balign 16, 0x90
+/* The 11-byte gap spelled out as production has it (the canonical 11-byte
+ * NOP): .balign 16, 0x90 releases that fill as multi-byte NOPs in GNU as and
+ * as literal 0x90s elsewhere, so the bytes are pinned for every assembler. */
+.byte 0x66,0x66,0x2e,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
 sc_run_record:
     push rbx
     push rsi

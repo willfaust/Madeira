@@ -47,7 +47,13 @@ typedef struct { RTL_USER_PROCESS_PARAMETERS *ProcessParameters; } PEB;
 typedef struct { void *UniqueProcess, *UniqueThread; } CLIENT_ID;
 typedef struct { PEB *Peb; CLIENT_ID ClientId; } TEB;
 #define HandleToULong(h) ((unsigned long)(uintptr_t)(h))
+#ifdef __APPLE__
+/* Darwin declares the real hook and QoS classes: rename what the code calls
+   and use the system's class values (the same 0x21 / 0x11) */
+#define pthread_set_qos_class_self_np model_set_qos_class_self
+#else
 enum { QOS_CLASS_USER_INTERACTIVE = 0x21, QOS_CLASS_UTILITY = 0x11 };
+#endif
 static __thread TEB *cur_teb;
 static TEB *NtCurrentTeb( void ) { return cur_teb; }
 static uint64_t fake_ns = 5000000000ull;

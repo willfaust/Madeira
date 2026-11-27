@@ -48,7 +48,7 @@ harness = r'''
 #include <pthread.h>
 typedef int kern_return_t;
 typedef unsigned int mach_msg_type_number_t;
-typedef int mach_port_t;
+typedef unsigned int mach_port_t;   /* Darwin's pthread.h chain typedefs it as unsigned int; C11 same-type redefinition is legal */
 typedef uint64_t mach_vm_address_t, mach_vm_size_t;
 typedef int *vm_region_info_t;
 typedef int *task_info_t;

@@ -19,6 +19,12 @@ import tempfile
 
 
 root = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import elftoolchain
+RUNTIME = os.uname().machine == 'x86_64' and os.sysconf('SC_PAGESIZE') == 4096
+if not RUNTIME:
+    print('SKIP: the runtime harness is a Win64 stand-in (x86-64 asm, 4 KiB pages); assembly checks still run, full runs happen on x86-64 CI')
 native = (root / 'build/ntdll-unix/virtual_ios.c').read_text()
 
 
@@ -150,17 +156,16 @@ static int ios_sc_cef_enabled(void) { const char *e = getenv("MADEIRA_SC_CEF"); 
 
 def link(folder, source, sections, symbols, defsym):
     """Assemble `source`, link each (section, address) and return section bytes and symbols."""
-    script = 'SECTIONS { %s }\n' % ' '.join('%s 0x%x : { *(%s) }' % (s, a, s) for s, a in sections)
+    script = 'SECTIONS { %s }\n' % ' '.join('%s 0x%x : SUBALIGN(1) { *(%s) }' % (s, a, s) for s, a in sorted(sections, key=lambda x: x[1]))
     script += '\n'.join('%s = %d;' % item for item in symbols.items()) + '\n'
     (folder / 'link.ld').write_text(script)
-    subprocess.run(['as', '--64', *defsym, str(root / 'tests/host' / source), '-o', str(folder / 'a.o')], check=True)
-    subprocess.run(['ld', '-T', str(folder / 'link.ld'), str(folder / 'a.o'), '-o', str(folder / 'a.elf')], check=True)
+    elftoolchain.assemble(root / 'tests/host' / source, folder / 'a.o', defsym)
+    elftoolchain.link(folder / 'link.ld', [folder / 'a.o'], folder / 'a.elf')
     out = {}
     for section, _ in sections:
-        subprocess.run(['objcopy', '-O', 'binary', '--only-section=' + section,
-                        str(folder / 'a.elf'), str(folder / 'a.bin')], check=True)
+        elftoolchain.objcopy_binary(folder / 'a.elf', section.lstrip('.'), folder / 'a.bin')
         out[section] = (folder / 'a.bin').read_bytes()
-    table = subprocess.check_output(['nm', str(folder / 'a.elf')], text=True)
+    table = elftoolchain.nm(folder / 'a.elf')
     names = {m[2]: int(m[1], 16) for m in re.finditer(r'(?m)^([\da-f]+) [Tt] (\w+)$', table)}
     return out, names
 
@@ -639,20 +644,21 @@ int main(int argc, char **argv)
 }
 '''
 
-    driver = folder / 'test.c'
-    driver.write_text(code)
-    binary = folder / 'test'
-    subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
-                    '-O2', '-fsanitize=address,undefined', '-g', '-pthread', *flags, str(driver),
-                    '-o', str(binary)], check=True)
-    print('--- %s' % build['name'], flush=True)
-    subprocess.run([str(binary)], check=True)
-    legacy = subprocess.run([str(binary), 'legacy-drain'], capture_output=True, text=True,
-                            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
-    assert legacy.returncode != 0 and 'loop == current' in legacy.stderr, legacy.stderr
-    print('PASS: %s: original renderer CALL fails the cross-thread TLS ownership control' % build['name'], flush=True)
-    for variable in ('MADEIRA_SC_RENDER_HANDLER', 'MADEIRA_SC_CEF'):
-        subprocess.run([str(binary), 'disabled'], check=True, env={**os.environ, variable: '0'})
+    if RUNTIME:
+        driver = folder / 'test.c'
+        driver.write_text(code)
+        binary = folder / 'test'
+        subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
+                        '-O2', '-fsanitize=address,undefined', '-g', '-pthread', *flags, str(driver),
+                        '-o', str(binary)], check=True)
+        print('--- %s' % build['name'], flush=True)
+        subprocess.run([str(binary)], check=True)
+        legacy = subprocess.run([str(binary), 'legacy-drain'], capture_output=True, text=True,
+                                preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+        assert legacy.returncode != 0 and 'loop == current' in legacy.stderr, legacy.stderr
+        print('PASS: %s: original renderer CALL fails the cross-thread TLS ownership control' % build['name'], flush=True)
+        for variable in ('MADEIRA_SC_RENDER_HANDLER', 'MADEIRA_SC_CEF'):
+            subprocess.run([str(binary), 'disabled'], check=True, env={**os.environ, variable: '0'})
 
 
 with tempfile.TemporaryDirectory(prefix='madeira-sc-loop-') as name:

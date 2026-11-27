@@ -24,6 +24,9 @@ def block(signature):
 
 helpers = '\n'.join(block(s) for s in (
     'private nonisolated static func fetchChunk(',
+    'private nonisolated static func fetchChunkFromPeer(',
+    'private nonisolated static func peerFailure(',
+    'private nonisolated static func sha1(',
     'private nonisolated static func failureReason(',
     'private nonisolated static func write('))
 health = block('final class ContentHostHealth:')
@@ -31,13 +34,19 @@ plan = block('struct DepotPlan:')
 fixture = r'''
 import Foundation
 import Darwin
+import CommonCrypto
 
-enum SteamError: Error { case chunkDownloadFailed(String), chunkDecodeFailed(String), checksumMismatch }
+enum SteamError: Error { case chunkDownloadFailed(String), chunkDecodeFailed(String), checksumMismatch, contentHTTP(Int) }
 enum SteamLog { static func trace(_ text: String) {}; static func event(_ text: String) {} }
 struct DepotManifest {
+    // The production shape (DepotManifest.swift), with fixture defaults.
     struct ChunkEntry {
-        var shaHex = "fixture"; var crc: UInt32 = 0
-        var uncompressedSize: UInt32 = 16; var offset: UInt64 = 7
+        var sha = Data(repeating: 0, count: 20)
+        var crc: UInt32 = 0
+        var offset: UInt64 = 7
+        var compressedSize: UInt32 = 16
+        var uncompressedSize: UInt32 = 16
+        var shaHex: String { sha.map { String(format: "%02x", $0) }.joined() }
     }
 }
 enum ContentDecryptor {
@@ -45,6 +54,19 @@ enum ContentDecryptor {
         if encryptedData == Data([0xff]) { throw SteamError.chunkDecodeFailed("fixture") }
         return encryptedData
     }
+    static func decompressChunk(compressedData: Data, expectedSize: Int) throws -> Data { compressedData }
+    static func adler32(_ data: Data) -> UInt32 { 0 }
+}
+/// The production type (SteamLANPeer.swift) is the networked PC; the harness
+/// never passes one, so only the surface fetchChunk touches is stubbed here.
+final class SteamPeerChunkSource {
+    let host = "fixture-peer"
+    private(set) var failures = 0
+    struct Response { var result = 1; var encrypted = false; var compressed = false; var data = Data() }
+    func serves(_ depotID: UInt32) -> Bool { false }
+    func recordFailure() -> Bool { failures += 1; return failures >= 3 }
+    func recordSuccess(bytes: Int) {}
+    func fetch(depotID: UInt32, sha: Data) async throws -> Response { Response() }
 }
 '''
 fixture += health + '\nenum Harness {\n' + plan + '\n' + helpers + r'''
@@ -63,7 +85,8 @@ fixture += health + '\nenum Harness {\n' + plan + '\n' + helpers + r'''
     }
     static func fetch(_ path: String, _ health: ContentHostHealth) async throws {
         let plan = DepotPlan(depotID: 1, manifestGID: 1, key: Data(), manifest: DepotManifest(),
-                             hosts: ["https://a", "https://b"], auth: [:], declaredSize: 16, health: health)
+                             hosts: ["https://a", "https://b"], auth: [:], declaredSize: 16, health: health,
+                             installURL: URL(fileURLWithPath: "/"))
         try await fetchChunk(DepotManifest.ChunkEntry(), plan: plan, path: path, attempts: 3, seed: 0)
     }
 }

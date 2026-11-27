@@ -17,7 +17,8 @@ if shutil.which('swift') is None:
     sys.exit(1 if '--require-swift' in sys.argv else 0)
 with tempfile.TemporaryDirectory() as tmp:
     exe = Path(tmp) / 'gog-setup'
-    r = subprocess.run(['swiftc', '-static-stdlib', str(root / 'tests/host/gog-setup/Stubs.swift'),
+    r = subprocess.run(['swiftc'] + ([] if sys.platform == 'darwin' else ['-static-stdlib']) +
+                       [str(root / 'tests/host/gog-setup/Stubs.swift'),
                         str(root / 'app/Madeira/SwiftGOG/GOGSetup.swift'), str(root / 'tests/host/gog-setup/main.swift'),
                         '-o', str(exe)], capture_output=True, text=True)
     run = subprocess.run([str(exe)], capture_output=True, text=True) if r.returncode == 0 else None
