@@ -25550,6 +25550,7 @@ static int mad_fg_setup(struct mad_swapchain *s) {
     g->snap[0] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
     g->snap[1] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
     g->out = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    if (g->label_runs > 0 && g->n_world) mad_kernels_ready(d);   /* split2: the helper kernels load on first use, which may not have come yet (install62 ran without split2) */
     if (g->label_runs > 0 && g->n_world && d->k_fgsel_pso) {   /* split2: the back buffer before the HUD and after the world-list layer */
         g->hud_a = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
         g->hud_b = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
