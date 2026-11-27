@@ -1,0 +1,52 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 8592f89..0da8101 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -6996,10 +6996,44 @@ _d3d9_nop(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ /* madeira-d3d12's shader-converter service: runtime DXIL -> metallib. Defined
+- * in research/madeira-d3d12/src/unix/ and compiled into the same static
+- * library as the rest of this unix side. */
++ * in madeira-d3d12/src/unix/ and compiled into the same static library as the
++ * rest of this unix side. If an enabled native .wcp provides
++ * libmadeira_ir_unix.dylib, resolve madeira_ir_convert from it once via
++ * madeira_wcp_dylib_path so shader-converter fixes ship without an app rebuild. */
+ extern int madeira_ir_convert(void *args);
+-static NTSTATUS _madeira_ir_convert(void *args) { return (NTSTATUS)madeira_ir_convert(args); }
++typedef int (*madeira_ir_convert_fn_t)(void *);
++typedef int (*madeira_wcp_dylib_path_fn_t)(const char *, char *, size_t);
++static madeira_ir_convert_fn_t g_madeira_ir_convert_fn;
++
++static madeira_ir_convert_fn_t madeira_ir_resolve(void) {
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    g_madeira_ir_convert_fn = madeira_ir_convert;
++    madeira_wcp_dylib_path_fn_t wcp_fn =
++        (madeira_wcp_dylib_path_fn_t)dlsym(RTLD_DEFAULT, "madeira_wcp_dylib_path");
++    char path[1024];
++    if (wcp_fn && wcp_fn("libmadeira_ir_unix.dylib", path, sizeof(path))) {
++      void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++      if (h) {
++        madeira_ir_convert_fn_t sym =
++            (madeira_ir_convert_fn_t)dlsym(h, "madeira_ir_convert");
++        if (sym) {
++          g_madeira_ir_convert_fn = sym;
++          fprintf(stderr, "[ir-wcp] loaded libmadeira_ir_unix.dylib from %s\n", path);
++        } else {
++          fprintf(stderr, "[ir-wcp] %s missing madeira_ir_convert; using linked fallback\n", path);
++          dlclose(h);
++        }
++      } else {
++        fprintf(stderr, "[ir-wcp] dlopen(%s) failed: %s; using linked fallback\n",
++                path, dlerror() ?: "unknown");
++      }
++    }
++  });
++  return g_madeira_ir_convert_fn;
++}
++
++static NTSTATUS _madeira_ir_convert(void *args) { return (NTSTATUS)madeira_ir_resolve()(args); }
+ 
+ /* The wow64 table must stay the SAME LENGTH as the native one, because the slot
+  * number is the ABI. A 32-bit guest would hand us narrowed pointers, so pointing

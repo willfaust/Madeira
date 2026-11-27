@@ -52,6 +52,9 @@
 		A1000921 /* ExternalStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000921 /* ExternalStorage.swift */; };
 		A1000710 /* SavesAndShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000710 /* SavesAndShortcuts.swift */; };
 		A1000711 /* WineMono.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000711 /* WineMono.swift */; };
+		A1000C01 /* WCPComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000C01 /* WCPComponents.swift */; };
+		A1000C02 /* WCP/WCPZstd.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000C02 /* WCPZstd.c */; };
+		A1000C03 /* WCP/zstddeclib.c in Sources */ = {isa = PBXBuildFile; fileRef = A2000C04 /* zstddeclib.c */; settings = {COMPILER_FLAGS = "-DZSTD_decompress=WCP_ZSTD_decompress -DZSTD_createDStream=WCP_ZSTD_createDStream -DZSTD_freeDStream=WCP_ZSTD_freeDStream -DZSTD_initDStream=WCP_ZSTD_initDStream -DZSTD_decompressStream=WCP_ZSTD_decompressStream -DZSTD_getErrorName=WCP_ZSTD_getErrorName"; }; };
 		A1007D03 /* WineGecko.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2007D03 /* WineGecko.swift */; };
 		A1000E01 /* EpicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E01 /* EpicLibrary.swift */; };
 		A1000E02 /* EpicGames.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000E02 /* EpicGames.swift */; };
@@ -98,6 +101,7 @@
 		A1000518 /* SwiftSteam/Helpers/SteamDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000518 /* SteamDevice.swift */; };
 		A1000519 /* SwiftSteam/Helpers/SteamLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000519 /* SteamLog.swift */; };
 		A1000001 /* MadeiraApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* MadeiraApp.swift */; };
+		A100D001 /* UnixHalf.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200D001 /* UnixHalf.swift */; };
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
 		A1000003 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* LogStore.swift */; };
 		A1000077 /* MadeiraConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000077 /* MadeiraConfig.swift */; };
@@ -331,6 +335,10 @@
 		A2000921 /* ExternalStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ExternalStorage.swift"; sourceTree = "<group>"; };
 		A2000710 /* SavesAndShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SavesAndShortcuts.swift"; sourceTree = "<group>"; };
 		A2000711 /* WineMono.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineMono.swift"; sourceTree = "<group>"; };
+		A2000C01 /* WCPComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WCPComponents.swift"; sourceTree = "<group>"; };
+		A2000C02 /* WCPZstd.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "WCP/WCPZstd.c"; sourceTree = "<group>"; };
+		A2000C03 /* WCPZstd.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "WCP/WCPZstd.h"; sourceTree = "<group>"; };
+		A2000C04 /* zstddeclib.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = "WCP/zstddeclib.c"; sourceTree = "<group>"; };
 		A2007D03 /* WineGecko.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WineGecko.swift"; sourceTree = "<group>"; };
 		A2000E01 /* EpicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicLibrary.swift"; sourceTree = "<group>"; };
 		A2000E02 /* EpicGames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EpicGames.swift"; sourceTree = "<group>"; };
@@ -381,6 +389,7 @@
 		A2000518 /* SteamDevice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamDevice.swift"; sourceTree = "<group>"; };
 		A2000519 /* SteamLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SwiftSteam/Helpers/SteamLog.swift"; sourceTree = "<group>"; };
 		A2000001 /* MadeiraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraApp.swift; sourceTree = "<group>"; };
+		A200D001 /* UnixHalf.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnixHalf.swift; sourceTree = "<group>"; };
 		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A2000003 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
 		A2000077 /* MadeiraConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraConfig.swift; sourceTree = "<group>"; };
@@ -657,6 +666,10 @@
 				A2000921 /* ExternalStorage.swift */,
 				A2000710 /* SavesAndShortcuts.swift */,
 				A2000711 /* WineMono.swift */,
+				A2000C01 /* WCPComponents.swift */,
+				A2000C02 /* WCPZstd.c */,
+				A2000C03 /* WCPZstd.h */,
+				A2000C04 /* zstddeclib.c */,
 				A2007D03 /* WineGecko.swift */,
 				A2000E01 /* EpicLibrary.swift */,
 				A2000E02 /* EpicGames.swift */,
@@ -709,6 +722,7 @@
 				A2000518 /* SteamDevice.swift */,
 				A2000519 /* SteamLog.swift */,
 				A2000001 /* MadeiraApp.swift */,
+				A200D001 /* UnixHalf.swift */,
 				A2000245 /* TouchGamepad.swift */,
 				A2000F01 /* GestureZones.swift */,
 				A2000246 /* TouchControlPresets.swift */,
@@ -1126,6 +1140,9 @@
 				A1000921 /* ExternalStorage.swift in Sources */,
 				A1000710 /* SavesAndShortcuts.swift in Sources */,
 				A1000711 /* WineMono.swift in Sources */,
+				A1000C01 /* WCPComponents.swift in Sources */,
+				A1000C02 /* WCP/WCPZstd.c in Sources */,
+				A1000C03 /* WCP/zstddeclib.c in Sources */,
 				A1007D03 /* WineGecko.swift in Sources */,
 				A1000E01 /* EpicLibrary.swift in Sources */,
 				A1000E02 /* EpicGames.swift in Sources */,
@@ -1174,6 +1191,7 @@
 				A1000518 /* SwiftSteam/Helpers/SteamDevice.swift in Sources */,
 				A1000519 /* SwiftSteam/Helpers/SteamLog.swift in Sources */,
 				A1000001 /* MadeiraApp.swift in Sources */,
+				A100D001 /* UnixHalf.swift in Sources */,
 				A1000245 /* TouchGamepad.swift in Sources */,
 				A1000F01 /* GestureZones.swift in Sources */,
 				A1000246 /* TouchControlPresets.swift in Sources */,
@@ -1351,7 +1369,7 @@
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
@@ -1383,7 +1401,7 @@
 					"$(SRCROOT)/../FEX/build-ios/External/SoftFloat-3e",
 					"$(SRCROOT)/Madeira",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1403,7 +1421,7 @@
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = ("$(inherited)", "$(MADEIRA_VULKAN_LDFLAGS)");
 				CODE_SIGN_ENTITLEMENTS = Madeira/Madeira.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
@@ -1435,7 +1453,7 @@
 					"$(SRCROOT)/../FEX/build-ios/External/SoftFloat-3e",
 					"$(SRCROOT)/Madeira",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.6;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(MADEIRA_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1453,7 +1471,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1463,7 +1481,7 @@
 					"$(inherited)",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.6;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-framework",
@@ -1484,7 +1502,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 15;
 				DEVELOPMENT_TEAM = V8NU3FX3TL;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(SRCROOT)/Frameworks/StikJIT.xcframework/ios-arm64";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1494,7 +1512,7 @@
 					"$(inherited)",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.2.6;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-framework",

@@ -47,6 +47,14 @@ extern void wineserver_log_set_file(const char *path);
 // Set NLS directory for wineserver (defined in unicode_ios.c)
 extern void wineserver_set_nls_dir(const char *path);
 
+// Optional component-loaded wineserver half (UnixHalf.swift); returns 0 / NULL when
+// no UnixHalf component provides wineserver, in which case we fall back to libwineserver.a.
+extern int madeira_unix_half_wineserver_start(int argc, char *argv[], int *out_ret);
+extern int madeira_unix_half_wineserver_set_log_file(const char *path);
+extern int madeira_unix_half_wineserver_set_nls_dir_bridge(const char *path);
+extern int madeira_unix_half_wineserver_set_foreground(int value);
+extern int *madeira_unix_half_wineserver_ready_ptr(void);
+
 static volatile int g_wineserver_running = 0;
 
 // Override wineserver's fatal_error to use logging and pthread_exit instead of exit(1)
@@ -85,6 +93,7 @@ static void *wineserver_thread_func(void *arg) {
         g_ws_bridge_log = fopen(logPath.UTF8String, "a");
         pthread_mutex_unlock(&g_ws_bridge_log_mutex);
         // Also set up logging for wineserver C code (main_ios.c, fd_ios.c, request_ios.c)
+        madeira_unix_half_wineserver_set_log_file(logPath.UTF8String);
         wineserver_log_set_file(logPath.UTF8String);
 
         // Redirect wineserver stderr to log file
@@ -113,11 +122,13 @@ static void *wineserver_thread_func(void *arg) {
 
         // Tell wineserver where NLS files are (inside the app bundle)
         NSString *nlsDir = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"nls"];
-        wineserver_set_nls_dir(nlsDir.UTF8String);
+        if (!madeira_unix_half_wineserver_set_nls_dir_bridge(nlsDir.UTF8String))
+            wineserver_set_nls_dir(nlsDir.UTF8String);
         wine_log_msg("NLS dir=%s", nlsDir.UTF8String);
 
         // wineserver_main sets foreground=1 based on args, but we set it directly
-        foreground = 1;
+        if (!madeira_unix_half_wineserver_set_foreground(1))
+            foreground = 1;
 
         // Call wineserver's main function with minimal args
         // No --debug: debug output floods stderr pipe, blocking the main_loop
@@ -125,7 +136,9 @@ static void *wineserver_thread_func(void *arg) {
         int argc = 2;
 
         wine_log_msg("Calling wineserver_main...");
-        int ret = wineserver_main(argc, argv);
+        int ret = 0;
+        if (!madeira_unix_half_wineserver_start(argc, argv, &ret))
+            ret = wineserver_main(argc, argv);
         wine_log_msg("wineserver_main returned: %d", ret);
 
         g_wineserver_running = 0;
@@ -157,7 +170,8 @@ int wineserver_start(const char *prefix_path) {
 
     {
         extern int wineserver_ready;
-        __atomic_store_n(&wineserver_ready, 0, __ATOMIC_RELEASE);
+        int *ready_ptr = madeira_unix_half_wineserver_ready_ptr();
+        __atomic_store_n(ready_ptr ? ready_ptr : &wineserver_ready, 0, __ATOMIC_RELEASE);
     }
     g_wineserver_running = 1;
 
@@ -193,7 +207,8 @@ int wineserver_is_running(void) {
 
 int wineserver_is_ready(void) {
     extern int wineserver_ready;
-    return __atomic_load_n(&wineserver_ready, __ATOMIC_ACQUIRE);
+    int *ready_ptr = madeira_unix_half_wineserver_ready_ptr();
+    return __atomic_load_n(ready_ptr ? ready_ptr : &wineserver_ready, __ATOMIC_ACQUIRE);
 }
 
 void wineserver_stop(void) {

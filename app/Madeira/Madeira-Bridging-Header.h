@@ -17,6 +17,8 @@
 // madeira-bcd: the bundled prefix template, read by the Dock's Reset (DockReset.swift).
 #include "PrefixExtractor.h"
 #include "CabinetReader.h"
+// .wcp component packages: streaming zstd decompression (WCPComponents.swift).
+#include "WCP/WCPZstd.h"
 
 // Wine file-based logging (server_ios.c)
 void wine_log_set_file(const char *path);
