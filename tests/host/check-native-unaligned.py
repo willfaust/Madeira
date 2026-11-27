@@ -45,7 +45,15 @@ harness = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef __APPLE__
+/* <stdlib.h> pulls in the system ucontext_t; the fixture's own ARM-shaped one
+ * below is what the extracted code is compiled against on every host. */
+#define ucontext_t darwin_ucontext_t
+#endif
 #include <stdlib.h>
+#ifdef __APPLE__
+#undef ucontext_t
+#endif
 typedef struct { uint64_t __x[29], __fp, __lr, __sp, __pc; } ss_t;
 typedef struct { __uint128_t __v[32]; } ns_t;
 typedef struct { ss_t __ss; ns_t __ns; } mctx_t;

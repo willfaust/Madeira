@@ -37,6 +37,9 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import elftoolchain
 native = (root / 'build/ntdll-unix/virtual_ios.c').read_text()
 
 
@@ -107,12 +110,9 @@ with tempfile.TemporaryDirectory(prefix='madeira-sc-rph-') as name:
         (folder / 'link.ld').write_text(
             'SECTIONS { .text 0x%x : { *(.text) } }\n' % THUNK +
             'helper_new = %d;\nrenderer_app_ctor = %d;\nget_handler = %d;\ncache = %d;\n' % (NEW, CTOR, GET, CACHE))
-        subprocess.run(['as', '--64', str(root / 'tests/host/sc-render-handler.S'), '-o', str(folder / 'a.o')],
-                       check=True)
-        subprocess.run(['ld', '-T', str(folder / 'link.ld'), str(folder / 'a.o'), '-o', str(folder / 'a.elf')],
-                       check=True)
-        subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text', str(folder / 'a.elf'),
-                        str(folder / 'a.bin')], check=True)
+        elftoolchain.assemble(root / 'tests/host/sc-render-handler.S', folder / 'a.o')
+        elftoolchain.link(folder / 'link.ld', [folder / 'a.o'], folder / 'a.elf')
+        elftoolchain.objcopy_binary(folder / 'a.elf', 'text', folder / 'a.bin')
         assert (folder / 'a.bin').read_bytes() == thunk, build['name']
         assert 0xc3 in thunk, 'the thunk returns'
 

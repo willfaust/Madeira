@@ -17,7 +17,7 @@ StrictInProcessSplitLocks, which the WOW64 module turns on by default.
    exact count.
 """
 from pathlib import Path
-import subprocess, tempfile
+import subprocess, sys, tempfile
 
 root = Path(__file__).resolve().parents[2]
 d9 = (root / "dxmt/src/d3d9/d3d9_multithread.hpp").read_text()
@@ -133,6 +133,7 @@ with tempfile.TemporaryDirectory() as tmp:
     t = Path(tmp)
     (t / "cas.cpp").write_text(code)
     subprocess.run(["c++", "-std=c++20", "-O1", "-g", "-pthread", "-fsanitize=address,undefined",
-                    "-o", str(t / "cas"), str(t / "cas.cpp"), "-latomic"], check=True)
+                    "-o", str(t / "cas"), str(t / "cas.cpp")] +
+                   (["-latomic"] if sys.platform != "darwin" else []), check=True)
     subprocess.run([str(t / "cas")], check=True)
 print("PASS: D3D9 device lock / split-lock checks")

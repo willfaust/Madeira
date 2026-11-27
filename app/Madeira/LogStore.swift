@@ -130,11 +130,13 @@ final class LogStore: ObservableObject {
         // Also accept programmatic logs from Swift/ObjC code via existing
         // C callbacks (kept for compatibility with code that doesn't write
         // to the log file).
-        wine_set_ui_log_callback { cStr in
+        let uiLogCb: UnixHalf.UILogCallbackFn = { cStr in
             guard let cStr = cStr else { return }
             let message = String(cString: cStr)
             LogStore.shared.handleRawLine(message)
         }
+        wine_set_ui_log_callback(uiLogCb)
+        UnixHalf.setWineserverUILogCallback(uiLogCb)
         jit_set_log_callback { cStr in
             guard let cStr = cStr else { return }
             let message = String(cString: cStr)

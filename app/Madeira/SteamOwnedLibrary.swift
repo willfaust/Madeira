@@ -1254,8 +1254,17 @@ final class SteamOwnedLibrary: ObservableObject {
         do {
             guard let info = try await fetcher.fetchAppInfo(appID: UInt32(appID)),
                   let index = owned.firstIndex(where: { $0.id == appID }) else { return }
+            var changed = false
             if owned[index].branches != info.branches {
                 owned[index].branches = info.branches
+                changed = true
+            }
+            let latestBuild = Int(info.buildID)
+            if latestBuild > 0 && owned[index].buildID != latestBuild {
+                owned[index].buildID = latestBuild
+                changed = true
+            }
+            if changed {
                 writeCache()
             }
             SteamLog.event("[steam-branch] app=\(appID) branches=\(info.branches.count) private=\(info.branches.filter(\.passwordRequired).count)")

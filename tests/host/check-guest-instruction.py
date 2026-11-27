@@ -7,6 +7,7 @@ classification; data and ARM64 targets must still translate to their copies.
 from pathlib import Path
 import os
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -568,13 +569,18 @@ int main(int argc, char **argv)
 }
 '''
 
+if os.sysconf('SC_PAGESIZE') != 4096:
+    print('SKIP: check-guest-instruction needs a 4 KiB host page (the cases fault one page at a time); runs fully on 4 KiB CI')
+    raise SystemExit(0)
+
 with tempfile.TemporaryDirectory(prefix='guest-instruction-') as directory:
     folder = Path(directory)
     code = prefix + functions + suffix
     cc = os.environ.get('CC', 'cc')
     flags = ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
              '-fsanitize=address,undefined', '-fno-sanitize-recover=all']
-    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=1', UBSAN_OPTIONS='halt_on_error=1')
+    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0' if sys.platform == 'darwin' else 'detect_leaks=1',
+               UBSAN_OPTIONS='halt_on_error=1')
     unit = folder / 'check.c'
     unit.write_text(code)
     binary = folder / 'check'

@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import elftoolchain
 native = (root / 'build/ntdll-unix/virtual_ios.c').read_text()
 
 
@@ -40,12 +43,9 @@ with tempfile.TemporaryDirectory(prefix='madeira-sc-ipc-') as name:
     linker = folder / 'trace.ld'
     linker.write_text('SECTIONS { . = %d; .text : { *(.text) } }\n' % define('IOS_SCH_IPC_TRACE') +
                       '\n'.join('%s = %d;' % item for item in symbols.items()) + '\n')
-    subprocess.run(['as', '--64', str(root / 'tests/host/sc-ipc-rebind.S'),
-                    '-o', str(folder / 'trace.o')], check=True)
-    subprocess.run(['ld', '-T', str(linker), str(folder / 'trace.o'),
-                    '-o', str(folder / 'trace.elf')], check=True)
-    subprocess.run(['objcopy', '-O', 'binary', '--only-section=.text',
-                    str(folder / 'trace.elf'), str(folder / 'trace.bin')], check=True)
+    elftoolchain.assemble(root / 'tests/host/sc-ipc-rebind.S', folder / 'trace.o')
+    elftoolchain.link(linker, [folder / 'trace.o'], folder / 'trace.elf')
+    elftoolchain.objcopy_binary(folder / 'trace.elf', 'text', folder / 'trace.bin')
     assert (folder / 'trace.bin').read_bytes() == blob
     assert define('IOS_SCH_RENDER_DRAIN') + 31 <= define('IOS_SCH_IPC_TRACE')
     assert define('IOS_SCH_IPC_TRACE') + len(blob) <= 0x181000
@@ -156,6 +156,9 @@ int main(void)
     puts("PASS: concurrent diagnostic emits eight records and every original connect still runs");
 }
 '''
+    if os.uname().machine != 'x86_64' or os.sysconf('SC_PAGESIZE') != 4096:
+        print('SKIP: the runtime harness is a Win64 stand-in (x86-64 asm, 4 KiB pages); the assembly checks above ran, full runs happen on x86-64 CI')
+        raise SystemExit(0)
     source = source.replace('TRACE_ENTRY', hex(define('IOS_SCH_IPC_TRACE')))
     source = source.replace('CONNECT_ENTRY', hex(define('IOS_SCH_IPC_CONNECT')))
     source = source.replace('COUNTER', hex(define('IOS_SCH_IPC_COUNT')))

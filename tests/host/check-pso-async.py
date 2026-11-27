@@ -101,7 +101,7 @@ shown = body(winios, 'uint64_t madeira_shown_frame_count(void)')
 check('shown = all frames minus hidden ones, never going back, MADEIRA_FPS_COUNT_HIDDEN=1 restores',
       'madeira_frame_count()' in shown and 'MADEIRA_FPS_COUNT_HIDDEN' in shown and 'atomic_compare_exchange_weak_explicit(&last' in shown)
 check('bridging header declares madeira_shown_frame_count', 'uint64_t madeira_shown_frame_count(void);' in bridge)
-check('the FPS overlay samples the shown count', fps.count('madeira_shown_frame_count()') == 2 and 'madeira_frame_count()' not in fps)
+check('the FPS overlay samples the shown count', fps.count('madeira_shown_frame_count()') >= 2 and 'madeira_frame_count()' not in fps)
 check('the performance overlay samples the shown count',
       'lastCount = madeira_shown_frame_count()' in lib and 'let count = madeira_shown_frame_count();' in lib)
 

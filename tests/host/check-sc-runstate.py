@@ -11,6 +11,9 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import elftoolchain
 native = (root / 'build/ntdll-unix/virtual_ios.c').read_text()
 header = root / 'build/ntdll-unix/ios_sc_runstate_diag.h'
 
@@ -45,17 +48,16 @@ with tempfile.TemporaryDirectory(prefix='madeira-sc-runstate-') as name:
     objects = []
     for source in ('sc-runstate-trace', 'sc-pump-run-fixture'):
         obj = folder / (source + '.o')
-        subprocess.run(['as', '--64', str(root / 'tests/host' / (source + '.S')), '-o', str(obj)], check=True)
+        elftoolchain.assemble(root / 'tests/host' / (source + '.S'), obj)
         objects.append(str(obj))
-    subprocess.run(['ld', '-T', str(linker), *objects, '-o', str(folder / 'trace.elf')], check=True)
+    elftoolchain.link(linker, objects, folder / 'trace.elf')
     for section in ('text', 'fixture'):
-        subprocess.run(['objcopy', '-O', 'binary', '--only-section=.' + section,
-                        str(folder / 'trace.elf'), str(folder / (section + '.bin'))], check=True)
+        elftoolchain.objcopy_binary(folder / 'trace.elf', section, folder / (section + '.bin'))
     assert (folder / 'text.bin').read_bytes() == blob
     fixture = (folder / 'fixture.bin').read_bytes()
     assert fixture[0x41:0x48] == bytes.fromhex('48 89 41 40 48 8b 01')
     assert fixture[0x4b:0x54] == bytes.fromhex('48 89 7b 40 48 8b 5c 24 50')
-    symbols = subprocess.check_output(['nm', str(folder / 'trace.elf')], text=True)
+    symbols = elftoolchain.nm(folder / 'trace.elf')
     for symbol, expected in (('sc_run_install', define('IOS_SCH_RUN_INSTALL')),
                              ('sc_run_restore', define('IOS_SCH_RUN_RESTORE')),
                              ('fixture_install', 0x174121), ('fixture_restore', 0x17412b)):
@@ -241,6 +243,9 @@ int main(void)
     return 0;
 }
 '''
+    if os.uname().machine != 'x86_64' or os.sysconf('SC_PAGESIZE') != 4096:
+        print('SKIP: the runtime harness is a Win64 stand-in (x86-64 asm, 4 KiB pages); the assembly checks above ran, full runs happen on x86-64 CI')
+        raise SystemExit(0)
     data = '#include <stddef.h>\n#define TRACE_ENTRY 0x%x\n#define TRACE_RESTORE 0x%x\n' % (
         define('IOS_SCH_RUN_INSTALL'), define('IOS_SCH_RUN_RESTORE'))
     for variable, payload in (('trace', blob), ('fixture', fixture)):

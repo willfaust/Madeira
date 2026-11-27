@@ -222,7 +222,18 @@ static void winios_bg_observe(void) {
  * stall at 5 s (4 dumps per run at most), and says when the main thread ran
  * again. Not while the app is in the background, and a watcher that was itself
  * stopped (a task suspension, see GAP) starts the wait over. Logging only. */
+static void *winios_half_resolve(const char *name, void *fallback);
 extern void ios_dump_all_thread_stacks(void);
+static void winios_call_dump_all_thread_stacks(void) {
+    typedef void (*fn_t)(void);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_ios_dump_all_thread_stacks", (void *)ios_dump_all_thread_stacks);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    ((fn_t)p)();
+}
 static _Atomic double wms_queued;        /* mono time the pending heartbeat was queued; 0 = none pending */
 static _Atomic int wms_reported;         /* this stall was reported: the main block says when it ran */
 static double wms_next_report;           /* watcher thread only, from here down */
@@ -265,7 +276,7 @@ static void winios_main_heartbeat(double now, double slept, double t0) {
         dprintf(STDERR_FILENO, "[main-stall] #%u every thread's stack (dump %u of at most 4 per run):\n",
                 wms_stalls, wms_dumps);
         /* off this thread: a long dump here would read as a GAP of the watcher */
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_dump_all_thread_stacks(); });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ winios_call_dump_all_thread_stacks(); });
     }
     wms_next_report = wms_next_report < 5.0 ? 5.0 : wms_next_report * 2.0;
 }
@@ -537,6 +548,64 @@ extern int winios_drv_post_restore(HWND hwnd);
 extern int winios_drv_foreground_if_owner(HWND hwnd);
 extern int winios_drv_close_desktop_if_owner(void);
 
+#include <dlfcn.h>
+static void *winios_half_resolve(const char *name, void *fallback) {
+    typedef void *(*lookup_fn_t)(const char *);
+    static _Atomic(uintptr_t) cached_lookup;
+    uintptr_t raw = atomic_load_explicit(&cached_lookup, memory_order_acquire);
+    if (!raw) {
+        void *sym = dlsym(RTLD_DEFAULT, "madeira_unix_half_symbol");
+        raw = sym ? (uintptr_t)sym : 1;
+        atomic_store_explicit(&cached_lookup, raw, memory_order_release);
+    }
+    if (raw > 1) {
+        void *p = ((lookup_fn_t)raw)(name);
+        if (p) return p;
+    }
+    return fallback;
+}
+
+static int winios_call_drv_census_owner(HWND hwnd, unsigned int *pid, unsigned int *style) {
+    typedef int (*fn_t)(HWND, unsigned int *, unsigned int *);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_census_owner", (void *)winios_drv_census_owner);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)(hwnd, pid, style);
+}
+static int winios_call_drv_process_image(unsigned int pid, char *out, unsigned int size) {
+    typedef int (*fn_t)(unsigned int, char *, unsigned int);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_process_image", (void *)winios_drv_process_image);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)(pid, out, size);
+}
+static int winios_call_drv_post_restore(HWND hwnd) {
+    typedef int (*fn_t)(HWND);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_post_restore", (void *)winios_drv_post_restore);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)(hwnd);
+}
+static int winios_call_drv_foreground_if_owner(HWND hwnd) {
+    typedef int (*fn_t)(HWND);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_foreground_if_owner", (void *)winios_drv_foreground_if_owner);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)(hwnd);
+}
+
 /* winios_close_desktop: the app asks explorer's desktop to close (a Dock
  * session whose game and Steam have ended); the desktop's own thread does it
  * from its event pump (winios_pProcessEvents). */
@@ -586,7 +655,7 @@ static int winios_census_image(unsigned int pid, char out[WINIOS_CENSUS_IMAGE]) 
     }
     pthread_mutex_unlock(&g_census_lock);
 
-    int known = winios_drv_process_image(pid, out, WINIOS_CENSUS_IMAGE);
+    int known = winios_call_drv_process_image(pid, out, WINIOS_CENSUS_IMAGE);
     if (!known) {
         out[0] = 0;
         if (atomic_fetch_add(&g_census_failures, 1) < 4) {
@@ -618,7 +687,7 @@ static void winios_census_note_frame(HWND hwnd, int x, int y, int w, int h, int 
     if (!atomic_load_explicit(&g_census_on, memory_order_relaxed) || !hwnd) return;
     /* win32u calls stay outside the census lock: they take win32u's own. */
     unsigned int pid = 0, style = 0;
-    if (!winios_drv_census_owner(hwnd, &pid, &style)) return;
+    if (!winios_call_drv_census_owner(hwnd, &pid, &style)) return;
     char image[WINIOS_CENSUS_IMAGE];
     winios_census_image(pid, image);
     int shown = visible && (style & WINIOS_WS_VISIBLE) && !(style & WINIOS_WS_MINIMIZE) && w > 0 && h > 0;
@@ -649,7 +718,7 @@ static void winios_census_note_frame(HWND hwnd, int x, int y, int w, int h, int 
     pthread_mutex_unlock(&g_census_lock);
     if (born_minimized) {
         /* Posted, not sent: this runs inside the window's WindowPosChanged. */
-        int ok = winios_drv_post_restore(hwnd);
+        int ok = winios_call_drv_post_restore(hwnd);
         atomic_store(&g_restore_foreground, (uintptr_t)hwnd);
         fprintf(stderr, "[born-minimized] hwnd=%p pid=%04x restore-posted=%d "
                         "(MADEIRA_RESTORE_BORN_MINIMIZED=0 leaves it minimized)\n", hwnd, pid, ok ? 1 : 0);
@@ -847,9 +916,69 @@ extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int
 extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
 extern void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift);
 extern void winios_dump_window_tree(void);
-extern void ios_dump_all_thread_stacks(void);
 extern int winios_drv_size_game_window(void *hwnd, int width, int height);
 extern void winios_screen_size(int *w, int *h);
+
+static void winios_call_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data, void *hwnd) {
+    typedef void (*fn_t)(int, int, unsigned int, unsigned int, void *);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_post_mouse", (void *)winios_drv_post_mouse);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    ((fn_t)p)(x, y, flags, mouse_data, hwnd);
+}
+static void winios_call_drv_post_key(unsigned short vk, unsigned int flags) {
+    typedef void (*fn_t)(unsigned short, unsigned int);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_post_key", (void *)winios_drv_post_key);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    ((fn_t)p)(vk, flags);
+}
+static void winios_call_drv_post_text(unsigned int scalar, unsigned short vk, int shift) {
+    typedef void (*fn_t)(unsigned int, unsigned short, int);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_post_text", (void *)winios_drv_post_text);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    ((fn_t)p)(scalar, vk, shift);
+}
+static int winios_call_drv_size_game_window(void *hwnd, int width, int height) {
+    typedef int (*fn_t)(void *, int, int);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_size_game_window", (void *)winios_drv_size_game_window);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)(hwnd, width, height);
+}
+static void winios_call_dump_window_tree(void) {
+    typedef void (*fn_t)(void);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_dump_window_tree", (void *)winios_dump_window_tree);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    ((fn_t)p)();
+}
+static int winios_call_drv_close_desktop_if_owner(void) {
+    typedef int (*fn_t)(void);
+    static _Atomic(uintptr_t) fn;
+    uintptr_t p = atomic_load_explicit(&fn, memory_order_acquire);
+    if (!p) {
+        p = (uintptr_t)winios_half_resolve("madeira_unix_half_winios_drv_close_desktop_if_owner", (void *)winios_drv_close_desktop_if_owner);
+        atomic_store_explicit(&fn, p, memory_order_release);
+    }
+    return ((fn_t)p)();
+}
 
 /* MADEIRA_DIRECT_WINDOW_SIZE=1: keep an opted-in presenting window's client
  * at the selected resolution, including an engine resize after startup.
@@ -915,7 +1044,7 @@ void winios_cancel_text(void) {
 static int winios_drain_text(const winios_input_event_t *e) {
     if (e->type != WINIOS_EV_TEXT) return 0;
     if (e->data == atomic_load(&g_text_generation))
-        winios_drv_post_text((unsigned int)e->x, (unsigned short)e->y, (e->flags & 1) != 0);
+        winios_call_drv_post_text((unsigned int)e->x, (unsigned short)e->y, (e->flags & 1) != 0);
     return 1;
 }
 
@@ -997,9 +1126,9 @@ static BOOL winios_drain_input(void) {
             fprintf(stderr, "[winios] drain type=%u x=%d y=%d flags=0x%x\n", e.type, e.x, e.y, e.flags); fflush(stderr);
         }
         if (e.type == WINIOS_EV_KEY)
-            winios_drv_post_key((unsigned short)e.x, e.flags);
+            winios_call_drv_post_key((unsigned short)e.x, e.flags);
         else
-            winios_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
+            winios_call_drv_post_mouse(e.x, e.y, e.flags, e.data, NULL);
         drained = TRUE;
     }
     pthread_mutex_unlock(&g_input_drain_lock);
@@ -1013,7 +1142,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
         winios_screen_size(&width, &height);
         /* The owner thread may dispatch WM_SIZE here, after swapchain creation
          * has returned. Other event-pump threads leave the request pending. */
-        if (!winios_drv_size_game_window((void *)size_hwnd, width, height)) {
+        if (!winios_call_drv_size_game_window((void *)size_hwnd, width, height)) {
             uintptr_t empty = 0;
             atomic_compare_exchange_strong(&g_size_game_hwnd, &empty, size_hwnd);
         }
@@ -1022,14 +1151,14 @@ BOOL winios_pProcessEvents(DWORD mask) {
      * (see g_restore_foreground); other threads leave the request in place. */
     uintptr_t fg = atomic_load_explicit(&g_restore_foreground, memory_order_relaxed);
     if (fg) {
-        int r = winios_drv_foreground_if_owner((HWND)fg);
+        int r = winios_call_drv_foreground_if_owner((HWND)fg);
         if (r && atomic_compare_exchange_strong(&g_restore_foreground, &fg, 0)) {
             fprintf(stderr, "[born-minimized] hwnd=%p foreground=%d\n", (HWND)fg, r);
             fflush(stderr);
         }
     }
     if (atomic_load_explicit(&g_close_desktop, memory_order_relaxed)) {
-        int r = winios_drv_close_desktop_if_owner();
+        int r = winios_call_drv_close_desktop_if_owner();
         int expected = 1;
         if (r && atomic_compare_exchange_strong(&g_close_desktop, &expected, 0)) {
             fprintf(stderr, "[winios] desktop close posted=%d (the Dock session ends)\n", r);
@@ -1051,7 +1180,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
         double now = CACurrentMediaTime();
         if (now >= next_tree_dump) {
             next_tree_dump = now + 5.0;
-            winios_dump_window_tree();
+            winios_call_dump_window_tree();
         }
     }
     return winios_drain_input();
@@ -1117,6 +1246,7 @@ static UIView *g_compositor_view;
 static BOOL g_comp_game;   /* g_compositor_view is the game-mode overlay (below) */
 static void winios_drop_compositor(const char *why);
 static CALayer *g_desk_bg;               /* teal desktop-area backdrop */
+static CALayer *g_cursor_layer;          /* desktop/game cursor sublayer (defined in cursor section) */
 static CGFloat g_px_to_pt = 1.0 / 3.0;   /* desktop px → screen pt (x, and y unless stretched) */
 static CGFloat g_px_to_pt_y;             /* y scale when the display mode stretches; 0 = same as x */
 static CGPoint g_desk_origin;            /* desktop (0,0) in view pt (letterbox offset) */
@@ -1465,7 +1595,7 @@ static void winios_ensure_compositor(void) {
                           dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         dispatch_source_set_timer(stack_timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC),
                                   20 * NSEC_PER_SEC, NSEC_PER_SEC);
-        dispatch_source_set_event_handler(stack_timer, ^{ ios_dump_all_thread_stacks(); });
+        dispatch_source_set_event_handler(stack_timer, ^{ winios_call_dump_all_thread_stacks(); });
         dispatch_resume(stack_timer);
     }
 }
@@ -1973,6 +2103,44 @@ void winios_window_geometry(HWND hwnd, int x, int y, int w, int h,
 
 /* Called from win32u's pWindowPosChanged wrapper (wine thread).
  * x/y/w/h = visible rect, cx/cy/cw/ch = client rect, screen desktop pixels. */
+/* Sync a top-level window layer's Core Animation z-order with Win32's
+ * WindowPosChanged insert_after (previous sibling in top-to-bottom order).
+ * Without this, a window created AFTER a Metal game window (for example a
+ * fullscreen black letterbox backdrop placed behind the game window via
+ * SetWindowPos) stays above the game's CALayer in g_compositor_view.layer
+ * and hides the rendered game output. */
+void winios_window_zorder(HWND hwnd, HWND insert_after) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!g_compositor_view || !g_layers) return;
+        CALayer *l = g_layers[@((uintptr_t)hwnd)];
+        CALayer *parent = g_compositor_view.layer;
+        if (!l || l.superlayer != parent) return;
+        intptr_t after_val = (intptr_t)insert_after;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (after_val == 0 /* HWND_TOP */ || after_val == -1 /* HWND_TOPMOST */) {
+            [l removeFromSuperlayer];
+            if (g_cursor_layer && g_cursor_layer.superlayer == parent)
+                [parent insertSublayer:l below:g_cursor_layer];
+            else
+                [parent addSublayer:l];
+        } else if (after_val == 1 /* HWND_BOTTOM */) {
+            [l removeFromSuperlayer];
+            if (g_desk_bg && g_desk_bg.superlayer == parent)
+                [parent insertSublayer:l above:g_desk_bg];
+            else
+                [parent insertSublayer:l atIndex:0];
+        } else if (after_val != -2 /* HWND_NOTOPMOST */) {
+            CALayer *after = g_layers[@((uintptr_t)insert_after)];
+            if (after && after != l && after.superlayer == parent) {
+                [l removeFromSuperlayer];
+                [parent insertSublayer:l below:after];
+            }
+        }
+        [CATransaction commit];
+    });
+}
+
 void winios_window_frame(HWND hwnd, int x, int y, int w, int h, int visible,
                          int cx, int cy, int cw, int ch) {
     winios_request_game_size(hwnd, cw, ch);
@@ -2473,7 +2641,7 @@ int winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
  * S2 trackpad pointer + rendered cursor
  * ============================================================ */
 
-static CALayer *g_cursor_layer;
+/* g_cursor_layer declared near g_desk_bg above so winios_window_zorder can keep it on top. */
 
 static UIImage *winios_cursor_image(void) {
     static UIImage *img;

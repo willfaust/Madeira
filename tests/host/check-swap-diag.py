@@ -457,7 +457,7 @@ if compiler:
           'activation, per-window budgets, forget, reset, threads', ok)
 
 # ------------------------------------------------------------- [main-stall]
-heartbeat = winios[winios.index('extern void ios_dump_all_thread_stacks(void);'):
+heartbeat = winios[winios.index('static _Atomic double wms_queued;'):
                    winios.index('static void *winios_freeze_watch(void *arg) {')]
 watch = function(winios, 'static void *winios_freeze_watch(void *arg) {')
 check('the freeze watcher drives the heartbeat once per loop, after measuring its own sleep',
@@ -468,7 +468,7 @@ main_body = main_body[:main_body.index('        });')]
 c_heartbeat = heartbeat.replace(main_body, '').replace('dispatch_async(dispatch_get_main_queue(), ^{        });',
                                                        'fake_main_push();')
 c_heartbeat = c_heartbeat.replace(
-    'dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ ios_dump_all_thread_stacks(); });',
+    'dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ winios_call_dump_all_thread_stacks(); });',
     'fake_global_dump();')
 check('the heartbeat code turns into plain C for the host (two blocks, nothing else)',
       '^{' not in c_heartbeat and 'dispatch_async(' not in c_heartbeat and

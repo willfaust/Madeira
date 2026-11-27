@@ -30,7 +30,8 @@ native = r'''
 #include <stdlib.h>
 #include <string.h>
 #define LOG(...) ((void)0)
-''' + scope['block'](bridge, 'static int madeira_env_is_locked(') + r'''
+static int madeira_cfg_get(const char *key, char *val, size_t n) { (void)key; (void)val; (void)n; return 0; }
+''' + scope['block'](bridge, 'static int madeira_env_is_locked(') + scope['block'](bridge, 'static int madeira_japanese_on(') + r'''
 void madeira_host_apply_config(const char *global)
 {
     NSString *text = [NSString stringWithUTF8String:global];

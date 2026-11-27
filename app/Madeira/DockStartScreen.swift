@@ -279,7 +279,7 @@ extension SteamLaunchScene.Places {
 final class DockStartScreen: ObservableObject {
     static let shared = DockStartScreen()
 
-    /// A Dock start's session runs (the status line, a failure and its Close session).
+    /// A Dock start's session runs (the status line, a failure, and Close session).
     @Published private(set) var active = false
     /// The started game's App ID, for its artwork.
     @Published private(set) var appID: Int?

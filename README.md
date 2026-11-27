@@ -47,6 +47,9 @@ Wine's server runs as a thread instead of a separate program.
 - **Japanese locale** per game, for Japanese games and visual novels whose text
   shows as squares or gibberish or that do not start: Shift-JIS (code page 932)
   and a bundled Japanese font ([details](docs/JAPANESE.md)).
+- **Component packages**: import FEX and Wine packages in DroidDeck's `.wcp`
+  format from Settings › Runtimes, and enable or remove them per install
+  ([details](docs/COMPONENTS.md)).
 
 ## Requirements
 

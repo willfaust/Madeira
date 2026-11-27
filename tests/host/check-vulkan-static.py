@@ -13,6 +13,8 @@ root = Path(__file__).resolve().parents[2]
 source = root / 'build/vulkan-ios/backend.c'
 assert source.is_file(), 'Static Vulkan backend adapter is not implemented'
 headers = os.environ.get('VULKAN_INCLUDE', str(root / 'toolchains/moltenvk/MoltenVK/include'))
+assert (Path(headers) / 'vulkan/vulkan.h').is_file(), \
+    f'Vulkan headers missing at {headers}; run build/vulkan-ios/fetch.sh (or set VULKAN_INCLUDE)'
 fixture = r'''
 #include <vulkan/vulkan.h>
 #include <assert.h>

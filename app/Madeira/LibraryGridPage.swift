@@ -415,7 +415,8 @@ struct LibraryGridPageModel: Equatable {
             let account = context.account
             let download = account.downloads[id]
             let status = SteamGamesRules.status(installed: item.installed, transfer: download?.transfer,
-                                                updateAvailable: account.updateAvailable(appID: id, installedBuild: context.games.builds[id]))
+                                                updateAvailable: account.updateAvailable(appID: id, installedBuild: context.games.builds[id],
+                                                                                         installedBranch: context.games.branches[id]))
             var label = LibraryCardLabel(title: item.name, played: account.playtime[id]?.played)
             if status.showsFormat, let entry = context.steamEntries[id] {
                 label.format = LibraryBadges.formatTexts(entry, note: status.badge)

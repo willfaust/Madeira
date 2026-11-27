@@ -75,8 +75,12 @@ require('HStack(spacing: 14)' in row, 'one row of glyph buttons')
 order = [row.index('L("Close session"), "stop.circle"'), row.index('L("Hide live log") : L("Show live log"), "text.alignleft"'),
          row.index('L("Show desktop"), "macwindow"')]
 require(order == sorted(order), 'glyph order: close session, live log, show desktop')
-require('if dockStart.failure != nil {' in row and 'if dockStart.holding {' in row and 'dockStart.showDesktop(model)' in row,
-        'close session only once the Dock stopped; show desktop only while the desktop is held back')
+require('if dockStart.failure != nil {' not in row and 'model.requestQuit()' in row
+        and 'if dockStart.holding {' in row and 'dockStart.showDesktop(model)' in row,
+        'close session is always on the starting screen; show desktop only while the desktop is held back')
+quit_fn = library[library.index('    func requestQuit() {'):library.index('    func forceCloseMadeira')]
+require('winios_close_desktop()' in quit_fn and 'if launching' in quit_fn and 'winios_post_key(0x12' in quit_fn,
+        'Close session on the starting screen closes the desktop; in-game Quit still sends Alt+F4')
 require('Text("Madeira Dock stopped")' in library and 'DockInstallers.note' in library and 'DockStartStatus.text(' in library,
         'the starting screen shows the Dock status, the one-time-install note, and a stop with its words')
 status = library[library.index('    private var dockStatus: String {'):]
@@ -94,7 +98,7 @@ require('int winios_drv_foreground_if_owner( HWND hwnd )' in driver and 'GetCurr
         'NtUserPostMessage( hwnd, WM_SYSCOMMAND, SC_RESTORE, 0 )' in driver, 'driver helpers: restore posted, front by the own thread')
 events = winios[winios.index('BOOL winios_pProcessEvents(DWORD mask) {'):]
 events = events[:events.index('static unsigned int cnt;')]
-require('winios_drv_foreground_if_owner((HWND)fg)' in events and 'atomic_compare_exchange_strong(&g_restore_foreground, &fg, 0)' in events,
+require(('winios_drv_foreground_if_owner((HWND)fg)' in events or 'winios_call_drv_foreground_if_owner((HWND)fg)' in events) and 'atomic_compare_exchange_strong(&g_restore_foreground, &fg, 0)' in events,
         "a restored born-minimized window is brought to the front by its own thread's event pump")
 destroy = winios[winios.index('void winios_pDestroyWindow(HWND hwnd) {'):]
 destroy = destroy[:destroy.index('\n}\n')]

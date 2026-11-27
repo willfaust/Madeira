@@ -1030,6 +1030,9 @@ final class LibraryModel: ObservableObject {
     /// Quit game was asked for and the program is still running after `forceCloseAfter`
     /// seconds: a frozen program never handles Alt+F4, so the menu offers to close Madeira.
     @Published var forceCloseOffered = false
+    /// Close session on the starting screen: the status line says Closing… until
+    /// wineserver exits (or Close Madeira is offered if it does not).
+    @Published var closingSession = false
     static let forceCloseAfter: TimeInterval = 10
     /// A Dock session whose game ended: Madeira Dock shut Valve's client down, and
     /// explorer's desktop is asked to close so the session returns to the library.
@@ -1707,7 +1710,8 @@ final class LibraryModel: ObservableObject {
         wine_exit_status_reset()
         JITPoolMeter.reset(); smallPoolNoted = false
         quitRequested = false
- quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
+        quitRequestedAt = nil; forceCloseOffered = false; closingSession = false
+        dockGameEnded = false; dockGameEndedAt = nil
         LibraryController.shared.configure(enabled: enabled, ownsInput: false)
         Self.sessionsThisRun += 1
         launchPresent = madeira_frame_count(); launchStarted = Date(); launchSlow = false; launchLogs = entry.liveLogs
@@ -1786,12 +1790,18 @@ final class LibraryModel: ObservableObject {
         if wine_process_is_running() != 0 {
             sawProcess = true
             if sessionMessage == "Starting…" { sessionMessage = "" }
-        } else if sawProcess && wineserver_is_running() == 0 { finish() }
+        } else if (sawProcess || closingSession) && wineserver_is_running() == 0 { finish() }
+        let closeWait = launching ? 3.0 : Self.forceCloseAfter
         if current != nil, !forceCloseOffered, let asked = quitRequestedAt,
-           Date().timeIntervalSince(asked) > Self.forceCloseAfter {
+           Date().timeIntervalSince(asked) > closeWait {
             forceCloseOffered = true
-            sessionMessage = L("The game did not close. Open the menu to force-close Madeira.")
-            fputs("[frontend] still running \(Int(Self.forceCloseAfter)) s after the close request; force close offered\n", stderr)
+            if launching {
+                sessionMessage = L("The session did not close.")
+                fputs("[frontend] still running \(Int(closeWait)) s after close session; Close Madeira offered on the starting screen\n", stderr)
+            } else {
+                sessionMessage = L("The game did not close. Open the menu to force-close Madeira.")
+                fputs("[frontend] still running \(Int(Self.forceCloseAfter)) s after the close request; force close offered\n", stderr)
+            }
         }
         if current != nil, dockGameEndedAt == nil, !launching, DockStartScreen.shared.active,
            MainActor.assumeIsolated({ MadeiraDock.pollReport().result }) == 0 {
@@ -1873,8 +1883,42 @@ final class LibraryModel: ObservableObject {
     }
     func requestQuit() {
         LibraryKeyboard.hide()
+        menu = false
+        // Play is still getting ready: drop the starting screen; Wine has not started.
+        if current == nil {
+            preparing = nil
+            fputs("[frontend] starting screen cancelled before the session began\n", stderr)
+            return
+        }
         quitRequested = true
         if quitRequestedAt == nil { quitRequestedAt = Date() }
+        // The starting screen has no game window to receive Alt+F4 (Steam wait,
+        // one-time installs, or Dock already stopped). Ask explorer's desktop to
+        // close so wineserver can exit and finish() can return to the library.
+        if launching {
+            let alreadyClosing = closingSession
+            closingSession = true
+            if wine_process_is_running() == 0 && wineserver_is_running() == 0 {
+                fputs("[frontend] close session: wine already ended; returning to the library\n", stderr)
+                finish()
+                return
+            }
+            winios_close_desktop()
+            if !DockStartScreen.shared.active {
+                winios_post_key(0x12, 1); winios_post_key(0x73, 1)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    winios_post_key(0x73, 0); winios_post_key(0x12, 0)
+                }
+            }
+            if alreadyClosing || DockStartScreen.shared.failure != nil {
+                forceCloseOffered = true
+                sessionMessage = L("The session did not close.")
+            } else {
+                sessionMessage = L("Closing…")
+            }
+            fputs("[frontend] close session: asked the desktop to close (alreadyClosing=\(alreadyClosing ? 1 : 0) dockFailure=\(DockStartScreen.shared.failure != nil ? 1 : 0))\n", stderr)
+            return
+        }
         // Ask the application to close (Alt+F4) through the normal input queue,
         // so it can save; the surface stays up until the native session ends.
         winios_post_key(0x12, 1); winios_post_key(0x73, 1)
@@ -1882,8 +1926,11 @@ final class LibraryModel: ObservableObject {
             winios_post_key(0x73, 0); winios_post_key(0x12, 0)
         }
         sessionMessage = L("Close requested. Confirm any in-game exit dialog.")
-        menu = false
         fputs("[frontend] graceful close requested\n", stderr)
+    }
+    func forceCloseMadeira(reason: String) {
+        LogStore.shared.log("[frontend] force close: \(reason)", level: .error)
+        exit(0)
     }
     func saveCurrentProfile() {
         let controls = TouchControlsModel.shared
@@ -1921,7 +1968,8 @@ final class LibraryModel: ObservableObject {
         GestureZonesModel.shared.selected = nil; GestureZonesModel.shared.zones = savedZones
         if ControlPresetsModel.enabled { controls.layoutID = savedLayout }
         current = nil; activeEntry = nil; menu = false; sessionMessage = ""
-        quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
+        quitRequestedAt = nil; forceCloseOffered = false; closingSession = false
+        dockGameEnded = false; dockGameEndedAt = nil
         displayMode = .fit
         LogStore.shared.setDisplayActive(true)
         launching = false; launchLogs = false; LibraryKeyboard.hide()
@@ -3945,6 +3993,8 @@ struct LibraryDetail: View {
     var play: (LibraryEntry) -> Void
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var model = LibraryModel.shared
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @ObservedObject private var steamGames = SteamGamesModel.shared
     @State private var importCover = false
     /// madeira-bcd: this game's own switches as the fork stores them (reloadBCD).
     @State private var bcd = BCDGameValues()
@@ -4153,13 +4203,23 @@ struct LibraryDetail: View {
         guard let appID else { return false }
         return SteamOwnedLibrary.shared.game(appID)?.workshop != false
     }
+    /// Whether this installed Steam game is managed by Madeira and Steam lists a newer build.
+    private func steamUpdateAvailable(_ appID: Int) -> Bool {
+        guard SteamOwnedLibrary.enabled,
+              let installed = steamGames.games.first(where: { $0.id == appID }),
+              SteamInstallPaths.isManaged(library: installed.library) else { return false }
+        return steam.updateAvailable(appID: appID, installedBuild: steamGames.builds[appID],
+                                     installedBranch: steamGames.branches[appID])
+    }
     /// The value a page's row shows, when one setting sums it up.
     private func summary(_ page: Page) -> String? {
         switch page {
         case .display: return entry.metalFXUpscale.map { "\(entry.resolution) · MetalFX \($0 == 2 ? "2" : "1.5")×" } ?? entry.resolution
         case .controls: return entry.controllerMode == "keys" ? "Keyboard and mouse" : entry.controllerMode == "dinput" ? "XInput and DirectInput" : nil
         case .launch: return entry.usesLaunchOptions ? (entry.runsInDesktop ? L("Wine desktop") : L("Directly")) : nil
-        case .steam: return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
+        case .steam:
+            if let appID = entry.steamAppID, steamUpdateAvailable(appID) { return "Update available" }
+            return entry.startsSteamGameDirectly ? "The game" : "Madeira Dock"
         case .advanced: return Self.configSummary(bcd.configText)   // madeira-bcd: the game's own config file
         case .iniFiles:
             let count = GameIniFiles.files(entry.windowsPath).count
@@ -4516,8 +4576,21 @@ struct LibraryDetail: View {
                 // A Play error sits under Play.
                 if let error { Section { Text(error).foregroundStyle(.red) } }
                 // A running update blocks Play: its progress shows here too.
-                if let appID = entry.steamAppID, let download = SteamOwnedLibrary.shared.downloads[appID] {
-                    Section { SteamDownloadStatus(download: download) }
+                if let appID = entry.steamAppID {
+                    if let download = steam.downloads[appID] {
+                        Section {
+                            SteamDownloadStatus(download: download)
+                            switch download.state {
+                            case .active, .queued: Button("Pause update") { steam.pause(appID) }
+                            case .paused, .failed: Button("Resume update") { steam.install(appID) }
+                            }
+                        }
+                    } else if steamUpdateAvailable(appID) {
+                        Section {
+                            Button { steam.install(appID) } label: { Label("Update available — download", systemImage: "arrow.down.circle") }
+                                .disabled(!steam.signedIn)
+                        }
+                    }
                 }
                 if let appName = entry.epicAppName {
                     EpicEntrySection(entry: $entry) { leaving = true; dismiss() }
@@ -4582,6 +4655,9 @@ struct LibraryDetail: View {
             // Play's checks read the installed games and Dock's client state, which the
             // Steam page refreshed when it was on this page.
             .onAppear { if entry.steamAppID != nil { MadeiraDockModel.shared.refresh(); SteamGamesModel.shared.refresh() } }
+            .task(id: entry.steamAppID) {
+                if let appID = entry.steamAppID, SteamOwnedLibrary.enabled { await steam.refreshBranches(appID) }
+            }
             // madeira-bcd: the game's own switches and config file, and its recommended settings.
             .onAppear {
                 migrateEntryOptions()
@@ -5296,13 +5372,19 @@ struct GraphicsSettings: View {
         FileManager.default.fileExists(atPath: Bundle.main.bundleURL.appendingPathComponent(path).path)
     }
     /// gl/libvulkan_kosmickrisp.dylib (docs/KOSMICKRISP.md); without it vulkan = kosmickrisp keeps Vulkan off.
-    static let hasKosmicKrisp = bundled("gl/libvulkan_kosmickrisp.dylib")
+    static var hasKosmicKrisp: Bool {
+        UnixHalf.overrideDylibPath(named: "libvulkan_kosmickrisp.dylib") != nil
+            || bundled("gl/libvulkan_kosmickrisp.dylib")
+    }
     /// vkd3d-proton's DLLs are git-ignored build products (build/vkd3d-proton/build.sh).
     static let hasVkd3d = bundled("vulkan/arm64ec-windows/d3d12.dll") && bundled("vulkan/arm64ec-windows/d3d12core.dll")
     /// DXVK's DLLs are git-ignored build products too (build/dxvk/build.sh, docs/DXVK.md).
     static let hasDxvk = ["d3d11", "d3d10core", "dxgi"].allSatisfy { bundled("vulkan/arm64ec-windows/dxvk-\($0).dll") }
     /// The Zink OpenGL backend's library; without it the default backend is OpenGL ES, where wined3d finds no context.
-    static let hasZink = bundled("gl/libOSMesa.dylib")
+    static var hasZink: Bool {
+        UnixHalf.overrideDylibPath(named: "libOSMesa.dylib") != nil
+            || bundled("gl/libOSMesa.dylib")
+    }
     /// KosmicKrisp takes the first Metal 4 device: iOS 26 with an A14 or newer.
     static let metal4: Bool = {
         #if targetEnvironment(simulator)
@@ -5585,6 +5667,7 @@ struct LibraryHUD: View {
     }
     @ObservedObject private var model = LibraryModel.shared
     @ObservedObject private var controls = TouchControlsModel.shared
+    @ObservedObject private var orientation = OrientationLock.shared
     @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     /// A Madeira Dock start: its status, failure and Show desktop (DockStartScreen).
     @ObservedObject private var dockStart = DockStartScreen.shared
@@ -5628,6 +5711,7 @@ struct LibraryHUD: View {
                     // (and measured) all the same.
                     launchView(entry, geometry: geo).opacity(curtain.hidesStartingScreen ? 0 : 1)
                 }
+                if !model.menu { sessionEdgeSwipe(geo) }
                 if !model.startingScreen && model.performance { LibraryFloatingItem(isMenu: false, viewport: geo.size, insets: geo.safeAreaInsets) }
                 if model.liveLogs && !model.startingScreen { LibraryLiveLogs().frame(maxWidth: 550, maxHeight: 140).padding(.top, Self.topInset(geo) + 60).padding(.horizontal, 12).allowsHitTesting(false) }
                 if !model.sessionMessage.isEmpty && !model.startingScreen { Text(model.sessionMessage).font(.caption).padding(10).background(.regularMaterial, in: Capsule()).frame(maxWidth: .infinity).padding(.top, Self.topInset(geo) + 12).allowsHitTesting(false) }
@@ -5680,6 +5764,33 @@ struct LibraryHUD: View {
             else if command == "back", model.menu { model.menu = false }
         }
     }
+    /// Either screen edge opens the session menu. The centre must not take the
+    /// touch: the starting screen's Close session / live log buttons sit there.
+    /// Only the 18 pt bands are hittable; the middle view has hit testing off.
+    @ViewBuilder private func sessionEdgeSwipe(_ geo: GeometryProxy) -> some View {
+        let band: CGFloat = 18
+        HStack(spacing: 0) {
+            Color.clear.frame(width: band).frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(sessionEdgeDrag)
+            Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .allowsHitTesting(false)
+            Color.clear.frame(width: band).frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(sessionEdgeDrag)
+        }
+        .frame(width: geo.size.width, height: geo.size.height)
+    }
+    private var sessionEdgeDrag: some Gesture {
+        DragGesture(minimumDistance: 24, coordinateSpace: .local)
+            .onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > 56, abs(dx) > abs(dy) * 1.5 else { return }
+                fputs("[frontend] edge swipe opened the session menu\n", stderr)
+                model.showMenu()
+            }
+    }
     /// Landscape: the cover large on the left, the title, status and controls beside it
     /// (launchWideView). MADEIRA_LAUNCH_WIDE=0 keeps the centred column in landscape too.
     private let launchWideEnabled = MadeiraConfig.flag("MADEIRA_LAUNCH_WIDE")   // 0: the starting screen is one centred column in landscape too
@@ -5708,10 +5819,14 @@ struct LibraryHUD: View {
                     .modifier(LaunchEntrance(visible: launchVisible, step: 0, rise: CGSize(width: 0, height: 26), scale: 0.84, still: curtained))
                 Text(entry.title).font(.title2.bold()).multilineTextAlignment(.center)
                     .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 0, height: 14), still: curtained))
-                if dockStart.failure == nil {
+                if dockStart.failure == nil && !model.closingSession {
                     ProgressView().tint(.white).modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
                 }
-                if let failure = dockStart.failure {
+                if model.closingSession {
+                    Text(model.forceCloseOffered ? L("The session did not close.") : L("Closing…"))
+                        .foregroundStyle(.white.opacity(0.8)).multilineTextAlignment(.center)
+                        .modifier(LaunchEntrance(visible: launchVisible, step: 2, still: curtained))
+                } else if let failure = dockStart.failure {
                     Text("Madeira Dock stopped").font(.headline)
                     Text(failure).font(.caption).multilineTextAlignment(.center).frame(maxWidth: 360)
                 } else if dockStart.active {
@@ -5740,18 +5855,22 @@ struct LibraryHUD: View {
                 }
                 // The starting screen's controls are one row of glyph-only buttons, so a
                 // short screen does not push them below the fold. The words stay as
-                // VoiceOver labels. A stopped Dock start can be closed; while a Dock start
-                // holds the desktop back, Show desktop reveals it.
+                // VoiceOver labels. Close session is always offered (it asks the desktop
+                // to close; Alt+F4 has no game window yet). While a Dock start holds the
+                // desktop back, Show desktop reveals it.
                 HStack(spacing: 14) {
-                    if dockStart.failure != nil {
-                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
-                    }
+                    launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
                     }
                     if dockStart.holding {
                         launchGlyph(L("Show desktop"), "macwindow") { dockStart.showDesktop(model) }
                             .accessibilityHint(L("Shows the Windows desktop"))
+                    }
+                    if model.forceCloseOffered {
+                        launchGlyph(L("Close Madeira"), "xmark.octagon") {
+                            model.forceCloseMadeira(reason: "starting screen: the session ignored close session")
+                        }
                     }
                 }.modifier(LaunchEntrance(visible: launchVisible, step: 3, still: curtained))
                 if model.launchSlow && !dockStart.holding {
@@ -5794,15 +5913,18 @@ struct LibraryHUD: View {
                     .modifier(LaunchEntrance(visible: launchVisible, step: 1, rise: CGSize(width: 22, height: 0), still: curtained))
                 launchWideStatus.modifier(LaunchEntrance(visible: launchVisible, step: 2, rise: CGSize(width: 22, height: 0), still: curtained))
                 HStack(spacing: 12) {
-                    if dockStart.failure != nil {
-                        launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
-                    }
+                    launchGlyph(L("Close session"), "stop.circle") { model.requestQuit() }
                     launchGlyph(showLogs ? L("Hide live log") : L("Show live log"), "text.alignleft", on: showLogs) {
                         model.toggleLaunchLogs()
                     }
                     if dockStart.holding {
                         launchGlyph(L("Show desktop"), "macwindow") { dockStart.showDesktop(model) }
                             .accessibilityHint(L("Shows the Windows desktop"))
+                    }
+                    if model.forceCloseOffered {
+                        launchGlyph(L("Close Madeira"), "xmark.octagon") {
+                            model.forceCloseMadeira(reason: "starting screen: the session ignored close session")
+                        }
                     }
                     if model.launchSlow && !dockStart.holding {
                         Button("Show game view") { model.showGameView(reason: "button") }
@@ -5829,7 +5951,10 @@ struct LibraryHUD: View {
     /// The landscape status: a small spinner and one line of what the start is doing,
     /// the one-time-install note and the elapsed time under it; or why the Dock stopped.
     @ViewBuilder private var launchWideStatus: some View {
-        if let failure = dockStart.failure {
+        if model.closingSession {
+            Text(model.forceCloseOffered ? L("The session did not close.") : L("Closing…"))
+                .font(.subheadline).foregroundStyle(.white.opacity(0.78))
+        } else if let failure = dockStart.failure {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Madeira Dock stopped").font(.headline)
                 Text(failure).font(.subheadline).foregroundStyle(.white.opacity(0.75)).frame(maxWidth: 440, alignment: .leading)
@@ -5863,6 +5988,7 @@ struct LibraryHUD: View {
         }
         .buttonStyle(.plain).foregroundStyle(.white)
         .accessibilityLabel(label)
+        .zIndex(2)
     }
 
     /// The starting screen's cover and backdrop: a Dock start shows the game's
@@ -5993,6 +6119,13 @@ struct LibraryHUD: View {
                         }.pickerStyle(.menu).labelsHidden()
                     }
                 }
+                LabeledContent("Orientation") {
+                    Picker("Orientation", selection: $orientation.mode) {
+                        ForEach(OrientationLock.Mode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }.pickerStyle(.segmented).frame(maxWidth: 240)
+                }
                 Divider()
                 // ml1133's ECO switch, live: the same as the developer overlay's ECO pill.
                 Text("CPU").font(.headline)
@@ -6058,8 +6191,7 @@ struct LibraryHUD: View {
                         .font(.caption).foregroundStyle(.secondary)
                 } else if model.forceCloseOffered {
                     Button(role: .destructive) {
-                        LogStore.shared.log("[frontend] force close: the program ignored the close request; closing Madeira", level: .error)
-                        exit(0)
+                        model.forceCloseMadeira(reason: "the program ignored the close request; closing Madeira")
                     } label: {
                         Label("Force close Madeira", systemImage: "xmark.octagon").foregroundStyle(.red)
                     }.tint(.red)
@@ -6224,6 +6356,13 @@ struct LibraryMetrics: View {
     @State private var lastTime = Date()
     @State private var tick = 0
     @State private var fps = 0.0
+    /// ml1304: seconds since `madeira_shown_frame_count()` last advanced. Everything
+    /// else in this pill is sampled FROM the present path, so when the title stops
+    /// presenting they all keep their last values and the pill reads like a healthy
+    /// game (2026-11-26: it showed 60 FPS next to a 13415 ms last frame for 300 s).
+    /// A figure that is not advancing is not a measurement, so show the stall instead.
+    @State private var stalledFor = 0.0
+    @State private var lastPresentAt: Date? = nil
     @State private var onePercent: (low: Double, high: Double)?
     @State private var pointOneLow: Double?
     /// Measured from the present path, like the graph (1000 / FPS hid the slow frames).
@@ -6269,10 +6408,20 @@ struct LibraryMetrics: View {
     private var cells: [Cell] {
         var result: [Cell] = []
         if model.overlayFields.contains("FPS") {
-            result.append(Cell(id: "fps", label: "FPS", value: String(format: "%.0f", fps), width: 44, tint: speed(fps)))
+            // ml1304: a stalled title has no frame rate to report. Showing the last
+            // computed value next to "13415 ms" was the reading that sent this
+            // investigation down a false trail, so the stall replaces both figures.
+            if stalledFor >= 2 {
+                result.append(Cell(id: "fps", label: "FPS", value: String(format: "STALL %.0fs", stalledFor), width: 44,
+                                   tint: colours ? .red : nil))
+            } else {
+                result.append(Cell(id: "fps", label: "FPS", value: String(format: "%.0f", fps), width: 44, tint: speed(fps)))
+            }
         }
         if model.overlayFields.contains("Frame time") {
-            result.append(Cell(id: "ms", label: "MS", value: frameMs.map { String(format: $0 >= 100 ? "%.0f" : "%.1f", $0) } ?? "–", width: 52))
+            result.append(stalledFor >= 2
+                ? Cell(id: "ms", label: "MS", value: String(format: "stall %.0fs", stalledFor), width: 52, tint: colours ? .red : nil)
+                : Cell(id: "ms", label: "MS", value: frameMs.map { String(format: $0 >= 100 ? "%.0f" : "%.1f", $0) } ?? "–", width: 52))
         }
         if model.overlayFields.contains("1% lows") {
             result.append(Cell(id: "low", label: "1% LOW", value: onePercent.map { String(format: "%.0f", $0.low) } ?? "–", width: 52,
@@ -6412,6 +6561,11 @@ struct LibraryMetrics: View {
                 let count = madeira_shown_frame_count(); let dt = now.timeIntervalSince(lastTime)
                 let frames = count >= lastCount ? count - lastCount : 0
                 fps = Double(frames) / max(0.001, dt); lastCount = count; lastTime = now
+                // ml1304: distinguish "0 FPS right now" from "the title is not presenting at
+                // all". Only the second is a stall, and only the second makes every other
+                // figure in this pill stale — so it is tracked separately and shown instead.
+                if frames > 0 { lastPresentAt = now }
+                stalledFor = lastPresentAt.map { now.timeIntervalSince($0) } ?? 0
                 // Over the last ten seconds, so a stall stays in the figure for a while.
                 if model.overlayFields.contains("1% lows") { onePercent = FrameTimes.onePercent(FrameTimes.read(windowMs: 10_000).intervals) }
                 // 0.1% needs more frames: thirty seconds (the ring holds 2048).
@@ -6448,8 +6602,14 @@ struct LibraryMetrics: View {
     }
     private var parts: [String] {
         var result: [String] = []
-        if model.overlayFields.contains("FPS") { result.append(String(format: "%.0f FPS", fps)) }
-        if model.overlayFields.contains("Frame time") { result.append(frameMs.map { String(format: "%.1f ms", $0) } ?? "— ms") }
+        if model.overlayFields.contains("FPS") {
+            result.append(stalledFor >= 2 ? String(format: "STALLED %.0f s, no frames presented", stalledFor)
+                                          : String(format: "%.0f FPS", fps))
+        }
+        if model.overlayFields.contains("Frame time") {
+            result.append(stalledFor >= 2 ? String(format: "no frame for %.0f s", stalledFor)
+                                          : (frameMs.map { String(format: "%.1f ms", $0) } ?? "— ms"))
+        }
         if model.overlayFields.contains("1% lows") {
             result.append(onePercent.map { String(format: "1%% low %.0f, 1%% high %.0f FPS", $0.low, $0.high) } ?? "1% lows —")
         }

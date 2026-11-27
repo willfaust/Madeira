@@ -8,6 +8,11 @@
 	<true/>
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
+	<!-- Needed to dlopen a library from the app container, which is what makes the Wine
+	     unix half a .wcp component instead of an IPA rebuild. Restricted: it only takes
+	     effect if the signing profile grants it, which LiveContainer decides at install. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
 	<key>get-task-allow</key>
 	<true/>
 </dict>

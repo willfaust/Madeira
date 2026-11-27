@@ -88,6 +88,13 @@ static void ios_foreground_if_none(const char *reason) {}
 static int send_hardware_message(void *window, int flags, const INPUT *input, int unused) {
     assert(n < 8192); sent[n++] = *input; return 0;
 }
+/* Winios.m's queue routes through the half-resolve dispatchers; the model
+   takes the dispatch as direct and mocks the hooks themselves below */
+#define winios_call_drv_post_text winios_drv_post_text
+#define winios_call_drv_post_key winios_drv_post_key
+#define winios_call_drv_post_mouse winios_drv_post_mouse
+static void winios_drv_post_key(unsigned short vk, unsigned int flags);
+static void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int data, void *hwnd);
 '''+text_driver+queue+r'''
 static void winios_drv_post_key(unsigned short vk, unsigned int flags) { winios_text_key(vk, flags); }
 static void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int data, void *hwnd) {}

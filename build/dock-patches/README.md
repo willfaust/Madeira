@@ -14,4 +14,7 @@ submodule pin does not change.
 | `0003-launch-start-when-ceg-already-prepared.patch` | Starts the game when Valve's client answers OK with no job, because it already prepared this account's executables (every launch after the first; Black Ops stopped with code 49 here until Repair) |
 
 A patch must apply on the current `madeira-dock` pin. When the pin moves,
-rebase the patches onto it (or drop a patch the new pin already covers).
+rebase the patches onto it (or drop a patch the new pin already covers). The
+whole stack equals the `madeira-dock` working tree this repository carries:
+nothing ships in the tree with no patch and no patch is forgotten in the tree.
+Checked by `tests/host/check-patch-stacks.py`.

@@ -871,13 +871,12 @@ enum DockInstallers {
         guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.contains("/") }) else { return nil }
         var current = drive
         for part in parts {
-            let exact = current.appendingPathComponent(part)
-            if FileManager.default.fileExists(atPath: exact.path) { current = exact }
-            else {
-                guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
-                      let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
-                current.appendPathComponent(match)
-            }
+            // never trust the caller's casing: on a case-insensitive volume
+            // fileExists would accept it and hand back the wrong name, so the
+            // on-disk entry is taken from the directory listing either way
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: current.path),
+                  let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
+            current.appendPathComponent(match)
             guard inside(current, drive: drive) else { return nil }
         }
         return current

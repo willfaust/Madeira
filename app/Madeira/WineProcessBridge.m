@@ -338,6 +338,27 @@ extern void __wine_main(int argc, char *argv[]);
 // File-based logging (from server_ios.c)
 extern void wine_log_set_file(const char *path);
 
+/* The unix half can also arrive as a .wcp component (UnixHalf.swift, which owns the
+ * discovery, the dlopen and the signing rules). When one is installed these three return 1
+ * and the calls above must not be used: the loaded half owns its own dispatch table and its
+ * own state, so mixing it with the linked archive would run two halves in one process.
+ * A return of 0 means no component is installed and the linked symbols apply. */
+extern int madeira_unix_half_start(int argc, char *argv[]);
+extern int madeira_unix_half_set_log_file(const char *path);
+extern int madeira_unix_half_set_main_i386(int value);
+/* Returns the count the loaded half sees, or -1 when no component is loaded. The child
+ * table is filled by the unix side, so it lives in the half's image: asking the linked
+ * archive instead reads an array nothing fills and answers 0 for a running game. */
+extern int madeira_unix_half_live_game_children(char *buf, int len, double max_age);
+extern int madeira_live_game_children(char *buf, int len, double max_age);
+
+/* The child table of whichever half is running. */
+static int madeira_live_children(char *buf, int len, double max_age)
+{
+    int n = madeira_unix_half_live_game_children(buf, len, max_age);
+    return n >= 0 ? n : madeira_live_game_children(buf, len, max_age);
+}
+
 /* madeira-bcd: env.MADEIRA_SRV_FGETPATH of the launch in progress, read by the in-app
  * wineserver (build/wineserver/fd_ios.c), which is running before a game's env lines
  * are set. Set after they are applied, cleared when the session ends. */
@@ -820,6 +841,186 @@ static void madeira_overlay_vcruntime32(NSFileManager *fm, NSString *prefix)
     dprintf(STDERR_FILENO, "[WineProc] Symlinked %d MS VC++ x86 runtime DLLs over i386 builtins (Documents/vcruntime32; MADEIRA_VCREDIST_X86=0 leaves them out)\n", linked);
 }
 
+/* Imported .wcp components (WCPComponents.swift). The package's files live in
+ * Documents/Components/<id>/payload; state.json lists the enabled packages and
+ * each package's layout, whose destinations carry one of the folder tokens
+ * below. Runs after every bundle link and the VC++ overlays, so an imported
+ * file wins for this session. Removing or disabling a package brings the
+ * bundled file back at the next launch: the links are recreated from the
+ * bundle every time a session starts.
+ *
+ *   ${system32}  drive_c/windows/system32
+ *   ${syswow64}  drive_c/windows/syswow64
+ *   ${sysx64}    drive_c/windows/sysx64
+ *   ${sysaa64}   drive_c/windows/sysaa64
+ *   ${aarch64}   system32 in an aarch64 session, sysaa64 in an ARM64EC one
+ *   ${sysarm64ec} the farm an ARM64EC process resolves in this session: sysx64 in an
+ *                aarch64 session (whose system32 holds aarch64 binaries), system32 in an
+ *                ARM64EC one. This is what an arm64ec-windows package must use; assuming
+ *                system32 overwrites the launcher's own arch and breaks the launch.
+ *
+ * An enabled package's "environment" dictionary is exported too. That is how a
+ * FEX package can carry its own FEX_* switches; it applies to every launch
+ * while the package is enabled. Log tag: [wcp]. */
+static int madeira_env_name_ok(const char *name)
+{
+    const char *p;
+    if (!name || !*name) return 0;
+    if (!((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_')) return 0;
+    for (p = name + 1; *p; p++)
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_')) return 0;
+    return 1;
+}
+
+/* A package that was enabled in an earlier session leaves symlinks in the
+ * prefix pointing at Documents/Components. If it is now disabled, or its files
+ * were replaced, those links break the Windows DLL search. Clear every link
+ * that points into the Components directory before the enabled ones are laid
+ * down; bundle links and anything else are left alone. */
+static void madeira_clear_wcp_links(NSFileManager *fm, NSString *windows, NSArray *tokens, NSString *root)
+{
+    NSString *components = [root stringByAppendingString:@"/"];
+    int removed = 0;
+    for (NSString *token in tokens) {
+        NSString *farm = [windows stringByAppendingPathComponent:token];
+        for (NSString *name in [fm contentsOfDirectoryAtPath:farm error:nil]) {
+            NSString *path = [farm stringByAppendingPathComponent:name];
+            NSString *destination = [fm destinationOfSymbolicLinkAtPath:path error:nil];
+            if (destination && [destination hasPrefix:components]) {
+                [fm removeItemAtPath:path error:nil];
+                removed++;
+            }
+        }
+    }
+    if (removed)
+        dprintf(STDERR_FILENO, "[wcp] cleared %d stale link(s)\n", removed);
+}
+
+static void madeira_clear_all_wcp_links(NSFileManager *fm, NSString *prefix)
+{
+    NSString *root = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                      stringByAppendingPathComponent:@"Components"];
+    NSString *windows = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSArray *tokens = @[@"system32", @"syswow64", @"sysx64", @"sysaa64"];
+    madeira_clear_wcp_links(fm, windows, tokens, root);
+}
+
+static void madeira_apply_wcp_components(NSFileManager *fm, NSString *prefix, BOOL use_arm64ec)
+{
+    NSString *root = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
+                      stringByAppendingPathComponent:@"Components"];
+    NSString *windows = [prefix stringByAppendingPathComponent:@"drive_c/windows"];
+    NSArray *tokens = @[@"system32", @"syswow64", @"sysx64", @"sysaa64"];
+    NSString *componentsPrefix = [root stringByAppendingString:@"/"];
+
+    NSData *data = [NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:@"state.json"]];
+    if (!data) return;
+    NSDictionary *state = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSArray *components = [state isKindOfClass:[NSDictionary class]] ? state[@"components"] : nil;
+    if (![components isKindOfClass:[NSArray class]]) return;
+
+    int linked = 0, failed = 0, envs = 0, active = 0, packages = 0;
+
+    for (NSDictionary *component in components) {
+        if (![component isKindOfClass:[NSDictionary class]] || ![component[@"enabled"] boolValue]) continue;
+        NSString *identifier = component[@"id"];
+        if (![identifier isKindOfClass:[NSString class]] || !identifier.length) continue;
+        if ([identifier containsString:@"/"] || [identifier containsString:@".."]) continue;
+        packages++;
+        NSString *directory = [root stringByAppendingPathComponent:identifier];
+
+        NSDictionary *environment = component[@"environment"];
+        if ([environment isKindOfClass:[NSDictionary class]]) {
+            for (NSString *key in environment) {
+                NSString *value = environment[key];
+                if (![key isKindOfClass:[NSString class]] || ![value isKindOfClass:[NSString class]]) continue;
+                if (!madeira_env_name_ok(key.UTF8String) || strchr(value.UTF8String, '\n')) continue;
+                setenv(key.UTF8String, value.UTF8String, 1);
+                envs++;
+            }
+        }
+
+        NSArray *layout = component[@"layout"];
+        if (![layout isKindOfClass:[NSArray class]]) continue;
+        for (NSDictionary *item in layout) {
+            if (![item isKindOfClass:[NSDictionary class]]) { failed++; continue; }
+            NSString *source = item[@"source"], *dest = item[@"dest"];
+            if (![source isKindOfClass:[NSString class]] || ![dest isKindOfClass:[NSString class]]) { failed++; continue; }
+            if (!source.length || [source hasPrefix:@"/"] || [source containsString:@".."] ||
+                !dest.length || [dest containsString:@".."]) { failed++; continue; }
+            NSString *file = [directory stringByAppendingPathComponent:source];
+            // Packages installed before the layout recorded a bare path wrote
+            // "payload/..." here, but the staging payload directory is what
+            // became the component folder, so that prefix points at nothing.
+            // Try the recorded path, then the same path without it.
+            if (![fm fileExistsAtPath:file] && [source hasPrefix:@"payload/"]) {
+                file = [directory stringByAppendingPathComponent:[source substringFromIndex:8]];
+            }
+            if (![fm fileExistsAtPath:file]) { failed++; continue; }
+
+            BOOL is_sysarm64ec = [dest hasPrefix:@"${sysarm64ec}/"];
+            NSString *resolved = [dest stringByReplacingOccurrencesOfString:@"${aarch64}"
+                                    withString:(use_arm64ec ? @"${sysaa64}" : @"${system32}")];
+            // The ARM64EC farm moves with the session: an ARM64EC session links its own
+            // binaries into system32, so the EC set stays there; an aarch64 session keeps
+            // system32 for itself and gives ARM64EC children sysx64 (see the sysx64/sysaa64
+            // farm pass above). A package's arm64ec-windows files must follow that.
+            resolved = [resolved stringByReplacingOccurrencesOfString:@"${sysarm64ec}"
+                                    withString:(use_arm64ec ? @"${system32}" : @"${sysx64}")];
+            // A native (Mach-O) component is not linked into the prefix: its libraries stay in
+            // the component folder and are dlopen'ed at launch (UnixHalf). Skipping it here is
+            // what keeps it out of the link count instead of reporting it as a failure.
+            // Same for a builtin package's `pe/` staging tree, which the loader reads directly
+            // from WINEDLLPATH because it builds ntdll's own path.
+            if ([resolved hasPrefix:@"files/"] || [resolved hasPrefix:@"pe/"]) continue;
+            NSString *folder = nil;
+            for (NSString *token in tokens) {
+                NSString *marker = [NSString stringWithFormat:@"${%@}", token];
+                if ([resolved hasPrefix:marker]) {
+                    folder = token;
+                    resolved = [resolved substringFromIndex:marker.length];
+                    break;
+                }
+            }
+            if (!folder || ![resolved hasPrefix:@"/"]) { failed++; continue; }
+            NSString *name = [resolved substringFromIndex:1];
+            if (!name.length || [name containsString:@"/"]) { failed++; continue; }
+
+            NSString *farm = [windows stringByAppendingPathComponent:folder];
+            [fm createDirectoryAtPath:farm withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *target = [farm stringByAppendingPathComponent:name];
+            [fm removeItemAtPath:target error:nil];
+            if ([fm createSymbolicLinkAtPath:target withDestinationPath:file error:nil]) {
+                linked++;
+                // Non-colliding ARM64EC-only DLLs (e.g. xtajit64.dll, d3d12.dll,
+                // d3d12core.dll, kernel32-one.dll) are also cross-linked from
+                // arm64ec-windows -> system32 in an aarch64 desktop session so
+                // hardcoded C:\windows\system32\... loads (like load_arm64ec_module
+                // loading xtajit64.dll) find them. Mirror ${sysarm64ec} WCP overrides
+                // into system32 too whenever system32 does not hold an aarch64 DLL.
+                if (!use_arm64ec && is_sysarm64ec) {
+                    NSString *sys32Target = [[windows stringByAppendingPathComponent:@"system32"]
+                                             stringByAppendingPathComponent:name];
+                    NSString *existing = [fm destinationOfSymbolicLinkAtPath:sys32Target error:nil];
+                    BOOL absent = ![fm fileExistsAtPath:sys32Target];
+                    BOOL isCrossEC = existing && ([existing containsString:@"/arm64ec-windows/"] ||
+                                                  [existing hasPrefix:componentsPrefix]);
+                    if (absent || isCrossEC) {
+                        [fm removeItemAtPath:sys32Target error:nil];
+                        [fm createSymbolicLinkAtPath:sys32Target withDestinationPath:file error:nil];
+                    }
+                }
+            }
+            else failed++;
+        }
+        active++;
+    }
+
+    if (packages)
+        dprintf(STDERR_FILENO, "[wcp] %d enabled package(s): %d links, %d failed, %d environment entries\n",
+                active, linked, failed, envs);
+}
+
 /* C:\windows\syswow64: the i386 farm, the Windows name for this pattern. A
  * 32-bit process's system32 is redirected here, and the unix loader's
  * machine -> directory mapping looks here for the 32-bit ntdll, kernel32 and
@@ -1042,20 +1243,31 @@ static NSString *madeira_vulkan_library(NSString *bundle)
 {
     char v[512] = "";
     BOOL set = madeira_cfg_get("vulkan", v, sizeof v) && v[0];
+    typedef int (*wcp_dylib_fn)(const char *, char *, int);
+    wcp_dylib_fn wcp_fn = (wcp_dylib_fn)dlsym(RTLD_DEFAULT, "madeira_wcp_dylib_path");
+    char wcp_buf[PATH_MAX];
 
     if (set && (!strcasecmp(v, "off") || !strcmp(v, "0"))) return nil;
     if (!set && !madeira_d3d12_vkd3d_wanted() && !madeira_d3d11_dxvk_wanted()) return nil;
     if (set && (!strcasecmp(v, "static") || !strcmp(v, "1")))
         return madeira_vulkan_static_available() ? @"madeira-static-moltenvk" : nil;
-    if (!set || !strcasecmp(v, "moltenvk"))
+    if (!set || !strcasecmp(v, "moltenvk")) {
+        if (wcp_fn && wcp_fn("libMoltenVK.dylib", wcp_buf, (int)sizeof(wcp_buf)))
+            return [NSString stringWithUTF8String:wcp_buf];
         return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
-    if (!strcasecmp(v, "kosmickrisp"))
+    }
+    if (!strcasecmp(v, "kosmickrisp")) {
+        if (wcp_fn && wcp_fn("libvulkan_kosmickrisp.dylib", wcp_buf, (int)sizeof(wcp_buf)))
+            return [NSString stringWithUTF8String:wcp_buf];
         return [bundle stringByAppendingPathComponent:@"gl/libvulkan_kosmickrisp.dylib"];
+    }
     if (strchr(v, '/'))
         return v[0] == '/' ? [NSString stringWithUTF8String:v]
                            : [bundle stringByAppendingPathComponent:[NSString stringWithUTF8String:v]];
     dprintf(STDERR_FILENO, "[vulkan] unknown madeira.cfg vulkan = %s (moltenvk, kosmickrisp, off or a .dylib path); "
             "using MoltenVK\n", v);
+    if (wcp_fn && wcp_fn("libMoltenVK.dylib", wcp_buf, (int)sizeof(wcp_buf)))
+        return [NSString stringWithUTF8String:wcp_buf];
     return [bundle stringByAppendingPathComponent:@"gl/libMoltenVK.dylib"];
 }
 
@@ -1526,11 +1738,22 @@ static void *wine_process_thread(void *arg) {
         // Skip check_command_line / reexec_loader
         setenv("WINELOADERNOEXEC", "1", 1);
 
-        // Set DLL search path to app bundle (contains aarch64-windows/ with PE DLLs)
+        // Set DLL search path to app bundle (contains aarch64-windows/ with PE DLLs), with any
+        // imported builtin package in front of it. An import lives at
+        // Documents/Components/<id>/pe/, mirroring the bundle's arch folders, so it is found
+        // first and the bundle's own ntdll.dll never has to change for a Wine PE fix to land.
         {
             NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-            setenv("WINEDLLPATH", bundlePath.UTF8String, 1);
-            LOG("WINEDLLPATH=%{public}s", bundlePath.UTF8String);
+            extern const char *madeira_builtin_override_path(void);
+            const char *overrides = madeira_builtin_override_path();
+            if (overrides && *overrides) {
+                NSString *combined = [NSString stringWithFormat:@"%s:%@", overrides, bundlePath];
+                setenv("WINEDLLPATH", combined.UTF8String, 1);
+                LOG("WINEDLLPATH=%{public}s (builtin override first)", combined.UTF8String);
+            } else {
+                setenv("WINEDLLPATH", bundlePath.UTF8String, 1);
+                LOG("WINEDLLPATH=%{public}s", bundlePath.UTF8String);
+            }
         }
 
         /* Wine trace channels.
@@ -1605,9 +1828,15 @@ static void *wine_process_thread(void *arg) {
          * dylibs are bundled. MADEIRA_GL_BACKEND in the environment wins over both.
          * The driver falls back to gles by itself if Zink cannot start. */
         {
-            NSString *glDir = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"gl"];
-            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:
-                                [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"]];
+            NSString *bundle = [[NSBundle mainBundle] bundlePath];
+            NSString *glDir = [bundle stringByAppendingPathComponent:@"gl"];
+            NSString *osmesaPath = [glDir stringByAppendingPathComponent:@"libOSMesa.dylib"];
+            typedef int (*wcp_dylib_fn)(const char *, char *, int);
+            wcp_dylib_fn wcp_fn = (wcp_dylib_fn)dlsym(RTLD_DEFAULT, "madeira_wcp_dylib_path");
+            char wcp_buf[PATH_MAX];
+            if (wcp_fn && wcp_fn("libOSMesa.dylib", wcp_buf, (int)sizeof(wcp_buf)))
+                osmesaPath = [NSString stringWithUTF8String:wcp_buf];
+            BOOL haveZink = [[NSFileManager defaultManager] fileExistsAtPath:osmesaPath];
             char glb[16] = "";
             if (!madeira_cfg_get("gl-backend", glb, sizeof glb) || !glb[0])
                 strlcpy(glb, haveZink ? "zink" : "gles", sizeof glb);
@@ -1822,7 +2051,10 @@ static void *wine_process_thread(void *arg) {
         {
             NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
             NSString *logPath = [docs stringByAppendingPathComponent:@"madeira-log.txt"];
-            wine_log_set_file(logPath.UTF8String);
+            // The half that will run owns the log: when a component is installed, the
+            // archive's logger is a different object and would write nothing this session reads.
+            if (!madeira_unix_half_set_log_file(logPath.UTF8String))
+                wine_log_set_file(logPath.UTF8String);
             /* ml519: start the freeze detector as soon as logging works, so
              * every launch (Thumper as well as Steam) yields a measurement. */
             { extern void winios_freeze_watch_start(void); winios_freeze_watch_start(); }
@@ -2230,6 +2462,10 @@ static void *wine_process_thread(void *arg) {
             NSFileManager *fm = [NSFileManager defaultManager];
 
             [fm createDirectoryAtPath:sys32Dir withIntermediateDirectories:YES attributes:nil error:nil];
+            // Clear previous session's WCP symlinks before re-seeding bundle farms so
+            // disabling a package always restores the bundled file (including cross-linked
+            // ARM64EC-only files in system32).
+            madeira_clear_all_wcp_links(fm, prefix);
 
             NSArray *dlls = [fm contentsOfDirectoryAtPath:dllSource error:nil];
             int linked = 0;
@@ -2330,6 +2566,9 @@ static void *wine_process_thread(void *arg) {
             if (madeira_d3d9_wined3d_wanted())
                 madeira_link_d3d9_wined3d(fm, prefix, bundlePath, has_i386_set);
             madeira_setup_vulkan(fm, prefix, bundlePath, use_arm64ec);
+            /* Imported .wcp components last, so a user package wins over both
+             * the bundle and the Microsoft VC++ overlay for this session. */
+            madeira_apply_wcp_components(fm, prefix, use_arm64ec);
 
             /* ml719: REPAIR THE SHELL FOLDERS. They ship as symlinks to the BUILD
              * MACHINE's home directory.
@@ -2699,12 +2938,17 @@ static void *wine_process_thread(void *arg) {
 
         /* WoW64: publish the main image's machine so the unix side reserves
          * this process's guest window before its first TEB, and hand FEX's
-         * WOW64 module the host features it cannot query itself. */
-        ios_main_image_i386 = is_i386_target ? 1 : 0;
+         * WOW64 module the host features it cannot query itself. Written through
+         * the entry below because the flag lives in the half: setting the linked
+         * archive's copy while a component's half is running would write a
+         * variable nothing reads. */
+        if (!madeira_unix_half_set_main_i386(is_i386_target ? 1 : 0))
+            ios_main_image_i386 = is_i386_target ? 1 : 0;
         madeira_publish_host_probe();   /* both FEX modules read it (A12/A13: FlagM, FlagM2) */
 
         if (setjmp(wine_ios_exit_jmpbuf) == 0) {
-            __wine_main(argc, argv);
+            if (!madeira_unix_half_start(argc, argv))
+                __wine_main(argc, argv);
             dprintf(STDERR_FILENO, "[WineProc] __wine_main returned normally\n");
         } else {
             dprintf(STDERR_FILENO, "[WineProc] Wine exited with code %d (caught by longjmp)\n", wine_ios_exit_code);
@@ -2728,10 +2972,9 @@ static void *wine_process_thread(void *arg) {
          * own config): a child that ends from a worker thread never releases its
          * slot (process_ios.c), and the session would then wait forever. */
         {
-            extern int madeira_live_game_children(char *buf, int len, double max_age);
-            const char *wc = getenv("MADEIRA_WAIT_CHILDREN");
             char names[256];
-            int n = madeira_live_game_children(names, sizeof names, 60.0);
+            int n = madeira_live_children(names, sizeof names, 60.0);
+            const char *wc = getenv("MADEIRA_WAIT_CHILDREN");
             if (n > 0 && !(wc && wc[0] == '1')) {
                 dprintf(STDERR_FILENO, "[WineProc] the main process exited while %d child process(es) it started "
                         "still run (%s); the session ends with it (MADEIRA_WAIT_CHILDREN=1 keeps it while they run)\n",
@@ -2741,7 +2984,7 @@ static void *wine_process_thread(void *arg) {
                         "it started still run (%s) -- a launcher started the game; the session goes on until "
                         "they exit (MADEIRA_WAIT_CHILDREN=1)\n", n, names);
                 unsigned ticks = 0;
-                while ((n = madeira_live_game_children(names, sizeof names, -1.0)) > 0) {
+                while ((n = madeira_live_children(names, sizeof names, -1.0)) > 0) {
                     usleep(200 * 1000);
                     if ((++ticks % 300) == 0)
                         dprintf(STDERR_FILENO, "[WineProc] still running: %d child process(es) (%s), %u s\n",
@@ -2826,7 +3069,9 @@ int wine_process_start(const char *prefix_path) {
     setenv("WINESERVERSOCKET", fd_str, 1);
 
     // Inject wineserver side — the event loop will pick this up
-    wineserver_inject_client_fd(pair[0]);
+    extern int madeira_unix_half_wineserver_inject_fd(int fd);
+    if (!madeira_unix_half_wineserver_inject_fd(pair[0]))
+        wineserver_inject_client_fd(pair[0]);
 
     /* The guest main thread runs on this pthread. Give it its QoS class
      * through the attribute, as wineserver_start does for the server thread:

@@ -120,6 +120,14 @@ final class ProMotionIntent {
     private var tickStart: CFTimeInterval = 0
     private var tickLast: CFTimeInterval = 0
     private var tickMaxGap: CFTimeInterval = 0
+    /// ml1304: the link ticks whether or not the title draws. A deadlocked title
+    /// (2026-11-26: Steam's overlay renderer stalled the present path) kept this
+    /// reporter printing a healthy "60.0 Hz" for 300 s while `presents` never moved,
+    /// so the one line that described the frame loop said it was fine. Track the
+    /// game's own present counter here and say so when it stops advancing.
+    private var tickPresents: UInt64 = 0
+    private var tickPresentsChangedAt: CFTimeInterval = 0
+    private var tickStallLogged = false
     /// ml2021 (opt-in, env.MADEIRA_PROMOTE_KICK = 1): a one-pixel layer whose opacity
     /// alternates every tick, so each tick commits a CoreAnimation transaction. The
     /// DXMT note of 2026-07-03 found that this device's compositor completes our
@@ -159,9 +167,28 @@ final class ProMotionIntent {
         let span = now - tickStart
         if span >= 10 {
             let hz = Double(tickCount - 1) / span
-            LogStore.shared.log(String(format: "[promote] link ran %d ticks in %.1f s = %.1f Hz (mean %.1f ms, longest gap %.1f ms, target %.0f ms)",
+            // ml1304: the tick count above describes the display LINK, which keeps
+            // running when the title is dead. Report the title's own present counter
+            // beside it, so "60.0 Hz" can never again describe a frozen game.
+            let presents = madeira_shown_frame_count()
+            let dPresents = presents &- tickPresents
+            if dPresents > 0 || tickPresentsChangedAt == 0 {
+                tickPresentsChangedAt = now
+                tickStallLogged = false
+            }
+            let stalledFor = dPresents == 0 ? now - tickPresentsChangedAt : 0
+            tickPresents = presents
+            let stallNote = stalledFor >= 2
+                ? String(format: " (STALLED %.1f s: the link is live, the title is not presenting)", stalledFor)
+                : ""
+            LogStore.shared.log(String(format: "[promote] link ran %d ticks in %.1f s = %.1f Hz (mean %.1f ms, longest gap %.1f ms, target %.0f ms) | game presents +%llu%@",
                                        tickCount, span, hz, span * 1000 / Double(max(1, tickCount - 1)), tickMaxGap * 1000,
-                                       (sender.targetTimestamp - sender.timestamp) * 1000))
+                                       (sender.targetTimestamp - sender.timestamp) * 1000,
+                                       UInt64(dPresents), stallNote))
+            if stalledFor >= 10 && !tickStallLogged {
+                tickStallLogged = true
+                LogStore.shared.log(String(format: "[stall] ml1304 the title has presented nothing for %.1f s while the link still ticks at %.1f Hz; FPS readings from the link are meaningless while this holds", stalledFor, hz))
+            }
             tickStart = now; tickCount = 1; tickMaxGap = 0
         }
         if ProMotionIntent.kickEnabled { kick() }
@@ -265,6 +292,11 @@ struct FPSOverlay: View {
     var compact: Bool = false
     @State private var presentCount: UInt64 = 0
     @State private var fps: Double = 0
+    /// ml1304: seconds since the title last presented. The pill's figures all come
+    /// from the present path, so a stalled title otherwise shows its last values
+    /// forever (60 FPS beside a 13 s frame). The stall replaces the frame rate.
+    @State private var stalledFor: Double = 0
+    @State private var lastPresentAt: Date? = nil
     @State private var visible: Bool = true
     @State private var timer: Timer? = nil
     @State private var displayTimer: Timer? = nil
@@ -315,8 +347,8 @@ struct FPSOverlay: View {
         Group {
             if visible && compact {
                 VStack(spacing: 4) {
-                    Text(String(format: "%.1f", fps))
-                        .foregroundColor(fpsColor)
+                    Text(stalledFor >= 2 ? String(format: "STALL %.0fs", stalledFor) : String(format: "%.1f", fps))
+                        .foregroundColor(stalledFor >= 2 ? .red : fpsColor)
                     pacingPill
                     capturePill
                     ecoPill
@@ -346,9 +378,9 @@ struct FPSOverlay: View {
                         .foregroundColor(.secondary)
                     Text("FPS:")
                         .foregroundColor(.secondary)
-                    Text(String(format: "%.1f", fps))
-                        .foregroundColor(fpsColor)
-                        .frame(width: 40, alignment: .trailing)
+                    Text(stalledFor >= 2 ? String(format: "STALL %.0fs", stalledFor) : String(format: "%.1f", fps))
+                        .foregroundColor(stalledFor >= 2 ? .red : fpsColor)
+                        .frame(width: 56, alignment: .trailing)
                     pacingPill
                     capturePill
                     ecoPill
@@ -526,6 +558,9 @@ struct FPSOverlay: View {
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             let t = CFAbsoluteTimeGetCurrent()
             let cur = madeira_shown_frame_count()
+            // ml1304: only a changing counter means the title is drawing.
+            if cur != presentCount { lastPresentAt = Date() }
+            stalledFor = lastPresentAt.map { Date().timeIntervalSince($0) } ?? 0
             samples.append((t, cur))
             if samples.count > bufferCapacity { samples.removeFirst() }
             presentCount = cur

@@ -95,7 +95,7 @@ require('kSecAttrAccessibleWhenUnlockedThisDeviceOnly' in store and 'SecItemAdd(
 require(take.index('guard store(account) else { return }') < take.rindex('removeItem(at: handoff)')
         and take.count('removeItem(at: handoff)') == 2,
         'the file is deleted once the Keychain holds it, and at once when it is not one Madeira can use')
-init = block(main, 'init()')
+init = block(main, '\n    init() {')
 require('SigningAccountStore.takeIn()' in init, 'the sign-in is taken in when Madeira starts, before any game can')
 require('SigningAccountStore.forget()' in block(signing, 'func forgetAccount()') and 'Forget Apple sign-in' in signing,
         'Settings can forget the sign-in')
