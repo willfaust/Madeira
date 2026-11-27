@@ -476,6 +476,7 @@ struct mad_device {
     struct { UINT32 value[4]; obj_handle_t buf; } fillpat[32]; unsigned nfillpat; SRWLOCK fillpat_lock;   /* ml1151: exact UAV clear patterns (a 16-byte period) */
     obj_handle_t k_lib, k_tind_pso, k_ring; UINT64 k_ring_pos; int k_state; SRWLOCK k_lock;   /* madeira-bcd: helper kernels (mad_kernels.metal) */
     obj_handle_t k_probe_pso; unsigned char *k_ring_cpu;   /* madeira-bcd: indirect-argument probes */
+    obj_handle_t k_fgsel_pso;   /* madeira-duo split2: mad_fg_hudless_select */
     /* madeira-bcd clear-rects: the helper library's clear functions (vertex; fragment
      * float, uint, sint, depth), pipelines by target format, depth-stencil states by flags */
     obj_handle_t clr_vs, clr_fs[4], clr_dss[4]; int clr_state; SRWLOCK clr_lock;
@@ -6727,12 +6728,19 @@ static int mad_kernels_ready(struct mad_device *d) {
             if (err) mad_log_nserror("mad_probe_words", err);
             NSObject_release(fn);
         }
+        fn = d->k_lib ? MTLLibrary_newFunction(d->k_lib, "mad_fg_hudless_select") : 0;   /* madeira-duo split2 (an older metallib has none) */
+        if (fn) {
+            memset(&ci, 0, sizeof ci); ci.compute_function = fn; err = 0;
+            d->k_fgsel_pso = MTLDevice_newComputePipelineState(d->mtl_device, &ci, &err);
+            if (err) mad_log_nserror("mad_fg_hudless_select", err);
+            NSObject_release(fn);
+        }
         memset(&bi, 0, sizeof bi); bi.length = MAD_KRING_BYTES; bi.options = WMTResourceStorageModeShared;
         if (d->k_lib) d->k_ring = MTLDevice_newBuffer(d->mtl_device, &bi);
         if (d->k_ring) { mad_resident(d, d->k_ring); d->k_ring_cpu = (unsigned char *)bi.memory.ptr; }
         d->k_state = d->k_lib && d->k_ring ? 1 : -1;
-        d3d12_log("[madeira-d3d12] helper kernels: %s (library %d, indirect tessellation kernel %d, probe kernel %d, ring %d%s)\n",
-                  d->k_state > 0 ? "ready" : "NOT available", !!d->k_lib, !!d->k_tind_pso, !!d->k_probe_pso, !!d->k_ring,
+        d3d12_log("[madeira-d3d12] helper kernels: %s (library %d, indirect tessellation kernel %d, probe kernel %d, framegen select kernel %d, ring %d%s)\n",
+                  d->k_state > 0 ? "ready" : "NOT available", !!d->k_lib, !!d->k_tind_pso, !!d->k_probe_pso, !!d->k_fgsel_pso, !!d->k_ring,
                   d->k_ring_cpu ? ", CPU-visible" : "");
 #else
         d->k_state = -1;
@@ -12365,6 +12373,8 @@ static struct mad_fg {
     int dump_left, dump_plain; unsigned dump_burst, dump_n; LONG64 dump_qpc;   /* framegen-dump */
     struct { obj_handle_t cb, buf; void *cpu; UINT w, h, pf, bpp; char name[32]; } dq[48]; unsigned ndq;   /* rundump1: 48 (was 16) */
     int rundump_left, rundump_on, rundump_next; unsigned rundump_n, rundump_imgs;   /* framegen-run-dump */
+    obj_handle_t hud_a, hud_b; int label_runs, label_left, sel_ready; UINT last_ps, last_vs; int last_blend;   /* split2 */
+    unsigned n_select, n_select_late;
     struct mad_fg_run runs[40]; unsigned nruns, run_more;
     unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_world_copy, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
     unsigned n_lost, n_pause, n_draw2; LONG64 t_draw2;   /* the same: game frames that got no drawable, gate closings, waits for the second drawable */
@@ -12415,7 +12425,9 @@ static void mad_fg_cfg(void) {
     g->cap = mad_cfg_float_pe("framegen-cap", 0.0);   /* madeira-duo: the frame cap the game runs under while frames are generated (30 = locked 30 -> 60); 0 = none, the pair is paced by the measured frame time */
     if (!(g->cap >= 10.0 && g->cap <= 240.0)) g->cap = 0.0;
     g->dump_left = (int)mad_cfg_int_pe("framegen-dump", 0);
-    g->rundump_left = (int)mad_cfg_int_pe("framegen-run-dump", 0);   /* madeira-duo rundump1: N > 0 = N frames a session, the back buffer before each run of draws to C:\\madeira-fg ([fg-rundump]) */   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
+    g->rundump_left = (int)mad_cfg_int_pe("framegen-run-dump", 0);
+    g->label_runs = (int)mad_cfg_int_pe("framegen-ui-label-runs", 0);   /* madeira-duo split2: runs after the framegen-ui-world-ps layer that join the interpolated picture (PoE2: 1, its world labels); 0 = split1 */
+    if (g->label_runs < 0 || g->label_runs > 8) g->label_runs = 0;   /* madeira-duo rundump1: N > 0 = N frames a session, the back buffer before each run of draws to C:\\madeira-fg ([fg-rundump]) */   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
     g->resume_need = 40;
     g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
     g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
@@ -12449,7 +12461,8 @@ static obj_handle_t mad_fg_newtex(struct mad_device *d, enum WMTPixelFormat pf, 
 static void mad_fg_release_tex(void) {
     struct mad_fg *g = &g_fg; unsigned k;
     mad_fg_defer(g->snap[0]); mad_fg_defer(g->snap[1]); mad_fg_defer(g->out);
-    g->snap[0] = g->snap[1] = g->out = 0;
+    mad_fg_defer(g->hud_a); mad_fg_defer(g->hud_b);
+    g->snap[0] = g->snap[1] = g->out = g->hud_a = g->hud_b = 0;
     for (k = 0; k < MAD_FG_BB; k++) { mad_fg_defer(g->bbv[k]); g->bbv[k] = 0; g->bbv_of[k] = NULL; }
     g->bw = g->bh = 0;
 }
@@ -12668,10 +12681,36 @@ static void mad_fg_snapshot(struct mad_exec *e, struct mad_resource *bb) {
     e->fence_needed = 1;
     g->snap_done = 1; g->n_split++;
 }
+/* split2: at the end of the world-list layer, keep the HUD-less copy as it was (a) and the back buffer now (b). */
+static int mad_fg_split2_mark(struct mad_exec *e, struct mad_resource *bb) {
+    struct mad_fg *g = &g_fg; struct wmtcmd_blit_copy_from_texture_to_texture k[2];
+    if (!bb->texture || !g->snap[g->cur] || !g->hud_a || !g->hud_b || bb->width != g->bw || bb->height != g->bh || bb->tex_pf != g->bpf ||
+        bb->samples > 1) return 0;
+    exec_end(e);
+    while (e->npend) exec_flush_clear(e, 0);
+    e->fence_needed = 1;
+    if (!exec_begin_blit(e)) return 0;
+    memset(k, 0, sizeof k);
+    k[0].type = WMTBlitCommandCopyFromTextureToTexture;
+    k[0].src = g->snap[g->cur];
+    k[0].src_size.width = g->bw; k[0].src_size.height = g->bh; k[0].src_size.depth = 1;
+    k[0].dst = g->hud_a;
+    k[0].next.ptr = &k[1];
+    k[1].type = WMTBlitCommandCopyFromTextureToTexture;
+    k[1].src = bb->texture;
+    k[1].src_size.width = bb->width; k[1].src_size.height = bb->height; k[1].src_size.depth = 1;
+    k[1].dst = g->hud_b;
+    MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k[0]);
+    exec_end(e);
+    e->fence_needed = 1;
+    return 1;
+}
 /* A draw into a back buffer is about to be replayed. */
 static void mad_fg_draw(struct mad_exec *e) {
-    struct mad_fg *g = &g_fg; const struct mad_pso *p = e->pso; int ui, world = 0, i, copy_again;
+    struct mad_fg *g = &g_fg; const struct mad_pso *p = e->pso; int ui, world = 0, i, copy_again, new_run;
     if (e->q != g->queue) return;
+    new_run = !g->bb_draws || p->ps_id != g->last_ps || p->vs_id != g->last_vs || p->fg_blend0 != g->last_blend;
+    g->last_ps = p->ps_id; g->last_vs = p->vs_id; g->last_blend = p->fg_blend0;
     for (i = 0; i < g->n_world; i++) if (p->ps_id == g->world_ps[i]) { world = 1; break; }
     ui = g->ui_ps ? p->ps_id == g->ui_ps : p->fg_blend0 != 0;
     if (world) ui = 0;   /* a world draw never starts the HUD */
@@ -12686,6 +12725,7 @@ static void mad_fg_draw(struct mad_exec *e) {
         } else { g->run_more++; r = NULL; }
         if (r && ui && g->ui_mode && !g->probe_ui && r->n == 1) { r->snap = 1; g->probe_ui = 1; }   /* where the copy is, or would be */
         else if (r && copy_again && g->ui_mode && r->n == 1 && !r->snap) r->snap = 2;
+        else if (r && g->label_left == 1 && new_run && !world && r->n == 1 && !r->snap) r->snap = 3;   /* split2: the copy after the labels */
         /* rundump1: this draw starts a new run, so the back buffer now holds everything up to the run before it */
         if (g->rundump_on && r && r->n == 1 && g->nruns >= 2 && g->rundump_imgs < 40 && e->mode != 6) {
             char what[24];
@@ -12693,7 +12733,20 @@ static void mad_fg_draw(struct mad_exec *e) {
             mad_fg_rundump(e, e->rt[0], what);
         }
     }
+    /* split2: this draw starts the run after the label runs: the back buffer is the HUD-less copy (c), selected at Present */
+    if (g->label_left > 0 && new_run && !world && --g->label_left == 0 && g->armed && e->mode != 6) {
+        unsigned first_copies = g->n_split;
+        mad_fg_snapshot(e, e->rt[0]);
+        if (g->n_split != first_copies) { g->n_split = first_copies; g->sel_ready = 1; }   /* refused: the copy before the HUD stays the input */
+    }
     if (g->armed && g->ui_mode && !g->snap_done && ui && e->mode != 6) mad_fg_snapshot(e, e->rt[0]);
+    else if (g->armed && g->ui_mode && copy_again && e->mode != 6 && g->hud_a && !g->world_copies) {
+        /* split2 (framegen-ui-label-runs): the world-list layer is the minimap, not labels. Keep the copy before the HUD (a)
+         * and the back buffer now (b); the labels drawn next go into the copy taken after them, and the layer's own pixels
+         * come back out at Present (mad_fg_hudless_select). */
+        if (mad_fg_split2_mark(e, e->rt[0])) { g->label_left = g->label_runs; g->n_world_copy++; }
+        g->world_copies = 4;
+    }
     else if (g->armed && g->ui_mode && copy_again && e->mode != 6) {
         unsigned first_copies = g->n_split;
         mad_fg_snapshot(e, e->rt[0]);
@@ -25497,6 +25550,10 @@ static int mad_fg_setup(struct mad_swapchain *s) {
     g->snap[0] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
     g->snap[1] = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
     g->out = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    if (g->label_runs > 0 && g->n_world && d->k_fgsel_pso) {   /* split2: the back buffer before the HUD and after the world-list layer */
+        g->hud_a = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+        g->hud_b = mad_fg_newtex(d, s->pf, s->desc.Width, s->desc.Height);
+    }
     g->cur = 0; g->prev_ok = 0; g->gen_prev = 0;
     if (!g->snap[0] || !g->snap[1] || !g->out) {
         mad_fg_release_tex();
@@ -25504,7 +25561,9 @@ static int mad_fg_setup(struct mad_swapchain *s) {
         return 0;
     }
     g->bw = s->desc.Width; g->bh = s->desc.Height; g->bpf = s->pf;
-    d3d12_log("[framegen] textures for %ux%u format %u: two HUD-less frames and the generated one\n", g->bw, g->bh, (unsigned)g->bpf);
+    d3d12_log("[framegen] textures for %ux%u format %u: two HUD-less frames and the generated one%s\n", g->bw, g->bh, (unsigned)g->bpf,
+              g->hud_a && g->hud_b ? "; split2: two more for the HUD's first layer (labels join the interpolated picture)" :
+              g->label_runs > 0 ? "; split2 NOT on (no framegen-ui-world-ps, or this build's kernels have no mad_fg_hudless_select)" : "");
     return 1;
 }
 /* The back buffer as a plain 2D texture (they are 2D arrays, ml932). */
@@ -25648,17 +25707,18 @@ static void mad_fg_dump_frame(struct mad_device *d, obj_handle_t cb, struct mad_
 static void mad_fg_report(double secs) {
     struct mad_fg *g = &g_fg;
     d3d12_log("[framegen] %.1f s: %u frames, %u generated%s; not generated: starting %u, under %.0f fps %u, no FSR inputs %u, FSR constants %u, "
-              "interpolator %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present, %u again after world HUD draws; frame %.1f ms; "
+              "interpolator %u, fence-chain 6 %u; HUD-less copies: %u before the HUD, %u at Present, %u again after world HUD draws, %u labels kept (split2, %u at Present); frame %.1f ms; "
               "command buffer GPU time: generated frame's %.2f ms avg %.2f max (%u), game frame's %.2f avg %.2f max (%u); "
               "wait for the game frame's drawable %.2f ms avg (%u), game frames that got none %u; hold %.1f ms each; "
               "gate closed %u times, reopens after %u frames at speed\n",
               secs, g->n_frames, g->n_gen, g->native == 1 ? "" : g->native == 0 ? " (this winemetal has no frame interpolator)" : "",
               g->n_skip[FG_SKIP_PRIME], g->min_fps, g->n_skip[FG_SKIP_SLOW], g->n_skip[FG_SKIP_NOFSR], g->n_skip[FG_SKIP_CONSTS],
-              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->n_world_copy, g->dt_ema * 1000.0,
+              g->n_skip[FG_SKIP_INTERP], g->n_skip[FG_SKIP_MODE6], g->n_split, g->n_late, g->n_world_copy, g->n_select, g->n_select_late, g->dt_ema * 1000.0,
               g->n_cb[1] ? g->cb_ms[1] / g->n_cb[1] : 0.0, g->cb_max[1], g->n_cb[1], g->n_cb[0] ? g->cb_ms[0] / g->n_cb[0] : 0.0, g->cb_max[0], g->n_cb[0],
               g->n_draw2 ? (double)g->t_draw2 * 1000.0 / (double)g->qpf / g->n_draw2 : 0.0, g->n_draw2, g->n_lost, mad_fg_hold() * 1000.0,
               g->n_pause, g->resume_need);
     g->n_frames = g->n_gen = g->n_split = g->n_late = g->n_world_copy = g->n_lost = g->n_pause = g->n_draw2 = 0; g->t_draw2 = 0;
+    g->n_select = g->n_select_late = 0;
     memset(g->n_skip, 0, sizeof g->n_skip); memset(g->n_cb, 0, sizeof g->n_cb);
     memset(g->cb_ms, 0, sizeof g->cb_ms); memset(g->cb_max, 0, sizeof g->cb_max);
 }
@@ -25668,10 +25728,33 @@ static void mad_fg_probe_flush(struct mad_swapchain *s) {
                  (unsigned long long)s->presents, g->bb_draws, s->desc.Width, s->desc.Height);
     for (i = 0; i < g->nruns && n < (int)sizeof line - 64; i++)
         n += snprintf(line + n, sizeof line - n, " %sps:%08x vs:%08x %s x%u;",
-                      g->runs[i].snap == 1 ? "[HUD starts] " : g->runs[i].snap == 2 ? "[copied again] " : "", g->runs[i].ps, g->runs[i].vs,
+                      g->runs[i].snap == 1 ? "[HUD starts] " : g->runs[i].snap == 2 ? (g->hud_a ? "[layer ends] " : "[copied again] ") :
+                      g->runs[i].snap == 3 ? "[labels end] " : "", g->runs[i].ps, g->runs[i].vs,
                       g->runs[i].blend ? "blend" : "opaque", g->runs[i].n);
     if (g->run_more) snprintf(line + n, sizeof line - n, " and %u more runs", g->run_more);
     d3d12_log("%s\n", line);
+}
+/* split2: the HUD-less copy taken after the labels (c, snap[cur]) gets the minimap's pixels back from the copy before
+ * the HUD (a) wherever the minimap layer changed them (a != b). Encoded on the present command buffer, before the
+ * interpolator reads it. */
+static void mad_fg_select(struct mad_device *d, obj_handle_t cb) {
+    struct mad_fg *g = &g_fg; struct wmtcmd_compute_setpso sp; struct wmtcmd_compute_settexture st[3]; struct wmtcmd_compute_dispatch dsp;
+    obj_handle_t enc;
+    if (!d->k_fgsel_pso || !g->hud_a || !g->hud_b || !g->snap[g->cur]) return;
+    enc = MTLCommandBuffer_computeCommandEncoder(cb, false);
+    if (!enc) return;
+    g_enc_seq++;
+    memset(&sp, 0, sizeof sp); memset(st, 0, sizeof st); memset(&dsp, 0, sizeof dsp);
+    sp.type = WMTComputeCommandSetPSO; sp.pso = d->k_fgsel_pso;
+    sp.threadgroup_size.width = 8; sp.threadgroup_size.height = 8; sp.threadgroup_size.depth = 1;
+    st[0].type = WMTComputeCommandSetTexture; st[0].texture = g->hud_a; st[0].index = 0;
+    st[1].type = WMTComputeCommandSetTexture; st[1].texture = g->hud_b; st[1].index = 1;
+    st[2].type = WMTComputeCommandSetTexture; st[2].texture = g->snap[g->cur]; st[2].index = 2;
+    dsp.type = WMTComputeCommandDispatch; dsp.size.width = (g->bw + 7) / 8; dsp.size.height = (g->bh + 7) / 8; dsp.size.depth = 1;
+    sp.next.ptr = &st[0]; st[0].next.ptr = &st[1]; st[1].next.ptr = &st[2]; st[2].next.ptr = &dsp;
+    MTLComputeCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&sp);
+    MTLCommandEncoder_endEncoding(enc);
+    g->n_select++;
 }
 /* Once per Present, with the present command buffer open and nothing in it:
  * encodes this frame's interpolation. 1 = g_fg.out will hold a generated frame. */
@@ -25723,8 +25806,8 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
         g->rundump_on = 0; g->rundump_left--;
     }
     if (g->armed && bb && bb->texture && g->snap[g->cur] && bb->width == g->bw && bb->height == g->bh) {
-        if (g->snap_done && !g->world_run) have_snap = 1;
-        else {   /* no HUD draw this frame (or framegen-ui = 0), or the frame ended in world HUD draws (split1): the finished frame is the colour input */
+        if (g->snap_done && !g->world_run && g->label_left <= 0) have_snap = 1;
+        else {   /* no HUD draw this frame (or framegen-ui = 0), or the frame ended in world HUD draws (split1) or in the label runs (split2): the finished frame is the colour input */
             obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
             if (enc) {
                 struct wmtcmd_blit_copy_from_texture_to_texture k;
@@ -25737,8 +25820,10 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
                 MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&k);
                 MTLCommandEncoder_endEncoding(enc);
                 have_snap = 1; g->n_late++;
+                if (g->label_left > 0) { g->sel_ready = 1; g->n_select_late++; }   /* split2: the labels were the last runs */
             }
         }
+        if (have_snap && g->sel_ready) mad_fg_select(d, cb);   /* split2 */
         if (!have_snap) why = FG_SKIP_PRIME;
         else if (g_f6_used) why = FG_SKIP_MODE6;
         else if (g->fsr_frame != g->frame || !g->f_mv || !g->f_depth) why = FG_SKIP_NOFSR;
@@ -25787,6 +25872,7 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
     }
     else if (g->probe_s && (now - g->probe_qpc) / g->qpf >= g->probe_s) { g->probe_frame = 1; g->probe_ui = 0; g->probe_qpc = now; g->nruns = 0; g->run_more = 0; }
     g->snap_done = 0; g->bb_draws = 0; g->world_run = 0; g->world_copies = 0; g->frame++;
+    g->label_left = 0; g->sel_ready = 0;   /* split2 */
     if (g->dt_ema > 0.0) {   /* the rate gate, with some hysteresis */
         /* It reopens 3 fps over the floor, or just under the cap when that is lower (a 30 cap never shows 31). A gate
          * that closes again within 600 frames of reopening waits twice as long the next time, up to 1280 frames, so
@@ -25817,6 +25903,7 @@ static void mad_fg_lost(struct mad_swapchain *s) {
     struct mad_fg *g = &g_fg;
     if (g->swap != s) return;
     g->snap_done = 0; g->bb_draws = 0; g->world_run = 0; g->world_copies = 0; g->prev_ok = 0; g->gen_prev = 0; g->probe_frame = 0;
+    g->label_left = 0; g->sel_ready = 0;   /* split2 */
     g->frame++;
 }
 /* The generated frame into a drawable, through the same spatial scaler as the game's frame. */
