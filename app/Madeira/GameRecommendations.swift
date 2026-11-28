@@ -1341,6 +1341,7 @@ enum GameRecommendations {
         fence-chain = 3
         fence-chain-frag = 1
         async-submit = 1
+        async-present-ahead = 0
         rp-discard = 1
         root-cbv-fast = 1
         buf-bind-fast = 1
@@ -1375,7 +1376,7 @@ enum GameRecommendations {
         ("screenspace_effects", "1"), ("screenspace_effects_resolution", "0"), ("texture_quality", "Low"),
         ("texture_filtering", "8"), ("bloom_strength", "0.25"), ("use_dynamic_particle_culling2", "true"),
         ("upscale", "FSR"), ("upscale_quality", "Balanced"), ("use_dynamic_resolution", "false"),
-        ("framerate_limit", "30"), ("framerate_limit_enabled", "true"), ("triple_buffering", "true"),
+        ("framerate_limit", "30"), ("framerate_limit_enabled", "true"), ("triple_buffering", "false"),
         ("reflex_mode", "Off"), ("hdr", "false"),
     ]
 
