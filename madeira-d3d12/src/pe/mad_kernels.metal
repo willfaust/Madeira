@@ -65,6 +65,24 @@ kernel void mad_texbuf_probe(texture_buffer<uint, access::read> t32 [[texture(0)
 }
 #endif
 
+// madeira-duo split2: framegen's HUD-less colour when the HUD starts with a
+// screen-anchored layer (PoE2's minimap) and then draws world labels. a = the
+// back buffer before the HUD, b = after that layer, c = after the labels
+// (in place). A pixel the layer changed (a != b) takes a, leaving the layer to
+// the HUD handling; every other pixel keeps c, labels included, and is
+// interpolated with the world.
+kernel void mad_fg_hudless_select(texture2d<float, access::read> a [[texture(0)]],
+                                  texture2d<float, access::read> b [[texture(1)]],
+                                  texture2d<float, access::write> c [[texture(2)]],
+                                  uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= c.get_width() || gid.y >= c.get_height())
+        return;
+    float4 pa = a.read(gid);
+    if (any(pa != b.read(gid)))
+        c.write(pa, gid);
+}
+
 // madeira-bcd clear-rects: ClearRenderTargetView / ClearDepthStencilView with
 // rectangles, as DXMT's D3D11 ClearView does them: one triangle over the whole
 // target per rectangle, cut by the scissor, one instance per array layer. The
@@ -102,21 +120,3 @@ fragment mad_clear_depth_out mad_clear_fs_depth(constant float4 &v [[buffer(0)]]
     return o;
 }
 #endif
-
-// madeira-duo split2: framegen's HUD-less colour when the HUD starts with a
-// screen-anchored layer (PoE2's minimap) and then draws world labels. a = the
-// back buffer before the HUD, b = after that layer, c = after the labels
-// (in place). A pixel the layer changed (a != b) takes a, leaving the layer to
-// the HUD handling; every other pixel keeps c, labels included, and is
-// interpolated with the world.
-kernel void mad_fg_hudless_select(texture2d<float, access::read> a [[texture(0)]],
-                                  texture2d<float, access::read> b [[texture(1)]],
-                                  texture2d<float, access::write> c [[texture(2)]],
-                                  uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= c.get_width() || gid.y >= c.get_height())
-        return;
-    float4 pa = a.read(gid);
-    if (any(pa != b.read(gid)))
-        c.write(pa, gid);
-}

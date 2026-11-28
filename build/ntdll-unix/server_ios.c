@@ -2685,6 +2685,141 @@ unsigned long long ios_fps_cap_dxmt_pace( void )
  * (47 user-interactive, 37 user-initiated, 31 default, 20 utility, 4 background,
  * 97 real-time). All calls are made on the xprobe thread; nothing is resolved
  * while the switch is off. */
+/* madeira-duo [xp-vmcall] (diag2): who maps and unmaps memory in this task, by call stack.
+ * env.MADEIRA_VMCALL_CENSUS = 1 turns it on; unset or 0 (the default) installs nothing.
+ *
+ * Why: in a Path of Exile 2 map the phone zero-fills 6,600-13,000 pages a second (100-200 MB of fresh
+ * memory) and the log names no caller. [xp-va] counts what the Windows side asks for; this counts
+ * what every native caller asks of the kernel: Metal, IOKit, CoreAnimation, malloc's large blocks and
+ * our own unix side.
+ *
+ * How: libsystem_kernel's wrappers (mmap, munmap, mach_vm_allocate, mach_vm_deallocate, mach_vm_map,
+ * vm_allocate, ...) call the function pointer __syscall_logger when it is set; malloc stack logging
+ * uses the same hook (xnu libsyscall/mach/mach_vm.c, wrappers/unix03/mmap.c). An allocation arrives
+ * as type 16 | 128 (file or shared memory) | the VM tag in the top byte, arg2 = size, result =
+ * address; a deallocation as type 32, arg2 = address, arg3 = size. The hook runs inside the wrapper
+ * on the calling thread, so it takes no lock, allocates nothing and prints nothing: it reads the
+ * stack with backtrace() (which stays inside the thread's own stack bounds) and adds the call to a
+ * fixed table keyed by the stack. The sampler names the busiest stacks every ~10 s with dladdr.
+ * A hook that was already set keeps getting every call. */
+#include <execinfo.h>
+#define IOS_VMC_SLOTS  512
+#define IOS_VMC_FRAMES 6
+typedef void (ios_vmc_logger_t)( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip );
+struct ios_vmc_slot { uint64_t key, calls, bytes; uintptr_t pc[IOS_VMC_FRAMES]; uint32_t type; };
+static struct ios_vmc_slot ios_vmc_tab[IOS_VMC_SLOTS];
+static uint64_t ios_vmc_lost, ios_vmc_total[4];   /* total: allocate calls, bytes, deallocate calls, bytes */
+static ios_vmc_logger_t *ios_vmc_prev;
+static int ios_vmc_on;
+
+static void ios_vmc_logger( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip )
+{
+    void *pcs[IOS_VMC_FRAMES + 2];
+    uintptr_t pc[IOS_VMC_FRAMES];
+    uint64_t key, bytes, seen;
+    unsigned i, h;
+    int n;
+
+    if (ios_vmc_prev) ios_vmc_prev( type, arg1, arg2, arg3, result, skip + 1 );
+    if (arg1 != (uintptr_t)mach_task_self()) return;
+    bytes = (type & 32) ? arg3 : arg2;
+    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 2 : 0], 1, __ATOMIC_RELAXED );
+    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 3 : 1], bytes, __ATOMIC_RELAXED );
+    /* pc[0]: the wrapper that called us, always known. pc[1..]: its callers, as far as backtrace()
+     * can follow them (pcs[0] is this function and pcs[1] the wrapper again). */
+    for (i = 0; i < IOS_VMC_FRAMES; i++) pc[i] = 0;
+    pc[0] = (uintptr_t)__builtin_return_address( 0 );
+    n = backtrace( pcs, IOS_VMC_FRAMES + 2 );
+    for (i = 2; i < (unsigned)n && i < IOS_VMC_FRAMES + 1; i++) pc[i - 1] = (uintptr_t)pcs[i];
+    key = ((uint64_t)(type & 0xff0000b0u) + 1) * 0x9e3779b97f4a7c15ull;
+    for (i = 0; i < IOS_VMC_FRAMES; i++) key = (key ^ pc[i]) * 0x100000001b3ull;
+    if (!key) key = 1;
+    for (h = (unsigned)(key >> 40), i = 0; i < 24; i++, h++)
+    {
+        struct ios_vmc_slot *s = &ios_vmc_tab[h & (IOS_VMC_SLOTS - 1)];
+        seen = __atomic_load_n( &s->key, __ATOMIC_RELAXED );
+        if (!seen && __atomic_compare_exchange_n( &s->key, &seen, key, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
+        {
+            unsigned f;
+            for (f = 0; f < IOS_VMC_FRAMES; f++) s->pc[f] = pc[f];
+            s->type = type;
+            seen = key;
+        }
+        if (seen == key)
+        {
+            __atomic_fetch_add( &s->calls, 1, __ATOMIC_RELAXED );
+            __atomic_fetch_add( &s->bytes, bytes, __ATOMIC_RELAXED );
+            return;
+        }
+    }
+    __atomic_fetch_add( &ios_vmc_lost, 1, __ATOMIC_RELAXED );
+}
+
+static void ios_vmc_install( void )
+{
+    const char *e = getenv( "MADEIRA_VMCALL_CENSUS" );   /* 1: [xp-vmcall] census of the task's mmap/vm_allocate callers; unset/0: off */
+    ios_vmc_logger_t **hook;
+    if (!e || e[0] != '1') return;
+    hook = (ios_vmc_logger_t **)dlsym( RTLD_DEFAULT, "__syscall_logger" );
+    if (!hook) { wine_log_write( "[xp-vmcall] __syscall_logger is not exported here: no census" ); return; }
+    ios_vmc_prev = *hook;
+    *hook = ios_vmc_logger;
+    ios_vmc_on = 1;
+    wine_log_write( "[xp-vmcall] on (MADEIRA_VMCALL_CENSUS=1): a line set every ~10 s; a hook was %s before", ios_vmc_prev ? "set" : "not set" );
+}
+
+/* one frame as "image+0xoffset(symbol+0xoffset)"; the image offset is what atos wants */
+static int ios_vmc_name( char *out, size_t size, uintptr_t pc )
+{
+    Dl_info di;
+    const char *base;
+    if (!pc) return 0;
+    if (!dladdr( (void *)pc, &di ) || !di.dli_fname) return snprintf( out, size, " < %#lx", (unsigned long)pc );
+    base = strrchr( di.dli_fname, '/' );
+    base = base ? base + 1 : di.dli_fname;
+    if (di.dli_sname)
+        return snprintf( out, size, " < %s+%#lx(%s+%#lx)", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase), di.dli_sname,
+                         (unsigned long)(pc - (uintptr_t)di.dli_saddr) );
+    return snprintf( out, size, " < %s+%#lx", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase) );
+}
+
+static void ios_vmc_report( const char *wall, double seconds )
+{
+    static uint64_t pcalls[IOS_VMC_SLOTS], pbytes[IOS_VMC_SLOTS], ptotal[4], plost;
+    static uint64_t dcalls[IOS_VMC_SLOTS], dbytes[IOS_VMC_SLOTS];
+    uint64_t total[4], lost;
+    int i, shown, used = 0;
+
+    if (!ios_vmc_on || seconds <= 0) return;
+    for (i = 0; i < 4; i++) { uint64_t v = __atomic_load_n( &ios_vmc_total[i], __ATOMIC_RELAXED ); total[i] = v - ptotal[i]; ptotal[i] = v; }
+    lost = __atomic_load_n( &ios_vmc_lost, __ATOMIC_RELAXED );
+    for (i = 0; i < IOS_VMC_SLOTS; i++)
+    {
+        uint64_t c = __atomic_load_n( &ios_vmc_tab[i].calls, __ATOMIC_RELAXED ), b = __atomic_load_n( &ios_vmc_tab[i].bytes, __ATOMIC_RELAXED );
+        dcalls[i] = c - pcalls[i]; dbytes[i] = b - pbytes[i]; pcalls[i] = c; pbytes[i] = b;
+        if (ios_vmc_tab[i].key) used++;
+    }
+    wine_log_write( "[xp-vmcall] %s %.1f s: mapped %llu calls %llu KB, unmapped %llu calls %llu KB, %d stacks known, %llu calls not counted by stack",
+                    wall, seconds, (unsigned long long)total[0], (unsigned long long)(total[1] >> 10), (unsigned long long)total[2],
+                    (unsigned long long)(total[3] >> 10), used, (unsigned long long)(lost - plost) );
+    plost = lost;
+    for (shown = 0; shown < 12; shown++)
+    {
+        char line[1100];
+        int best = -1, n, f;
+        for (i = 0; i < IOS_VMC_SLOTS; i++)
+            if (dcalls[i] && (best < 0 || dbytes[i] > dbytes[best] || (dbytes[i] == dbytes[best] && dcalls[i] > dcalls[best]))) best = i;
+        if (best < 0) break;
+        n = snprintf( line, sizeof(line), "[xp-vmcall]   %s tag %u%s: %llu calls %llu KB |", (ios_vmc_tab[best].type & 32) ? "unmap" : "map",
+                      (unsigned)(ios_vmc_tab[best].type >> 24), (ios_vmc_tab[best].type & 128) ? " file/shared" : "",
+                      (unsigned long long)dcalls[best], (unsigned long long)(dbytes[best] >> 10) );
+        for (f = 0; f < IOS_VMC_FRAMES && n < (int)sizeof(line) - 200; f++)
+            n += ios_vmc_name( line + n, sizeof(line) - n, ios_vmc_tab[best].pc[f] );
+        wine_log_write( "%s", line );
+        dcalls[best] = 0;
+    }
+}
+
 static int ios_power_probe_on;   /* read where the samplers are armed */
 
 struct ios_pp_thr { uint64_t tid; uint32_t wtid; char role[6]; int pri; double p_mj, e_mj; };
@@ -2980,141 +3115,6 @@ static void ios_power_probe_tick( const char *wall, uint64_t now_ns, double dt_m
     wine_log_write( "%s", line );
     ios_pp_nthr = 0;
     ios_pp.ms = ios_pp.cpu_mj = ios_pp.cpu_p_mj = ios_pp.billed_mj = ios_pp.serviced_mj = 0;
-}
-
-/* madeira-duo [xp-vmcall] (diag2): who maps and unmaps memory in this task, by call stack.
- * env.MADEIRA_VMCALL_CENSUS = 1 turns it on; unset or 0 (the default) installs nothing.
- *
- * Why: in a Path of Exile 2 map the phone zero-fills 6,600-13,000 pages a second (100-200 MB of fresh
- * memory) and the log names no caller. [xp-va] counts what the Windows side asks for; this counts
- * what every native caller asks of the kernel: Metal, IOKit, CoreAnimation, malloc's large blocks and
- * our own unix side.
- *
- * How: libsystem_kernel's wrappers (mmap, munmap, mach_vm_allocate, mach_vm_deallocate, mach_vm_map,
- * vm_allocate, ...) call the function pointer __syscall_logger when it is set; malloc stack logging
- * uses the same hook (xnu libsyscall/mach/mach_vm.c, wrappers/unix03/mmap.c). An allocation arrives
- * as type 16 | 128 (file or shared memory) | the VM tag in the top byte, arg2 = size, result =
- * address; a deallocation as type 32, arg2 = address, arg3 = size. The hook runs inside the wrapper
- * on the calling thread, so it takes no lock, allocates nothing and prints nothing: it reads the
- * stack with backtrace() (which stays inside the thread's own stack bounds) and adds the call to a
- * fixed table keyed by the stack. The sampler names the busiest stacks every ~10 s with dladdr.
- * A hook that was already set keeps getting every call. */
-#include <execinfo.h>
-#define IOS_VMC_SLOTS  512
-#define IOS_VMC_FRAMES 6
-typedef void (ios_vmc_logger_t)( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip );
-struct ios_vmc_slot { uint64_t key, calls, bytes; uintptr_t pc[IOS_VMC_FRAMES]; uint32_t type; };
-static struct ios_vmc_slot ios_vmc_tab[IOS_VMC_SLOTS];
-static uint64_t ios_vmc_lost, ios_vmc_total[4];   /* total: allocate calls, bytes, deallocate calls, bytes */
-static ios_vmc_logger_t *ios_vmc_prev;
-static int ios_vmc_on;
-
-static void ios_vmc_logger( uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t skip )
-{
-    void *pcs[IOS_VMC_FRAMES + 2];
-    uintptr_t pc[IOS_VMC_FRAMES];
-    uint64_t key, bytes, seen;
-    unsigned i, h;
-    int n;
-
-    if (ios_vmc_prev) ios_vmc_prev( type, arg1, arg2, arg3, result, skip + 1 );
-    if (arg1 != (uintptr_t)mach_task_self()) return;
-    bytes = (type & 32) ? arg3 : arg2;
-    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 2 : 0], 1, __ATOMIC_RELAXED );
-    __atomic_fetch_add( &ios_vmc_total[(type & 32) ? 3 : 1], bytes, __ATOMIC_RELAXED );
-    /* pc[0]: the wrapper that called us, always known. pc[1..]: its callers, as far as backtrace()
-     * can follow them (pcs[0] is this function and pcs[1] the wrapper again). */
-    for (i = 0; i < IOS_VMC_FRAMES; i++) pc[i] = 0;
-    pc[0] = (uintptr_t)__builtin_return_address( 0 );
-    n = backtrace( pcs, IOS_VMC_FRAMES + 2 );
-    for (i = 2; i < (unsigned)n && i < IOS_VMC_FRAMES + 1; i++) pc[i - 1] = (uintptr_t)pcs[i];
-    key = ((uint64_t)(type & 0xff0000b0u) + 1) * 0x9e3779b97f4a7c15ull;
-    for (i = 0; i < IOS_VMC_FRAMES; i++) key = (key ^ pc[i]) * 0x100000001b3ull;
-    if (!key) key = 1;
-    for (h = (unsigned)(key >> 40), i = 0; i < 24; i++, h++)
-    {
-        struct ios_vmc_slot *s = &ios_vmc_tab[h & (IOS_VMC_SLOTS - 1)];
-        seen = __atomic_load_n( &s->key, __ATOMIC_RELAXED );
-        if (!seen && __atomic_compare_exchange_n( &s->key, &seen, key, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED ))
-        {
-            unsigned f;
-            for (f = 0; f < IOS_VMC_FRAMES; f++) s->pc[f] = pc[f];
-            s->type = type;
-            seen = key;
-        }
-        if (seen == key)
-        {
-            __atomic_fetch_add( &s->calls, 1, __ATOMIC_RELAXED );
-            __atomic_fetch_add( &s->bytes, bytes, __ATOMIC_RELAXED );
-            return;
-        }
-    }
-    __atomic_fetch_add( &ios_vmc_lost, 1, __ATOMIC_RELAXED );
-}
-
-static void ios_vmc_install( void )
-{
-    const char *e = getenv( "MADEIRA_VMCALL_CENSUS" );   /* 1: [xp-vmcall] census of the task's mmap/vm_allocate callers; unset/0: off */
-    ios_vmc_logger_t **hook;
-    if (!e || e[0] != '1') return;
-    hook = (ios_vmc_logger_t **)dlsym( RTLD_DEFAULT, "__syscall_logger" );
-    if (!hook) { wine_log_write( "[xp-vmcall] __syscall_logger is not exported here: no census" ); return; }
-    ios_vmc_prev = *hook;
-    *hook = ios_vmc_logger;
-    ios_vmc_on = 1;
-    wine_log_write( "[xp-vmcall] on (MADEIRA_VMCALL_CENSUS=1): a line set every ~10 s; a hook was %s before", ios_vmc_prev ? "set" : "not set" );
-}
-
-/* one frame as "image+0xoffset(symbol+0xoffset)"; the image offset is what atos wants */
-static int ios_vmc_name( char *out, size_t size, uintptr_t pc )
-{
-    Dl_info di;
-    const char *base;
-    if (!pc) return 0;
-    if (!dladdr( (void *)pc, &di ) || !di.dli_fname) return snprintf( out, size, " < %#lx", (unsigned long)pc );
-    base = strrchr( di.dli_fname, '/' );
-    base = base ? base + 1 : di.dli_fname;
-    if (di.dli_sname)
-        return snprintf( out, size, " < %s+%#lx(%s+%#lx)", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase), di.dli_sname,
-                         (unsigned long)(pc - (uintptr_t)di.dli_saddr) );
-    return snprintf( out, size, " < %s+%#lx", base, (unsigned long)(pc - (uintptr_t)di.dli_fbase) );
-}
-
-static void ios_vmc_report( const char *wall, double seconds )
-{
-    static uint64_t pcalls[IOS_VMC_SLOTS], pbytes[IOS_VMC_SLOTS], ptotal[4], plost;
-    static uint64_t dcalls[IOS_VMC_SLOTS], dbytes[IOS_VMC_SLOTS];
-    uint64_t total[4], lost;
-    int i, shown, used = 0;
-
-    if (!ios_vmc_on || seconds <= 0) return;
-    for (i = 0; i < 4; i++) { uint64_t v = __atomic_load_n( &ios_vmc_total[i], __ATOMIC_RELAXED ); total[i] = v - ptotal[i]; ptotal[i] = v; }
-    lost = __atomic_load_n( &ios_vmc_lost, __ATOMIC_RELAXED );
-    for (i = 0; i < IOS_VMC_SLOTS; i++)
-    {
-        uint64_t c = __atomic_load_n( &ios_vmc_tab[i].calls, __ATOMIC_RELAXED ), b = __atomic_load_n( &ios_vmc_tab[i].bytes, __ATOMIC_RELAXED );
-        dcalls[i] = c - pcalls[i]; dbytes[i] = b - pbytes[i]; pcalls[i] = c; pbytes[i] = b;
-        if (ios_vmc_tab[i].key) used++;
-    }
-    wine_log_write( "[xp-vmcall] %s %.1f s: mapped %llu calls %llu KB, unmapped %llu calls %llu KB, %d stacks known, %llu calls not counted by stack",
-                    wall, seconds, (unsigned long long)total[0], (unsigned long long)(total[1] >> 10), (unsigned long long)total[2],
-                    (unsigned long long)(total[3] >> 10), used, (unsigned long long)(lost - plost) );
-    plost = lost;
-    for (shown = 0; shown < 12; shown++)
-    {
-        char line[1100];
-        int best = -1, n, f;
-        for (i = 0; i < IOS_VMC_SLOTS; i++)
-            if (dcalls[i] && (best < 0 || dbytes[i] > dbytes[best] || (dbytes[i] == dbytes[best] && dcalls[i] > dcalls[best]))) best = i;
-        if (best < 0) break;
-        n = snprintf( line, sizeof(line), "[xp-vmcall]   %s tag %u%s: %llu calls %llu KB |", (ios_vmc_tab[best].type & 32) ? "unmap" : "map",
-                      (unsigned)(ios_vmc_tab[best].type >> 24), (ios_vmc_tab[best].type & 128) ? " file/shared" : "",
-                      (unsigned long long)dcalls[best], (unsigned long long)(dbytes[best] >> 10) );
-        for (f = 0; f < IOS_VMC_FRAMES && n < (int)sizeof(line) - 200; f++)
-            n += ios_vmc_name( line + n, sizeof(line) - n, ios_vmc_tab[best].pc[f] );
-        wine_log_write( "%s", line );
-        dcalls[best] = 0;
-    }
 }
 
 static void ios_xprobe_main( void )

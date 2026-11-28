@@ -14478,6 +14478,7 @@ static const char *mad_swd_step_name(LONG step) {
     case 'A': return " (layer setup on the iOS main thread)";
     case 'D': return " (nextDrawable)";
     case 'C': return " (blit and commit)";
+    case 'G': return " (framegen: copies for the presenter thread)";   /* madeira-duo fgp1 */
     }
     return "";
 }
@@ -26488,7 +26489,7 @@ static void mad_present_run(struct mad_swapchain *s, UINT idx) {
     }
     if (g_fg_on > 0 && g_fgp_slots > 0) {   /* madeira-duo fgp1: the presenter thread waits for the drawables */
         int done;
-        mad_swd_step(s->queue, 'C');
+        mad_swd_step(s->queue, 'G');
         { LONG64 tc = mad_qpc(); done = mad_fgp_present(s, idx, src); InterlockedExchangeAdd64(&g_xp.t_cmt, mad_qpc() - tc); }
         if (done) goto fgp_presented;
         mad_fgp_drain();   /* the old path presents now: nothing older may still be on its way to the glass */
