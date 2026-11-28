@@ -5,7 +5,7 @@
 
 Two kinds of option live in Documents/madeira.cfg:
   - plain keys ("vram-mb = 4352"), read through build/madeira_cfg.h
-    (madeira_cfg_get/int/bool), the D3D12 runtime (mad_cfg_int_pe/str_pe) or
+    (madeira_cfg_get/int/bool), the D3D12 runtime (mad_cfg_int_pe/str_pe/float_pe) or
     the app (MadeiraConfig.get/bool/flag);
   - environment switches ("env.NAME = value"), which the app exports before
     Wine starts; any MADEIRA_*/DXMT_*/MYTHIC_* name the code reads with getenv,
@@ -33,7 +33,7 @@ REPOS = {
 EXT = (".c", ".h", ".m", ".mm", ".cpp", ".hpp", ".cc", ".swift")
 SKIP = ("/host-tests/", "/ffmpeg/", "ConfigCatalog.generated.swift")
 
-CFG = re.compile(r'\b(madeira_cfg_(?:get|int|bool)|mad_cfg_(?:int|str)_pe|'
+CFG = re.compile(r'\b(madeira_cfg_(?:get|int|bool)|mad_cfg_(?:int|str|float)_pe|'
                  r'MadeiraConfig\.(?:get|bool|flag))\(\s*"([A-Za-z0-9._-]+)"\s*(?:,\s*([^,)]+))?')
 ENV = re.compile(r'\b(getenv|GetEnvironmentVariable[AW]?|env::getEnvVar|madeiraSwitch|'
                  r'madeira_switch_for_caller|mad_env_is_zero|flag|envFlag|ios_srv_switch)\(\s*L?"((?:MADEIRA|DXMT|MYTHIC)_[A-Z0-9_]+)"'
