@@ -1,0 +1,155 @@
+From f68320c50494a3e315a257965a8b164b438f77a5 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Sun, 8 Nov 2026 00:22:55 +1100
+Subject: [PATCH] Opt-in MADEIRA_DXC_ARGS_LOG / _ADD / _DROP: log and rewrite
+ the game's compile arguments
+
+---
+ .../clang/tools/dxcompiler/dxcompilerobj.cpp  | 117 ++++++++++++++++++
+ 1 file changed, 117 insertions(+)
+
+diff --git a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+index 231737d1..3a5d6ca7 100644
+--- a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
++++ b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+@@ -40,6 +40,10 @@
+ #include "dxc/Support/dxcfilesystem.h"
+ #include "dxc/dxcapi.internal.h"
+ #include "dxcutil.h"
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
+ 
+ #include "dxc/Support/DxcLangExtensionsHelper.h"
+ #include "dxc/Support/FileIOHelper.h"
+@@ -462,6 +466,113 @@ static HRESULT ErrorWithString(const std::string &error, REFIID riid,
+   return S_OK;
+ }
+ 
++// Madeira (madeira-duo dxc-args): opt-in, all off by default.
++//   MADEIRA_DXC_ARGS_LOG=1    log each distinct argument set the game passes
++//                             (flags only: -D values, -E/-Fo/-Fd/file names
++//                             are summarised), with a running count.
++//   MADEIRA_DXC_ARGS_DROP=a;b drop these arguments (exact match; a value-taking
++//                             option drops its value too, e.g. "-O1" or "-Zi").
++//   MADEIRA_DXC_ARGS_ADD=a;b  append these arguments (e.g. "-O3").
++// Lines go to Wine's debug output (__wine_dbg_output), one record < 1000 bytes.
++namespace madeira_dxc_args {
++static std::mutex g_lock;
++static std::map<std::string, unsigned> *g_seen;
++static unsigned g_total;
++static int g_log = -1;
++static std::vector<std::wstring> *g_add, *g_drop;
++static void out(const char *line) {
++  typedef int(__cdecl * fn_t)(const char *);
++  static fn_t fn;
++  static int looked;
++  if (!looked) {
++    HMODULE nt = GetModuleHandleA("ntdll.dll");
++    fn = nt ? (fn_t)(void *)GetProcAddress(nt, "__wine_dbg_output") : nullptr;
++    looked = 1;
++  }
++  if (fn) fn(line);
++}
++static std::vector<std::wstring> *split(const char *v) {
++  auto *r = new std::vector<std::wstring>();
++  if (!v) return r;
++  std::string cur;
++  for (const char *c = v;; c++) {
++    if (*c == ';' || !*c) {
++      if (!cur.empty()) r->push_back(std::wstring(cur.begin(), cur.end()));
++      cur.clear();
++      if (!*c) break;
++    } else cur += *c;
++  }
++  return r;
++}
++static void init() {
++  std::lock_guard<std::mutex> g(g_lock);
++  if (g_log >= 0) return;
++  const char *l = getenv("MADEIRA_DXC_ARGS_LOG");
++  g_add = split(getenv("MADEIRA_DXC_ARGS_ADD"));
++  g_drop = split(getenv("MADEIRA_DXC_ARGS_DROP"));
++  g_seen = new std::map<std::string, unsigned>();
++  if (g_log || !g_add->empty() || !g_drop->empty() || (l && l[0] == '1')) {
++    char b[600];
++    snprintf(b, sizeof b, "[dxc-args] madeira: log %d, %u argument(s) added, %u dropped (MADEIRA_DXC_ARGS_LOG/ADD/DROP)\n",
++             (l && l[0] == '1') ? 1 : 0, (unsigned)g_add->size(), (unsigned)g_drop->size());
++    out(b);
++  }
++  g_log = (l && l[0] == '1') ? 1 : 0;   // last: other threads read the lists only after this
++}
++static std::string narrow(LPCWSTR w) {
++  std::string r;
++  for (; w && *w; w++) r += (*w < 128) ? (char)*w : '?';
++  return r;
++}
++// Options whose next argument is a per-shader value.
++static bool value_opt(const std::string &a) {
++  static const char *const v[] = {"-E", "-T", "-Fo", "-Fd", "-Fc", "-Fe", "-Fh", "-Fre", "-Frs", "-Fsh", "-Vn", "-I", "-D",
++                                  "-setprivate", "-setrootsignature", "-extractrootsignature", nullptr};
++  for (int i = 0; v[i]; i++) if (a == v[i]) return true;
++  return false;
++}
++static bool value_opt_w(LPCWSTR w) { return value_opt(narrow(w)); }
++static void log_args(LPCWSTR *args, UINT32 n) {
++  std::string key;
++  unsigned defines = 0;
++  for (UINT32 i = 0; i < n; i++) {
++    std::string a = narrow(args[i]);
++    if (a.empty() || (a[0] != '-' && a[0] != '/')) continue;   // a file name
++    if (a.compare(1, 1, "D") == 0) { defines++; if (a.size() == 2) i++; continue; }
++    if (a == "-T" && i + 1 < n) { key += "-T " + narrow(args[i + 1]).substr(0, 2) + "_x "; i++; continue; }   // stage, not the model
++    if (value_opt(a)) { i++; continue; }
++    if (a.compare(0, 2, "-E") == 0 || a.compare(0, 2, "-T") == 0) continue;   // -Emain / -Tvs_6_0 joined
++    key += a; key += ' ';
++  }
++  char b[990];
++  std::lock_guard<std::mutex> g(g_lock);
++  g_total++;
++  unsigned &c = (*g_seen)[key];
++  c++;
++  if (c == 1 && g_seen->size() <= 64) {
++    snprintf(b, sizeof b, "[dxc-args] new set #%u (compile %u, %u -D): %.880s\n", (unsigned)g_seen->size(), g_total, defines, key.c_str());
++    out(b);
++  }
++  if (!(g_total % 2000)) {
++    snprintf(b, sizeof b, "[dxc-args] %u compiles, %u distinct sets\n", g_total, (unsigned)g_seen->size());
++    out(b);
++  }
++}
++// The argument list the compile uses: the game's, minus DROP, plus ADD.
++static void rewrite(LPCWSTR *&args, UINT32 &n, std::vector<LPCWSTR> &store) {
++  if (g_drop->empty() && g_add->empty()) return;
++  for (UINT32 i = 0; i < n; i++) {
++    bool drop = false;
++    for (auto &d : *g_drop) if (args[i] && d == args[i]) drop = true;
++    if (drop) { if (value_opt_w(args[i]) && i + 1 < n) i++; continue; }
++    store.push_back(args[i]);
++  }
++  for (auto &a : *g_add) store.push_back(a.c_str());
++  args = store.data();
++  n = (UINT32)store.size();
++}
++} // namespace madeira_dxc_args
++
+ class DxcCompiler : public IDxcCompiler3,
+                     public IDxcLangExtensions3,
+                     public IDxcContainerEvent,
+@@ -539,6 +650,12 @@ public:
+ 
+     *ppResult = nullptr;
+ 
++    // Madeira dxc-args: log and/or rewrite the game's arguments (opt-in).
++    std::vector<LPCWSTR> madeiraArgs;
++    madeira_dxc_args::init();
++    if (madeira_dxc_args::g_log) madeira_dxc_args::log_args(pArguments, argCount);
++    madeira_dxc_args::rewrite(pArguments, argCount, madeiraArgs);
++
+     HRESULT hr = S_OK;
+     CComPtr<IDxcBlobUtf8> utf8Source;
+     CComPtr<AbstractMemoryStream> pOutputStream;
+-- 
+2.56.0
+

@@ -36,6 +36,8 @@
 //    - The Steam titles of `steamTitles` (merged 2026-10-26): their App IDs,
 //      their folders under steamapps\common and their own programs; a
 //      program marked Steam-only names the game only inside a Steam library.
+//    - Path of Exile 2 from Steam: App ID 2694490 or the folder
+//      "Path of Exile 2" (its programs share names with Path of Exile's).
 //    - Any other game, and the Desktop, gets the standard list (owner's
 //      decisions, 2026-10-12; GameRecommendationsApply.swift).
 //
@@ -47,6 +49,17 @@
 //
 
 import Foundation
+
+/// madeira-duo: a setting in a file the game keeps itself, under the Windows user's folder
+/// (GameRecommendation.ini; written by GameRecommendations.writeIni, GameIniFiles.swift).
+struct GameIniSetting: Equatable {
+    /// Under drive_c\users\<user>, "/"-separated, in any case:
+    /// "Documents/My Games/Path of Exile 2/poe2_production_Config.ini".
+    let file: String
+    let section: String
+    let key: String
+    let value: String
+}
 
 /// The recommended setup of one game. A switch left nil is not touched.
 struct GameRecommendation: Equatable {
@@ -87,11 +100,26 @@ struct GameRecommendation: Equatable {
     /// (GameRecommendations.smallRAMDevice). nil: every device gets the same list.
     var smallRAMConfig: String? = nil
 
+    /// madeira-duo: Game details › MetalFX upscaling (LibraryEntry.metalFXUpscale), 1.5 or 2;
+    /// 1 turns it off. nil keeps the entry's.
+    var metalFXUpscale: Double? = nil
+    /// madeira-duo: lines only a bundle with the ARM64EC dxcompiler.dll gets, after `config`
+    /// (GameRecommendations.nativeDXCBundled): without that DLL, env.MADEIRA_DXC_NATIVE = 1
+    /// would leave the game no dxcompiler.dll at all.
+    var nativeDXCConfig: String? = nil
+    /// madeira-duo: settings in the game's own files, written at a start once the game has
+    /// written the file (GameRecommendations.writeIni).
+    var ini: [GameIniSetting] = []
+
     /// The config file's text as GameProfile stores it (one trailing newline): `config`,
-    /// and on a device with less than 12 GB of RAM `smallRAMConfig` after it.
+    /// on a device with less than 12 GB of RAM `smallRAMConfig` after it, and with the
+    /// ARM64EC dxcompiler.dll in the bundle `nativeDXCConfig`.
     var fileText: String {
         var text = config.hasSuffix("\n") ? config : config + "\n"
         if let extra = smallRAMConfig, GameRecommendations.smallRAMDevice {
+            text += extra.hasSuffix("\n") ? extra : extra + "\n"
+        }
+        if let extra = nativeDXCConfig, GameRecommendations.nativeDXCBundled {
             text += extra.hasSuffix("\n") ? extra : extra + "\n"
         }
         return text
@@ -113,6 +141,8 @@ struct GameRecommendation: Equatable {
         if let resolution { parts.append(resolution == Self.screen720 ? "this screen's shape at 720 lines" : resolution) }
         if launchMode == "desktop" { parts.append("starts in the Wine desktop") }
         if startServices == true { parts.append("Windows services first") }
+        if let metalFXUpscale { parts.append(metalFXUpscale > 1 ? "MetalFX \(metalFXUpscale == 2 ? "2" : "1.5")×" : "MetalFX off") }
+        if !ini.isEmpty { parts.append("\(ini.count) of the game's own settings") }
         return parts.joined(separator: ", ")
     }
 }
@@ -127,6 +157,11 @@ enum GameRecommendations {
     /// An 8 GB (or smaller) device: under 10 GB installed. It gets a list's
     /// `smallRAMConfig`; a 12 GB phone or a 16 GB iPad does not.
     static var smallRAMDevice: Bool { deviceRAMBytes < 10 << 30 }
+
+    /// madeira-duo: the bundle carries the ARM64EC dxcompiler.dll (build/dxc-arm64ec), which
+    /// env.MADEIRA_DXC_NATIVE = 1 loads from system32. A variable so the host test can try both.
+    static var nativeDXCBundled: Bool =
+        Bundle.main.url(forResource: "dxcompiler", withExtension: "dll", subdirectory: "arm64ec-windows") != nil
 
     // MARK: The lists
 
@@ -1236,10 +1271,120 @@ enum GameRecommendations {
     /// Legacy's list.
     static let smallRAMSwapLines = "swap-mb = 3072"
 
+    /// madeira-duo: Path of Exile 2 from Steam (App ID 2694490), as tuned on an iPhone Duo (A20 Pro GPU, 12 GB) from
+    /// 14 to 28 Nov 2026: memory (JIT pool split, donor pool, swap file), thread QoS by the game's thread names, the
+    /// emulator's copy and leaf-call idioms, Direct3D 12 pipeline building and caches, GPU recording, and frame
+    /// generation from the game's FSR 3.1 inputs (30 -> 60 on a 120 Hz panel, the game capped at 30). Its game
+    /// settings (shadows, light, water, GI and textures at their lowest, FSR Balanced at 1152x720, dynamic
+    /// resolution off, 30 fps cap) go into poe2_production_Config.ini once the game has written it. Left out of the
+    /// device's file: diagnostics, a list of game-build code addresses, and switches this tree does not have.
+    static let pathOfExile2 = GameRecommendation(
+        id: "path-of-exile-2", title: "Path of Exile 2", version: 1,
+        config: """
+        # Madeira's recommended settings for Path of Exile 2.
+        # Reset to Recommended, at the bottom of the game's settings, brings them back.
+        # Memory: the JIT pool and its split, the donor pool, the swap file and x64 images out of the pool.
+        pool = 1024
+        pool-split = 1
+        donor-pool-mb = 4096
+        swap-mode = 2
+        swap-mb = 3072
+        swap-images = 1
+        env.MADEIRA_X64_IMAGE_NOCOPY = 1
+        env.MADEIRA_POOL_TRIM = 2
+        env.MADEIRA_SECTION_VIEW_CAP_GB = 4
+        # Threads: QoS by the game's thread names; Steam demoted once the game presents; the warmer on efficiency cores.
+        env.MADEIRA_THREAD_QOS = Main=user-interactive;HIGH*=user-interactive;MEDIUM*=user-initiated;LOW*=user-initiated;Bink*=utility;CJobMgr*=utility;CHTTP*=utility;CURL*=utility;CSystemManager*=utility;COfflineMessageCache*=utility;sl.log=utility
+        env.MADEIRA_BG_QOS_PROCS = steam.exe;steamwebhelper.exe;steamservice.exe
+        env.MADEIRA_BG_QOS_DELAY_S = 20
+        env.MADEIRA_ECO_NATIVE = 1
+        env.MADEIRA_PROBES = light
+        env.MADEIRA_LEAN_DIAG = 1
+        quiet-log = 1
+        # Wine and the emulator.
+        env.MADEIRA_SYNC_LEAN = 1
+        env.MADEIRA_FASTSYNC_SEM = 1
+        env.MADEIRA_FASTSYNC_CAP_US = 12000
+        env.MADEIRA_CS_X64 = 1
+        env.MADEIRA_SRV_FGETPATH = 1
+        env.MADEIRA_VDCFG_PATH = 1
+        env.FEX_EXTENDEDVOLATILEMETADATA = PathOfExileSteam.exe:pathofexilesteam.exe:fmod.dll:fmodstudio.dll:d3d12.dll
+        env.MADEIRA_FEX_ALIAS_FIRST = 1
+        env.MADEIRA_FEX_MEMMOVE = 1
+        env.MADEIRA_FEX_MEMMOVE_SITES = 1
+        env.MADEIRA_FEX_MOVE_NOPUSH = 1
+        env.MADEIRA_FEX_LEAF_INLINE = 1
+        env.MADEIRA_FEX_LEAF_MAX = 24
+        env.MADEIRA_FEX_ZERO_SCRUB = 0
+        # Direct3D 12: pipelines built in the background and at creation, kept in archives and the shader pack.
+        pso-async = 1
+        pso-async-threads = 8
+        pso-archive = 1
+        env.MADEIRA_PSO_ARCHIVE_MB = 4096
+        pso-warm = 4
+        pso-warm-compute-only = 1
+        pso-create-build = 1
+        pso-create-block = 1
+        cs-create-build = 3
+        pso-origin = 1
+        shader-cache-app-key = 0
+        d3d12-shader-pack = 1
+        env.MADEIRA_D3D12_DXIL_CACHE_MB = 4096
+        msc-bounds-check = 0
+        msc-strict-nan = 0
+        msc-sample-nan-zero = 0
+        msc-position-inf-nan = 0
+        msc-position-invariance = 0
+        # Direct3D 12: recording and submission.
+        list-journal = 1
+        cs-concurrent = 1
+        fence-chain = 3
+        fence-chain-frag = 1
+        async-submit = 1
+        async-present-ahead = 0
+        rp-discard = 1
+        root-cbv-fast = 1
+        buf-bind-fast = 1
+        replay-prefetch = 12
+        upload-swap = 0
+        vram-mb = 2048
+        # Frame generation from FSR 3.1's motion vectors and depth: the game capped at 30, 60 shown on a 120 Hz panel.
+        framegen = 1
+        framegen-cap = 30
+        framegen-min-fps = 1
+        framegen-ui-world-ps = 4b98ff22,eca18fd4
+        framegen-ui-label-runs = 1
+        framegen-presenter = 2
+        panel-hz = 120
+        """,
+        fpsMode: 3, resolution: "1152x720", metalFXUpscale: 2,
+        nativeDXCConfig: """
+        # The ARM64EC dxcompiler.dll (build/dxc-arm64ec) for the game's shader compiles, validating without dxil.dll.
+        env.MADEIRA_DXC_NATIVE = 1
+        env.MADEIRA_DXC_DXIL = 0
+        """,
+        ini: pathOfExile2Display.map {
+            GameIniSetting(file: "Documents/My Games/Path of Exile 2/poe2_production_Config.ini", section: "DISPLAY",
+                           key: $0.0, value: $0.1)
+        })
+
+    /// Path of Exile 2's [DISPLAY] settings on the device it was tuned on.
+    static let pathOfExile2Display: [(String, String)] = [
+        ("resolution_width", "1152"), ("resolution_height", "720"), ("renderer_type", "DirectX12"),
+        ("fullscreen", "false"), ("borderless_windowed_fullscreen", "true"), ("vsync_mode", "Off"),
+        ("shadow_type", "Low"), ("light_quality", "0"), ("water_detail", "0"), ("global_illumination_detail", "0"),
+        ("screenspace_effects", "1"), ("screenspace_effects_resolution", "0"), ("texture_quality", "Low"),
+        ("texture_filtering", "8"), ("bloom_strength", "0.25"), ("use_dynamic_particle_culling2", "true"),
+        ("upscale", "FSR"), ("upscale_quality", "Balanced"), ("use_dynamic_resolution", "false"),
+        ("framerate_limit", "30"), ("framerate_limit_enabled", "true"), ("triple_buffering", "false"),
+        ("reflex_mode", "Off"), ("hdr", "false"),
+    ]
+
     static let all = [rdr2Steam, rdr2Other, gta5EnhancedSteam, gta5EnhancedOther, gta5LegacySteam, gta5LegacyOther, gta4Steam,
                       ghostOfTsushima, godOfWar, horizonZeroDawn, horizonForbiddenWest, ratchetClankRiftApart, crysisRemastered,
                       crysis2Remastered, crysis3Remastered, rockstarLauncher, rockstarLauncherSetup, steamBigPicture,
-                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, standard]
+                      darkSoulsRemastered, darkSoulsIII, falloutNewVegas, fallout3, blackOps1, blackOps2, borderlands2, pathOfExile2,
+                      standard]
         + steamTitles.map(\.list)
 
     // MARK: Recognising a game
@@ -1259,6 +1404,8 @@ enum GameRecommendations {
     static let gta5LegacyAppID = 271590
     /// Grand Theft Auto IV: The Complete Edition.
     static let gta4AppID = 12210
+    /// Path of Exile 2.
+    static let pathOfExile2AppID = 2694490
 
     /// The recommendation for a game, or nil.
     /// - windowsPath: a program ("C:\Games\GoW\GoW.exe"), or a library Steam
@@ -1300,6 +1447,7 @@ enum GameRecommendations {
             if steamAppID == crysisRemasteredAppID || installFolder == "crysis remastered" { return crysisRemastered }
             if steamAppID == crysis2RemasteredAppID || installFolder == "crysis 2 remastered" { return crysis2Remastered }
             if steamAppID == crysis3RemasteredAppID || installFolder == "crysis 3 remastered" { return crysis3Remastered }
+            if steamAppID == pathOfExile2AppID || installFolder == "path of exile 2" { return pathOfExile2 }
             return steamTitles.first { title in
                 steamAppID.map { title.appIDs.contains($0) } == true || installFolder.map { title.folders.contains($0) } == true
             }?.list

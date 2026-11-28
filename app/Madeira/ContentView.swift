@@ -2570,6 +2570,7 @@ struct ContentView: View {
         var entry = entry
         let isNew = !library.entries.contains { $0.id == entry.id }
         if GameRecommendations.prepare(&entry, new: isNew) { library.save(entry) }
+        GameRecommendations.writeIni(for: entry)   // madeira-duo: the list's settings in the game's own files
         // A Steam game starts through Madeira Dock with its own launch profile (SteamGames.swift),
         // unless its Game details page chose "The game": then its own program starts below, like
         // any library game (SteamDirectStart).

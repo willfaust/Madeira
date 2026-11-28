@@ -1,0 +1,75 @@
+From a48b4951ac112332dcb908a32d9486e95e3888f6 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Tue, 10 Nov 2026 01:04:35 +1100
+Subject: [PATCH] cli: fossilize_replay_progress for the replay library
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ cli/fossilize_replay.cpp | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/cli/fossilize_replay.cpp b/cli/fossilize_replay.cpp
+index bbf76f0..92e68c1 100644
+--- a/cli/fossilize_replay.cpp
++++ b/cli/fossilize_replay.cpp
+@@ -3598,6 +3598,35 @@ struct ThreadedReplayer : StateCreatorInterface
+ 	DatabaseInterface *global_database = nullptr;
+ };
+ 
++#ifdef FOSSILIZE_REPLAY_LIBRARY
++// Progress for an embedding app (Madeira): pipelines in the databases being
++// replayed, and pipelines played back so far. Both 0 when no replay is running.
++static std::atomic<uint32_t> library_progress_total;
++static std::atomic<ThreadedReplayer *> library_progress_replayer;
++
++extern "C" __attribute__((visibility("default"))) void fossilize_replay_progress(uint32_t *done, uint32_t *total)
++{
++	ThreadedReplayer *replayer = library_progress_replayer.load(std::memory_order_acquire);
++	*total = replayer ? library_progress_total.load(std::memory_order_relaxed) : 0;
++	*done = replayer ? replayer->graphics_pipeline_count.load(std::memory_order_relaxed) +
++	                   replayer->compute_pipeline_count.load(std::memory_order_relaxed) : 0;
++}
++
++struct LibraryProgressScope
++{
++	explicit LibraryProgressScope(ThreadedReplayer *replayer)
++	{
++		library_progress_total.store(0, std::memory_order_relaxed);
++		library_progress_replayer.store(replayer, std::memory_order_release);
++	}
++	~LibraryProgressScope()
++	{
++		library_progress_replayer.store(nullptr, std::memory_order_release);
++		library_progress_total.store(0, std::memory_order_relaxed);
++	}
++};
++#endif
++
+ static void on_validation_error(void *userdata)
+ {
+ 	auto *replayer = static_cast<ThreadedReplayer *>(userdata);
+@@ -4134,6 +4163,9 @@ static int run_normal_process(ThreadedReplayer &replayer, const vector<const cha
+                               const char *whitelist, uint32_t whitelist_mask,
+                               intptr_t metadata_handle)
+ {
++#ifdef FOSSILIZE_REPLAY_LIBRARY
++	LibraryProgressScope progress_scope(&replayer);
++#endif
+ 	auto start_time = chrono::steady_clock::now();
+ 	auto start_create_archive = chrono::steady_clock::now();
+ 	auto resolver = create_database(databases);
+@@ -4402,6 +4434,10 @@ static int run_normal_process(ThreadedReplayer &replayer, const vector<const cha
+ 
+ 			std::move(begin(*hashes) + start_index, begin(*hashes) + end_index, begin(*hashes));
+ 			hashes->erase(begin(*hashes) + (end_index - start_index), end(*hashes));
++#ifdef FOSSILIZE_REPLAY_LIBRARY
++			if (tag == RESOURCE_GRAPHICS_PIPELINE || tag == RESOURCE_COMPUTE_PIPELINE)
++				library_progress_total.fetch_add(uint32_t(hashes->size()), std::memory_order_relaxed);
++#endif
+ 
+ 			if (replayer.replayer_cache_db)
+ 				populate_blob_hash_set(replayer.cached_blobs[tag], tag, *replayer.replayer_cache_db);
+-- 
+2.56.0
+

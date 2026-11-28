@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 DXMT = {'d3d9.dll', 'd3d9shim.dll', 'd3d9-emulated.dll', 'd3d10core.dll',
         'd3d11.dll', 'dxgi.dll', 'winemetal.dll', 'nvapi64.dll'}
 CUSTOM = {'faultrep.dll', 'madeira_d3d12.dll', 'xtajit64.dll', 'xtajit.dll',
-          'dockhost.exe', 'dock-notices.txt', 'wineios.drv', 'tftrace-x64.dll'}
+          'dockhost.exe', 'dock-notices.txt', 'wineios.drv', 'tftrace-x64.dll',
+          'dxcompiler.dll'}  # madeira-duo: native DXC, built by build/dxc-arm64ec (not a Wine module)
 
 
 def targets(arch, names=None):

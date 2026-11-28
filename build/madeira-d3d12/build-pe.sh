@@ -102,8 +102,26 @@ for cpp in "$SRC/mad_bcn.cpp" "$REPO_ROOT/dxmt/src/dxmt/dxmt_bcn.cpp"; do
     "$MINGW/arm64ec-w64-mingw32-clang++" -c -O2 -std=c++17 -fno-exceptions -fno-rtti \
         -I"$REPO_ROOT/dxmt/src/dxmt" -o "$OUT/$(basename "$cpp" .cpp).o" "$cpp"
 done
+# list-journal: the *.x64.c / *.x64.S objects are x64 code linked into the
+# ARM64EC image (lld puts them in the x64 code range). x64 code runs at the PE
+# address while ARM64EC code runs from Madeira's pool copy with its own .data,
+# so an x64 object must not reference any symbol outside itself
+# (madeira_list_journal.h); the build stops if one does.
+X64_OBJS=()
+for s in "$SRC"/*.x64.S "$SRC"/*.x64.c; do
+    [ -e "$s" ] || continue
+    "$MINGW/x86_64-w64-mingw32-clang" -c -O2 -Wall -fno-auto-import -fno-builtin \
+        -I"$SRC" -I"$REPO_ROOT/madeira-d3d12/src" -o "$OUT/$(basename "$s").o" "$s"
+    X64_OBJS+=("$OUT/$(basename "$s").o")
+    if [ -n "$("$MINGW/llvm-nm" -u "$OUT/$(basename "$s").o")" ]; then
+        echo "x64 object $(basename "$s") references outside symbols:" >&2
+        "$MINGW/llvm-nm" -u "$OUT/$(basename "$s").o" >&2
+        exit 1
+    fi
+done
 "$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall ${EXTRA[@]+"${EXTRA[@]}"} \
-    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$OUT/mad_bcn.o" "$OUT/dxmt_bcn.o" "$SRC/d3d12.def" \
+    -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$OUT/mad_bcn.o" "$OUT/dxmt_bcn.o" \
+    ${X64_OBJS[@]+"${X64_OBJS[@]}"} "$SRC/d3d12.def" \
     -I"$SRC" -I"$REPO_ROOT/madeira-d3d12/src" -I"$REPO_ROOT/dxmt/src/winemetal" \
     -L"$REPO_ROOT/dxmt/build-arm64ec/src/winemetal" -lwinemetal \
     -luuid -lole32

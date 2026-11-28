@@ -81,6 +81,8 @@
  * hull/domain shader then reports no tessellation numbers and its pipeline
  * stays a placeholder. */
 #define IR_OPT_FUNC_LIST(X) \
+    X(IRCompilerIgnoreDebugInformation) \
+    X(IRCompilerSetValidationFlags) \
     X(IRShaderReflectionCopyHullInfo) \
     X(IRShaderReflectionReleaseHullInfo) \
     X(IRShaderReflectionCopyDomainInfo) \
@@ -1484,6 +1486,19 @@ static void mad_dxc_init_once(void)
         return;
     }
     mkdir(dir, 0755);
+    /* madeira-duo (16 Nov 2026): with d3d12-shader-pack on, new entries go to the pack and
+     * loose ones are only read (and moved into the pack on a hit), so the loose bound has
+     * nothing to bound. The scan still stat()ed every leftover loose entry each launch
+     * (17,348 files, 451 MB on the Duo: 2.5% of the process's CPU in Path of Exile 2's
+     * hideout). It is skipped then; MADEIRA_D3D12_DXIL_LOOSE_SCAN=1 runs it anyway. */
+    if (mad_sc_pack_on()) {
+        const char *force = getenv("MADEIRA_D3D12_DXIL_LOOSE_SCAN");
+        if (!(force && force[0] == '1')) {
+            dprintf(2, "[d3d12-dxil-cache] ml1990 enabled, entries in the shader pack; loose entries not scanned "
+                       "(read and moved into the pack on a hit); retry slots %s\n", g_dxc_slot_on ? "on" : "off");
+            return;
+        }
+    }
     /* madeira-duo (6 Nov 2026): the first scan stats every loose entry (17k on the Duo,
      * over a second), and this runs inside the first pipeline creation, on the game's
      * Main thread in PoE2: one 2.3 s hitch. It runs on its own thread now. Until it
@@ -1683,6 +1698,34 @@ static uint32_t mad_ir_compat_flags(void) {
     return (uint32_t)cached;
 }
 
+/* madeira-duo: converter settings outside the compatibility flags (opt-in).
+ * - msc-ignore-debug-info = 1: the converter drops the DXIL's debug information
+ *   (IRCompilerIgnoreDebugInformation); smaller libraries, less to compile.
+ * - msc-validation = 0: no compile-time validation of the input DXIL
+ *   (IRCompilerSetValidationFlags none); the game's DXIL passed DXC already.
+ * Either one, set away from its default, joins the DXIL cache key here and the
+ * PE side's cache identity (madeira_d3d12.c, g_sc_rt). Bits 16+ never reach the
+ * converter. */
+#define MAD_IR_OPT_NODEBUG    (1u << 16)
+#define MAD_IR_OPT_NOVALIDATE (1u << 17)
+static uint32_t mad_ir_opts(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        int nodebug, novalidate;
+        pthread_once(&g_ir_once, ir_load_once);   /* the optional symbols decide */
+        nodebug = madeira_cfg_int("msc-ignore-debug-info", 0) ? 1 : 0;
+        novalidate = madeira_cfg_int("msc-validation", 1) ? 0 : 1;
+        if (nodebug && !g_ir.IRCompilerIgnoreDebugInformation) nodebug = 0;
+        if (novalidate && !g_ir.IRCompilerSetValidationFlags) novalidate = 0;
+        if (nodebug || novalidate)
+            fprintf(stderr, "[madeira-ir] madeira-duo converter options: debug information %s, DXIL validation %s "
+                            "(madeira.cfg msc-ignore-debug-info, msc-validation)\n",
+                    nodebug ? "ignored" : "kept", novalidate ? "off" : "on");
+        cached = (int)((nodebug ? MAD_IR_OPT_NODEBUG : 0) | (novalidate ? MAD_IR_OPT_NOVALIDATE : 0));
+    }
+    return (uint32_t)cached;
+}
+
 extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
     pthread_once(&g_ir_once, ir_load_once);
     if (!a) return MADEIRA_IR_UNSUPPORTED;
@@ -1779,7 +1822,7 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
         env.converter_ident = g_ir.ident;
         env.build_stamp = MAD_SC_BUILD;
         env.ags_rewrite = (uint32_t)mad_ags_enabled();
-        env.compat_flags = mad_ir_compat_flags();
+        env.compat_flags = mad_ir_compat_flags() | mad_ir_opts();   /* madeira-duo: the options join the key */
         mad_dxc_key(a, &env, &dxc_key, &dxc_check);
         if (dxc_slot) hit = mad_dxc_slot_take(dxc_key, dxc_check, &hit_len);
         if (!hit && dxc_disk) {
@@ -1926,6 +1969,13 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * views every such texture as an array to match. The other flags:
      * mad_ir_compat_flags. */
     g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)mad_ir_compat_flags());
+    {   /* madeira-duo: mad_ir_opts */
+        uint32_t opts = mad_ir_opts();
+        if ((opts & MAD_IR_OPT_NODEBUG) && g_ir.IRCompilerIgnoreDebugInformation)
+            g_ir.IRCompilerIgnoreDebugInformation(compiler, true);
+        if ((opts & MAD_IR_OPT_NOVALIDATE) && g_ir.IRCompilerSetValidationFlags)
+            g_ir.IRCompilerSetValidationFlags(compiler, IRCompilerValidationFlagNone);
+    }
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
     /* the tessellation reflection too: a conversion that does not fill it must not hand back the caller's bytes */
     a->ret_hs_patches_per_tg = a->ret_hs_threads_per_patch = a->ret_hs_input_cps = a->ret_hs_output_cps = 0;

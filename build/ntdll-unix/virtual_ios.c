@@ -666,6 +666,211 @@ void ios_jit_describe_pool_addr( const void *addr, char *buf, size_t buflen )
 static int ios_pool_last_alloc_reused;
 static __thread int ios_pool_last_same_image;
 
+/* madeira-pool-trim: don't copy what nobody reads from the pool.
+ *
+ * The image copy writes the whole PE into the pool, so every 16KB page of it is
+ * dirty, resident and kept warm by the pool warmer. Two kinds of page carry
+ * nothing the pool copy needs: pages that no section, header or relocation
+ * block reaches (the zero gaps between sections) and, at level 2, the
+ * resource section (lookups go through the module handle, which is the PE
+ * view, not the copy). On a range that has never been handed out the pool is
+ * still zero-fill, so leaving those pages untouched keeps the copy's bytes
+ * identical for the gaps and costs no memory at all.
+ *
+ * Skipped pages are recorded in a bitmap so the warmer, the copy check and the
+ * icache flush (a cache op by VA faults the page in) leave them alone. Any
+ * full copy over a range, and any release of it, clears its bits.
+ * MADEIRA_POOL_TRIM: 0 off, 1 gaps, 2 gaps + .rsrc. */
+extern size_t ios_jit_pool_size_global;
+static unsigned char *ios_pool_cold_bits;
+static size_t ios_pool_cold_npages;
+static size_t ios_pool_cold_bytes_total;
+
+static int ios_pool_trim_level( void )
+{
+    static int level = -1;
+    if (level < 0)
+    {
+        const char *e = getenv( "MADEIRA_POOL_TRIM" );
+        level = (e && e[0] >= '1' && e[0] <= '2') ? e[0] - '0' : 0;
+    }
+    return level;
+}
+
+static inline int ios_pool_cold_test( size_t off )
+{
+    size_t page = off >> 14;
+    unsigned char *bits = __atomic_load_n( &ios_pool_cold_bits, __ATOMIC_ACQUIRE );
+    if (!bits || page >= ios_pool_cold_npages) return 0;
+    return (__atomic_load_n( &bits[page >> 3], __ATOMIC_RELAXED ) >> (page & 7)) & 1;
+}
+
+static void ios_pool_cold_clear( size_t off, size_t size )
+{
+    size_t page, last;
+    unsigned char *bits = ios_pool_cold_bits;
+    if (!bits || !size) return;
+    last = (off + size - 1) >> 14;
+    if (last >= ios_pool_cold_npages) last = ios_pool_cold_npages - 1;
+    for (page = off >> 14; page <= last; page++)
+        __atomic_fetch_and( &bits[page >> 3], (unsigned char)~(1u << (page & 7)), __ATOMIC_RELAXED );
+}
+
+static void ios_pool_cold_set( size_t page )
+{
+    if (page < ios_pool_cold_npages)
+        __atomic_fetch_or( &ios_pool_cold_bits[page >> 3], (unsigned char)(1u << (page & 7)), __ATOMIC_RELAXED );
+}
+
+/* Mark every 16KB pool page that image range [lo, hi) touches as needed. */
+static void ios_pool_trim_need( unsigned char *need, size_t npages, size_t lead,
+                                size_t lo, size_t hi, size_t image_size )
+{
+    size_t p, first, last;
+    if (hi > image_size) hi = image_size;
+    if (lo >= hi) return;
+    first = (lead + lo) >> 14;
+    last = (lead + hi - 1) >> 14;
+    for (p = first; p <= last && p < npages; p++) need[p] = 1;
+}
+
+/* Copy image [src, src+size) to the pool at rw/rx + dst_off, skipping the pages
+ * described above, and flush the icache over what was copied. Returns 0 (and
+ * does nothing) when the image can't be parsed, so the caller does the full
+ * copy; otherwise 1, with the bytes skipped in *skipped_out. */
+static int ios_pool_trim_copy( char *rw_base, char *rx_base, size_t dst_off,
+                               const char *src, size_t size, int level,
+                               size_t *skipped_out, size_t *rsrc_skipped )
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)src;
+    const IMAGE_NT_HEADERS *nt;
+    const IMAGE_SECTION_HEADER *sec;
+    const IMAGE_DATA_DIRECTORY *dirs;
+    size_t lead = dst_off & 0x3fff, npages, p, skipped = 0, rsrc = 0, run_lo = 0, run_hi = 0;
+    size_t rsrc_lo = 0, rsrc_hi = 0;
+    unsigned char *need;
+    unsigned i, nsec, ndirs, rsrc_sec = 0;
+
+    *skipped_out = *rsrc_skipped = 0;
+    if (size < 0x1000 || dos->e_magic != IMAGE_DOS_SIGNATURE || (size_t)dos->e_lfanew + 0x200 > size) return 0;
+    nt = (const IMAGE_NT_HEADERS *)(src + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return 0;
+    nsec = nt->FileHeader.NumberOfSections;
+    sec = IMAGE_FIRST_SECTION( nt );
+    if ((const char *)(sec + nsec) > src + size) return 0;
+    dirs = nt->OptionalHeader.DataDirectory;
+    ndirs = nt->OptionalHeader.NumberOfRvaAndSizes;
+    if (ndirs > IMAGE_NUMBEROF_DIRECTORY_ENTRIES) ndirs = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+
+    npages = (lead + size + 0x3fff) >> 14;
+    if (!(need = calloc( npages, 1 ))) return 0;
+
+    /* the first and last pool pages are shared with the alignment pad and the
+     * x18 trampolines behind the image: always copied */
+    need[0] = 1;
+    need[npages - 1] = 1;
+    ios_pool_trim_need( need, npages, lead, 0, nt->OptionalHeader.SizeOfHeaders, size );
+
+    /* level 2: the resource section, unless any other directory lives in it */
+    if (level >= 2 && ndirs > IMAGE_DIRECTORY_ENTRY_RESOURCE && dirs[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress)
+    {
+        size_t rva = dirs[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress;
+        for (i = 0; i < nsec; i++)
+        {
+            size_t va = sec[i].VirtualAddress;
+            size_t span = sec[i].Misc.VirtualSize > sec[i].SizeOfRawData ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
+            if (rva >= va && rva < va + span) { rsrc_lo = va; rsrc_hi = va + span; rsrc_sec = i; break; }
+        }
+        for (i = 0; rsrc_hi && i < ndirs; i++)
+        {
+            if (i == IMAGE_DIRECTORY_ENTRY_RESOURCE || i == IMAGE_DIRECTORY_ENTRY_SECURITY) continue;
+            if (!dirs[i].VirtualAddress) continue;
+            if (dirs[i].VirtualAddress < rsrc_hi && dirs[i].VirtualAddress + dirs[i].Size > rsrc_lo)
+                rsrc_lo = rsrc_hi = 0;
+        }
+        if (rsrc_hi && (sec[rsrc_sec].Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)))
+            rsrc_lo = rsrc_hi = 0;
+    }
+    for (i = 0; i < nsec; i++)
+    {
+        size_t va = sec[i].VirtualAddress;
+        size_t span = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
+        if (rsrc_hi && i == rsrc_sec) continue;
+        ios_pool_trim_need( need, npages, lead, va, va + span, size );
+    }
+
+    /* every page a relocation block patches (the relocation pass writes it) */
+    if (ndirs > IMAGE_DIRECTORY_ENTRY_BASERELOC && dirs[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress)
+    {
+        size_t r = dirs[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
+        size_t r_end = r + dirs[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
+        if (r_end > size) { free( need ); return 0; }
+        while (r + sizeof(IMAGE_BASE_RELOCATION) <= r_end)
+        {
+            const IMAGE_BASE_RELOCATION *b = (const IMAGE_BASE_RELOCATION *)(src + r);
+            if (b->SizeOfBlock < sizeof(*b)) break;
+            ios_pool_trim_need( need, npages, lead, b->VirtualAddress, (size_t)b->VirtualAddress + 0x1000, size );
+            r += b->SizeOfBlock;
+        }
+    }
+
+    /* a page outside every section is section-alignment padding: skip it only
+     * if it really is all zero in the source, so the copy stays byte-identical */
+    for (p = 1; p + 1 < npages; p++)
+    {
+        size_t lo = (p << 14) - lead, k;
+        const uint64_t *w = (const uint64_t *)(src + lo);
+        if (need[p] || (rsrc_hi && lo >= rsrc_lo && lo + 0x4000 <= rsrc_hi)) continue;
+        for (k = 0; k < 0x4000 / 8; k++) if (w[k]) { need[p] = 1; break; }
+    }
+
+    /* the pool range is fresh, so the bitmap may need to exist first */
+    if (!ios_pool_cold_bits)
+    {
+        size_t n = (ios_jit_pool_size_global + 0x3fff) >> 14;
+        unsigned char *bits = calloc( (n + 7) / 8, 1 );
+        if (!bits) { free( need ); return 0; }
+        ios_pool_cold_npages = n;
+        __atomic_store_n( &ios_pool_cold_bits, bits, __ATOMIC_RELEASE );
+    }
+
+    /* mark first, so a warmer pass racing the copy already skips the pages */
+    for (p = 0; p < npages; p++)
+        if (!need[p]) ios_pool_cold_set( ((dst_off - lead) >> 14) + p );
+
+    for (p = 0; p <= npages; p++)
+    {
+        size_t lo, hi;
+        if (p < npages && need[p])
+        {
+            lo = p ? (p << 14) - lead : 0;
+            hi = ((p + 1) << 14) - lead;
+            if (hi > size) hi = size;
+            if (run_hi != lo) { run_lo = lo; }
+            run_hi = hi;
+            continue;
+        }
+        if (run_hi > run_lo)
+        {
+            memcpy( rw_base + dst_off + run_lo, src + run_lo, run_hi - run_lo );
+            sys_icache_invalidate( rx_base + dst_off + run_lo, run_hi - run_lo );
+        }
+        run_lo = run_hi = 0;
+        if (p < npages)
+        {
+            lo = (p << 14) - lead;
+            skipped += 0x4000;
+            if (rsrc_hi && lo >= rsrc_lo && lo < rsrc_hi) rsrc += 0x4000;
+        }
+    }
+    free( need );
+    __atomic_fetch_add( &ios_pool_cold_bytes_total, skipped, __ATOMIC_RELAXED );
+    *skipped_out = skipped;
+    *rsrc_skipped = rsrc;
+    return 1;
+}
+
 /* Defined next to decommit_pages; declared here so the allocator can check a
  * range against the LIVE ledger before handing it out (task #34 double-handout
  * detector). */
@@ -1125,12 +1330,13 @@ static void *ios_pool_warmer_thread( void *arg )
             if (tail > total) tail = total;
             /* madeira-bcd split pool: the hole is not pool memory (its RW side
              * is PROT_NONE, its RX side the main thread's stack) -- skip it. */
-            for (o = 0; o < head; o += 0x4000) { if (IOS_POOL_IN_HOLE(o)) continue; sink += rw[o]; touched++; }
-            for (o = total - tail; o < total; o += 0x4000) { if (IOS_POOL_IN_HOLE(o)) continue; sink += rw[o]; touched++; }
+            /* madeira-pool-trim: pages the image copy left untouched stay untouched */
+            for (o = 0; o < head; o += 0x4000) { if (IOS_POOL_IN_HOLE(o) || ios_pool_cold_test(o)) continue; sink += rw[o]; touched++; }
+            for (o = total - tail; o < total; o += 0x4000) { if (IOS_POOL_IN_HOLE(o) || ios_pool_cold_test(o)) continue; sink += rw[o]; touched++; }
             if (rx)
             {
-                for (o = 0; o < head; o += 0x4000) { if (IOS_POOL_IN_HOLE(o)) continue; sink += rx[o]; touched++; }
-                for (o = total - tail; o < total; o += 0x4000) { if (IOS_POOL_IN_HOLE(o)) continue; sink += rx[o]; touched++; }
+                for (o = 0; o < head; o += 0x4000) { if (IOS_POOL_IN_HOLE(o) || ios_pool_cold_test(o)) continue; sink += rx[o]; touched++; }
+                for (o = total - tail; o < total; o += 0x4000) { if (IOS_POOL_IN_HOLE(o) || ios_pool_cold_test(o)) continue; sink += rx[o]; touched++; }
             }
             /* madeira-bcd pool-low: region C's carved part holds FEX code buffers
              * exactly like the tail -- warm both of its aliases too. */
@@ -1145,8 +1351,9 @@ static void *ios_pool_warmer_thread( void *arg )
             (void)sink;
             cycle++;
             if (cycle == 1 || (cycle % 30) == 0)
-                dprintf(2, "[pool-warmer] cycle=%u touched=%lu pages (head=0x%lx tail=0x%lx)\n",
-                        cycle, (unsigned long)touched, (unsigned long)head, (unsigned long)tail);
+                dprintf(2, "[pool-warmer] cycle=%u touched=%lu pages (head=0x%lx tail=0x%lx) trimmed=%lu KB\n",
+                        cycle, (unsigned long)touched, (unsigned long)head, (unsigned long)tail,
+                        (unsigned long)(ios_pool_cold_bytes_total >> 10));
             {
                 extern void ios_wow_pressure_tick( unsigned cycle );
                 ios_wow_pressure_tick( cycle );   /* ml2030: idle 32-bit placeholders back under band pressure */
@@ -1396,6 +1603,12 @@ static void *ios_pool_warmer_thread( void *arg )
                 static const char *band_name[B_MAX] =
                     { "poolRX", "poolRW", "hostlow", "guest", "pa", "fex", "other" };
                 unsigned long long band_dirty[B_MAX], band_res[B_MAX];
+                /* madeira-duo (diag2): what sits in the compressor by band, and the guest band's regions by
+                 * size and backing (anonymous, or mapped from the swap file), so a run says which memory a
+                 * lower swap floor would move out of the compressor. Index: [file-backed][size class]. The
+                 * kernel merges neighbouring anonymous mappings, so a region is not always one allocation. */
+                static const char * const gz_name[6] = { "<64K", "64K-1M", "1-4M", "4-16M", "16-64M", ">=64M" };
+                unsigned long long band_swap[B_MAX], gz_n[2][6], gz_res[2][6], gz_swap[2][6];
                 /* ml1074: the four dirtiest regions of the two bands nobody can name
                  * from the totals (hostlow = everything below 64 GB that is not the
                  * pool; pa = 0x74..0x7c). The overall top-12 is always the game's own
@@ -1428,6 +1641,8 @@ static void *ios_pool_warmer_thread( void *arg )
                 memset( swap_by_tag, 0, sizeof(swap_by_tag) );
                 memset( band_dirty, 0, sizeof(band_dirty) );
                 memset( band_res, 0, sizeof(band_res) );
+                memset( band_swap, 0, sizeof(band_swap) );
+                memset( gz_n, 0, sizeof(gz_n) ); memset( gz_res, 0, sizeof(gz_res) ); memset( gz_swap, 0, sizeof(gz_swap) );
                 struct timespec pm_t0, pm_t1;   /* madeira-bcd: what the walk costs */
                 clock_gettime( CLOCK_MONOTONIC, &pm_t0 );
                 for (;;)
@@ -1460,6 +1675,16 @@ static void *ios_pool_warmer_thread( void *arg )
                         else b = B_OTHER;
                         band_dirty[b] += d;
                         band_res[b] += (unsigned long long)info.pages_resident << 14;
+                        band_swap[b] += (unsigned long long)info.pages_swapped_out << 14;   /* diag2 */
+                        if (b == B_GUEST)
+                        {
+                            int fb = info.external_pager ? 1 : 0;
+                            int zc = rsize < (64u << 10) ? 0 : rsize < (1u << 20) ? 1 : rsize < (4u << 20) ? 2 :
+                                     rsize < (16u << 20) ? 3 : rsize < (64u << 20) ? 4 : 5;
+                            gz_n[fb][zc]++;
+                            gz_res[fb][zc] += (unsigned long long)info.pages_resident << 14;
+                            gz_swap[fb][zc] += (unsigned long long)info.pages_swapped_out << 14;
+                        }
                         if (b == B_HOST_LOW || b == B_PA)
                         {
                             int w = 0, q;
@@ -1556,6 +1781,17 @@ static void *ios_pool_warmer_thread( void *arg )
                     dprintf(2, " %s=%llu/%llu", band_name[ti],
                             band_dirty[ti] >> 20, band_res[ti] >> 20);
                 dprintf(2, "\n");
+                dprintf(2, "[phys-map] compressed MB by band (diag2):");
+                for (ti = 0; ti < B_MAX; ti++) dprintf(2, " %s=%llu", band_name[ti], band_swap[ti] >> 20);
+                dprintf(2, "\n");
+                for (tj = 0; tj < 2; tj++)
+                {
+                    dprintf(2, "[phys-map] guest %s regions by size (diag2), count resident/compressed MB:",
+                            tj ? "file-backed" : "anonymous");
+                    for (ti = 0; ti < 6; ti++)
+                        dprintf(2, " %s %llu %llu/%llu", gz_name[ti], gz_n[tj][ti], gz_res[tj][ti] >> 20, gz_swap[tj][ti] >> 20);
+                    dprintf(2, "\n");
+                }
                 for (ti = 0; ti < B_MAX; ti++)
                 {
                     int q;
@@ -1645,6 +1881,7 @@ static void ios_jit_verify_copy( const char *src, const char *rx, size_t size,
     for (i = 0; i + 8 <= size; i += step)
     {
         uint64_t a, b;
+        if (ios_pool_cold_test( offset + i )) continue;   /* madeira-pool-trim: not copied */
         memcpy( &a, src + i, 8 );
         memcpy( &b, rx  + i, 8 );
         checked++;
@@ -2847,6 +3084,7 @@ static int ios_pool_free_put( struct ios_pool_free *fl, int *n, int max, size_t 
 {
     int i, merged;
 
+    ios_pool_cold_clear( off, size );   /* madeira-pool-trim: whoever gets it next owns every page */
     do
     {
         merged = 0;
@@ -13563,6 +13801,7 @@ void ios_jit_reclaim_process( void *peb )
     {
         size_t off, size;
         if (ios_pool_ledger[i].peb != peb) { i++; continue; }
+        ios_pool_cold_clear( ios_pool_ledger[i].off, ios_pool_ledger[i].size );   /* madeira-pool-trim */
         off  = ios_pool_ledger[i].off;
         size = ios_pool_ledger[i].size;
 
@@ -19808,6 +20047,7 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
             size_t alloc_size = image_alloc + tramp_prealloc + (data_delta ? page_size : 0);
             uint64_t image_tag = ios_pool_image_tag( image_base, image_size, alloc_size );
             size_t offset;
+            int trim_virgin = 0;   /* madeira-pool-trim: the range has never been handed out */
             /* ios_image_reload_mode: the same image again at the base of its
              * unloaded copy -> rebuild that copy where it is. Its pool range
              * (already shifted by data_delta, x18 tramps right behind the
@@ -19834,8 +20074,18 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
                             "ledger record of 0x%lx bytes -- new pool copy\n", image_base,
                             (unsigned long)image_size, reload_pe, (unsigned long)reload_size,
                             (unsigned long)(image_alloc + tramp_prealloc));
+                size_t head_before = jit_pool_offset;
+                int big_virgin = !ios_pool_big_freed_at;
                 reload_jit = NULL;
                 offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);
+                /* virgin: above the bump mark it was taken from, or the big-image
+                 * slot on its first use. The low region and recycled ranges never are. */
+                if (offset != (size_t)-1 && !ios_pool_last_alloc_reused)
+                {
+                    int in_big = ios_pool_big_size && offset < ios_pool_big_off + ios_pool_big_size &&
+                                 offset + alloc_size > ios_pool_big_off;
+                    trim_virgin = in_big ? big_virgin : offset >= head_before;
+                }
                 if (offset == (size_t)-1) offset = ios_pool_low_image_range( alloc_size );
                 if (offset == (size_t)-1 && ios_pool_recycle_code_range( alloc_size ))
                     offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);
@@ -19870,10 +20120,33 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
              * This preserves ADRP-based PC-relative references between sections. */
             ios_jit_scan_nonexec( "pre-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
-            memcpy((char *)jit_rw_base + offset, image_base, image_size);
+            {
+                /* madeira-pool-trim: on a virgin main-pool range, leave the pages
+                 * nothing reads from the copy as zero-fill (see ios_pool_trim_copy) */
+                size_t trim_skipped = 0, trim_rsrc = 0;
+                int trim_level = ios_pool_trim_level();
+                int trimmed = 0;
+
+                ios_pool_cold_clear( offset, image_size );
+                if (trim_level && trim_virgin && !reload_jit &&
+                    !ios_jit_low_contains( (uintptr_t)jit_rx_base + offset ))
+                    trimmed = ios_pool_trim_copy( (char *)jit_rw_base, (char *)jit_rx_base, offset,
+                                                  (const char *)image_base, image_size, trim_level,
+                                                  &trim_skipped, &trim_rsrc );
+                if (!trimmed)
+                {
+                    memcpy((char *)jit_rw_base + offset, image_base, image_size);
+                    sys_icache_invalidate((char *)jit_rx_base + offset, image_size);
+                }
+                else if (trim_skipped)
+                    dprintf(2, "[pool-trim] %s: %lu KB not copied (.rsrc %lu KB) of %lu KB, total %lu KB\n",
+                            ios_pe_module_name( image_base, image_size ),
+                            (unsigned long)(trim_skipped >> 10), (unsigned long)(trim_rsrc >> 10),
+                            (unsigned long)(image_size >> 10),
+                            (unsigned long)(ios_pool_cold_bytes_total >> 10));
+            }
             ios_jit_scan_nonexec( "post-memcpy", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
-            sys_icache_invalidate((char *)jit_rx_base + offset, image_size);
             ios_jit_scan_nonexec( "post-icache", ios_pe_module_name( image_base, image_size ),
                                   (char *)jit_rx_base + offset, image_size );
             ios_jit_verify_copy( (const char *)image_base,
@@ -22909,6 +23182,15 @@ static void ios_dc_census_take( const void *addr, size_t len, struct ios_dc_cens
  * Extent bookkeeping runs under virtual_mutex like the callers. */
 #include <fcntl.h>
 /* swap-tier core begin (tests/host/check-swap-coverage.py compiles the code up to "core end") */
+/* madeira-duo [xp-va] (diag2): what the Windows side asks of the address space and what the tier does
+ * with it, as running totals that the sampler (server_ios.c) turns into one line a second. Pairs of
+ * calls and bytes: 0 commit, 1 reserve only, 2 decommit, 3 release, 4 reset, 5 donor pool pieces
+ * mapped, 6 donor pool pieces given back (each zeroed with MADV_ZERO, so its next use is a zero-fill
+ * fault a page), 7 file holes punched by a decommit inside a backed reservation.
+ * Counting only: relaxed atomic adds, no lock taken, nothing printed here. */
+unsigned long long ios_va_census[16];
+#define IOS_VA_NOTE( k, n ) do { __atomic_fetch_add( &ios_va_census[2 * (k)], 1, __ATOMIC_RELAXED ); \
+                                 __atomic_fetch_add( &ios_va_census[2 * (k) + 1], (unsigned long long)(n), __ATOMIC_RELAXED ); } while (0)
 static int      ios_swap_fd = -1;
 static uint64_t ios_swap_cap, ios_swap_bump;
 /* resv: the extent maps a whole reservation (wide at reserve time, broad), so a
@@ -23396,6 +23678,7 @@ static void ios_donor_give( uint64_t off, size_t len )
                                      len, (unsigned long long)off );
         }
     }
+    IOS_VA_NOTE( 6, len );   /* [xp-va] */
     ios_donor_bytes -= len;
     ios_donor_free_insert( off, len );
 }
@@ -23909,6 +24192,7 @@ static size_t ios_swap_donor_pieces( char *hs, size_t len, int unix_prot, size_t
         }
         ios_donor_bytes += got; if (ios_donor_bytes > ios_donor_peak) ios_donor_peak = ios_donor_bytes;
         ios_donor_takes++;
+        IOS_VA_NOTE( 5, got );   /* [xp-va] */
         ios_swap_record( hs + done, got, off | IOS_DONOR_FLAG, key );
         done += got;
     }
@@ -24124,6 +24408,7 @@ static int ios_swap_punch_resv( char *lo, size_t len )
             return 0;
         }
         mprotect( lo, len, PROT_READ | PROT_WRITE );
+        IOS_VA_NOTE( 7, len );   /* [xp-va] */
         if (++ios_swap_holes <= 8 || (ios_swap_holes % 1024) == 0)
             dprintf( 2, "[swap] ml1257 decommit %p+0x%zx punched in place (%llu holes)\n", lo, len, ios_swap_holes );
         return 1;
@@ -27168,6 +27453,108 @@ done:
 static unsigned int ios_fd_reuse( const void *addr, SIZE_T size, ULONG type );   /* defined below */
 #endif
 
+#ifdef WINE_IOS
+/* madeira-duo SECTION VIEWS LARGER THAN THEIR FILE (env.MADEIRA_SECTION_VIEW_GROW,
+ * default 1; 0 = Wine's plain refusal). LMDB (mdb.master, as Path of Exile 2
+ * links it) opens a database on Windows with NtCreateSection(SEC_RESERVE, the
+ * data file, no size) and maps a MEM_RESERVE view of its whole map size over a
+ * file of two pages, then commits pages as the database grows: Windows accepts a
+ * reserve view past the end of a growable file section. Wine refuses it
+ * (STATUS_INVALID_VIEW_SIZE, which Win32 reports as ERROR_ACCESS_DENIED), so
+ * PoE2's Shaders and Pipelines caches have failed to open in every session (on
+ * the phone and under Proton alike) and the game rebuilt both each time.
+ * For a MEM_RESERVE view of a regular file, the file is extended to the end of
+ * the view right before it is mapped (sparse: no blocks until written), which is
+ * what LMDB's own MDB_FIXEDSIZE build asks Windows for, so no page of the view
+ * lies past the end of the file and none can fault. The descriptor is checked
+ * against the section first -- a linked regular file of exactly the section's
+ * size -- since a file that is not this section's must never be touched (see
+ * ml570 in map_file_into_view_ex). A view over 64 GB, a file that does not match
+ * or a failed extension keeps Wine's refusal. [section-grow] logs each case
+ * (first 16) with the file's path. LMDB then commits the pages it uses with
+ * VirtualAlloc(MEM_COMMIT), as Windows wants for a reserve view; a file view's
+ * pages are committed from the start here, so a commit inside a grown view
+ * succeeds (Wine answers STATUS_ALREADY_COMMITTED for other file views, and
+ * LMDB would fail its first page). The grown views are kept by address
+ * (ios_grown_views, under virtual_mutex like both callers).
+ * vk6: PoE2 sets a 100 GB map size (its data.mdb meta pages: mm_mapsize
+ * 0x1900000000). That is only address space on Windows, but Madeira has about
+ * 58 GB of it on the phone, so the view is CAPPED at env.MADEIRA_SECTION_VIEW_CAP_GB
+ * (default 16) and the caller is told the smaller size. LMDB keeps its own map
+ * size and only reads pages it has written, so a capped view is safe while the
+ * database stays under the cap; past it LMDB would read beyond the view. The
+ * [section-grow] line gives the requested and the mapped size. */
+static struct { void *base; SIZE_T size; } ios_grown_views[16];
+static int ios_section_view_grown( const struct file_view *view )
+{
+    int i;
+    for (i = 0; i < 16; i++)
+        if (ios_grown_views[i].base == view->base && ios_grown_views[i].size == view->size) return 1;
+    return 0;
+}
+static int ios_section_view_grow_ok( ULONG alloc_type )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *e = getenv( "MADEIRA_SECTION_VIEW_GROW" );
+        on = !(e && e[0] == '0');
+    }
+    return on && (alloc_type & MEM_RESERVE);
+}
+static ULONGLONG ios_section_view_cap(void)   /* bytes; vk6 */
+{
+    static ULONGLONG cap;
+    if (!cap)
+    {
+        const char *e = getenv( "MADEIRA_SECTION_VIEW_CAP_GB" );
+        long long gb = e ? atoll( e ) : 0;
+        if (gb < 1 || gb > 48) gb = 16;
+        cap = (ULONGLONG)gb << 30;
+    }
+    return cap;
+}
+static ULONGLONG ios_grow_requested;   /* the size the caller asked for, for the log (under virtual_mutex) */
+static unsigned int ios_section_view_grow( int fd, mem_size_t full_size, ULONGLONG end, void *base, SIZE_T size )
+{
+    static LONG said;
+    struct stat st;
+    char path[PATH_MAX];
+    const char *why = NULL;
+    strcpy( path, "?" );
+    if (fd < 0 || fstat( fd, &st )) why = "no file behind the section";
+    else
+    {
+        fcntl( fd, F_GETPATH, path );
+        if (!S_ISREG( st.st_mode ) || st.st_nlink < 1) why = "not a linked regular file";
+        else if ((mem_size_t)st.st_size != full_size) why = "the file's size is not the section's (not this section's file?)";
+        else if ((ULONGLONG)st.st_size < end && ftruncate( fd, (off_t)end )) why = strerror( errno );   /* grow only, never shrink */
+    }
+    if (!why)
+    {
+        int i, slot = 0;
+        for (i = 0; i < 16; i++) if (!ios_grown_views[i].base || ios_grown_views[i].base == base) { slot = i; break; }
+        ios_grown_views[slot].base = base;
+        ios_grown_views[slot].size = size;
+    }
+    if (InterlockedIncrement( &said ) <= 16)
+    {
+        /* blocks written so far: how full a capped database is (the file itself is sparse) */
+        unsigned long long used_mb = why ? 0 : (unsigned long long)st.st_blocks * 512 >> 20;
+        dprintf( 2, "[section-grow] %s: reserve view %p+0x%lx (asked 0x%llx%s) over %s (0x%llx bytes, %llu MB written)%s%s "
+                    "(env.MADEIRA_SECTION_VIEW_GROW = 0 turns it off, MADEIRA_SECTION_VIEW_CAP_GB sets the cap)\n",
+                 why ? "REFUSED" : "file extended to cover the view", base, (unsigned long)size,
+                 ios_grow_requested, ios_grow_requested > size ? ", CAPPED" : "", path,
+                 (unsigned long long)full_size, used_mb, why ? ": " : "", why ? why : "" );
+        if (!why && ios_grow_requested > size && used_mb << 20 > (unsigned long long)size / 4 * 3)
+            dprintf( 2, "[section-grow] WARNING: %s has %llu MB written of a %lu MB view; past the view the game "
+                        "would read unmapped memory: raise MADEIRA_SECTION_VIEW_CAP_GB or delete the cache folder\n",
+                     path, used_mb, (unsigned long)(size >> 20) );
+    }
+    return why ? STATUS_INVALID_VIEW_SIZE : STATUS_SUCCESS;
+}
+#endif
+
 /***********************************************************************
  *             virtual_map_section
  *
@@ -27192,6 +27579,9 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     HANDLE shared_file;
     LARGE_INTEGER offset;
     sigset_t sigset;
+#ifdef WINE_IOS
+    ULONGLONG ios_grow_to = 0;   /* madeira-duo section-view-grow: extend the file to this before mapping */
+#endif
 
 #ifdef WINE_IOS
     /* WoW64 guest window: same rule as allocate_virtual_memory — a ceiling
@@ -27274,7 +27664,22 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     if (*size_ptr)
     {
         size = *size_ptr;
-        if (size > full_size - offset.QuadPart) return STATUS_INVALID_VIEW_SIZE;
+        if (size > full_size - offset.QuadPart)
+        {
+#ifdef WINE_IOS
+            /* madeira-duo section-view-grow: a reserve view past the end of its file */
+            if (!image_info && ios_section_view_grow_ok( alloc_type ) &&
+                (ULONGLONG)offset.QuadPart < ios_section_view_cap())
+            {
+                ios_grow_requested = size;
+                if ((ULONGLONG)offset.QuadPart + size > ios_section_view_cap())   /* vk6: capped */
+                    size = ios_section_view_cap() - (ULONGLONG)offset.QuadPart;
+                ios_grow_to = (ULONGLONG)offset.QuadPart + size;
+            }
+            else
+#endif
+            return STATUS_INVALID_VIEW_SIZE;
+        }
     }
     else
     {
@@ -27313,6 +27718,15 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
 #endif
     res = map_view( &view, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
     if (res) goto done;
+#ifdef WINE_IOS
+    /* madeira-duo section-view-grow: only once the address range is ours */
+    if (ios_grow_to && (res = ios_section_view_grow( unix_handle, full_size, (ULONGLONG)offset.QuadPart + size,
+                                                      view->base, view->size )))
+    {
+        delete_view( view );
+        goto done;
+    }
+#endif
 
     TRACE( "handle=%p size=%lx offset=%s\n", handle, size, wine_dbgstr_longlong(offset.QuadPart) );
     /* iOS: SEC_COMMIT shared sections (e.g. \KernelObjects\__wine_session) need
@@ -31377,7 +31791,8 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         int any_committed = 0;   /* ml1077: only FRESH commits may be file-backed (a hole reads as zero) */
         { const char *pg; for (pg = base; pg < (const char *)base + size; pg += page_size) if (get_page_vprot( pg ) & VPROT_COMMITTED) { any_committed = 1; break; } }
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
-        else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
+        else if (view->protect & SEC_FILE)   /* madeira-duo section-view-grow: a grown view's pages are committed already */
+            status = ios_section_view_grown( view ) ? STATUS_SUCCESS : STATUS_ALREADY_COMMITTED;
         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
         else if (!(status = set_protection( view, base, size, protect )))
         {
@@ -31490,6 +31905,7 @@ static void ios_vm_note_alloc( void *base, SIZE_T size, ULONG type, ULONG protec
     static int log_all = -1;
     static unsigned long special_logged;
     int special = viol || zbits;
+    IOS_VA_NOTE( (type & MEM_COMMIT) ? 0 : (type & MEM_RESET) ? 4 : 1, size );   /* [xp-va]: every successful request */
     if (log_all < 0) { const char *e = getenv( "MADEIRA_VALLOC_LOG_ALL" ); log_all = e && e[0] == '1'; }
     if (!log_all && !covers && is_wow64()) return;
     if (b < 0x100000000ull && !viol && !zbits) return;
@@ -31515,6 +31931,8 @@ static void ios_vm_note_free( void *base, SIZE_T size, ULONG type )
 {
     UINT64 b = (UINT64)(ULONG_PTR)base, w = ios_vm_watch();
     int hits = (w && b <= w && (size == 0 || w < b + size));
+    /* [xp-va]: the calls here; the bytes where NtFreeVirtualMemory succeeds and knows the size */
+    __atomic_fetch_add( &ios_va_census[(type & MEM_DECOMMIT) ? 4 : 6], 1, __ATOMIC_RELAXED );
     if (b < 0x100000000ull) return;
     if (hits || ios_vm_free_logged < 3000)
     {
@@ -35758,6 +36176,7 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         *addr_ptr = base;
         *size_ptr = size;
 #ifdef WINE_IOS
+        __atomic_fetch_add( &ios_va_census[(type & MEM_DECOMMIT) ? 5 : 7], (unsigned long long)size, __ATOMIC_RELAXED );   /* [xp-va] */
         if ((type & MEM_RELEASE) && ios_thin_live_n) ios_thin_released( base );
 #endif
     }

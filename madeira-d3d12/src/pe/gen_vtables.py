@@ -144,6 +144,12 @@ def emit(header_path, out_path):
             L.append("    v->%s = stub_%s_%s;" % (name, iface, name))
         L.append("}")
         L.append("")
+        # Slot names in vtable order, for logs that count calls per slot (api-census).
+        L.append("static const char *const madeira_slots_%s[%d] __attribute__((unused)) = {" % (iface, len(methods)))
+        for _, name, _ in methods:
+            L.append('    "%s",' % name)
+        L.append("};")
+        L.append("")
 
     L.append("#endif /* MADEIRA_D3D12_STUBS_H */")
     open(out_path, "w").write("\n".join(L) + "\n")

@@ -190,3 +190,124 @@ drivers behind one `libvulkan.1.dylib`. In that case:
 - `maxBufferLength` limits on iOS GPUs for large `VkDeviceMemory` allocations.
 - Present: CAMetalLayer, FIFO only (see patch 0001).
 - No CTS run, no vkd3d-proton or DXVK run.
+
+## Caches, archives, Fossilize and statistics (madeira-duo vk2, 9 Nov 2026)
+
+Upstream KosmicKrisp keeps nothing between launches: it never opens Mesa's disk cache, creates no
+implicit pipeline cache (so applications that pass no `VkPipelineCache`, like Path of Exile 2, get
+no caching at all), and compiles every Metal pipeline without an archive. vk2 adds:
+
+- `kosmickrisp-ios-0007`: the Mesa disk cache (built with `-Dshader-cache=enabled`) and an implicit
+  pipeline cache, as RADV does. Repeat launches skip SPIR-V -> NIR -> MSL.
+- `kosmickrisp-ios-0008`: Metal 4 pipeline archives. A `MTL4PipelineDataSetSerializer` collects every
+  pipeline built; chunks (`*.mtl4a`) are written every 60 s while new pipelines are built and when
+  the compiler is released, loaded at the next start-up and passed as `lookupArchives`. Unreadable
+  chunks (e.g. after an iOS update) are deleted. Keys: `MADEIRA_KK_ARCHIVE=0` (off),
+  `MADEIRA_KK_ARCHIVE_MB` (cap, default 1024), `MADEIRA_KK_ARCHIVE_FLUSH_S` (default 60),
+  `MADEIRA_KK_ARCHIVE_DIR`. Also timing: `[kk-slow]` for library/pipeline builds of 150 ms or more,
+  `[kk-compile]` totals with a duration histogram every 30 s (`MADEIRA_KK_COMPILE_STATS=0` off).
+- `kosmickrisp-ios-0009`: `[kk-frame]` every 30 s (presents, present intervals with >33/50/100 ms
+  counts, CPU time in queue submits, Metal GPU time per frame from commit feedback;
+  `MADEIRA_KK_FRAME_STATS=0` off), and each present is reported to Madeira's frame counter
+  (`madeira_vulkan_present_mark`, WiniosGL.m) so the FPS overlay and `[frame]` count Vulkan frames.
+- WineProcessBridge: with `vulkan = kosmickrisp`, `MESA_SHADER_CACHE_DIR` defaults to
+  `<prefix>/madeira-cache/kosmickrisp` (archives in its `kosmickrisp-mtl4/`), max 2G.
+
+Fossilize (`madeira.cfg fossilize = record | replay | on | off`, default off; KosmicKrisp only):
+
+- record: Vulkan goes through the Khronos loader (`gl/libvulkan.1.dylib`, build/vulkan-loader-ios),
+  driver manifest `gl/vulkan/icd.d/kosmickrisp_icd.json`, capture layer `VK_LAYER_fossilize`
+  (`gl/libVkLayer_fossilize.dylib`, build/fossilize-ios). Output:
+  `<prefix>/madeira-cache/fossilize/capture.*.foz`.
+- replay: before the session, every `.foz` there and in `import/` is replayed in-process
+  (`gl/libfossilize_replay.dylib`, `fossilize_replay_main`) straight through KosmicKrisp, filling its
+  disk cache and archives; `replayed.cache` skips what earlier replays built.
+  `fossilize-threads` (default 4). The point: driver caches are invalidated by driver rebuilds
+  (the disk cache key includes the driver build) and possibly by iOS updates (archives); the
+  `.foz` recording survives both and rebuilds them before play.
+
+## Unsupported features at device creation (patch 0010)
+
+KosmicKrisp doesn't support these core features: `geometryShader`, `fillModeNonSolid`, `depthBounds`, `wideLines`,
+`pipelineStatisticsQuery`, `shaderStorageImageMultisample`, `shaderFloat64`, `shaderResourceResidency`, sparse
+binding and residency, and `variableMultisampleRate`. If an application enables any of them, `vkCreateDevice`
+fails with `VK_ERROR_FEATURE_NOT_PRESENT`. Without a debug messenger, Mesa's explanation goes nowhere.
+
+On 9 Nov 2026, PoE2 0.5 hit exactly that on the Duo. Client.txt shows `Failed to start device:
+vk::PhysicalDevice::createDeviceUnique: ErrorFeatureNotPresent`, then `Falling back to DirectX11`, and the whole
+session ran on DXMT.
+
+Patch 0010 does two things:
+
+- Every enabled core feature that isn't supported is logged as `[kk-features] <struct>.<feature> requested but not
+  supported`.
+- Mesa's own messages are switched on while the device is created, so failures in Vulkan 1.1+ and extension
+  feature structures also name the field. A failed create logs `[kk-features] vkCreateDevice failed: <VkResult>`.
+
+`MADEIRA_KK_RELAX_FEATURES=1` (madeira.cfg `env.`) drops the unsupported core 1.0 features from the request and
+logs each one, so device creation can go ahead for applications that enable features they never use. If a dropped
+feature is used anyway, the pipelines that need it fail to build. Look for `Failed to create MTL` and the game's
+own errors.
+
+## Large timestamp query pools (patch 0011)
+
+Metal caps the number of entries in one `MTL4CounterHeap`. Above the cap, AGX logs `MTLCounterHeap: Invalid heap
+size requested`. Upstream KosmicKrisp backs each `VK_QUERY_TYPE_TIMESTAMP` pool with a single heap. So on 9 Nov 2026,
+with geometryShader relaxed (0010), PoE2 got past `vkCreateDevice` but failed `vkCreateQueryPool` with
+`ErrorOutOfDeviceMemory` and fell back to DirectX 11 again.
+
+Patch 0011 finds the largest heap size Metal accepts by halving the request. It remembers that size for the
+process and spreads the pool over as many heaps as needed: query q lives in heap q / n at q % n. A split pool
+logs `[kk-query] timestamp pool of N split into H counter heaps of n`.
+
+## Timestamp pools without a counter heap (patch 0012)
+
+On the Duo, Metal refuses *every* timestamp counter heap, even a 2-entry one: install32c logged `[kk-query]
+timestamp pool of 2: no counter heap size works`. So 0011's split alone can't help there. Patch 0012 creates the
+pool without a heap when that happens. `vkCmdWriteTimestamp2` marks the query available, and its value reads as
+the 0 the reset left. This is logged once as `[kk-query] Metal refuses timestamp counter heaps here … timestamp
+queries will read 0`. GPU timings the game derives from timestamps read as zero. A real fix would sample through
+another Metal counter API that the phone does support.
+
+## Pre-launch compile, progress and live counters (vk3, 10 Nov 2026)
+
+- **Library ▸ any game ▸ Shaders** lists the size of each shader cache in the prefix: the Mesa cache, the Metal
+  pipeline archives and the Fossilize recordings, plus the D3D12 caches. **Compile shaders now** replays the
+  recorded pipelines through KosmicKrisp on every core before any game starts
+  (`madeira_shader_precompile_start`). Progress shows as pipelines done of the total in the recordings, rate and
+  time left. It comes from Fossilize patch 0003's `fossilize_replay_progress`. A game started during the compile
+  waits for it, and the game-start replay is then skipped for that app run. The game-start replay now uses
+  every core too (`fossilize-threads` still overrides; `fossilize-precompile-threads` does the same for the
+  button).
+- **Overlay ▸ Shader misses** shows totals since the overlay started, so the figures don't drop back to zero
+  between bursts. On Vulkan: BUILT (builds that compiled, 2 ms or more), BUILD (builds running now) and SLOW
+  (compiles of 150 ms or more since the game started). The source is patch 0013: KosmicKrisp reports every
+  library and pipeline build to `madeira_vulkan_compile_mark` (WiniosGL.m). On D3D12: SHADERS (stages
+  madeira-d3d12 converted), PSO (pipelines Metal compiled because the pso-archive didn't have them) and WAIT
+  (pipelines the game waits on now, including pso-create-block builds inside a create call), provided this
+  build's DXMT has `madeira_shader_overlay_stats` (looked up at run time; vk4 pins DXMT duo/overlay-shader).
+
+## Compile-speed levers within the current design (patch 0014)
+
+KosmicKrisp bakes pipeline state into its MSL, so these levers keep one library per stage and make each compile
+cheaper or concurrent. Each has a switch, so one run can compare them:
+
+- `MADEIRA_KK_COMPILE_QOS` (default 1): a thread compiling below user-initiated QoS is raised to user-interactive
+  for the compile, then set back. Metal's compiler service runs a request at the requester's QoS.
+- `MADEIRA_KK_PARALLEL_LIBS` (default 1): a render pipeline's vertex and fragment libraries compile at the same time.
+- `MADEIRA_KK_OPT_SIZE` (default 0): `MTLLibraryOptimizationLevelSize`. Apple documents smaller binaries "which may
+  also reduce compile time". Shader speed may drop, so measure it.
+- `[kk-slow]` logs the compiling thread's QoS and the MSL size. `[kk-frame]` adds `feedback N (M untimed)`, to show
+  why GPU time read 0 on the Duo.
+
+## Giant generated shaders (patch 0015)
+
+The install33c live log (11 Nov 2026) showed that 31 libraries with 0.5-1.5 MB of generated MSL took 227 of the 298 s
+of library compiles, 4-24 s each. MSL size is what drives the time. `[kk-slow]` now adds `hash <fnv64 of the MSL>`.
+The same hash in a later session means Metal's library cache didn't keep that library. Sources of at least
+`MADEIRA_KK_DUMP_MSL_KB` (default 250; 0 = off) are written once to
+`$MESA_SHADER_CACHE_DIR/msl-dump/<hash>.metal`, at most 64 files, so the generator can be studied. The compile QoS
+raise (0014) now also lifts user-initiated threads: PoE2's loader runs at user-initiated, so 0014 left it alone.
+
+Keep Madeira in the foreground while it compiles. In the background, Madeira holds the game under 50% of one core
+(`[bg-run]`), and compiles practically stop.

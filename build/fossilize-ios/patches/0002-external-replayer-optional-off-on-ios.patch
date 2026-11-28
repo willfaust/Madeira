@@ -1,0 +1,50 @@
+From 060c15f6929c6c26df4e7f16bc925313af64ee6e Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 21:52:43 +1100
+Subject: [PATCH] Make the external replayer optional; off on Android and iOS
+
+The external replayer spawns fossilize-replay child processes and includes
+Linux-only headers (sys/prctl.h). Hosts that can't spawn processes replay
+in-process. FOSSILIZE_EXTERNAL_REPLAYER (default off on Android and iOS)
+replaces the Android-only exclusion.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+---
+ CMakeLists.txt | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 473c6b0..3d4ff9c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -75,14 +75,25 @@ if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
+ 	target_compile_definitions(fossilize PUBLIC __USE_MINGW_ANSI_STDIO=1)
+ endif()
+ 
+-if (NOT ANDROID)
++# The external replayer spawns fossilize-replay child processes (Linux: prctl, fork). Hosts that
++# can't spawn processes (Android, iOS) replay in-process instead and leave it out.
++if (ANDROID OR IOS)
++    set(FOSSILIZE_EXTERNAL_REPLAYER_DEFAULT OFF)
++else()
++    set(FOSSILIZE_EXTERNAL_REPLAYER_DEFAULT ON)
++endif()
++option(FOSSILIZE_EXTERNAL_REPLAYER "Build the process-spawning external replayer." ${FOSSILIZE_EXTERNAL_REPLAYER_DEFAULT})
++
++if (FOSSILIZE_EXTERNAL_REPLAYER)
+     target_sources(fossilize PRIVATE fossilize_external_replayer.cpp fossilize_external_replayer.hpp)
+ endif()
+ 
+ if (WIN32)
+     target_sources(fossilize PRIVATE fossilize_external_replayer_windows.hpp)
+-else()
++elseif (FOSSILIZE_EXTERNAL_REPLAYER)
+     target_sources(fossilize PRIVATE fossilize_external_replayer_linux.hpp)
++endif()
++if (NOT WIN32)
+     if (APPLE)
+         target_sources(fossilize PRIVATE platform/gcc_clang_spinlock.hpp)
+     else()
+-- 
+2.56.0
+

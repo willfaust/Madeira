@@ -1948,6 +1948,29 @@ static NTSTATUS ios_get_loopback_capture_device(void *args) {
     return STATUS_SUCCESS;
 }
 
+/* madeira-duo MADEIRA_AUDIO_MIX_RATE: the sample rate the shared-mode mix format
+ * reports (8000..96000 Hz; unset, 0 or out of range: 48000, as before). A sound engine
+ * that mixes at the device's rate then mixes that much less audio per second; one
+ * whose game fixed the rate converts at its output instead and gains nothing. FMOD
+ * documents 24 kHz as its own default on mobile "to reduce CPU cost"
+ * (System::setSoftwareFormat), and Path of Exile 2's FMOD mixer thread is 9.5% of
+ * the process's CPU in a map. The RemoteIO endpoint is created at the rate of its
+ * first client (ios_dev_create_locked), so iOS converts to the hardware rate; the
+ * ml1066 create_stream line gives the rate each client then opened. */
+static UINT32 ios_audio_mix_rate(void) {
+    static UINT32 rate;
+    if (!rate) {
+        const char *e = getenv( "MADEIRA_AUDIO_MIX_RATE" );
+        long v = e ? atol( e ) : 0;
+        UINT32 r = (v >= 8000 && v <= 96000) ? (UINT32)v : IOS_AUDIO_SAMPLE_RATE;
+        if (r != IOS_AUDIO_SAMPLE_RATE)
+            fprintf(stderr, "[ios_audio] MADEIRA_AUDIO_MIX_RATE=%u: the mix format reports %u Hz (default %u)\n",
+                    (unsigned)r, (unsigned)r, (unsigned)IOS_AUDIO_SAMPLE_RATE);
+        rate = r;
+    }
+    return rate;
+}
+
 static NTSTATUS ios_get_mix_format(void *args) {
     struct get_mix_format_params *p = args;
     LOG_FN_CALL(16, "get_mix_format");
@@ -1957,10 +1980,10 @@ static NTSTATUS ios_get_mix_format(void *args) {
         struct WAVEFORMATEX_stub *f = p->fmt;
         f->wFormatTag = 0xFFFE; /* WAVE_FORMAT_EXTENSIBLE */
         f->nChannels = IOS_AUDIO_CHANNELS;
-        f->nSamplesPerSec = IOS_AUDIO_SAMPLE_RATE;
+        f->nSamplesPerSec = ios_audio_mix_rate();   /* madeira-duo MADEIRA_AUDIO_MIX_RATE; 48000 unless set */
         f->wBitsPerSample = IOS_AUDIO_BITS;
         f->nBlockAlign = IOS_AUDIO_FRAME_BYTES;
-        f->nAvgBytesPerSec = IOS_AUDIO_SAMPLE_RATE * IOS_AUDIO_FRAME_BYTES;
+        f->nAvgBytesPerSec = f->nSamplesPerSec * IOS_AUDIO_FRAME_BYTES;
         f->cbSize = 22; /* extensible body */
         /* Extensible body: Samples (2), ChannelMask (4), SubFormat (16).
          * KSDATAFORMAT_SUBTYPE_PCM = {00000001-0000-0010-8000-00AA00389B71} */

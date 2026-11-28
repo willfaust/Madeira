@@ -9,8 +9,9 @@ import os, re, shutil, subprocess, tempfile
 ROOT = Path(__file__).resolve().parents[2]
 build = (ROOT / 'build/ntdll-unix/build.sh').read_text()
 server = (ROOT / 'build/ntdll-unix/server_ios.c').read_text()
-line = next(s for s in server.splitlines() if 'XP_MS( ru.ri_runnable_time - pru.ri_runnable_time )' in s)
-expression = line.split('), ', 1)[1].rstrip().rstrip(',')
+# ri_runnable_time is in nanoseconds (not Mach ticks); the expression after it is page_wait_ms
+line = next(s for s in server.splitlines() if '(double)(ru.ri_runnable_time - pru.ri_runnable_time) / 1e6, ' in s)
+expression = line.split(' / 1e6, ', 1)[1].rstrip().rstrip(',')
 setup = re.search(r'            double page_wait_ms = .*?#endif', server, re.S)
 setup = setup.group(0) if setup else ''
 fragment = '#include <sys/resource.h>\n#define XP_MS(x) ((double)(x) / 1000000.0)\n' + '''

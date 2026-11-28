@@ -1,0 +1,302 @@
+From e63a94bf6e1ae387a6bea74421c745968acab4dc Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Tue, 10 Nov 2026 01:55:28 +1100
+Subject: [PATCH] kosmickrisp: compile-speed levers (QoS, parallel library
+ pairs, size optimisation) and diagnostics
+
+- MADEIRA_KK_COMPILE_QOS (default 1): raise a compiling thread below
+  user-initiated to user-interactive for the compile.
+- MADEIRA_KK_PARALLEL_LIBS (default 1): a render pipeline's vertex and
+  fragment libraries compile at the same time (mtl_new_library_pair).
+- MADEIRA_KK_OPT_SIZE (default 0): MTLLibraryOptimizationLevelSize.
+- [kk-slow] logs the thread's QoS and the MSL size; [kk-frame] counts
+  feedback-handler calls and those without GPU times.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/bridge/mtl_compiler.h       |  7 ++
+ src/kosmickrisp/bridge/mtl_compiler.m       | 83 ++++++++++++++++++++-
+ src/kosmickrisp/bridge/stubs/mtl_compiler.c | 10 +++
+ src/kosmickrisp/vulkan/kk_queue.c           | 11 ++-
+ src/kosmickrisp/vulkan/kk_shader.c          | 18 +++--
+ 5 files changed, 117 insertions(+), 12 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.h b/src/kosmickrisp/bridge/mtl_compiler.h
+index b0fa59f..7ae4825 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.h
++++ b/src/kosmickrisp/bridge/mtl_compiler.h
+@@ -27,6 +27,13 @@ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+                 enum mtl_math_mode math_mode,
+                 enum mtl_math_floating_point_functions math_fp_fns);
++/* Madeira: both libraries of a render pipeline, compiled at the same time
++ * (MADEIRA_KK_PARALLEL_LIBS=0: one after the other). *out_b is NULL when a
++ * fails in the sequential mode. */
++void mtl_new_library_pair(mtl_compiler *compiler, const char *src_a, const char *src_b,
++                          enum mtl_math_mode math_mode,
++                          enum mtl_math_floating_point_functions math_fp_fns,
++                          mtl_library **out_a, mtl_library **out_b);
+ mtl_function_descriptor *
+ mtl_new_library_function_descriptor(mtl_library *library,
+                                     const char *entry_point);
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 7617cec..1b90f9e 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -65,6 +65,7 @@ struct kk_compile_stat {
+    _Atomic uint64_t slow;
+ };
+ 
++static _Thread_local size_t kk_compile_msl_bytes; /* MSL size of the library being built */
+ static struct kk_compile_stat kk_stat_library = {.name = "library", .kind = 0};
+ static struct kk_compile_stat kk_stat_render = {.name = "render", .kind = 1};
+ static struct kk_compile_stat kk_stat_compute = {.name = "compute", .kind = 2};
+@@ -193,8 +194,8 @@ kk_compile_record(struct kk_compile_stat *stat, uint64_t start_ns)
+    else {
+       atomic_fetch_add(&stat->slow, 1);
+       if (kk_stats_enabled != 0)
+-         fprintf(stderr, "[kk-slow] %s %.1f ms (thread %p)\n", stat->name, elapsed / 1e6,
+-                 (void *)pthread_self());
++         fprintf(stderr, "[kk-slow] %s %.1f ms (thread %p, qos %d, msl %zu B)\n", stat->name,
++                 elapsed / 1e6, (void *)pthread_self(), (int)qos_class_self(), kk_compile_msl_bytes);
+    }
+    kk_compile_report(false);
+ }
+@@ -465,6 +466,46 @@ mtl_new_compiler(mtl_device *device)
+ }
+ 
+ /* Library */
++/* Madeira: compile-speed levers that keep KosmicKrisp's design (one library
++ * per stage, pipeline state baked in), each with a switch:
++ *  - MADEIRA_KK_COMPILE_QOS (default 1): a thread compiling below user-initiated
++ *    QoS is raised to user-interactive for the compile and set back after, so
++ *    Metal's compiler service (which takes the requester's QoS) runs it on the
++ *    performance cores. PoE2 creates pipelines on one loading thread whose QoS
++ *    comes from MADEIRA_THREAD_QOS.
++ *  - MADEIRA_KK_OPT_SIZE (default 0): MTLLibraryOptimizationLevelSize, which
++ *    Apple documents as smaller binaries that "may also reduce compile time";
++ *    possibly slower shaders, so measure.
++ *  - MADEIRA_KK_PARALLEL_LIBS (default 1): mtl_new_library_pair compiles a
++ *    pipeline's vertex and fragment libraries at the same time.
++ * Slow builds now log the MSL size. */
++static int
++kk_env_flag(const char *name, int fallback)
++{
++   const char *v = getenv(name);
++   return v && v[0] ? v[0] != '0' : fallback;
++}
++
++static qos_class_t
++kk_compile_qos_raise(void)
++{
++   static int enabled = -1;
++   if (enabled < 0)
++      enabled = kk_env_flag("MADEIRA_KK_COMPILE_QOS", 1);
++   qos_class_t previous = qos_class_self();
++   if (enabled && previous != QOS_CLASS_UNSPECIFIED && previous < QOS_CLASS_USER_INITIATED &&
++       pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0)
++      return previous;
++   return QOS_CLASS_UNSPECIFIED;
++}
++
++static void
++kk_compile_qos_restore(qos_class_t previous)
++{
++   if (previous != QOS_CLASS_UNSPECIFIED)
++      pthread_set_qos_class_self_np(previous, 0);
++}
++
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+                 enum mtl_math_mode math_mode,
+@@ -481,15 +522,24 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+       opts.languageVersion = MTLLanguageVersion3_2;
+       opts.mathMode = (MTLMathMode)math_mode;
+       opts.mathFloatingPointFunctions = (MTLMathFloatingPointFunctions)math_fp_fns;
++      static int opt_size = -1;
++      if (opt_size < 0)
++         opt_size = kk_env_flag("MADEIRA_KK_OPT_SIZE", 0);
++      if (opt_size)
++         opts.optimizationLevel = MTLLibraryOptimizationLevelSize;
+ 
+       MTL4LibraryDescriptor *desc = [[MTL4LibraryDescriptor new] autorelease];
+       desc.source = ns_src;
+       desc.options = opts;
+ 
+       NSError *error;
++      qos_class_t qos = kk_compile_qos_raise();
++      kk_compile_msl_bytes = strlen(src);
+       uint64_t start = kk_compile_begin(&kk_stat_library);
+       id<MTLLibrary> lib = [comp newLibraryWithDescriptor:desc error:&error];
+       kk_compile_record(&kk_stat_library, start);
++      kk_compile_msl_bytes = 0;
++      kk_compile_qos_restore(qos);
+ 
+       if (lib == nil) {
+          fprintf(stderr, "Failed to create MTLLibrary: %s\n", [error.localizedDescription UTF8String]);
+@@ -499,6 +549,31 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+    }
+ }
+ 
++void
++mtl_new_library_pair(mtl_compiler *compiler, const char *src_a, const char *src_b,
++                     enum mtl_math_mode math_mode,
++                     enum mtl_math_floating_point_functions math_fp_fns,
++                     mtl_library **out_a, mtl_library **out_b)
++{
++   static int parallel = -1;
++   if (parallel < 0)
++      parallel = kk_env_flag("MADEIRA_KK_PARALLEL_LIBS", 1);
++   if (!parallel) {
++      *out_a = mtl_new_library(compiler, src_a, math_mode, math_fp_fns);
++      *out_b = *out_a ? mtl_new_library(compiler, src_b, math_mode, math_fp_fns) : NULL;
++      return;
++   }
++   __block mtl_library *b = NULL;
++   dispatch_group_t group = dispatch_group_create();
++   dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
++      b = mtl_new_library(compiler, src_b, math_mode, math_fp_fns);
++   });
++   *out_a = mtl_new_library(compiler, src_a, math_mode, math_fp_fns);
++   dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
++   dispatch_release(group);
++   *out_b = b;
++}
++
+ mtl_function_descriptor *
+ mtl_new_library_function_descriptor(mtl_library *library, const char *entry_point)
+ {
+@@ -527,6 +602,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       desc.maxTotalThreadsPerThreadgroup = max_total_threads_per_threadgroup;
+ 
+       NSError *error;
++      qos_class_t qos = kk_compile_qos_raise();
+       uint64_t start = kk_compile_begin(&kk_stat_compute);
+       pthread_rwlock_rdlock(&kk_archive.lock);
+       id<MTLComputePipelineState> pipeline = [comp newComputePipelineStateWithDescriptor:desc
+@@ -534,6 +610,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+                                                                                    error:&error];
+       pthread_rwlock_unlock(&kk_archive.lock);
+       kk_compile_record(&kk_stat_compute, start);
++      kk_compile_qos_restore(qos);
+       if (pipeline != nil)
+          kk_archive_after_build();
+ 
+@@ -654,6 +731,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+ 
+       NSError *error = nil;
++      qos_class_t qos = kk_compile_qos_raise();
+       uint64_t start = kk_compile_begin(&kk_stat_render);
+       pthread_rwlock_rdlock(&kk_archive.lock);
+       id<MTLRenderPipelineState> pipeline = [comp newRenderPipelineStateWithDescriptor:desc
+@@ -661,6 +739,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+                                                                                  error:&error];
+       pthread_rwlock_unlock(&kk_archive.lock);
+       kk_compile_record(&kk_stat_render, start);
++      kk_compile_qos_restore(qos);
+       if (pipeline != nil)
+          kk_archive_after_build();
+ 
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_compiler.c b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+index 86e6ffa..ad8c047 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_compiler.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+@@ -29,6 +29,16 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+    return NULL;
+ }
+ 
++void
++mtl_new_library_pair(mtl_compiler *compiler, const char *src_a, const char *src_b,
++                     enum mtl_math_mode math_mode,
++                     enum mtl_math_floating_point_functions math_fp_fns,
++                     mtl_library **out_a, mtl_library **out_b)
++{
++   *out_a = NULL;
++   *out_b = NULL;
++}
++
+ mtl_function_descriptor *
+ mtl_new_library_function_descriptor(mtl_library *library,
+                                     const char *entry_point)
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index b8cd744..a6b9e52 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -43,6 +43,8 @@ static struct {
+    _Atomic uint64_t gpu_ns;
+    _Atomic uint64_t gpu_commits;
+    _Atomic uint64_t gpu_max_ns;
++   _Atomic uint64_t feedbacks;        /* Madeira: feedback handler calls */
++   _Atomic uint64_t feedbacks_untimed; /* ... with no usable GPU start/end */
+    uint64_t window_start_ns;
+    uint64_t last_present_ns;
+    uint64_t presents;
+@@ -77,14 +79,16 @@ kk_frame_report(uint64_t now)
+    fprintf(stderr,
+            "[kk-frame] %.1f s: presents=%llu fps=%.1f interval avg=%.1fms max=%.1fms >33ms=%llu >50ms=%llu "
+            ">100ms=%llu | submit cpu %.2f ms/frame (%llu submits) | gpu %.2f ms/frame busy=%.0f%% "
+-           "commits=%llu max=%.1fms\n",
++           "commits=%llu max=%.1fms | feedback %llu (%llu untimed)\n",
+            window / 1e9, (unsigned long long)presents, window ? presents * 1e9 / window : 0.0,
+            presents ? kk_frames.interval_total_ns / 1e6 / presents : 0.0,
+            kk_frames.interval_max_ns / 1e6, (unsigned long long)kk_frames.over_33ms,
+            (unsigned long long)kk_frames.over_50ms, (unsigned long long)kk_frames.over_100ms,
+            presents ? kk_frames.submit_ns / 1e6 / presents : 0.0,
+            (unsigned long long)kk_frames.submits, presents ? gpu_ns / 1e6 / presents : 0.0,
+-           window ? 100.0 * gpu_ns / window : 0.0, (unsigned long long)commits, gpu_max / 1e6);
++           window ? 100.0 * gpu_ns / window : 0.0, (unsigned long long)commits, gpu_max / 1e6,
++           (unsigned long long)atomic_exchange(&kk_frames.feedbacks, 0),
++           (unsigned long long)atomic_exchange(&kk_frames.feedbacks_untimed, 0));
+    kk_frames.window_start_ns = now;
+    kk_frames.presents = 0;
+    kk_frames.interval_total_ns = 0;
+@@ -167,6 +171,9 @@ static void
+ commit_callback(struct mtl_feedback_data *data)
+ {
+    /* Madeira: GPU time per commit for [kk-frame]. */
++   atomic_fetch_add(&kk_frames.feedbacks, 1);
++   if (!(data->gpu_end > data->gpu_start && data->gpu_start > 0.0))
++      atomic_fetch_add(&kk_frames.feedbacks_untimed, 1);
+    if (data->gpu_end > data->gpu_start && data->gpu_start > 0.0) {
+       uint64_t gpu = (uint64_t)((data->gpu_end - data->gpu_start) * 1e9);
+       atomic_fetch_add(&kk_frames.gpu_ns, gpu);
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index c3583d7..9c207b2 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -1224,20 +1224,22 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+    }
+ 
+    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+-   mtl_library *vertex_library = mtl_new_library(
+-      device->mtl_compiler_handle, vs_data->code, MTL_MATH_MODE_FAST,
+-      MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+-   if (vertex_library == NULL)
++   const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
++   /* Madeira: the two libraries compile at the same time (mtl_compiler.m). */
++   mtl_library *vertex_library = NULL, *fragment_library = NULL;
++   mtl_new_library_pair(device->mtl_compiler_handle, vs_data->code, fs_data->code,
++                        MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST,
++                        &vertex_library, &fragment_library);
++   if (vertex_library == NULL) {
++      if (fragment_library)
++         mtl_release(fragment_library);
+       return VK_ERROR_INVALID_SHADER_NV;
++   }
+ 
+    mtl_function_descriptor *vertex_function =
+       mtl_new_library_function_descriptor(vertex_library,
+                                           vs_data->entrypoint_name);
+ 
+-   const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
+-   mtl_library *fragment_library = mtl_new_library(
+-      device->mtl_compiler_handle, fs_data->code, MTL_MATH_MODE_FAST,
+-      MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+    if (fragment_library == NULL) {
+       result = VK_ERROR_INVALID_SHADER_NV;
+       goto destroy_vertex;
+-- 
+2.56.0
+

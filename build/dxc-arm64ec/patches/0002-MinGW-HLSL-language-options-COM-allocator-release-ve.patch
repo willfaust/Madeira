@@ -1,0 +1,121 @@
+From 3e002e4e8a640dc059f25a208df1e11591f3d6d4 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Wed, 4 Nov 2026 05:16:46 +1100
+Subject: [PATCH 2/3] MinGW: HLSL language options, COM allocator, release
+ version
+
+- Fixed (HLSL) LangOptions on MinGW like the MSVC release; with the variable
+  ones HLSL's built-in types were never declared (every shader failed)
+- CAllocator uses CoTaskMem* on MinGW: CComHeapPtr memory reaches callers
+  that free it with CoTaskMemFree (as in hexops' Zig port)
+- utils/version/version.inc set to Microsoft's 1.8.2407.7 (416fab6b5), so
+  with HLSL_ENABLE_FIXED_VER the DXIL matches the release byte for byte
+  (444 of 449 test shaders identical, signed hash included; the rest differ
+  only in value numbering/declaration order or /Zi paths)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ lib/DxcSupport/WinAdapter.cpp         | 13 +++++++++++++
+ tools/clang/CMakeLists.txt            |  5 ++---
+ tools/clang/lib/Basic/LangOptions.cpp |  2 +-
+ utils/version/version.inc             |  9 ++++++---
+ 4 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/lib/DxcSupport/WinAdapter.cpp b/lib/DxcSupport/WinAdapter.cpp
+index df1f9f46..c9a9aaf8 100644
+--- a/lib/DxcSupport/WinAdapter.cpp
++++ b/lib/DxcSupport/WinAdapter.cpp
+@@ -17,11 +17,24 @@
+ 
+ //===--------------------------- CAllocator -------------------------------===//
+ 
++#ifdef __MINGW32__
++// CComHeapPtr is CHeapPtr<T, CAllocator> here, and its memory reaches callers
++// that free it with CoTaskMemFree (ATL's CComHeapPtr uses the COM heap), so on
++// Windows CAllocator is the COM allocator (as in hexops' Zig port).
++void *CAllocator::Reallocate(void *p, size_t nBytes) throw() {
++  return CoTaskMemRealloc(p, nBytes);
++}
++void *CAllocator::Allocate(size_t nBytes) throw() {
++  return CoTaskMemAlloc(nBytes);
++}
++void CAllocator::Free(void *p) throw() { CoTaskMemFree(p); }
++#else
+ void *CAllocator::Reallocate(void *p, size_t nBytes) throw() {
+   return realloc(p, nBytes);
+ }
+ void *CAllocator::Allocate(size_t nBytes) throw() { return malloc(nBytes); }
+ void CAllocator::Free(void *p) throw() { free(p); }
++#endif
+ 
+ #ifndef __MINGW32__
+ 
+diff --git a/tools/clang/CMakeLists.txt b/tools/clang/CMakeLists.txt
+index 328ffad8..9702cf82 100644
+--- a/tools/clang/CMakeLists.txt
++++ b/tools/clang/CMakeLists.txt
+@@ -431,9 +431,8 @@ install(DIRECTORY include/clang-c
+   )
+ 
+ add_definitions( -D_GNU_SOURCE )
+-if (MINGW)
+-  add_definitions( -DMS_SUPPORT_VARIABLE_LANGOPTS )
+-endif()
++# Madeira: MinGW builds use the fixed (HLSL) language options, like the MSVC
++# release; with the variable ones HLSL's built-in types are never declared.
+ 
+ option(CLANG_ENABLE_ARCMT "Build ARCMT." ON)
+ if (CLANG_ENABLE_ARCMT)
+diff --git a/tools/clang/lib/Basic/LangOptions.cpp b/tools/clang/lib/Basic/LangOptions.cpp
+index 87d20740..0b466583 100644
+--- a/tools/clang/lib/Basic/LangOptions.cpp
++++ b/tools/clang/lib/Basic/LangOptions.cpp
+@@ -16,7 +16,7 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ using namespace clang;
+ 
+-#ifdef LLVM_ON_UNIX
++#if defined(LLVM_ON_UNIX) || defined(__MINGW32__) // Madeira: clang needs the definitions on MinGW too
+ #ifndef MS_SUPPORT_VARIABLE_LANGOPTS
+ #define LANGOPT(Name, Bits, Default, Description) const unsigned LangOptionsBase::Name;
+ #define LANGOPT_BOOL(Name, Default, Description) const bool LangOptionsBase::Name;
+diff --git a/utils/version/version.inc b/utils/version/version.inc
+index 4e5d9f73..1ce97be5 100644
+--- a/utils/version/version.inc
++++ b/utils/version/version.inc
+@@ -1,5 +1,8 @@
+ #pragma once
+ 
++// Madeira: the version of Microsoft's release build 1.8.2407.7 (the copy games
++// ship), so the DXIL this build emits matches theirs byte for byte.
++
+ #ifdef RC_COMPANY_NAME
+ #undef RC_COMPANY_NAME
+ #endif
+@@ -23,12 +26,12 @@
+ #ifdef RC_VERSION_FIELD_4
+ #undef RC_VERSION_FIELD_4
+ #endif
+-#define RC_VERSION_FIELD_4 0
++#define RC_VERSION_FIELD_4 7
+ 
+ #ifdef RC_FILE_VERSION
+ #undef RC_FILE_VERSION
+ #endif
+-#define RC_FILE_VERSION "1.8.2407.0"
++#define RC_FILE_VERSION "1.8.2407.7"
+ 
+ #ifdef RC_FILE_DESCRIPTION
+ #undef RC_FILE_DESCRIPTION
+@@ -49,7 +52,7 @@
+ #ifdef RC_PRODUCT_VERSION
+ #undef RC_PRODUCT_VERSION
+ #endif
+-#define RC_PRODUCT_VERSION "1.8.2407.0"
++#define RC_PRODUCT_VERSION "1.8.2407.7 (416fab6b5)"
+ 
+ #ifdef HLSL_TOOL_NAME
+ #undef HLSL_TOOL_NAME
+-- 
+2.56.0
+

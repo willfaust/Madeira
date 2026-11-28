@@ -1,0 +1,138 @@
+From d461eea048d9c990cc3a13021f7206ffba2b2f01 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Wed, 11 Nov 2026 02:45:42 +1100
+Subject: [PATCH] kosmickrisp: hash slow libraries, dump giant MSL; raise
+ compile QoS from user-initiated too
+
+PoE2's slowest libraries come from 0.5-1.5 MB of generated MSL (4-24 s
+each on the Duo). [kk-slow] now logs a hash of the source, so a later
+session can tell a recompile from a new shader, and sources of at least
+MADEIRA_KK_DUMP_MSL_KB (default 250) are written once to
+$MESA_SHADER_CACHE_DIR/msl-dump/<hash>.metal (at most 64). The compile
+QoS raise now also lifts user-initiated threads, where PoE2's loader runs.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/bridge/mtl_compiler.m | 66 +++++++++++++++++++++++++--
+ 1 file changed, 61 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 1b90f9e..f020e33 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -19,6 +19,7 @@
+ 
+ #include <dirent.h>
+ #include <errno.h>
++#include <fcntl.h>
+ #include <pthread.h>
+ #include <stdatomic.h>
+ #include <stdio.h>
+@@ -150,6 +151,57 @@ kk_compile_report(bool force)
+ }
+ 
+ 
++/* Madeira: big generated shaders. PoE2's slowest libraries come from 0.5-1.5 MB
++ * of MSL (4-24 s each on the Duo, 10 Nov 2026). Every library of 150 ms or more
++ * logs a hash of its source, so a shader compiled again in a later session (a
++ * Metal library-cache miss) can be told from a new one, and sources of at least
++ * MADEIRA_KK_DUMP_MSL_KB (default 250; 0 = off) are written once to
++ * $MESA_SHADER_CACHE_DIR/msl-dump/<hash>.metal (at most 64 files). */
++static _Thread_local uint64_t kk_compile_msl_hash;
++
++static uint64_t
++kk_msl_hash(const char *src, size_t len)
++{
++   uint64_t h = 1469598103934665603ull;
++   for (size_t i = 0; i < len; ++i) {
++      h ^= (unsigned char)src[i];
++      h *= 1099511628211ull;
++   }
++   return h;
++}
++
++static void
++kk_msl_dump(const char *src, size_t len, uint64_t hash)
++{
++   static int limit_kb = -1;
++   static _Atomic int dumped;
++   if (limit_kb < 0) {
++      const char *v = getenv("MADEIRA_KK_DUMP_MSL_KB");
++      limit_kb = v && v[0] ? atoi(v) : 250;
++   }
++   if (limit_kb <= 0 || len < (size_t)limit_kb * 1024 || atomic_load(&dumped) >= 64)
++      return;
++   const char *base = getenv("MESA_SHADER_CACHE_DIR");
++   if (!base || !base[0])
++      return;
++   char dir[1024], path[1100];
++   snprintf(dir, sizeof dir, "%s/msl-dump", base);
++   mkdir(dir, 0755);
++   snprintf(path, sizeof path, "%s/%016llx.metal", dir, (unsigned long long)hash);
++   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
++   if (fd < 0)
++      return;
++   size_t off = 0;
++   while (off < len) {
++      ssize_t w = write(fd, src + off, len - off);
++      if (w <= 0)
++         break;
++      off += (size_t)w;
++   }
++   close(fd);
++   atomic_fetch_add(&dumped, 1);
++}
++
+ /* Madeira: every build is also reported to the app (madeira_vulkan_compile_mark in
+  * WiniosGL.m, found with dlsym like madeira_vulkan_present_mark), which keeps the
+  * counters its performance overlay and Shaders page show: builds in flight, and
+@@ -194,8 +246,9 @@ kk_compile_record(struct kk_compile_stat *stat, uint64_t start_ns)
+    else {
+       atomic_fetch_add(&stat->slow, 1);
+       if (kk_stats_enabled != 0)
+-         fprintf(stderr, "[kk-slow] %s %.1f ms (thread %p, qos %d, msl %zu B)\n", stat->name,
+-                 elapsed / 1e6, (void *)pthread_self(), (int)qos_class_self(), kk_compile_msl_bytes);
++         fprintf(stderr, "[kk-slow] %s %.1f ms (thread %p, qos %d, msl %zu B, hash %016llx)\n",
++                 stat->name, elapsed / 1e6, (void *)pthread_self(), (int)qos_class_self(),
++                 kk_compile_msl_bytes, (unsigned long long)kk_compile_msl_hash);
+    }
+    kk_compile_report(false);
+ }
+@@ -468,8 +521,8 @@ mtl_new_compiler(mtl_device *device)
+ /* Library */
+ /* Madeira: compile-speed levers that keep KosmicKrisp's design (one library
+  * per stage, pipeline state baked in), each with a switch:
+- *  - MADEIRA_KK_COMPILE_QOS (default 1): a thread compiling below user-initiated
+- *    QoS is raised to user-interactive for the compile and set back after, so
++ *  - MADEIRA_KK_COMPILE_QOS (default 1): a thread compiling below user-interactive
++ *    QoS (PoE2's loader runs at user-initiated) is raised to user-interactive for the compile and set back after, so
+  *    Metal's compiler service (which takes the requester's QoS) runs it on the
+  *    performance cores. PoE2 creates pipelines on one loading thread whose QoS
+  *    comes from MADEIRA_THREAD_QOS.
+@@ -493,7 +546,7 @@ kk_compile_qos_raise(void)
+    if (enabled < 0)
+       enabled = kk_env_flag("MADEIRA_KK_COMPILE_QOS", 1);
+    qos_class_t previous = qos_class_self();
+-   if (enabled && previous != QOS_CLASS_UNSPECIFIED && previous < QOS_CLASS_USER_INITIATED &&
++   if (enabled && previous != QOS_CLASS_UNSPECIFIED && previous < QOS_CLASS_USER_INTERACTIVE &&
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0)
+       return previous;
+    return QOS_CLASS_UNSPECIFIED;
+@@ -535,10 +588,13 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+       NSError *error;
+       qos_class_t qos = kk_compile_qos_raise();
+       kk_compile_msl_bytes = strlen(src);
++      kk_compile_msl_hash = kk_msl_hash(src, kk_compile_msl_bytes);
+       uint64_t start = kk_compile_begin(&kk_stat_library);
+       id<MTLLibrary> lib = [comp newLibraryWithDescriptor:desc error:&error];
+       kk_compile_record(&kk_stat_library, start);
++      kk_msl_dump(src, kk_compile_msl_bytes, kk_compile_msl_hash);
+       kk_compile_msl_bytes = 0;
++      kk_compile_msl_hash = 0;
+       kk_compile_qos_restore(qos);
+ 
+       if (lib == nil) {
+-- 
+2.56.0
+

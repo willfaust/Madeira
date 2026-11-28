@@ -4097,13 +4097,14 @@ struct LibraryDetail: View {
     }
     /// The pages the details page links to (iOS Settings style), each with its own Form.
     enum Page: Hashable {
-        case display, controls, launch, compatibility, steam, cloud, achievements, gog, itch, library, iniFiles, advanced
+        case display, controls, launch, compatibility, shaders, steam, cloud, achievements, gog, itch, library, iniFiles, advanced
         var title: String {
             switch self {
             case .display: return "Display"
             case .controls: return "Controls"
             case .launch: return "Launch"
             case .compatibility: return "Compatibility"
+            case .shaders: return "Shaders"
             case .steam: return "Steam"
             case .cloud: return "Steam Cloud"
             case .workshop: return "Steam Workshop"
@@ -4121,6 +4122,7 @@ struct LibraryDetail: View {
             case .controls: return "gamecontroller"
             case .launch: return "terminal"
             case .compatibility: return "cpu"
+            case .shaders: return "hammer"
             case .steam: return "shippingbox"
             case .cloud: return "icloud"
             case .workshop: return "square.stack.3d.up"
@@ -4143,7 +4145,7 @@ struct LibraryDetail: View {
         let steam: [Page] = entry.steamAppID == nil ? (entry.gogProductID != nil ? [.gog] : entry.itchGameID != nil ? [.itch] : [])
             : (SteamOwnedLibrary.cloudEnabled ? [.steam, .cloud, .achievements] : [.steam, .achievements])
                 + (SteamOwnedLibrary.workshopEnabled && Self.showsWorkshop(entry.steamAppID) ? [.workshop] : [])
-        let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility] : [.display, .controls, .compatibility]
+        let tuning: [Page] = launch ? [.display, .controls, .launch, .compatibility, .shaders] : [.display, .controls, .compatibility, .shaders]
         let more: [Page] = entry.desktop == true ? [.advanced] : [.library, .iniFiles, .advanced]
         return [tuning, steam, more].filter { !$0.isEmpty }
     }
@@ -4175,6 +4177,7 @@ struct LibraryDetail: View {
             case .controls: controlsPage
             case .launch: launchPage
             case .compatibility: compatibilityPage
+            case .shaders: ShaderCacheSection()
             case .steam: steamPage
             case .cloud: if let appID = entry.steamAppID { SteamCloudSection(appID: appID) }
             case .workshop:
@@ -4659,6 +4662,94 @@ struct BCDGameValues {
 /// syntax, applied at its next start. madeira-bcd: LibraryDetail binds it to the
 /// game's GameProfiles.swift file (Application Support/GameConfigs), which every
 /// launch exports as MADEIRA_CFG_GAME (BCDLaunch, MadeiraConfig.applyGame).
+/// madeira-duo vk3: the shader caches in the prefix, how big each is, and a compile of the recorded
+/// Vulkan pipelines before a game starts (madeira_shader_precompile_start, WineProcessBridge.m), with
+/// its progress. The caches are shared by every game in the prefix.
+struct ShaderCacheSection: View {
+    struct Folder: Identifiable { let name: String; let bytes: Int64; var id: String { name } }
+    @State private var sizes: [Folder] = []
+    @State private var done: UInt32 = 0
+    @State private var total: UInt32 = 0
+    @State private var state: Int32 = 0
+    @State private var seconds = 0.0
+    @State private var message: String?
+    private let ticks = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private static var documents: URL { FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first! }
+    /// (name, folder under Documents). LOCALAPPDATA is drive_c/users/mobile/AppData/Local.
+    private static let folders: [(String, String)] = [
+        ("Vulkan: Mesa shader cache", "wine/madeira-cache/kosmickrisp/mesa_shader_cache"),
+        ("Vulkan: Metal pipeline archives", "wine/madeira-cache/kosmickrisp/kosmickrisp-mtl4"),
+        ("Vulkan: recorded pipelines", "wine/madeira-cache/fossilize"),
+        ("D3D12: converted shaders", "shadercache"),
+        ("D3D12: shader cache", "wine/drive_c/users/mobile/AppData/Local/Madeira/ShaderCache"),
+        ("D3D12: pipeline archive", "wine/drive_c/users/mobile/AppData/Local/Madeira/PipelineArchive"),
+    ]
+
+    private static func folderBytes(_ url: URL) -> Int64 {
+        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { return -1 }
+        var bytes: Int64 = 0
+        for case let file as URL in walker {
+            guard let values = try? file.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true else { continue }
+            bytes += Int64(values.totalFileAllocatedSize ?? 0)
+        }
+        return bytes
+    }
+
+    private func measure() {
+        Task.detached(priority: .utility) {
+            let measured = Self.folders.map { Folder(name: $0.0, bytes: Self.folderBytes(Self.documents.appendingPathComponent($0.1))) }
+            await MainActor.run { sizes = measured }
+        }
+    }
+
+    private func poll() {
+        var d: UInt32 = 0, t: UInt32 = 0, st: Int32 = 0, secs = 0.0
+        madeira_shader_precompile_status(&d, &t, &st, &secs)
+        let finished = state == 1 && st != 1
+        done = d; total = t; state = st; seconds = secs
+        if finished { measure() }
+    }
+
+    private var progressText: String {
+        let rate = seconds > 0 ? Double(done) / seconds : 0
+        var text = total > 0 ? "\(done) of \(total) pipelines" : "\(done) pipelines"
+        if rate > 0 { text += String(format: " · %.0f/s", rate) }
+        if rate > 0, total > done { text += String(format: " · about %.0f s left", Double(total - done) / rate) }
+        return text
+    }
+
+    var body: some View {
+        Section {
+            ForEach(sizes) { entry in
+                LabeledContent(entry.name, value: entry.bytes < 0 ? "–" : ByteCountFormatter.string(fromByteCount: entry.bytes, countStyle: .file))
+            }
+            Button("Compile shaders now", systemImage: "hammer") {
+                switch madeira_shader_precompile_start() {
+                case 0: message = nil; state = 1
+                case -1: message = L("A shader compile is already running.")
+                default: message = L("Needs vulkan = kosmickrisp in madeira.cfg.")
+                }
+            }
+            .disabled(state == 1)
+            if state == 1 {
+                ProgressView(value: Double(done), total: Double(max(total, max(done, 1))))
+                Text(progressText).font(.caption.monospacedDigit())
+            } else if state == 2 {
+                Text(String(format: L("Last compile: %u pipelines in %.0f s."), done, seconds)).font(.caption)
+            } else if state == 3 {
+                Text("The last compile stopped with an error; the log has the [fossilize] lines.").font(.caption).foregroundStyle(.red)
+            }
+            if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+        } header: { Text("Shaders") } footer: {
+            Text("Compiles the Vulkan pipelines Madeira recorded while you played (vulkan = kosmickrisp, fossilize = on) on every core, before the game starts. A game started meanwhile waits for it. The same replay runs at each game start.")
+        }
+        .onAppear { measure(); poll() }
+        .onReceive(ticks) { _ in poll() }
+    }
+}
+
 struct LibraryGameConfigEditor: View {
     @Binding var text: String
     var body: some View {
@@ -6105,7 +6196,7 @@ enum OverlayStyle {
     static let layouts: [(id: String, name: String)] = [("grid", "Grid"), ("row", "One row"), ("column", "Column")]
     static let backgrounds: [(id: String, name: String)] = [("glass", "Glass"), ("dark", "Dark"), ("clear", "None")]
     /// The figures the overlay can show, in the order of the menu's switches.
-    static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
+    static let fields = ["FPS", "Frame time", "1% lows", "0.1% lows", "Frame graph", "CPU", "GPU", "Shader misses", "RAM", "JIT memory", "Swap & donor", "Battery", "Thermal"]
 }
 
 /// Frame times from the present path (madeira_frame_times_us, Winios.m) and the
@@ -6246,6 +6337,27 @@ struct LibraryMetrics: View {
     @State private var donatedMB = 0
     @State private var donorPoolMB = 0
     @State private var donorGuarded = 0
+    /// madeira-duo overlay-shader: madeira_shader_overlay_stats (winemetal_unix.c). Totals since the
+    /// overlay started showing them (vk4: totals, not rates, so the figures don't drop back to zero
+    /// between bursts): shader stages madeira-d3d12's cache did not have (converted), and pipelines
+    /// Metal compiled because the pso-archive did not have them; right now, the pipelines the game
+    /// waits on (pso-async queue, and pso-create-block builds inside a create call) and the
+    /// create-time queue behind them; the flags it gave.
+    @State private var shaderPrimed = false
+    @State private var baseShaderMisses: UInt64 = 0
+    @State private var basePipelineMisses: UInt64 = 0
+    @State private var shaderTotal = 0
+    @State private var pipelineTotal = 0
+    @State private var psoQueue = 0
+    @State private var psoBackground = 0
+    @State private var shaderFlags = 0
+    /// madeira-duo vk3/vk4: Vulkan builds KosmicKrisp reported (madeira_vulkan_compile_stats): compiles since
+    /// the overlay started showing them, builds running now, slow compiles since the game started.
+    @State private var baseVulkanCompiles: UInt64 = 0
+    @State private var vulkanTotal = 0
+    @State private var vulkanInFlight = 0
+    @State private var vulkanSlow = 0
+    @State private var vulkanSeen = false
     /// Half-second ticks; the figures change every `refresh` seconds (0.5, 1 or 2).
     private let ticks = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     /// ml2021: one cell per figure. A fixed width per cell (the widest value it can show)
@@ -6295,6 +6407,20 @@ struct LibraryMetrics: View {
         if model.overlayFields.contains("Swap & donor") {
             if donorPoolMB > 0 { result.append(Cell(id: "donor", label: "DONOR", value: "\(donatedMB)", width: 54)) }
             result.append(Cell(id: "swap", label: "SWAP", value: "\(swapFileMB)", width: 54))
+        }
+        if model.overlayFields.contains("Shader misses") {
+            if vulkanSeen {
+                // Vulkan (KosmicKrisp): compiles so far, builds running now, slow compiles this game.
+                result.append(Cell(id: "miss", label: "BUILT", value: "\(vulkanTotal)", width: 64))
+                result.append(Cell(id: "psoq", label: "BUILD", value: "\(vulkanInFlight)", width: 50))
+                result.append(Cell(id: "slow", label: "SLOW", value: "\(vulkanSlow)", width: 54))
+            } else {
+                // D3D12: shaders converted and pipelines compiled so far, pipelines the game waits on now.
+                let known = shaderPrimed && shaderFlags & 1 != 0
+                result.append(Cell(id: "miss", label: "SHADERS", value: known ? "\(shaderTotal)" : "–", width: 64))
+                result.append(Cell(id: "pso", label: "PSO", value: known && shaderFlags & 8 != 0 ? "\(pipelineTotal)" : "–", width: 56))
+                result.append(Cell(id: "psoq", label: "WAIT", value: shaderFlags & 1 == 0 ? "–" : shaderFlags & 4 == 0 ? "off" : "\(psoQueue)", width: 50))
+            }
         }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append(Cell(id: "bat", label: "BAT", value: "\(battery)%", width: 50)) }
         if model.overlayFields.contains("Thermal") {
@@ -6432,6 +6558,29 @@ struct LibraryMetrics: View {
                     madeira_swap_overlay_stats(&file, &donated, &pool, &guarded)
                     swapFileMB = Int(file); donatedMB = Int(donated); donorPoolMB = Int(pool); donorGuarded = Int(guarded)
                 }
+                if model.overlayFields.contains("Shader misses") {
+                    var shaders: UInt64 = 0, pipelines: UInt64 = 0, queue: Int64 = 0, background: Int64 = 0, flags: Int32 = 0
+                    _ = madeira_shader_overlay_stats_optional(&shaders, &pipelines, &queue, &background, &flags)
+                    var vkBuilds: UInt64 = 0, vkCompiles: UInt64 = 0, vkSlow: UInt64 = 0, vkMs: UInt64 = 0
+                    var vkInFlight: Int64 = 0, vkLibraries: UInt64 = 0, vkPipelines: UInt64 = 0
+                    madeira_vulkan_compile_stats(&vkBuilds, &vkCompiles, &vkSlow, &vkMs, &vkInFlight, &vkLibraries, &vkPipelines)
+                    // The counters run for the app (a new game's madeira-d3d12 block starts at
+                    // zero again): totals count from the first sample, and a counter that went
+                    // backwards (a new game process) counts from zero.
+                    if vkBuilds > 0 {
+                        if !vulkanSeen || vkCompiles < baseVulkanCompiles { baseVulkanCompiles = vulkanSeen ? 0 : vkCompiles }
+                        vulkanSeen = true
+                        vulkanTotal = Int(vkCompiles - baseVulkanCompiles)
+                        vulkanInFlight = Int(vkInFlight); vulkanSlow = Int(vkSlow)
+                    }
+                    if !shaderPrimed { baseShaderMisses = shaders; basePipelineMisses = pipelines; shaderPrimed = true }
+                    if shaders < baseShaderMisses { baseShaderMisses = 0 }
+                    if pipelines < basePipelineMisses { basePipelineMisses = 0 }
+                    shaderTotal = Int(shaders - baseShaderMisses); pipelineTotal = Int(pipelines - basePipelineMisses)
+                    psoQueue = Int(queue); psoBackground = Int(background); shaderFlags = Int(flags)
+                } else if shaderPrimed {
+                    shaderPrimed = false; shaderTotal = 0; pipelineTotal = 0
+                }
                 if model.overlayFields.contains("GPU") {
                     let busy = madeira_gpu_meter_busy_seconds(), buffers = madeira_gpu_meter_cmdbufs()
                     let used = max(0, busy - lastGPUBusy)
@@ -6473,6 +6622,17 @@ struct LibraryMetrics: View {
                                                : "Donated \(donatedMB)/\(donorPoolMB) MB")
             }
             result.append("Swap \(swapFileMB) MB")
+        }
+        if model.overlayFields.contains("Shader misses"), vulkanSeen {
+            result.append("\(vulkanTotal) shaders compiled, \(vulkanInFlight) building, \(vulkanSlow) slow")
+        } else if model.overlayFields.contains("Shader misses") {
+            if !shaderPrimed || shaderFlags & 1 == 0 { result.append("Shader misses —") }
+            else if shaderFlags & 8 != 0 {
+                result.append("\(shaderTotal) shaders converted, \(pipelineTotal) pipelines compiled")
+            } else { result.append("\(shaderTotal) shaders converted") }
+            if shaderFlags & 1 == 0 { result.append("Pipeline queue —") }
+            else if shaderFlags & 4 == 0 { result.append("Pipeline queue off") }
+            else { result.append("Pipeline queue \(psoQueue) (\(psoBackground) queued at creation)") }
         }
         if model.overlayFields.contains("Battery"), battery >= 0 { result.append("\(battery)%") }
         if model.overlayFields.contains("Thermal") {

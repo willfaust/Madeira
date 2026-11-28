@@ -1,0 +1,540 @@
+From 7bb0c615e15b25d34563f9f13467128758476768 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Mon, 9 Nov 2026 21:25:16 +1100
+Subject: [PATCH] kosmickrisp: Metal 4 pipeline archives and compile timing
+
+Pipelines built through the MTL4Compiler are collected by a
+MTL4PipelineDataSetSerializer and written as archive chunks every 60 s
+while new pipelines are built, and when the compiler is released. Chunks
+from earlier sessions are loaded at start-up and passed as lookupArchives,
+so repeat builds are found instead of compiled. Library and pipeline
+builds are timed: [kk-slow] for builds of 150 ms or more, [kk-compile]
+totals every 30 s. MADEIRA_KK_ARCHIVE=0 / MADEIRA_KK_COMPILE_STATS=0 opt out.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+---
+ src/kosmickrisp/bridge/mtl_compiler.h       |   4 +
+ src/kosmickrisp/bridge/mtl_compiler.m       | 422 +++++++++++++++++++-
+ src/kosmickrisp/bridge/stubs/mtl_compiler.c |   5 +
+ src/kosmickrisp/vulkan/kk_device.c          |   3 +
+ 4 files changed, 432 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.h b/src/kosmickrisp/bridge/mtl_compiler.h
+index b433ac9..b0fa59f 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.h
++++ b/src/kosmickrisp/bridge/mtl_compiler.h
+@@ -18,6 +18,10 @@ enum mtl_pixel_format;
+ /* Compiler */
+ mtl_compiler *mtl_new_compiler(mtl_device *device);
+ 
++/* Madeira: writes pending pipeline-archive data now and logs the compile
++ * statistics. Called when the last device using the compiler goes away. */
++void mtl_compiler_flush_archive(mtl_compiler *compiler);
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 92c532e..74e1bde 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -12,6 +12,402 @@
+ #include <Metal/MTL4LibraryFunctionDescriptor.h>
+ #include <Metal/MTL4RenderPipeline.h>
+ #include <Metal/MTLDevice.h>
++#include <Metal/MTL4Archive.h>
++#include <Metal/MTL4PipelineDataSetSerializer.h>
++#include <dispatch/dispatch.h>
++
++#include <dirent.h>
++#include <errno.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
++
++/*
++ * Madeira: Metal 4 pipeline archives and compile timing.
++ *
++ * Archives. Every pipeline the compiler builds is also collected by a
++ * MTL4PipelineDataSetSerializer (binaries). The collected set is written out
++ * as one archive chunk at most every MADEIRA_KK_ARCHIVE_FLUSH_S seconds
++ * (default 60) while new pipelines are being built, and when the compiler is
++ * released. At start-up every chunk in the archive directory is loaded,
++ * newest first, up to MADEIRA_KK_ARCHIVE_MB (default 1024) in total, and
++ * passed to every pipeline build as lookupArchives, so a pipeline built in an
++ * earlier session is found instead of compiled again. Chunks Metal can't read
++ * (for example after an OS update) are deleted. The directory is
++ * MADEIRA_KK_ARCHIVE_DIR, else $MESA_SHADER_CACHE_DIR/kosmickrisp-mtl4, else
++ * $HOME/.cache/kosmickrisp-mtl4. MADEIRA_KK_ARCHIVE=0 turns all of it off.
++ *
++ * Timing. Library compiles, render and compute pipeline builds are timed.
++ * Any one that takes 150 ms or more is logged as [kk-slow]; every 30 s a
++ * [kk-compile] line gives cumulative counts, totals, maxima and a duration
++ * histogram per kind (the < 2 ms bucket is, in practice, archive or Metal
++ * cache hits). MADEIRA_KK_COMPILE_STATS=0 turns the lines off.
++ */
++
++#define KK_SLOW_NS (150ull * 1000000ull)
++#define KK_REPORT_NS (30ull * 1000000000ull)
++
++struct kk_compile_stat {
++   const char *name;
++   _Atomic uint64_t count;
++   _Atomic uint64_t total_ns;
++   _Atomic uint64_t max_ns;
++   _Atomic uint64_t under_2ms;
++   _Atomic uint64_t under_20ms;
++   _Atomic uint64_t under_150ms;
++   _Atomic uint64_t slow;
++};
++
++static struct kk_compile_stat kk_stat_library = {.name = "library"};
++static struct kk_compile_stat kk_stat_render = {.name = "render"};
++static struct kk_compile_stat kk_stat_compute = {.name = "compute"};
++static _Atomic uint64_t kk_last_report_ns;
++static int kk_stats_enabled = -1;
++
++static struct {
++   pthread_once_t once;
++   bool enabled;
++   char directory[1024];
++   uint64_t cap_bytes;
++   uint64_t flush_interval_ns;
++   NSMutableArray *archives;
++   id<MTL4PipelineDataSetSerializer> serializer;
++   MTL4CompilerTaskOptions *task_options;
++   pthread_rwlock_t lock;
++   _Atomic uint64_t built_since_flush;
++   _Atomic uint64_t last_flush_ns;
++   _Atomic uint64_t chunks_written;
++   _Atomic uint64_t flush_running;
++   uint32_t chunks_loaded;
++   uint32_t chunks_rejected;
++   uint64_t bytes_loaded;
++} kk_archive = {.once = PTHREAD_ONCE_INIT};
++
++static uint64_t
++kk_now_ns(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static uint64_t
++kk_env_u64(const char *name, uint64_t fallback)
++{
++   const char *value = getenv(name);
++   if (value == NULL || value[0] == '\0')
++      return fallback;
++   return strtoull(value, NULL, 10);
++}
++
++static void
++kk_compile_report(bool force)
++{
++   if (kk_stats_enabled < 0)
++      kk_stats_enabled = kk_env_u64("MADEIRA_KK_COMPILE_STATS", 1) != 0;
++   if (!kk_stats_enabled)
++      return;
++
++   uint64_t now = kk_now_ns();
++   uint64_t last = atomic_load(&kk_last_report_ns);
++   if (!force && now - last < KK_REPORT_NS)
++      return;
++   if (!force && !atomic_compare_exchange_strong(&kk_last_report_ns, &last, now))
++      return;
++
++   struct kk_compile_stat *stats[3] = {&kk_stat_library, &kk_stat_render, &kk_stat_compute};
++   char line[1024];
++   int used = snprintf(line, sizeof(line), "[kk-compile]");
++   for (int i = 0; i < 3; ++i) {
++      struct kk_compile_stat *stat = stats[i];
++      uint64_t count = atomic_load(&stat->count);
++      uint64_t total = atomic_load(&stat->total_ns);
++      used += snprintf(line + used, sizeof(line) - used,
++                       " %s n=%llu total=%.0fms avg=%.2fms max=%.1fms <2ms=%llu <20ms=%llu <150ms=%llu slow=%llu |",
++                       stat->name, (unsigned long long)count, total / 1e6,
++                       count ? total / 1e6 / count : 0.0,
++                       atomic_load(&stat->max_ns) / 1e6,
++                       (unsigned long long)atomic_load(&stat->under_2ms),
++                       (unsigned long long)atomic_load(&stat->under_20ms),
++                       (unsigned long long)atomic_load(&stat->under_150ms),
++                       (unsigned long long)atomic_load(&stat->slow));
++      if (used >= (int)sizeof(line))
++         break;
++   }
++   fprintf(stderr, "%s archive chunks loaded=%u (%llu KB) rejected=%u written=%llu%s\n", line,
++           kk_archive.chunks_loaded, (unsigned long long)(kk_archive.bytes_loaded / 1024),
++           kk_archive.chunks_rejected,
++           (unsigned long long)atomic_load(&kk_archive.chunks_written),
++           kk_archive.enabled ? "" : " (archives off)");
++}
++
++static void
++kk_compile_record(struct kk_compile_stat *stat, uint64_t start_ns)
++{
++   uint64_t elapsed = kk_now_ns() - start_ns;
++   atomic_fetch_add(&stat->count, 1);
++   atomic_fetch_add(&stat->total_ns, elapsed);
++   uint64_t max = atomic_load(&stat->max_ns);
++   while (elapsed > max && !atomic_compare_exchange_weak(&stat->max_ns, &max, elapsed))
++      ;
++   if (elapsed < 2000000ull)
++      atomic_fetch_add(&stat->under_2ms, 1);
++   else if (elapsed < 20000000ull)
++      atomic_fetch_add(&stat->under_20ms, 1);
++   else if (elapsed < KK_SLOW_NS)
++      atomic_fetch_add(&stat->under_150ms, 1);
++   else {
++      atomic_fetch_add(&stat->slow, 1);
++      if (kk_stats_enabled != 0)
++         fprintf(stderr, "[kk-slow] %s %.1f ms (thread %p)\n", stat->name, elapsed / 1e6,
++                 (void *)pthread_self());
++   }
++   kk_compile_report(false);
++}
++
++static void
++kk_archive_default_directory(char *out, size_t size)
++{
++   const char *explicit_dir = getenv("MADEIRA_KK_ARCHIVE_DIR");
++   if (explicit_dir && explicit_dir[0]) {
++      snprintf(out, size, "%s", explicit_dir);
++      return;
++   }
++   const char *mesa_dir = getenv("MESA_SHADER_CACHE_DIR");
++   if (mesa_dir && mesa_dir[0]) {
++      snprintf(out, size, "%s/kosmickrisp-mtl4", mesa_dir);
++      return;
++   }
++   const char *home = getenv("HOME");
++   snprintf(out, size, "%s/.cache/kosmickrisp-mtl4", home ? home : ".");
++}
++
++static void
++kk_mkdir_parents(const char *path)
++{
++   char buffer[1024];
++   snprintf(buffer, sizeof(buffer), "%s", path);
++   for (char *cursor = buffer + 1; *cursor; ++cursor) {
++      if (*cursor == '/') {
++         *cursor = '\0';
++         mkdir(buffer, 0755);
++         *cursor = '/';
++      }
++   }
++   mkdir(buffer, 0755);
++}
++
++struct kk_chunk_entry {
++   char name[256];
++   time_t modified;
++   off_t size;
++};
++
++static int
++kk_chunk_newest_first(const void *a, const void *b)
++{
++   const struct kk_chunk_entry *left = a, *right = b;
++   if (left->modified != right->modified)
++      return left->modified < right->modified ? 1 : -1;
++   return strcmp(right->name, left->name);
++}
++
++/* Lists *.mtl4a in the archive directory, newest first. Caller frees. */
++static struct kk_chunk_entry *
++kk_list_chunks(uint32_t *count_out)
++{
++   *count_out = 0;
++   DIR *directory = opendir(kk_archive.directory);
++   if (directory == NULL)
++      return NULL;
++   uint32_t capacity = 64, count = 0;
++   struct kk_chunk_entry *entries = malloc(capacity * sizeof(*entries));
++   struct dirent *entry;
++   while (entries && (entry = readdir(directory)) != NULL) {
++      size_t length = strlen(entry->d_name);
++      if (length < 7 || strcmp(entry->d_name + length - 6, ".mtl4a") != 0)
++         continue;
++      char path[1400];
++      snprintf(path, sizeof(path), "%s/%s", kk_archive.directory, entry->d_name);
++      struct stat info;
++      if (stat(path, &info) != 0)
++         continue;
++      if (count == capacity) {
++         capacity *= 2;
++         struct kk_chunk_entry *grown = realloc(entries, capacity * sizeof(*entries));
++         if (grown == NULL)
++            break;
++         entries = grown;
++      }
++      snprintf(entries[count].name, sizeof(entries[count].name), "%s", entry->d_name);
++      entries[count].modified = info.st_mtime;
++      entries[count].size = info.st_size;
++      count++;
++   }
++   closedir(directory);
++   if (entries)
++      qsort(entries, count, sizeof(*entries), kk_chunk_newest_first);
++   *count_out = count;
++   return entries;
++}
++
++/* Deletes the oldest chunks beyond the size cap. */
++static void
++kk_prune_chunks(void)
++{
++   uint32_t count;
++   struct kk_chunk_entry *entries = kk_list_chunks(&count);
++   uint64_t kept = 0;
++   for (uint32_t i = 0; i < count; ++i) {
++      kept += (uint64_t)entries[i].size;
++      if (kept > kk_archive.cap_bytes && i > 0) {
++         char path[1400];
++         snprintf(path, sizeof(path), "%s/%s", kk_archive.directory, entries[i].name);
++         unlink(path);
++         fprintf(stderr, "[kk-archive] pruned %s (cap %llu MB)\n", entries[i].name,
++                 (unsigned long long)(kk_archive.cap_bytes >> 20));
++      }
++   }
++   free(entries);
++}
++
++static id<MTLDevice> kk_archive_device;
++
++static void
++kk_archive_init_once(void)
++{
++   id<MTLDevice> device = kk_archive_device;
++   kk_archive.enabled = kk_env_u64("MADEIRA_KK_ARCHIVE", 1) != 0;
++   kk_archive.cap_bytes = kk_env_u64("MADEIRA_KK_ARCHIVE_MB", 1024) << 20;
++   kk_archive.flush_interval_ns = kk_env_u64("MADEIRA_KK_ARCHIVE_FLUSH_S", 60) * 1000000000ull;
++   pthread_rwlock_init(&kk_archive.lock, NULL);
++   atomic_store(&kk_archive.last_flush_ns, kk_now_ns());
++   if (!kk_archive.enabled) {
++      fprintf(stderr, "[kk-archive] off (MADEIRA_KK_ARCHIVE=0)\n");
++      return;
++   }
++
++   kk_archive_default_directory(kk_archive.directory, sizeof(kk_archive.directory));
++   kk_mkdir_parents(kk_archive.directory);
++
++   @autoreleasepool {
++      kk_archive.archives = [[NSMutableArray alloc] init];
++      uint32_t count;
++      struct kk_chunk_entry *entries = kk_list_chunks(&count);
++      for (uint32_t i = 0; i < count; ++i) {
++         char path[1400];
++         snprintf(path, sizeof(path), "%s/%s", kk_archive.directory, entries[i].name);
++         if (kk_archive.bytes_loaded + (uint64_t)entries[i].size > kk_archive.cap_bytes)
++            break;
++         NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
++         NSError *error = nil;
++         id<MTL4Archive> archive = [device newArchiveWithURL:url error:&error];
++         if (archive == nil) {
++            fprintf(stderr, "[kk-archive] %s unreadable, deleted: %s\n", entries[i].name,
++                    error ? [error.localizedDescription UTF8String] : "no error");
++            unlink(path);
++            kk_archive.chunks_rejected++;
++            continue;
++         }
++         [kk_archive.archives addObject:archive];
++         [archive release];
++         kk_archive.chunks_loaded++;
++         kk_archive.bytes_loaded += (uint64_t)entries[i].size;
++      }
++      free(entries);
++
++      MTL4PipelineDataSetSerializerDescriptor *serializer_descriptor =
++         [[MTL4PipelineDataSetSerializerDescriptor new] autorelease];
++      serializer_descriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
++      kk_archive.serializer = [device newPipelineDataSetSerializerWithDescriptor:serializer_descriptor];
++      if (kk_archive.serializer == nil)
++         fprintf(stderr, "[kk-archive] no pipeline data set serializer: new chunks won't be written\n");
++
++      if (kk_archive.archives.count > 0) {
++         kk_archive.task_options = [[MTL4CompilerTaskOptions alloc] init];
++         kk_archive.task_options.lookupArchives = kk_archive.archives;
++      }
++   }
++   fprintf(stderr, "[kk-archive] dir %s: %u chunk(s) loaded (%llu KB), %u rejected, cap %llu MB, flush every %llu s\n",
++           kk_archive.directory, kk_archive.chunks_loaded,
++           (unsigned long long)(kk_archive.bytes_loaded / 1024), kk_archive.chunks_rejected,
++           (unsigned long long)(kk_archive.cap_bytes >> 20),
++           (unsigned long long)(kk_archive.flush_interval_ns / 1000000000ull));
++}
++
++static void
++kk_archive_write_chunk(void)
++{
++   if (!kk_archive.enabled || kk_archive.serializer == nil)
++      return;
++   uint64_t built = atomic_exchange(&kk_archive.built_since_flush, 0);
++   if (built == 0)
++      return;
++
++   char path[1400];
++   snprintf(path, sizeof(path), "%s/chunk-%lld-%d-%llu.mtl4a", kk_archive.directory,
++            (long long)time(NULL), (int)getpid(),
++            (unsigned long long)atomic_load(&kk_archive.chunks_written));
++   uint64_t start = kk_now_ns();
++   bool written = false;
++   pthread_rwlock_wrlock(&kk_archive.lock);
++   @autoreleasepool {
++      NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
++      NSError *error = nil;
++      written = [kk_archive.serializer serializeAsArchiveAndFlushToURL:url error:&error];
++      if (!written)
++         fprintf(stderr, "[kk-archive] writing %s failed: %s\n", path,
++                 error ? [error.localizedDescription UTF8String] : "no error");
++   }
++   pthread_rwlock_unlock(&kk_archive.lock);
++   if (written) {
++      struct stat info;
++      off_t size = stat(path, &info) == 0 ? info.st_size : 0;
++      atomic_fetch_add(&kk_archive.chunks_written, 1);
++      fprintf(stderr, "[kk-archive] wrote %s: %lld KB, %llu pipeline build(s) since the last chunk, %.0f ms\n",
++              path, (long long)(size / 1024), (unsigned long long)built,
++              (kk_now_ns() - start) / 1e6);
++      kk_prune_chunks();
++   }
++   atomic_store(&kk_archive.last_flush_ns, kk_now_ns());
++}
++
++/* After a pipeline build: write a chunk in the background when it's due. */
++static void
++kk_archive_after_build(void)
++{
++   if (!kk_archive.enabled)
++      return;
++   atomic_fetch_add(&kk_archive.built_since_flush, 1);
++   uint64_t now = kk_now_ns();
++   if (now - atomic_load(&kk_archive.last_flush_ns) < kk_archive.flush_interval_ns)
++      return;
++   uint64_t idle = 0;
++   if (!atomic_compare_exchange_strong(&kk_archive.flush_running, &idle, 1))
++      return;
++   atomic_store(&kk_archive.last_flush_ns, now);
++   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
++      kk_archive_write_chunk();
++      atomic_store(&kk_archive.flush_running, 0);
++   });
++}
++
++void
++mtl_compiler_flush_archive(mtl_compiler *compiler)
++{
++   (void)compiler;
++   kk_compile_report(true);
++   if (kk_archive.archives == nil && !kk_archive.enabled)
++      return;
++   while (atomic_load(&kk_archive.flush_running))
++      usleep(1000);
++   kk_archive_write_chunk();
++}
+ 
+ /* Compiler */
+ mtl_compiler *
+@@ -22,6 +418,12 @@ mtl_new_compiler(mtl_device *device)
+ 
+       MTL4CompilerDescriptor *desc = [[MTL4CompilerDescriptor new] autorelease];
+ 
++      /* Madeira: archives (see the top of this file). */
++      kk_archive_device = dev;
++      pthread_once(&kk_archive.once, kk_archive_init_once);
++      if (kk_archive.serializer != nil)
++         desc.pipelineDataSetSerializer = kk_archive.serializer;
++
+       NSError *error;
+       id<MTL4Compiler> compiler = [dev newCompilerWithDescriptor:desc error:&error];
+ 
+@@ -56,7 +458,9 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+       desc.options = opts;
+ 
+       NSError *error;
++      uint64_t start = kk_now_ns();
+       id<MTLLibrary> lib = [comp newLibraryWithDescriptor:desc error:&error];
++      kk_compile_record(&kk_stat_library, start);
+ 
+       if (lib == nil) {
+          fprintf(stderr, "Failed to create MTLLibrary: %s\n", [error.localizedDescription UTF8String]);
+@@ -94,8 +498,15 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       desc.maxTotalThreadsPerThreadgroup = max_total_threads_per_threadgroup;
+ 
+       NSError *error;
+-      id<MTLComputePipelineState> pipeline = [comp newComputePipelineStateWithDescriptor:desc compilerTaskOptions:nil
++      uint64_t start = kk_now_ns();
++      pthread_rwlock_rdlock(&kk_archive.lock);
++      id<MTLComputePipelineState> pipeline = [comp newComputePipelineStateWithDescriptor:desc
++                                                                     compilerTaskOptions:kk_archive.task_options
+                                                                                    error:&error];
++      pthread_rwlock_unlock(&kk_archive.lock);
++      kk_compile_record(&kk_stat_compute, start);
++      if (pipeline != nil)
++         kk_archive_after_build();
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLComputePipelineState: %s\n", [error.localizedDescription UTF8String]);
+@@ -214,8 +625,15 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+ 
+       NSError *error = nil;
+-      id<MTLRenderPipelineState> pipeline = [comp newRenderPipelineStateWithDescriptor:desc compilerTaskOptions:nil
++      uint64_t start = kk_now_ns();
++      pthread_rwlock_rdlock(&kk_archive.lock);
++      id<MTLRenderPipelineState> pipeline = [comp newRenderPipelineStateWithDescriptor:desc
++                                                                   compilerTaskOptions:kk_archive.task_options
+                                                                                  error:&error];
++      pthread_rwlock_unlock(&kk_archive.lock);
++      kk_compile_record(&kk_stat_render, start);
++      if (pipeline != nil)
++         kk_archive_after_build();
+ 
+       if (pipeline == nil) {
+          fprintf(stderr, "Failed to create MTLRenderPipelineState: %s\n", [error.localizedDescription UTF8String]);
+diff --git a/src/kosmickrisp/bridge/stubs/mtl_compiler.c b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+index c8b1a1b..86e6ffa 100644
+--- a/src/kosmickrisp/bridge/stubs/mtl_compiler.c
++++ b/src/kosmickrisp/bridge/stubs/mtl_compiler.c
+@@ -15,6 +15,11 @@ mtl_new_compiler(mtl_device *device)
+    return NULL;
+ }
+ 
++void
++mtl_compiler_flush_archive(mtl_compiler *compiler)
++{
++}
++
+ /* Library */
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index 644a872..959e6a0 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -81,6 +81,7 @@ kk_release_compiler(struct kk_device *dev)
+ {
+    /* KK_WORKAROUND_11 */
+    if (dev->disabled_workarounds & BITFIELD64_BIT(11)) {
++      mtl_compiler_flush_archive(dev->mtl_compiler_handle);
+       mtl_release(dev->mtl_compiler_handle);
+       return;
+    }
+@@ -95,6 +96,8 @@ kk_release_compiler(struct kk_device *dev)
+ 
+       if (compiler->refcount == 0) {
+          _mesa_hash_table_remove(&compilers_ht, ent);
++         /* Madeira: write the pipeline-archive chunk for this session. */
++         mtl_compiler_flush_archive(compiler->handle);
+          mtl_release(compiler->handle);
+          ralloc_free(compiler);
+       }
+-- 
+2.56.0
+

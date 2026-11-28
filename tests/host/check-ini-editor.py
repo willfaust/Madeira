@@ -94,6 +94,15 @@ print("list=" + GameIniFiles.files("C:\\GAME", defaults: defaults).joined(separa
 print("help=" + [IniSettingHelp.describe(key: "uGridsToLoad") != nil, IniSettingHelp.describe(key: "iSize W")?.hasPrefix("The game's width") == true,
                   IniSettingHelp.describe(key: "bSomethingNew") == "A switch: 1 is on, 0 is off.", IniSettingHelp.describe(key: "whatever") == nil]
                   .map { "\($0)" }.joined(separator: ","))
+var put = IniDocument(text: "[LOGIN]\r\na=1\r\n[DISPLAY]\r\nshadow_type=High\r\nupscale=Off\r\n\r\n[SOUND]\r\nv=1\r\n")
+let r1 = put.put(section: "display", key: "SHADOW_TYPE", value: "Low")
+let r2 = put.put(section: "DISPLAY", key: "upscale", value: "Off")
+let r3 = put.put(section: "DISPLAY", key: "framerate_limit", value: "30")
+let r4 = put.put(section: "NEW", key: "k", value: "v")
+print("put=\(r1),\(r2),\(r3),\(r4)|" + show(put.text))
+var empty = IniDocument(text: "")
+empty.put(section: "DISPLAY", key: "a", value: "1")
+print("putempty=" + show(empty.text))
 let drive = URL(fileURLWithPath: CommandLine.arguments[1])
 print("found=" + GameIniFiles.candidates(drive: drive, gameFolder: "Games/NV").sorted().joined(separator: ","))
 '''
@@ -136,6 +145,10 @@ else:
         check(out['folder'] == 'Games/NV|Games/NV', "the game's folder: the program's, or a Steam install folder")
         check(out['list'] == 'x/B.ini', 'each game keeps its own list, once per file')
         check(out['help'] == 'true,true,true,true', 'the info button: known settings, then the kind from the name')
+        check(out['put'] == 'true,false,true,true|[LOGIN]<CR><LF>a=1<CR><LF>[DISPLAY]<CR><LF>shadow_type=Low<CR><LF>upscale=Off<CR><LF>'
+              'framerate_limit=30<CR><LF><CR><LF>[SOUND]<CR><LF>v=1<CR><LF>[NEW]<CR><LF>k=v<CR><LF>',
+              'recommended settings: a value rewritten in any case, the same value left, a new key after its section, a new section at the end')
+        check(out['putempty'] == '[DISPLAY]<LF>a=1<LF>', 'an empty file gets the section and its key')
         check(out['found'] == 'Games/NV/Fallout_default.ini,users/steamuser/Documents/My Games/FalloutNV/Fallout.ini',
               "candidates: the game's folder and My Games, not other games")
 

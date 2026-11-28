@@ -268,6 +268,7 @@ SD1 = SRC.index("static int exec_arg_slot_for(struct mad_exec *e, const struct m
                 "                             const UINT32 (*consts)[64], obj_handle_t *buf, UINT64 *off, const UINT *ovr, const struct mad_pso *pso) {")
 
 SD_STUBS = r'''
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -303,6 +304,8 @@ static long long mad_cfg_int_pe(const char *key, long long dflt) {
     int i; for (i = 0; i < 11; i++) if (!strcmp(key, k[i])) return g_cfg[i] ? g_cfg[i] : dflt;
     return dflt;
 }
+/* rcas-fill (FSR sharpening when PoE2 gives none) reads its strength as text in this region: unset here */
+static int mad_cfg_str_pe(const char *key, char *out, size_t cap) { (void)key; (void)out; (void)cap; return 0; }
 struct mad_device { obj_handle_t gpu_event, mtl_device; volatile LONG64 gpu_serial_committed, gpu_serial_failed; };
 static UINT64 g_completed;
 static UINT64 mad_gpu_completed(struct mad_device *d) { (void)d; return g_completed; }
@@ -633,7 +636,7 @@ else:
         c.write_text(code)
         exe = pathlib.Path(t) / "sd"
         p = subprocess.run([cc, "-std=c11", "-Wall", "-Wno-unused-function", "-Wno-unused-variable",
-                            "-I", str(R / "madeira-d3d12/src"), "-o", str(exe), str(c)], capture_output=True, text=True)
+                            "-I", str(R / "madeira-d3d12/src"), "-o", str(exe), str(c), "-lm"], capture_output=True, text=True)
         check("sync harness compiles", p.returncode == 0)
         if p.returncode:
             print(p.stderr[-4000:])
@@ -688,6 +691,8 @@ SMP_STUBS = r"""
 #include <stdio.h>
 #include <string.h>
 typedef unsigned UINT; typedef long LONG;
+#define MemoryBarrier() __sync_synchronize()
+static LONG InterlockedIncrement(volatile LONG *p) { return __sync_add_and_fetch(p, 1); }
 enum WMTSamplerBorderColor { WMTSamplerBorderColorTransparentBlack = 0, WMTSamplerBorderColorOpaqueBlack = 1, WMTSamplerBorderColorOpaqueWhite = 2 };
 enum WMTSamplerAddressMode { WMTSamplerAddressModeClampToEdge = 0, WMTSamplerAddressModeMirrorClampToEdge = 1, WMTSamplerAddressModeRepeat = 2,
                              WMTSamplerAddressModeMirrorRepeat = 3, WMTSamplerAddressModeClampToZero = 4, WMTSamplerAddressModeClampToBorderColor = 5 };
@@ -703,9 +708,9 @@ typedef enum { D3D12_COMPARISON_FUNC_NEVER = 1, D3D12_COMPARISON_FUNC_LESS, D3D1
                D3D12_COMPARISON_FUNC_GREATER, D3D12_COMPARISON_FUNC_NOT_EQUAL, D3D12_COMPARISON_FUNC_GREATER_EQUAL, D3D12_COMPARISON_FUNC_ALWAYS } D3D12_COMPARISON_FUNC;
 static int g_logs; static char g_last_log[1024];
 static void d3d12_log(const char *fmt, ...) { va_list ap; va_start(ap, fmt); g_logs++; vsnprintf(g_last_log, sizeof g_last_log, fmt, ap); va_end(ap); fputs(g_last_log, stdout); }
-static long long g_red_cfg, g_census_cfg;
+static long long g_red_cfg, g_census_cfg, g_aniso_cfg;
 static long long mad_cfg_int_pe(const char *key, long long dflt) {
-    if (!strcmp(key, "sampler-reduction")) return g_red_cfg; if (!strcmp(key, "sampler-census")) return g_census_cfg; return dflt;
+    if (!strcmp(key, "sampler-reduction")) return g_red_cfg; if (!strcmp(key, "sampler-census")) return g_census_cfg; if (!strcmp(key, "sampler-max-aniso")) return g_aniso_cfg; return dflt;
 }
 """
 SMP_HARNESS = r"""
@@ -751,12 +756,22 @@ int main(void) {
     reload(0, 1); g_logs = 0;
     S(0x15, 0); S(0x15, 0); S(0x95, D3D12_COMPARISON_FUNC_LESS); S(0x00, 0);
     T(g_logs == 4 && strstr(g_last_log, "filter 0x000 (standard reduction, D3D min point mag point mip point"));
+    /* sampler-max-aniso: unset, 8x stays 8x with no log line (above); 1 caps it and logs the first cap once; 16 keeps it */
+    reload(0, 0); g_aniso_cfg = 1; g_logs = 0;
+    a = S(0xd5, D3D12_COMPARISON_FUNC_GREATER); T(a.max_anisotroy == 1 && g_logs == 2 && strstr(g_last_log, "capped, 8x -> 1x"));
+    a = S(0x55, 0); T(a.max_anisotroy == 1 && g_logs == 2);
+    a = S(0x15, 0); T(a.max_anisotroy == 1 && g_logs == 2);
+    reload(0, 0); g_aniso_cfg = 16; g_logs = 0;
+    a = S(0x55, 0); T(a.max_anisotroy == 8 && g_logs == 2 && strstr(g_last_log, "within the cap, 8x"));
+    reload(0, 0); g_aniso_cfg = 17; g_logs = 0;
+    a = S(0x55, 0); T(a.max_anisotroy == 8 && g_logs == 0);   /* out of range: off */
+    g_aniso_cfg = 0;
     printf("sampler harness ok\n");
     return 0;
 }
 """
 smp_code = SMP_STUBS + cut("static enum WMTCompareFunction mad_compare(D3D12_COMPARISON_FUNC f) {") + "\n"
-i0 = SRC.index("static int g_smp_red = -1, g_smp_census;")
+i0 = SRC.index("static int g_smp_red = -1, g_smp_census")
 i1 = SRC.index("static void mad_sampler_info(struct WMTSamplerInfo *si, UINT filter, UINT au, UINT av, UINT aw, UINT aniso, UINT cmp, UINT border, float minlod, float maxlod, const char *who) {")
 smp_code += SRC[i0:i1] + cut(SRC[i1:SRC.index("{", i1) + 1]) + "\n" + SMP_HARNESS
 if cc:

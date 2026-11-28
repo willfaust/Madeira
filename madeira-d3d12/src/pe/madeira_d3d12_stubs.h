@@ -399,6 +399,88 @@ static void madeira_fill_ID3D12Device10(ID3D12Device10Vtbl *v) {
     v->CreateReservedResource2 = stub_ID3D12Device10_CreateReservedResource2;
 }
 
+static const char *const madeira_slots_ID3D12Device10[79] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetNodeCount",
+    "CreateCommandQueue",
+    "CreateCommandAllocator",
+    "CreateGraphicsPipelineState",
+    "CreateComputePipelineState",
+    "CreateCommandList",
+    "CheckFeatureSupport",
+    "CreateDescriptorHeap",
+    "GetDescriptorHandleIncrementSize",
+    "CreateRootSignature",
+    "CreateConstantBufferView",
+    "CreateShaderResourceView",
+    "CreateUnorderedAccessView",
+    "CreateRenderTargetView",
+    "CreateDepthStencilView",
+    "CreateSampler",
+    "CopyDescriptors",
+    "CopyDescriptorsSimple",
+    "GetResourceAllocationInfo",
+    "GetCustomHeapProperties",
+    "CreateCommittedResource",
+    "CreateHeap",
+    "CreatePlacedResource",
+    "CreateReservedResource",
+    "CreateSharedHandle",
+    "OpenSharedHandle",
+    "OpenSharedHandleByName",
+    "MakeResident",
+    "Evict",
+    "CreateFence",
+    "GetDeviceRemovedReason",
+    "GetCopyableFootprints",
+    "CreateQueryHeap",
+    "SetStablePowerState",
+    "CreateCommandSignature",
+    "GetResourceTiling",
+    "GetAdapterLuid",
+    "CreatePipelineLibrary",
+    "SetEventOnMultipleFenceCompletion",
+    "SetResidencyPriority",
+    "CreatePipelineState",
+    "OpenExistingHeapFromAddress",
+    "OpenExistingHeapFromFileMapping",
+    "EnqueueMakeResident",
+    "CreateCommandList1",
+    "CreateProtectedResourceSession",
+    "CreateCommittedResource1",
+    "CreateHeap1",
+    "CreateReservedResource1",
+    "GetResourceAllocationInfo1",
+    "CreateLifetimeTracker",
+    "RemoveDevice",
+    "EnumerateMetaCommands",
+    "EnumerateMetaCommandParameters",
+    "CreateMetaCommand",
+    "CreateStateObject",
+    "GetRaytracingAccelerationStructurePrebuildInfo",
+    "CheckDriverMatchingIdentifier",
+    "SetBackgroundProcessingMode",
+    "AddToStateObject",
+    "CreateProtectedResourceSession1",
+    "GetResourceAllocationInfo2",
+    "CreateCommittedResource2",
+    "CreatePlacedResource1",
+    "CreateSamplerFeedbackUnorderedAccessView",
+    "GetCopyableFootprints1",
+    "CreateShaderCacheSession",
+    "ShaderCacheControl",
+    "CreateCommandQueue1",
+    "CreateCommittedResource3",
+    "CreatePlacedResource2",
+    "CreateReservedResource2",
+};
+
 /* ---- ID3D12CommandQueue: 19 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12CommandQueue_QueryInterface(ID3D12CommandQueue *This, REFIID riid, void **ppvObject) {
     madeira_d3d12_note_unimplemented("ID3D12CommandQueue", "QueryInterface");
@@ -489,6 +571,28 @@ static void madeira_fill_ID3D12CommandQueue(ID3D12CommandQueueVtbl *v) {
     v->GetDesc = stub_ID3D12CommandQueue_GetDesc;
 }
 
+static const char *const madeira_slots_ID3D12CommandQueue[19] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "UpdateTileMappings",
+    "CopyTileMappings",
+    "ExecuteCommandLists",
+    "SetMarker",
+    "BeginEvent",
+    "EndEvent",
+    "Signal",
+    "Wait",
+    "GetTimestampFrequency",
+    "GetClockCalibration",
+    "GetDesc",
+};
+
 /* ---- ID3D12CommandAllocator: 9 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12CommandAllocator_QueryInterface(ID3D12CommandAllocator *This, REFIID riid, void **ppvObject) {
     madeira_d3d12_note_unimplemented("ID3D12CommandAllocator", "QueryInterface");
@@ -534,6 +638,18 @@ static void madeira_fill_ID3D12CommandAllocator(ID3D12CommandAllocatorVtbl *v) {
     v->GetDevice = stub_ID3D12CommandAllocator_GetDevice;
     v->Reset = stub_ID3D12CommandAllocator_Reset;
 }
+
+static const char *const madeira_slots_ID3D12CommandAllocator[9] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "Reset",
+};
 
 /* ---- ID3D12GraphicsCommandList7: 81 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12GraphicsCommandList7_QueryInterface(ID3D12GraphicsCommandList7 *This, REFIID riid, void **ppvObject) {
@@ -871,6 +987,90 @@ static void madeira_fill_ID3D12GraphicsCommandList7(ID3D12GraphicsCommandList7Vt
     v->Barrier = stub_ID3D12GraphicsCommandList7_Barrier;
 }
 
+static const char *const madeira_slots_ID3D12GraphicsCommandList7[81] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "GetType",
+    "Close",
+    "Reset",
+    "ClearState",
+    "DrawInstanced",
+    "DrawIndexedInstanced",
+    "Dispatch",
+    "CopyBufferRegion",
+    "CopyTextureRegion",
+    "CopyResource",
+    "CopyTiles",
+    "ResolveSubresource",
+    "IASetPrimitiveTopology",
+    "RSSetViewports",
+    "RSSetScissorRects",
+    "OMSetBlendFactor",
+    "OMSetStencilRef",
+    "SetPipelineState",
+    "ResourceBarrier",
+    "ExecuteBundle",
+    "SetDescriptorHeaps",
+    "SetComputeRootSignature",
+    "SetGraphicsRootSignature",
+    "SetComputeRootDescriptorTable",
+    "SetGraphicsRootDescriptorTable",
+    "SetComputeRoot32BitConstant",
+    "SetGraphicsRoot32BitConstant",
+    "SetComputeRoot32BitConstants",
+    "SetGraphicsRoot32BitConstants",
+    "SetComputeRootConstantBufferView",
+    "SetGraphicsRootConstantBufferView",
+    "SetComputeRootShaderResourceView",
+    "SetGraphicsRootShaderResourceView",
+    "SetComputeRootUnorderedAccessView",
+    "SetGraphicsRootUnorderedAccessView",
+    "IASetIndexBuffer",
+    "IASetVertexBuffers",
+    "SOSetTargets",
+    "OMSetRenderTargets",
+    "ClearDepthStencilView",
+    "ClearRenderTargetView",
+    "ClearUnorderedAccessViewUint",
+    "ClearUnorderedAccessViewFloat",
+    "DiscardResource",
+    "BeginQuery",
+    "EndQuery",
+    "ResolveQueryData",
+    "SetPredication",
+    "SetMarker",
+    "BeginEvent",
+    "EndEvent",
+    "ExecuteIndirect",
+    "AtomicCopyBufferUINT",
+    "AtomicCopyBufferUINT64",
+    "OMSetDepthBounds",
+    "SetSamplePositions",
+    "ResolveSubresourceRegion",
+    "SetViewInstanceMask",
+    "WriteBufferImmediate",
+    "SetProtectedResourceSession",
+    "BeginRenderPass",
+    "EndRenderPass",
+    "InitializeMetaCommand",
+    "ExecuteMetaCommand",
+    "BuildRaytracingAccelerationStructure",
+    "EmitRaytracingAccelerationStructurePostbuildInfo",
+    "CopyRaytracingAccelerationStructure",
+    "SetPipelineState1",
+    "DispatchRays",
+    "RSSetShadingRate",
+    "RSSetShadingRateImage",
+    "DispatchMesh",
+    "Barrier",
+};
+
 /* ---- ID3D12Fence: 11 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12Fence_QueryInterface(ID3D12Fence *This, REFIID riid, void **ppvObject) {
     madeira_d3d12_note_unimplemented("ID3D12Fence", "QueryInterface");
@@ -926,6 +1126,20 @@ static void madeira_fill_ID3D12Fence(ID3D12FenceVtbl *v) {
     v->SetEventOnCompletion = stub_ID3D12Fence_SetEventOnCompletion;
     v->Signal = stub_ID3D12Fence_Signal;
 }
+
+static const char *const madeira_slots_ID3D12Fence[11] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "GetCompletedValue",
+    "SetEventOnCompletion",
+    "Signal",
+};
 
 /* ---- ID3D12Resource2: 17 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12Resource2_QueryInterface(ID3D12Resource2 *This, REFIID riid, void **ppvObject) {
@@ -1012,6 +1226,26 @@ static void madeira_fill_ID3D12Resource2(ID3D12Resource2Vtbl *v) {
     v->GetDesc1 = stub_ID3D12Resource2_GetDesc1;
 }
 
+static const char *const madeira_slots_ID3D12Resource2[17] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "Map",
+    "Unmap",
+    "GetDesc",
+    "GetGPUVirtualAddress",
+    "WriteToSubresource",
+    "ReadFromSubresource",
+    "GetHeapProperties",
+    "GetProtectedResourceSession",
+    "GetDesc1",
+};
+
 /* ---- ID3D12RootSignature: 8 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12RootSignature_QueryInterface(ID3D12RootSignature *This, REFIID riid, void **ppvObject) {
     madeira_d3d12_note_unimplemented("ID3D12RootSignature", "QueryInterface");
@@ -1052,6 +1286,17 @@ static void madeira_fill_ID3D12RootSignature(ID3D12RootSignatureVtbl *v) {
     v->SetName = stub_ID3D12RootSignature_SetName;
     v->GetDevice = stub_ID3D12RootSignature_GetDevice;
 }
+
+static const char *const madeira_slots_ID3D12RootSignature[8] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+};
 
 /* ---- ID3D12PipelineState: 9 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12PipelineState_QueryInterface(ID3D12PipelineState *This, REFIID riid, void **ppvObject) {
@@ -1098,6 +1343,18 @@ static void madeira_fill_ID3D12PipelineState(ID3D12PipelineStateVtbl *v) {
     v->GetDevice = stub_ID3D12PipelineState_GetDevice;
     v->GetCachedBlob = stub_ID3D12PipelineState_GetCachedBlob;
 }
+
+static const char *const madeira_slots_ID3D12PipelineState[9] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "GetCachedBlob",
+};
 
 /* ---- ID3D12DescriptorHeap: 11 slots ---- */
 static HRESULT STDMETHODCALLTYPE stub_ID3D12DescriptorHeap_QueryInterface(ID3D12DescriptorHeap *This, REFIID riid, void **ppvObject) {
@@ -1154,5 +1411,19 @@ static void madeira_fill_ID3D12DescriptorHeap(ID3D12DescriptorHeapVtbl *v) {
     v->GetCPUDescriptorHandleForHeapStart = stub_ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart;
     v->GetGPUDescriptorHandleForHeapStart = stub_ID3D12DescriptorHeap_GetGPUDescriptorHandleForHeapStart;
 }
+
+static const char *const madeira_slots_ID3D12DescriptorHeap[11] __attribute__((unused)) = {
+    "QueryInterface",
+    "AddRef",
+    "Release",
+    "GetPrivateData",
+    "SetPrivateData",
+    "SetPrivateDataInterface",
+    "SetName",
+    "GetDevice",
+    "GetDesc",
+    "GetCPUDescriptorHandleForHeapStart",
+    "GetGPUDescriptorHandleForHeapStart",
+};
 
 #endif /* MADEIRA_D3D12_STUBS_H */

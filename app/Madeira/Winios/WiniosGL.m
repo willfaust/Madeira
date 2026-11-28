@@ -24,6 +24,7 @@
 // deprecated but it is the only OpenGL iOS has.
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
+#include <dlfcn.h>
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <Metal/Metal.h>
@@ -284,8 +285,69 @@ static _Atomic uint64_t gl_present_count;
 extern uint64_t madeira_get_present_count(void);
 extern void madeira_frame_mark(const void *layer);   // Winios.m: the overlay's frame times
 
+// madeira-duo vk2: Vulkan presents. Vulkan drivers that know about Madeira (KosmicKrisp's
+// kosmickrisp-ios-0009 patch looks this up with dlsym) report each present here, so the FPS
+// overlay, [frame] lines and first-frame checks count Vulkan games like GL ones.
+static _Atomic uint64_t vulkan_present_count;
+
+__attribute__((visibility("default"), used))
+void madeira_vulkan_present_mark(const void *layer) {
+    atomic_fetch_add_explicit(&vulkan_present_count, 1, memory_order_relaxed);
+    if (layer) madeira_frame_mark(layer);
+}
+
+// madeira-duo vk3: Vulkan shader and pipeline builds. KosmicKrisp (kosmickrisp-ios-0013) reports each
+// Metal library and pipeline build here, start and finish, so the overlay's Shader misses field and
+// the Shaders page can show what is compiling. A build under 2 ms came from a cache (Metal's own, or
+// the pipeline archives); anything longer was compiled. "Slow" = 150 ms or more.
+static _Atomic int64_t vulkan_builds_in_flight;
+static _Atomic uint64_t vulkan_builds, vulkan_compiles, vulkan_slow_compiles, vulkan_compile_ns;
+static _Atomic uint64_t vulkan_kind_compiles[3];
+
+__attribute__((visibility("default"), used))
+void madeira_vulkan_compile_mark(int kind, int begin, uint64_t ns) {
+    if (begin) { atomic_fetch_add_explicit(&vulkan_builds_in_flight, 1, memory_order_relaxed); return; }
+    atomic_fetch_sub_explicit(&vulkan_builds_in_flight, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&vulkan_builds, 1, memory_order_relaxed);
+    if (ns < 2000000ull) return;
+    atomic_fetch_add_explicit(&vulkan_compiles, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&vulkan_compile_ns, ns, memory_order_relaxed);
+    if (kind >= 0 && kind < 3) atomic_fetch_add_explicit(&vulkan_kind_compiles[kind], 1, memory_order_relaxed);
+    if (ns >= 150000000ull) atomic_fetch_add_explicit(&vulkan_slow_compiles, 1, memory_order_relaxed);
+}
+
+void madeira_vulkan_compile_stats(uint64_t *builds, uint64_t *compiles, uint64_t *slow, uint64_t *compile_ms,
+                                  int64_t *in_flight, uint64_t *libraries, uint64_t *pipelines) {
+    *builds = atomic_load_explicit(&vulkan_builds, memory_order_relaxed);
+    *compiles = atomic_load_explicit(&vulkan_compiles, memory_order_relaxed);
+    *slow = atomic_load_explicit(&vulkan_slow_compiles, memory_order_relaxed);
+    *compile_ms = atomic_load_explicit(&vulkan_compile_ns, memory_order_relaxed) / 1000000ull;
+    *in_flight = MAX(0, atomic_load_explicit(&vulkan_builds_in_flight, memory_order_relaxed));
+    *libraries = atomic_load_explicit(&vulkan_kind_compiles[0], memory_order_relaxed);
+    *pipelines = atomic_load_explicit(&vulkan_kind_compiles[1], memory_order_relaxed)
+        + atomic_load_explicit(&vulkan_kind_compiles[2], memory_order_relaxed);
+}
+
+// The D3D12 overlay counters live in DXMT's winemetal (madeira_shader_overlay_stats, overlay-shader
+// branch); looked up at run time so builds without them still link. 0 when absent.
+int madeira_shader_overlay_stats_optional(unsigned long long *shader_misses, unsigned long long *pipeline_misses,
+                                          long long *pso_queue, long long *pso_background, int *flags) {
+    static void (*fn)(unsigned long long *, unsigned long long *, long long *, long long *, int *);
+    static _Atomic int resolved;
+    if (!atomic_load_explicit(&resolved, memory_order_acquire)) {
+        fn = (void (*)(unsigned long long *, unsigned long long *, long long *, long long *, int *))
+            dlsym(RTLD_DEFAULT, "madeira_shader_overlay_stats");
+        atomic_store_explicit(&resolved, 1, memory_order_release);
+    }
+    *shader_misses = 0; *pipeline_misses = 0; *pso_queue = 0; *pso_background = 0; *flags = 0;
+    if (!fn) return 0;
+    fn(shader_misses, pipeline_misses, pso_queue, pso_background, flags);
+    return 1;
+}
+
 uint64_t madeira_frame_count(void) {
-    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed);
+    return madeira_get_present_count() + atomic_load_explicit(&gl_present_count, memory_order_relaxed)
+        + atomic_load_explicit(&vulkan_present_count, memory_order_relaxed);
 }
 
 // The presenter behind *state, created on first use for hwnd's layer.

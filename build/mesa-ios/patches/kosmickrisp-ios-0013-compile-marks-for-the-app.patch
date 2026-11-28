@@ -1,0 +1,113 @@
+From 382e00241a98afde248ea02e9ea67bdaa33bf06e Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Tue, 10 Nov 2026 01:07:23 +1100
+Subject: [PATCH] kosmickrisp: report builds to the embedding app
+ (madeira_vulkan_compile_mark)
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/bridge/mtl_compiler.m | 41 +++++++++++++++++++++++----
+ 1 file changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 74e1bde..7617cec 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -15,6 +15,7 @@
+ #include <Metal/MTL4Archive.h>
+ #include <Metal/MTL4PipelineDataSetSerializer.h>
+ #include <dispatch/dispatch.h>
++#include <dlfcn.h>
+ 
+ #include <dirent.h>
+ #include <errno.h>
+@@ -54,6 +55,7 @@
+ 
+ struct kk_compile_stat {
+    const char *name;
++   int kind; /* madeira_vulkan_compile_mark: 0 library, 1 render, 2 compute */
+    _Atomic uint64_t count;
+    _Atomic uint64_t total_ns;
+    _Atomic uint64_t max_ns;
+@@ -63,9 +65,9 @@ struct kk_compile_stat {
+    _Atomic uint64_t slow;
+ };
+ 
+-static struct kk_compile_stat kk_stat_library = {.name = "library"};
+-static struct kk_compile_stat kk_stat_render = {.name = "render"};
+-static struct kk_compile_stat kk_stat_compute = {.name = "compute"};
++static struct kk_compile_stat kk_stat_library = {.name = "library", .kind = 0};
++static struct kk_compile_stat kk_stat_render = {.name = "render", .kind = 1};
++static struct kk_compile_stat kk_stat_compute = {.name = "compute", .kind = 2};
+ static _Atomic uint64_t kk_last_report_ns;
+ static int kk_stats_enabled = -1;
+ 
+@@ -146,10 +148,37 @@ kk_compile_report(bool force)
+            kk_archive.enabled ? "" : " (archives off)");
+ }
+ 
++
++/* Madeira: every build is also reported to the app (madeira_vulkan_compile_mark in
++ * WiniosGL.m, found with dlsym like madeira_vulkan_present_mark), which keeps the
++ * counters its performance overlay and Shaders page show: builds in flight, and
++ * each finished build's kind and duration. Absent outside Madeira. */
++static void (*kk_compile_mark)(int kind, int begin, uint64_t ns);
++static _Atomic int kk_compile_mark_resolved;
++
++static void
++kk_compile_notify(int kind, int begin, uint64_t ns)
++{
++   if (!atomic_load_explicit(&kk_compile_mark_resolved, memory_order_acquire)) {
++      kk_compile_mark = (void (*)(int, int, uint64_t))dlsym(RTLD_DEFAULT, "madeira_vulkan_compile_mark");
++      atomic_store_explicit(&kk_compile_mark_resolved, 1, memory_order_release);
++   }
++   if (kk_compile_mark)
++      kk_compile_mark(kind, begin, ns);
++}
++
++static uint64_t
++kk_compile_begin(struct kk_compile_stat *stat)
++{
++   kk_compile_notify(stat->kind, 1, 0);
++   return kk_now_ns();
++}
++
+ static void
+ kk_compile_record(struct kk_compile_stat *stat, uint64_t start_ns)
+ {
+    uint64_t elapsed = kk_now_ns() - start_ns;
++   kk_compile_notify(stat->kind, 0, elapsed);
+    atomic_fetch_add(&stat->count, 1);
+    atomic_fetch_add(&stat->total_ns, elapsed);
+    uint64_t max = atomic_load(&stat->max_ns);
+@@ -458,7 +487,7 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+       desc.options = opts;
+ 
+       NSError *error;
+-      uint64_t start = kk_now_ns();
++      uint64_t start = kk_compile_begin(&kk_stat_library);
+       id<MTLLibrary> lib = [comp newLibraryWithDescriptor:desc error:&error];
+       kk_compile_record(&kk_stat_library, start);
+ 
+@@ -498,7 +527,7 @@ mtl_new_compute_pipeline_state(mtl_compiler *compiler,
+       desc.maxTotalThreadsPerThreadgroup = max_total_threads_per_threadgroup;
+ 
+       NSError *error;
+-      uint64_t start = kk_now_ns();
++      uint64_t start = kk_compile_begin(&kk_stat_compute);
+       pthread_rwlock_rdlock(&kk_archive.lock);
+       id<MTLComputePipelineState> pipeline = [comp newComputePipelineStateWithDescriptor:desc
+                                                                      compilerTaskOptions:kk_archive.task_options
+@@ -625,7 +654,7 @@ mtl_new_render_pipeline(mtl_compiler *compiler, mtl_render_pass_descriptor *desc
+       MTL4RenderPipelineDescriptor *desc = (MTL4RenderPipelineDescriptor *)descriptor;
+ 
+       NSError *error = nil;
+-      uint64_t start = kk_now_ns();
++      uint64_t start = kk_compile_begin(&kk_stat_render);
+       pthread_rwlock_rdlock(&kk_archive.lock);
+       id<MTLRenderPipelineState> pipeline = [comp newRenderPipelineStateWithDescriptor:desc
+                                                                    compilerTaskOptions:kk_archive.task_options
+-- 
+2.56.0
+

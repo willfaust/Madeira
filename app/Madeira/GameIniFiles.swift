@@ -99,6 +99,35 @@ struct IniDocument: Equatable {
     }
 
     var text: String { lines.joined(separator: newline) + (endsWithNewline ? newline : "") }
+
+    /// madeira-duo: sets `key` in `section` (both case-insensitive) to `value`, for Madeira's
+    /// recommended settings (GameRecommendation.ini). The first such setting is rewritten as
+    /// set(line:to:) does; a key the section lacks goes after the section's last setting as
+    /// "key=value", and a section the file lacks goes at its end. True when the text changed.
+    @discardableResult
+    mutating func put(section: String, key: String, value: String) -> Bool {
+        func same(_ a: String, _ b: String) -> Bool { a.caseInsensitiveCompare(b) == .orderedSame }
+        if let found = settings.first(where: { same($0.section, section) && same($0.key, key) }) {
+            guard found.value != value else { return false }
+            set(line: found.line, to: value)
+            return true
+        }
+        let wasEmpty = lines.isEmpty || lines == [""]
+        var edited = wasEmpty ? [] : lines
+        let header = lines.firstIndex { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return false }
+            return same(String(line[line.index(after: line.startIndex)..<close]).trimmingCharacters(in: .whitespaces), section)
+        }
+        if let last = settings.last(where: { same($0.section, section) })?.line ?? header {
+            edited.insert("\(key)=\(value)", at: last + 1)
+        } else {
+            edited += ["[\(section)]", "\(key)=\(value)"]
+        }
+        // A file that was empty gets a last newline, as a game writes it.
+        self = IniDocument(text: edited.joined(separator: newline) + (endsWithNewline || wasEmpty ? newline : ""))
+        return true
+    }
 }
 
 /// A file's bytes as text, and back in the same encoding (UTF-8, with or
@@ -488,6 +517,67 @@ struct IniFileEditor: View {
             LogStore.shared.log("[ini-editor] saved \(file)")
         } catch {
             self.error = "Not saved: \(error.localizedDescription)"
+        }
+    }
+}
+
+// MARK: Recommended settings in the game's own files
+
+extension GameRecommendations {
+    /// madeira-duo: the game's own-file settings of its list (GameRecommendation.ini), written at a
+    /// start (ContentView.launchLibraryEntry) once per list version while the game's config is the
+    /// list Madeira wrote for it; Reset to Recommended writes them again at the next start. Only a
+    /// file the game has already written is changed: a game writes its whole file the first time it
+    /// runs, and a file of only these lines is not one every game reads. Until then each start looks
+    /// again. Each file found joins the game's Settings files (GameIniFilesSection).
+    static func writeIni(for entry: LibraryEntry) {
+        guard let rec = recommendation(for: entry), !rec.ini.isEmpty, written(rec, for: entry.windowsPath) else { return }
+        let done = "\(rec.id)#\(rec.version)"
+        guard iniMark(entry.windowsPath) != done else { return }
+        let fm = FileManager.default
+        let users = LibraryModel.drive.appendingPathComponent("users", isDirectory: true)
+        let names = ((try? fm.contentsOfDirectory(atPath: users.path)) ?? []).filter { $0 != "Public" }.sorted()
+        var waiting = false
+        for file in Set(rec.ini.map(\.file)).sorted() {
+            let settings = rec.ini.filter { $0.file == file }
+            // Each component in any case, as Windows finds it.
+            let found = names.compactMap { user -> String? in
+                var path = "users/" + user
+                for part in file.split(separator: "/").map(String.init) {
+                    let here = LibraryModel.drive.appendingPathComponent(path).path
+                    guard let name = ((try? fm.contentsOfDirectory(atPath: here)) ?? []).first(where: {
+                        $0.caseInsensitiveCompare(part) == .orderedSame }) else { return nil }
+                    path += "/" + name
+                }
+                return path
+            }
+            if found.isEmpty { waiting = true; continue }
+            for path in found {
+                let url = LibraryModel.drive.appendingPathComponent(path)
+                guard let data = try? Data(contentsOf: url), let decoded = IniFileText(data: data) else {
+                    LogStore.shared.log("[recommended] \(entry.title): could not read \(path)", level: .error)
+                    waiting = true; continue
+                }
+                var document = IniDocument(text: decoded.text)
+                var changed = 0
+                for setting in settings where document.put(section: setting.section, key: setting.key, value: setting.value) {
+                    changed += 1
+                }
+                if changed > 0 {
+                    guard let out = decoded.data(document.text), (try? out.write(to: url, options: .atomic)) != nil else {
+                        LogStore.shared.log("[recommended] \(entry.title): could not write \(path)", level: .error)
+                        waiting = true; continue
+                    }
+                    GameIniFiles.setSavedFingerprint(GameIniFiles.fingerprint(out), for: path)
+                }
+                GameIniFiles.add(path, for: entry.windowsPath)
+                LogStore.shared.log("[recommended] \(entry.title): \(rec.id) v\(rec.version) set \(changed) of \(settings.count) settings in \(path)")
+            }
+        }
+        if waiting {
+            LogStore.shared.log("[recommended] \(entry.title): \(rec.id) v\(rec.version) game settings wait for files the game has not written yet")
+        } else {
+            setIniMark(done, entry.windowsPath)
         }
     }
 }

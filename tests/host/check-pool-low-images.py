@@ -42,11 +42,17 @@ helpers = ''.join(function(signature) for signature in (
 image_copy = source[source.index('size_t image_alloc = (image_size + page_size - 1)'):]
 image_copy = image_copy[:image_copy.index('/* Copy ENTIRE PE image')]
 assert image_copy.count('ios_pool_low_image_range( alloc_size )') == 1
-allocation = ('offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);\n'
-              '                if (offset == (size_t)-1) offset = ios_pool_low_image_range( alloc_size );\n'
-              '                if (offset == (size_t)-1 && ios_pool_recycle_code_range( alloc_size ))\n'
-              '                    offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);')
-assert allocation in image_copy, 'the overflow runs only after normal image allocation fails'
+first = 'offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);\n'
+overflow = ('                if (offset == (size_t)-1) offset = ios_pool_low_image_range( alloc_size );\n'
+            '                if (offset == (size_t)-1 && ios_pool_recycle_code_range( alloc_size ))\n'
+            '                    offset = ios_pool_alloc_range_tagged(alloc_size, jit_pool_size - ios_jit_tail_reserved, image_tag);')
+assert first in image_copy and overflow in image_copy and image_copy.index(first) < image_copy.index(overflow), \
+    'the overflow runs only after normal image allocation fails'
+# MADEIRA_POOL_TRIM's bookkeeping (was the range virgin?) sits between the two; it must not allocate.
+between = image_copy[image_copy.index(first) + len(first):image_copy.index(overflow)]
+assert 'ios_pool_alloc' not in between and 'ios_pool_low_image_range' not in between and 'ios_pool_recycle' not in between, \
+    'nothing else allocates between the normal image allocation and its overflow'
+allocation = first + overflow   # the sequence the harness below runs
 assert source.count('ios_pool_low_image_range( alloc_size )') == 1, 'anonymous RWX must retain its old path'
 assert source.count('ios_pool_recycle_code_range( alloc_size )') == 1, 'only the image failure path may transfer code ranges'
 assert 'ios_tail_carves[i].freed_at = time( NULL );' in source
@@ -96,6 +102,8 @@ static uintptr_t ios_wow_base(void) { return wow; }
 static void ios_mono_alias_retire(uintptr_t va) { (void)va; }
 static int ios_pool_range_execable(size_t off, size_t size, unsigned *cur, unsigned *max)
 { (void)off; (void)size; if (cur) *cur = 5; if (max) *max = poisoned ? 3 : 7; return !poisoned; }
+/* MADEIRA_POOL_TRIM is off here: no cold-page bitmap to clear. */
+static void ios_pool_cold_clear(size_t off, size_t size) { (void)off; (void)size; }
 static int ios_pool_range_clean(size_t off, size_t size)
 { return ios_pool_range_execable(off, size, NULL, NULL); }
 typedef int (*ios_pool_clean_fn)(size_t, size_t);

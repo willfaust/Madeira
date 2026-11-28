@@ -1,0 +1,99 @@
+From 7b31eb1d5b0872bdbc74515f6162c58cf8cfd307 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Sat, 14 Nov 2026 23:45:05 +1100
+Subject: [PATCH 6/6] MADEIRA_DXC_ARGS_LOG: [dxc-time] compile timing every 100
+ compiles
+
+With the args log on, each Compile is timed and a [dxc-time] line every
+100 compiles gives the count, total and average time, the last 100's
+average, the slowest compile and which mem2reg path is in use, so a
+session's compile cost can be compared across builds and settings.
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../clang/tools/dxcompiler/dxcompilerobj.cpp  | 40 +++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+index 3a5d6ca7..dd6fb909 100644
+--- a/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
++++ b/tools/clang/tools/dxcompiler/dxcompilerobj.cpp
+@@ -41,6 +41,7 @@
+ #include "dxc/dxcapi.internal.h"
+ #include "dxcutil.h"
+ #include <map>
++#include <chrono>
+ #include <mutex>
+ #include <string>
+ #include <vector>
+@@ -481,6 +482,9 @@ static unsigned g_total;
+ static int g_log = -1;
+ static std::vector<std::wstring> *g_add, *g_drop;
+ static void out(const char *line) {
++#ifndef _WIN32
++  fputs(line, stderr);   // host builds (tests): no Wine debug channel
++#else
+   typedef int(__cdecl * fn_t)(const char *);
+   static fn_t fn;
+   static int looked;
+@@ -490,6 +494,7 @@ static void out(const char *line) {
+     looked = 1;
+   }
+   if (fn) fn(line);
++#endif
+ }
+ static std::vector<std::wstring> *split(const char *v) {
+   auto *r = new std::vector<std::wstring>();
+@@ -558,6 +563,40 @@ static void log_args(LPCWSTR *args, UINT32 n) {
+     out(b);
+   }
+ }
++// Compile timing (with MADEIRA_DXC_ARGS_LOG=1): a [dxc-time] line every 100
++// compiles with the running total, so a session's compile cost can be compared
++// across builds and settings (MADEIRA_DXC_MEM2REG_SCAN).
++static unsigned g_timed;
++static double g_total_ms, g_window_ms, g_max_ms;
++static void record_time(double ms) {
++  char b[400];
++  std::lock_guard<std::mutex> g(g_lock);
++  g_timed++;
++  g_total_ms += ms;
++  g_window_ms += ms;
++  if (ms > g_max_ms) g_max_ms = ms;
++  if (g_timed == 1 || !(g_timed % 100)) {
++    const char *walk = getenv("MADEIRA_DXC_MEM2REG_SCAN");
++    snprintf(b, sizeof b,
++             "[dxc-time] %u compiles, %.0f ms in all (avg %.1f ms), last %u avg %.1f ms, max %.0f ms; mem2reg %s\n",
++             g_timed, g_total_ms, g_total_ms / g_timed, g_timed == 1 ? 1u : 100u,
++             g_window_ms / (g_timed == 1 ? 1 : 100), g_max_ms,
++             walk && walk[0] && !(walk[0] == '0' && !walk[1]) ? "walk (MADEIRA_DXC_MEM2REG_SCAN)" : "first-reference map");
++    out(b);
++    g_window_ms = 0;
++  }
++}
++struct CompileTimer {
++  bool on;
++  std::chrono::steady_clock::time_point start;
++  explicit CompileTimer(bool enabled) : on(enabled) {
++    if (on) start = std::chrono::steady_clock::now();
++  }
++  ~CompileTimer() {
++    if (on)
++      record_time(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
++  }
++};
+ // The argument list the compile uses: the game's, minus DROP, plus ADD.
+ static void rewrite(LPCWSTR *&args, UINT32 &n, std::vector<LPCWSTR> &store) {
+   if (g_drop->empty() && g_add->empty()) return;
+@@ -655,6 +694,7 @@ public:
+     madeira_dxc_args::init();
+     if (madeira_dxc_args::g_log) madeira_dxc_args::log_args(pArguments, argCount);
+     madeira_dxc_args::rewrite(pArguments, argCount, madeiraArgs);
++    madeira_dxc_args::CompileTimer madeiraTimer(madeira_dxc_args::g_log == 1);
+ 
+     HRESULT hr = S_OK;
+     CComPtr<IDxcBlobUtf8> utf8Source;
+-- 
+2.56.0
+

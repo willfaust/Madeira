@@ -1,0 +1,85 @@
+From 63b7b94c6f33dd26726af0792de771364f9f13a8 Mon Sep 17 00:00:00 2001
+From: Shitiz Garg <mail@shitiz.me>
+Date: Tue, 10 Nov 2026 00:17:17 +1100
+Subject: [PATCH] kosmickrisp: timestamp pools without a counter heap when
+ Metal refuses one
+
+On the iPhone (A20, iOS 26) Metal refuses every timestamp counter heap,
+even one of 2 entries (AGX: "Invalid heap size requested"), so splitting
+the pool doesn't help and vkCreateQueryPool still failed. Create the pool
+without a heap instead: vkCmdWriteTimestamp2 marks the query available and
+its value reads as the 0 the reset left. Logged once as [kk-query].
+
+Signed-off-by: Shitiz Garg <mail@shitiz.me>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/vulkan/kk_query_pool.c | 36 ++++++++++++++++++++++----
+ 1 file changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index 7e6890f..d0dd8b3 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -140,6 +140,8 @@ kk_ts_create_heaps(struct kk_device *dev, struct kk_query_pool *pool,
+ {
+    uint32_t count = MAX2(pool->vk.query_count, 1);
+    uint32_t known_max = __atomic_load_n(&kk_ts_heap_max_entries, __ATOMIC_RELAXED);
++   if (known_max == UINT32_MAX)
++      return VK_SUCCESS; /* heaps refused before: no heap (see below) */
+    uint32_t entries = known_max ? MIN2(count, known_max) : count;
+ 
+    /* Find a heap size Metal accepts: halve until one works. */
+@@ -151,9 +153,19 @@ kk_ts_create_heaps(struct kk_device *dev, struct kk_query_pool *pool,
+       entries /= 2;
+    }
+    if (!first) {
+-      fprintf(stderr, "[kk-query] timestamp pool of %u: no counter heap size works\n",
+-              pool->vk.query_count);
+-      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      /* On the iPhone (A20, iOS 26) Metal refuses every timestamp counter
++       * heap, even of 2 entries ("Invalid heap size requested"). Failing the
++       * pool makes PoE2 abandon Vulkan, so create it without a heap: writes
++       * mark the query available and the value reads as 0. */
++      static bool warned;
++      if (!warned) {
++         warned = true;
++         fprintf(stderr, "[kk-query] Metal refuses timestamp counter heaps here "
++                 "(pool of %u): timestamp queries will read 0\n",
++                 pool->vk.query_count);
++      }
++      __atomic_store_n(&kk_ts_heap_max_entries, UINT32_MAX, __ATOMIC_RELAXED);
++      return VK_SUCCESS;
+    }
+    if (entries < count && entries > known_max)
+       __atomic_store_n(&kk_ts_heap_max_entries, entries, __ATOMIC_RELAXED);
+@@ -412,11 +424,25 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+    struct kk_device *dev = kk_cmd_buffer_device(cmd);
+-   assert(kk_pool_is_ts(pool) && pool->ts.heaps);
++   assert(kk_pool_is_ts(pool));
++   uint32_t count = kk_mv_query_count(cmd);
++
++   if (!pool->ts.heaps) {
++      /* No Metal counter heap on this device (see kk_ts_create_heaps): make
++       * the query available with the value the reset left, 0, so the
++       * application never waits on it. */
++      bool top = !(cmd->gfx.encoder &&
++                   (stage & VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT));
++      uint64_t addr = kk_query_available_addr(pool, query);
++      for (uint32_t i = 0; i < count; i++) {
++         libkk_write_u32(cmd, kk_grid_1d(1), top, addr, true);
++         addr += sizeof(uint32_t);
++      }
++      return;
++   }
+    uint32_t heap_index = query % pool->ts.heap_entries;
+    mtl_counter_heap *heap = kk_ts_heap(pool, query);
+ 
+-   uint32_t count = kk_mv_query_count(cmd);
+    enum mtl_render_stages mtl_stage =
+       kk_pipeline_stages_to_mtl_render_stage(stage);
+ 
+-- 
+2.56.0
+

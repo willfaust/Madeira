@@ -78,12 +78,13 @@ final class ProMotionIntent {
             // `minimum` must not exceed the panel's own maximum or CoreAnimation
             // clamps the whole range away (a 60Hz device asked for min 60 /
             // max 120 gets nothing useful).
-            let lo = Float(min(60, maxHz))
+            let lo = ProMotionIntent.pinnedHz > 0 ? want : Float(min(60, maxHz))   // madeira-duo panel-hz: a fixed rate
             l.preferredFrameRateRange = CAFrameRateRange(minimum: lo, maximum: want, preferred: want)
             l.add(to: .main, forMode: .common)
             link = l
             activeMax = want
             displaySyncApplied = false; armedAt = 0; tickStart = 0   // ml2021: per arming
+            kickWanted = false
             fputs("[promote] display link armed preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz\n", stderr)
             // ml2020: stderr written before Wine starts is not in the exported log; say it there too
             LogStore.shared.log("[promote] display link armed min=\(Int(lo))Hz preferred=\(Int(want))Hz panel_max=\(ProMotionIntent.panelMaxFPS)Hz")
@@ -96,8 +97,20 @@ final class ProMotionIntent {
         }
     }
 
+    /// madeira-duo (6 Nov 2026): `panel-hz = N` in madeira.cfg pins the panel to N Hz
+    /// (minimum = preferred = maximum = N) for every FPS limit, overriding the intents
+    /// below. iPhone ProMotion rates include 120, 80, 60, 48, 40, 30 and 24 (Apple,
+    /// "Optimizing iPhone and iPad apps to support ProMotion displays"); iOS may still pick
+    /// another. A 40 FPS limit on a 40 Hz panel wakes the main thread a third as often as
+    /// at 120 Hz, but a frame that misses 25 ms then waits until 50 ms. Unset or 0: off.
+    static var pinnedHz: Int {
+        guard let text = MadeiraConfig.get("panel-hz"), let hz = Int(text), hz > 0 else { return 0 }
+        return min(hz, panelMaxFPS)
+    }
+
     /// The intent that belongs to a given pacing mode (0 = none). See the type comment.
     static func maxHz(for mode: Int32) -> Int {
+        if pinnedHz > 0 { return pinnedHz }
         let floor = panelFloor ? min(60, panelMaxFPS) : 0                 // ml2020: see panelFloor
         if mode == 3 { return holdMaximum ? min(60, panelMaxFPS) : floor }   // 30 cap
         if mode == 1 { return holdMaximum ? panelMaxFPS : floor }            // 60 cap
@@ -107,7 +120,7 @@ final class ProMotionIntent {
     /// Arms or releases the link for `mode` and publishes the rates to DXMT.
     static func apply(mode: Int32) {
         let hz = maxHz(for: mode)
-        LogStore.shared.log("[promote] pacing mode \(mode): display intent \(hz) Hz (panel max \(panelMaxFPS), hold-maximum \(holdMaximum), floor \(panelFloor))")
+        LogStore.shared.log("[promote] pacing mode \(mode): display intent \(hz) Hz (panel max \(panelMaxFPS), hold-maximum \(holdMaximum), floor \(panelFloor), panel-hz \(pinnedHz))")
         shared.setActive(hz > 0, maxHz: hz)
         madeira_set_display_max_fps(Int32(panelMaxFPS), Int32(hz))
     }
@@ -127,6 +140,10 @@ final class ProMotionIntent {
     /// drawable waits fall with this on, that is what the display link alone does not do.
     private var kickLayer: CALayer?
     private var kickOn = false
+    /// madeira-duo: `kickEnabled` as read once per arming (with display sync, a second after the link starts).
+    /// Reading it on every tick cost two stat() calls on madeira.cfg plus string building each time:
+    /// 160 stats a second on the main thread at panel-hz 80, 44% of that thread's samples in a profile.
+    private var kickWanted = false
     static var kickEnabled: Bool { MadeiraConfig.flag("MADEIRA_PROMOTE_KICK", fallback: false) }
 
     /// ml2021: env.MADEIRA_DISPLAY_SYNC applied to the game's layer once the session's
@@ -138,6 +155,7 @@ final class ProMotionIntent {
     private func applyDisplaySync(now: CFTimeInterval) {
         guard !displaySyncApplied, now - armedAt >= 1 else { return }
         displaySyncApplied = true
+        kickWanted = ProMotionIntent.kickEnabled
         let layer = MetalHostView.shared.metalLayer
         let sel = NSSelectorFromString("setDisplaySyncEnabled:")
         guard layer.responds(to: sel) else { return }
@@ -164,7 +182,7 @@ final class ProMotionIntent {
                                        (sender.targetTimestamp - sender.timestamp) * 1000))
             tickStart = now; tickCount = 1; tickMaxGap = 0
         }
-        if ProMotionIntent.kickEnabled { kick() }
+        if kickWanted { kick() }
     }
 
     private func kick() {
