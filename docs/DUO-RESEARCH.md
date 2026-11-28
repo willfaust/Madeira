@@ -1,6 +1,6 @@
 # iPhone Duo research notes
 
-These notes index the foldable-layout, controller and Vulkan work on the `iphone-duo-support` branch. The reference tip before this documentation commit is [`e4e0f9d`](https://github.com/slushiimusic/Madeira/commit/e4e0f9dd512d49fdefca2c359019f53dbe57c0d0).
+These notes index the foldable-layout, controller and Vulkan work on the `iphone-duo-support` branch.
 
 ## Foldable layout and input
 
@@ -17,10 +17,17 @@ The simulator’s `-fold` argument exercises the split geometry. Physical hinge 
 
 - The branch documents an executable launch route using the iOS MoltenVK build and its opt-in idTech compatibility patches. The Steam launcher is a separate case. Its Chromium allocator requests a highly aligned virtual-address reservation that the documented build does not handle for that launcher. See [Vulkan runtime notes](../app/Madeira/vulkan/README.md).
 - The idTech patches report the capabilities the title probes, translate the affected shader’s double-precision constructs to float in generated Metal shader code, and pace MoltenVK presents against the session FPS setting. These are compatibility changes. Precision, visual output and frame pacing still need to be compared in the same scene. See [MoltenVK patch notes](../build/moltenvk-ios/patches/README.md).
-- Earlier Vulkan presents were missing from the FPS counter. The updated host wrapper counts successful and suboptimal presents, leaves failed presents out of the count, and holds submissions while the app is inactive. The wrapper regression uses a fake host Vulkan library. See the [wrapper test commit](https://github.com/slushiimusic/Madeira/commit/e4e0f9dd512d49fdefca2c359019f53dbe57c0d0).
+- Earlier Vulkan presents were missing from the FPS counter. The updated host wrapper counts successful and suboptimal presents, leaves failed presents out of the count, and holds submissions while the app is inactive. The wrapper regression uses a fake host Vulkan library. See the Vulkan wrapper test in the [branch history](https://github.com/slushiimusic/Madeira/commits/iphone-duo-support/).
 - The branch records that diagnostics and their logging caused hitches during DOOM Eternal testing on the Duo. Library launches now use lean diagnostics by default. Future comparisons should record whether diagnostics and the deck glow were enabled. See [branch history](https://github.com/slushiimusic/Madeira/commits/iphone-duo-support/).
 
-The branch records observations from DOOM Eternal on the Duo. The available record does not include a controlled frame-time capture, a long-session thermal result, or verification of the normal Steam launcher.
+### Physical-device results
+
+| Hardware | Observed result | Conditions |
+| --- | --- | --- |
+| iPhone Duo (iPhone19,4), iOS 27.2 | DOOM Eternal ran at a reported **55–60 FPS** through Madeira Dock. Ultimate Doom and other library titles were also exercised. | Earlier Madeira base `e3a88fd` with the same Vulkan changes and MoltenVK 1.4.3. Folded, flat and upright modes were exercised with touch controls and a Bluetooth controller. |
+| M4 iPad Pro | DOOM Eternal ran at a reported **60 FPS**. | Earlier device build with the same Vulkan changes. |
+
+The device runs used a stand-in to start `DOOMEternalx64vk.exe`. The documented in-app Program selection and the rebased branch have not been verified on hardware. The patches applied to pinned MoltenVK 1.4.2, with no device run of that build recorded. A controlled frame-time capture and long-session thermal results are still missing. See [Vulkan runtime notes](../app/Madeira/vulkan/README.md).
 
 ## Earlier research for comparison
 
