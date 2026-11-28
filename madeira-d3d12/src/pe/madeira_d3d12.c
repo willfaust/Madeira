@@ -12380,6 +12380,7 @@ static struct mad_fg {
     unsigned n_frames, n_gen, n_skip[FG_SKIP_N], n_split, n_late, n_world_copy, n_cb[2]; double cb_ms[2], cb_max[2];   /* since the last [framegen] line */
     unsigned n_lost, n_pause, n_draw2; LONG64 t_draw2;   /* the same: game frames that got no drawable, gate closings, waits for the second drawable */
     LONG said_fsr, said_bad, said_tex;
+    int ab_s, ab_off; LONG64 ab_qpc;   /* madeira-duo gpud1 framegen-ab */
 } g_fg;
 
 /* A Metal object a committed command buffer may still read: released eight presents on. */
@@ -12431,6 +12432,8 @@ static void mad_fg_cfg(void) {
     if (g->label_runs < 0 || g->label_runs > 8) g->label_runs = 0;   /* madeira-duo rundump1: N > 0 = N frames a session, the back buffer before each run of draws to C:\\madeira-fg ([fg-rundump]) */   /* madeira-duo: N > 0 = N times a session, three generated frames in a row with their inputs go to C:\\madeira-fg ([fg-dump]) */
     g_fgp_slots = (int)mad_cfg_int_pe("framegen-presenter", 0);   /* madeira-duo fgp1: 1-2 = a presenter thread waits for the drawables, the worker goes on to the next frame */
     if (g_fgp_slots < 0 || g_fgp_slots > 2) g_fgp_slots = 0;
+    g->ab_s = (int)mad_cfg_int_pe("framegen-ab", 0);   /* madeira-duo gpud1: N > 0 = generation N s on, N s off, in turn ([framegen] ab lines say when) */
+    if (g->ab_s < 0) g->ab_s = 0;
     g->resume_need = 40;
     g->mul_mvx = mad_cfg_float_pe("framegen-mv-x", 1.0);
     g->mul_mvy = mad_cfg_float_pe("framegen-mv-y", 1.0);
@@ -12677,6 +12680,7 @@ static void mad_fg_snapshot(struct mad_exec *e, struct mad_resource *bb) {
     while (e->npend) exec_flush_clear(e, 0);   /* a pending clear of what is copied goes first */
     e->fence_needed = 1;
     if (!exec_begin_blit(e)) return;
+    if (g_enc_labels) mad_label(e->benc, "B#%u fg-hudless-copy", g_enc_seq);   /* madeira-duo gpud1 */
     memset(&k, 0, sizeof k);
     k.type = WMTBlitCommandCopyFromTextureToTexture;
     k.src = bb->texture;
@@ -12696,6 +12700,7 @@ static int mad_fg_split2_mark(struct mad_exec *e, struct mad_resource *bb) {
     while (e->npend) exec_flush_clear(e, 0);
     e->fence_needed = 1;
     if (!exec_begin_blit(e)) return 0;
+    if (g_enc_labels) mad_label(e->benc, "B#%u fg-split2-copies", g_enc_seq);   /* madeira-duo gpud1 */
     memset(k, 0, sizeof k);
     k[0].type = WMTBlitCommandCopyFromTextureToTexture;
     k[0].src = g->snap[g->cur];
@@ -25755,6 +25760,7 @@ static void mad_fg_select(struct mad_device *d, obj_handle_t cb) {
     enc = MTLCommandBuffer_computeCommandEncoder(cb, false);
     if (!enc) return;
     g_enc_seq++;
+    if (g_enc_labels) mad_label(enc, "C#%u fg-select", g_enc_seq);   /* madeira-duo gpud1 */
     memset(&sp, 0, sizeof sp); memset(st, 0, sizeof st); memset(&dsp, 0, sizeof dsp);
     sp.type = WMTComputeCommandSetPSO; sp.pso = d->k_fgsel_pso;
     sp.threadgroup_size.width = 8; sp.threadgroup_size.height = 8; sp.threadgroup_size.depth = 1;
@@ -25823,6 +25829,7 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
             if (enc) {
                 struct wmtcmd_blit_copy_from_texture_to_texture k;
                 g_enc_seq++;
+                if (g_enc_labels) mad_label(enc, "B#%u fg-late-copy", g_enc_seq);   /* madeira-duo gpud1 */
                 memset(&k, 0, sizeof k);
                 k.type = WMTBlitCommandCopyFromTextureToTexture;
                 k.src = bb->texture;
@@ -25902,7 +25909,17 @@ static int mad_fg_frame(struct mad_swapchain *s, UINT idx, obj_handle_t cb) {
         } else if (fps >= up) { if (++g->fast_n >= g->resume_need) { g->paused = 0; g->fast_n = 0; g->resumed_at = g->frame; } }
         else g->fast_n = 0;
     }
-    g->armed = (g_fg_on & 1) && g->native == 1 && !g->paused && !g->dump_plain && mad_fg_setup(s);
+    if (g->ab_s > 0 && (g_fg_on & 1)) {   /* madeira-duo gpud1 framegen-ab: the same scene with and without generation */
+        int off;
+        if (!g->ab_qpc) { char clk[16]; g->ab_qpc = now; mad_ftl_clock(mad_ftl_wall(), clk);
+            d3d12_log("[framegen] ab: generation on at %s (the [ftl] clock), present #%llu, then %d s off and %d s on in turn\n", clk, (unsigned long long)s->presents, g->ab_s, g->ab_s); }
+        off = (int)(((now - g->ab_qpc) / g->qpf / g->ab_s) & 1);
+        if (off != g->ab_off) {
+            char clk[16]; mad_ftl_clock(mad_ftl_wall(), clk); g->ab_off = off;
+            d3d12_log("[framegen] ab: generation %s at %s (the [ftl] clock), present #%llu\n", off ? "OFF" : "on", clk, (unsigned long long)s->presents);
+        }
+    }
+    g->armed = (g_fg_on & 1) && g->native == 1 && !g->paused && !g->ab_off && !g->dump_plain && mad_fg_setup(s);
     if ((g_fg_on & 1) && g->log_s && (now - g->log_qpc) / g->qpf >= g->log_s) {
         mad_fg_report((double)(now - g->log_qpc) / (double)g->qpf);
         g->log_qpc = now;
@@ -25928,6 +25945,7 @@ static void mad_fg_show(struct mad_swapchain *s, obj_handle_t cb, obj_handle_t d
     enc = MTLCommandBuffer_blitCommandEncoder(cb);
     if (!enc) return;
     g_enc_seq++;
+    if (g_enc_labels) mad_label(enc, "B#%u fg-generated-copy", g_enc_seq);   /* madeira-duo gpud1 */
     memset(&t2t, 0, sizeof t2t);
     t2t.type = WMTBlitCommandCopyFromTextureToTexture;
     t2t.src = from;
@@ -25973,6 +25991,119 @@ static obj_handle_t mad_fg_pair(struct mad_swapchain *s, obj_handle_t cb, obj_ha
  * handed over, so the presenter's copies read finished pictures; a slot is filled again only after the presenter
  * has committed its copies, so a refill lands after them. With 2 slots the worker can be one frame further ahead.
  * Costs: the slot textures (2 per slot at the drawable size) and one extra full-screen copy per picture. */
+/* madeira-duo gpud1: GPU diagnostics for the GPU-bound maps (run-1128a: map fps follows GPU ms a frame).
+ *   gpu-diag-stages = 1: the framegen present work goes in three command buffers instead of one (interpolation with
+ *     the late copy and the split2 select; the generated picture's upscale and copy into its slot; the game picture's
+ *     upscale and copy), and the presenter's two copies onto the glass are timed too. Every one of them by GPU start
+ *     and end, so [gpu-diag] gives what each of our stages costs the GPU per frame.
+ *   gpu-gauge = N: every N s an 8 MB buffer copy in a command buffer of its own. The fastest of a window is a gauge
+ *     of the GPU's speed (copies only share the GPU with what runs beside them, so the minimum is the clean one):
+ *     it says whether the GPU itself slows as the device state steps up, or whether only the scene got heavier.
+ * Polled by the worker, reported every framegen-log seconds. */
+enum { GPD_FG_FRAME, GPD_FG_GENSHOW, GPD_GAME_SCALE, GPD_PRES_GEN, GPD_PRES_GAME, GPD_GAUGE, GPD_N };
+static const char *const g_gpd_name[GPD_N] = {
+    "interpolation (+ late copy, select)", "generated picture: upscale + copy to slot", "game picture: upscale + copy to slot",
+    "presenter copy to glass, generated", "presenter copy to glass, game", "gauge: 8 MB buffer copy" };
+#define MAD_GAUGE_BYTES (8u << 20)
+static struct {
+    SRWLOCK lock;
+    struct { obj_handle_t cb; int kind; } q[96]; unsigned n;
+    double ms[GPD_N], mx[GPD_N], mn[GPD_N]; unsigned cnt[GPD_N]; unsigned dropped, failed;
+    int stages, gauge_s, said;
+    obj_handle_t ga, gb; LONG64 g_last; int g_failed;
+} g_gpd = { SRWLOCK_INIT, { { 0 } }, 0, { 0 }, { 0 }, { 0 }, { 0 }, 0, 0, -1, -1 };
+static void mad_gpd_cfg(void) {
+    if (g_gpd.stages >= 0) return;
+    g_gpd.stages = mad_cfg_int_pe("gpu-diag-stages", 0) > 0;
+    g_gpd.gauge_s = (int)mad_cfg_int_pe("gpu-gauge", 0);
+    if (g_gpd.gauge_s < 0) g_gpd.gauge_s = 0;
+    d3d12_log("[gpu-diag] gpud1: stage command buffers %s, gauge %s%d s\n", g_gpd.stages ? "on" : "off",
+              g_gpd.gauge_s ? "every " : "off ", g_gpd.gauge_s);
+}
+/* A committed command buffer of ours, timed once the GPU is done with it. Any thread. */
+static void mad_gpd_add(obj_handle_t cb, int kind) {
+    if (!cb) return;
+    AcquireSRWLockExclusive(&g_gpd.lock);
+    if (g_gpd.n < sizeof g_gpd.q / sizeof g_gpd.q[0]) { NSObject_retain(cb); g_gpd.q[g_gpd.n].cb = cb; g_gpd.q[g_gpd.n].kind = kind; g_gpd.n++; }
+    else g_gpd.dropped++;
+    ReleaseSRWLockExclusive(&g_gpd.lock);
+}
+static void mad_gpd_poll(void) {
+    unsigned i, n = 0;
+    AcquireSRWLockExclusive(&g_gpd.lock);
+    for (i = 0; i < g_gpd.n; i++) {
+        obj_handle_t cb = g_gpd.q[i].cb;
+        enum WMTCommandBufferStatus st = MTLCommandBuffer_status(cb);
+        if (st < WMTCommandBufferStatusCompleted) { g_gpd.q[n++] = g_gpd.q[i]; continue; }
+        if (st == WMTCommandBufferStatusCompleted) {
+            struct { UINT64 cb; double start, end; } t; struct madeira_ctl_args a; int k = g_gpd.q[i].kind;
+            memset(&t, 0, sizeof t); t.cb = (UINT64)cb;
+            memset(&a, 0, sizeof a); a.op = 3; a.ptr = (UINT64)(ULONG_PTR)&t; a.len = sizeof t;
+            MadeiraCtl(&a);
+            if (a.ret && t.start > 0.0 && t.end > t.start) {
+                double ms = (t.end - t.start) * 1000.0;
+                g_gpd.ms[k] += ms; g_gpd.cnt[k]++;
+                if (ms > g_gpd.mx[k]) g_gpd.mx[k] = ms;
+                if (!g_gpd.mn[k] || ms < g_gpd.mn[k]) g_gpd.mn[k] = ms;
+            }
+        } else g_gpd.failed++;
+        NSObject_release(cb);
+    }
+    g_gpd.n = n;
+    ReleaseSRWLockExclusive(&g_gpd.lock);
+}
+/* gpu-gauge: the fixed copy, from the worker. */
+static void mad_gpd_gauge(struct mad_device *d) {
+    LONG64 now; LARGE_INTEGER fq; obj_handle_t cb, enc;
+    if (g_gpd.gauge_s <= 0 || g_gpd.g_failed) return;
+    now = mad_qpc(); QueryPerformanceFrequency(&fq);
+    if (g_gpd.g_last && now - g_gpd.g_last < (LONG64)g_gpd.gauge_s * fq.QuadPart) return;
+    g_gpd.g_last = now;
+    if (!g_gpd.ga) {
+        struct WMTBufferInfo bi;
+        memset(&bi, 0, sizeof bi); bi.length = MAD_GAUGE_BYTES; bi.options = WMTResourceStorageModePrivate;
+        g_gpd.ga = MTLDevice_newBuffer(d->mtl_device, &bi);
+        memset(&bi, 0, sizeof bi); bi.length = MAD_GAUGE_BYTES; bi.options = WMTResourceStorageModePrivate;
+        g_gpd.gb = MTLDevice_newBuffer(d->mtl_device, &bi);
+        if (!g_gpd.ga || !g_gpd.gb) { g_gpd.g_failed = 1; d3d12_log("[gpu-diag] gauge: no buffers, off\n"); return; }
+        mad_resident(d, g_gpd.ga); mad_resident(d, g_gpd.gb);
+    }
+    cb = MTLCommandQueue_commandBuffer(d->mtl_queue);
+    if (!cb) return;
+    enc = MTLCommandBuffer_blitCommandEncoder(cb);
+    if (enc) {
+        struct wmtcmd_blit_copy_from_buffer_to_buffer k;
+        g_enc_seq++;
+        if (g_enc_labels) mad_label(enc, "B#%u gauge", g_enc_seq);
+        memset(&k, 0, sizeof k); k.type = WMTBlitCommandCopyFromBufferToBuffer;
+        k.src = g_gpd.ga; k.src_offset = 0; k.dst = g_gpd.gb; k.dst_offset = 0; k.copy_length = MAD_GAUGE_BYTES;
+        MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&k);
+        MTLCommandEncoder_endEncoding(enc);
+    }
+    MTLCommandBuffer_commit(cb);
+    mad_gpd_add(cb, GPD_GAUGE);
+}
+static void mad_gpd_report(double secs, unsigned frames) {
+    char line[1600]; int n, k;
+    double f = frames ? (double)frames : 1.0;
+    mad_gpd_poll();
+    AcquireSRWLockExclusive(&g_gpd.lock);
+    n = snprintf(line, sizeof line, "[gpu-diag] %.1f s, %u game frames: GPU ms per game frame (count, min/avg/max per buffer):", secs, frames);
+    for (k = 0; k < GPD_N && n < (int)sizeof line - 160; k++) {
+        if (!g_gpd.cnt[k]) continue;
+        n += snprintf(line + n, sizeof line - n, " %s %.2f (%u, %.2f/%.2f/%.2f);", g_gpd_name[k], k == GPD_GAUGE ? 0.0 : g_gpd.ms[k] / f,
+                      g_gpd.cnt[k], g_gpd.mn[k], g_gpd.ms[k] / g_gpd.cnt[k], g_gpd.mx[k]);
+    }
+    if (g_gpd.cnt[GPD_GAUGE] && g_gpd.mn[GPD_GAUGE] > 0.0)
+        n += snprintf(line + n, sizeof line - n, " gauge best %.1f GB/s, avg %.1f GB/s;",
+                      MAD_GAUGE_BYTES / (g_gpd.mn[GPD_GAUGE] * 1e6), MAD_GAUGE_BYTES / (g_gpd.ms[GPD_GAUGE] / g_gpd.cnt[GPD_GAUGE] * 1e6));
+    if (g_gpd.dropped || g_gpd.failed) n += snprintf(line + n, sizeof line - n, " %u not timed (queue full), %u failed;", g_gpd.dropped, g_gpd.failed);
+    memset(g_gpd.ms, 0, sizeof g_gpd.ms); memset(g_gpd.mx, 0, sizeof g_gpd.mx); memset(g_gpd.mn, 0, sizeof g_gpd.mn);
+    memset(g_gpd.cnt, 0, sizeof g_gpd.cnt); g_gpd.dropped = g_gpd.failed = 0;
+    ReleaseSRWLockExclusive(&g_gpd.lock);
+    d3d12_log("%s\n", line);
+}
+
 struct mad_fgp_slot {
     volatile LONG state;   /* 0 free, 1 handed to the presenter */
     struct mad_swapchain *s;
@@ -25993,6 +26124,7 @@ static struct {
     volatile LONG64 t_slot_wait, t_d1, t_d2;
     volatile LONG n_slot_wait, n_pairs, n_single, n_lost;
     LONG64 log_qpc;
+    LONG64 t_cpu[6]; LONG n_cpu;   /* madeira-duo gpud1: the worker's CPU time in mad_fgp_present by step */
 } g_fgp = { SRWLOCK_INIT, CONDITION_VARIABLE_INIT, CONDITION_VARIABLE_INIT };
 
 static void mad_fgp_blit(obj_handle_t cb, obj_handle_t src, obj_handle_t dst, UINT w, UINT h) {
@@ -26000,6 +26132,7 @@ static void mad_fgp_blit(obj_handle_t cb, obj_handle_t src, obj_handle_t dst, UI
     obj_handle_t enc = MTLCommandBuffer_blitCommandEncoder(cb);
     if (!enc) return;
     g_enc_seq++;
+    if (g_enc_labels) mad_label(enc, "B#%u fg-glass-copy", g_enc_seq);   /* madeira-duo gpud1 */
     memset(&t2t, 0, sizeof t2t);
     t2t.type = WMTBlitCommandCopyFromTextureToTexture;
     t2t.src = src;
@@ -26024,6 +26157,7 @@ static void mad_fgp_show(struct mad_fgp_slot *sl) {
             mad_fgp_blit(cb, sl->gen_tex, tex, sl->w, sl->h);
             MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, d, sl->hold);
             MTLCommandBuffer_commit(cb);
+            if (g_gpd.stages > 0) mad_gpd_add(cb, GPD_PRES_GEN);   /* madeira-duo gpud1 */
         } else InterlockedIncrement(&g_fgp.n_lost);
     }
     t0 = mad_qpc();
@@ -26036,6 +26170,7 @@ static void mad_fgp_show(struct mad_fgp_slot *sl) {
         if (sl->gen) MTLCommandBuffer_presentDrawableAfterMinimumDuration(cb, d, sl->hold);
         else MTLCommandBuffer_presentDrawable(cb, d);
         MTLCommandBuffer_commit(cb);
+        if (g_gpd.stages > 0) mad_gpd_add(cb, GPD_PRES_GAME);   /* madeira-duo gpud1 */
     } else InterlockedIncrement(&g_fgp.n_lost);
     InterlockedIncrement(sl->gen ? &g_fgp.n_pairs : &g_fgp.n_single);
 }
@@ -26129,6 +26264,15 @@ static void mad_fgp_report(void) {
               "presenter waits for drawables %.2f ms (generated) + %.2f ms (game) a slot; worker waited for a free slot %ld times, %.2f ms a frame\n",
               secs, (long)pairs, (long)single, (long)lost, pairs ? (double)d1 * ms / pairs : 0.0, shown ? (double)d2 * ms / shown : 0.0,
               (long)nw, shown ? (double)sw * ms / shown : 0.0);
+    if (g_fgp.n_cpu) {   /* madeira-duo gpud1: where the worker's ~17 ms "cmt" goes */
+        double c = ms / g_fgp.n_cpu;
+        d3d12_log("[framegen] fgp1 worker CPU a frame (%ld frames): command buffer %.2f ms, interpolation encode %.2f, generated upscale+copy encode %.2f, "
+                  "game upscale encode %.2f, copy encode %.2f, commits %.2f\n", (long)g_fgp.n_cpu, g_fgp.t_cpu[0] * c, g_fgp.t_cpu[1] * c,
+                  g_fgp.t_cpu[2] * c, g_fgp.t_cpu[3] * c, g_fgp.t_cpu[4] * c, g_fgp.t_cpu[5] * c);
+        memset(g_fgp.t_cpu, 0, sizeof g_fgp.t_cpu);
+    }
+    if (g_gpd.stages > 0 || g_gpd.gauge_s > 0) mad_gpd_report(secs, (unsigned)shown);
+    g_fgp.n_cpu = 0;
 }
 /* The worker's half of a framegen present with the presenter on: 1 = done (pictures in a slot, slot handed over),
  * 0 = take the old path (no thread, no textures, no command buffer). */
@@ -26149,20 +26293,47 @@ static int mad_fgp_present(struct mad_swapchain *s, UINT idx, struct mad_resourc
     }
     ReleaseSRWLockExclusive(&g_fgp.lock);
     InterlockedExchangeAdd64(&g_fgp.t_slot_wait, mad_qpc() - t0);
+    mad_gpd_cfg();   /* madeira-duo gpud1 */
+    if (g_gpd.stages > 0 || g_gpd.gauge_s > 0) mad_gpd_poll();   /* every frame: about five buffers a frame join the queue */
+    mad_gpd_gauge(s->queue->device);
+    t0 = mad_qpc();
     cb = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
+    g_fgp.t_cpu[0] += mad_qpc() - t0;
     if (!cb) return 0;
     if (g_sd_state > 0 && g_fence_strict) mad_strict_cb_wait(s->queue->device, cb);
+    t0 = mad_qpc();
     gen = mad_fg_frame(s, idx, cb);
+    g_fgp.t_cpu[1] += mad_qpc() - t0;
+    if (g_gpd.stages > 0) {   /* madeira-duo gpud1: each stage in its own command buffer, timed */
+        LONG64 tc = mad_qpc();
+        MTLCommandBuffer_commit(cb); mad_gpd_add(cb, GPD_FG_FRAME);
+        cb = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
+        g_fgp.t_cpu[5] += mad_qpc() - tc;
+        if (!cb) return 0;   /* the interpolation is committed; this frame goes the old way (mad_fg_frame ran: its state moved on) */
+    }
+    t0 = mad_qpc();
     if (gen) mad_fg_show(s, cb, sl->gen_tex);   /* the generated picture as mad_fg_pair showed it, into the slot */
+    g_fgp.t_cpu[2] += mad_qpc() - t0;
+    if (gen && g_gpd.stages > 0) {
+        LONG64 tc = mad_qpc();
+        MTLCommandBuffer_commit(cb); mad_gpd_add(cb, GPD_FG_GENSHOW);
+        cb = MTLCommandQueue_commandBuffer(s->queue->device->mtl_queue);
+        g_fgp.t_cpu[5] += mad_qpc() - tc;
+        if (!cb) return 0;
+    }
+    t0 = mad_qpc();
     if (fx) {
         obj_handle_t ff = (g_f6_used && s->queue->device->enc_fence) ? s->queue->device->enc_fence : 0;
         MTLCommandBuffer_encodeSpatialScale(cb, s->fx_scaler, s->fx_view[idx], s->fx_out, ff);
         copy_src = s->fx_out;
     }
+    g_fgp.t_cpu[3] += mad_qpc() - t0;
+    t0 = mad_qpc();
     enc = MTLCommandBuffer_blitCommandEncoder(cb);
     if (enc) {
         struct wmtcmd_blit_copy_from_texture_to_texture t2t;
         g_enc_seq++;
+        if (g_enc_labels) mad_label(enc, "B#%u fg-slot-copy", g_enc_seq);   /* madeira-duo gpud1 */
         if (g_f6_used && s->queue->device->enc_fence) {   /* as the old path: after every committed batch */
             obj_handle_t df = s->queue->device->enc_fence;
             f6_encode(enc, F6_BLIT, &df, 1, 0);
@@ -26175,7 +26346,12 @@ static int mad_fgp_present(struct mad_swapchain *s, UINT idx, struct mad_resourc
         MTLBlitCommandEncoder_encodeCommands(enc, (const struct wmtcmd_base *)&t2t);
         MTLCommandEncoder_endEncoding(enc);
     }
+    g_fgp.t_cpu[4] += mad_qpc() - t0;
+    t0 = mad_qpc();
     MTLCommandBuffer_commit(cb);
+    g_fgp.t_cpu[5] += mad_qpc() - t0;
+    g_fgp.n_cpu++;
+    if (g_gpd.stages > 0) mad_gpd_add(cb, GPD_GAME_SCALE);
     mad_fg_committed(cb, gen);
     sl->s = s; sl->w = w; sl->h = h; sl->gen = gen; sl->hold = gen ? mad_fg_hold() : 0.0;
     AcquireSRWLockExclusive(&g_fgp.lock);
