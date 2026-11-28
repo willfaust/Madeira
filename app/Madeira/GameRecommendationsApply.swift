@@ -36,6 +36,9 @@ extension GameRecommendations {
     /// What Madeira did for which game: [lowercased Windows path: "<id>#<version>#<file hash>"
     /// for a recommendation it wrote, "" for a game that kept its own config].
     private static let appliedKey = "madeira.recommended.applied"
+    /// madeira-duo: the lists whose own-file settings writeIni (GameIniFiles.swift) has written:
+    /// [lowercased Windows path: "<id>#<version>"].
+    private static let iniKey = "madeira.recommended.ini"
 
     private enum Write: String { case firstSight = "first sight", updated, reset }
 
@@ -87,6 +90,7 @@ extension GameRecommendations {
         guard let rec = recommendation(for: entry) else { clear(entry.windowsPath, title: entry.title); return nil }
         put(rec, to: entry.windowsPath, .reset, title: entry.title)
         takeEntryFields(rec, &entry)
+        setIniMark(nil, entry.windowsPath)   // its game settings again at the next start
         return rec
     }
 
@@ -179,6 +183,22 @@ extension GameRecommendations {
         if let mode = rec.display { entry.display = mode == DisplayMode.fit.rawValue ? nil : mode }
         if let mode = rec.launchMode { entry.launchMode = mode == "desktop" ? mode : nil }
         if let on = rec.startServices { entry.startServices = on ? true : nil }
+        if let scale = rec.metalFXUpscale { entry.metalFXUpscale = scale > 1 ? scale : nil }
+    }
+
+    /// Whether the game's config is `rec` as Madeira wrote it (any version), not one of the player's own.
+    static func written(_ rec: GameRecommendation, for windowsPath: String) -> Bool {
+        marks[windowsPath.lowercased()]?.hasPrefix(rec.id + "#") == true
+    }
+
+    static func iniMark(_ windowsPath: String) -> String? {
+        ((UserDefaults.standard.dictionary(forKey: iniKey) as? [String: String]) ?? [:])[windowsPath.lowercased()]
+    }
+
+    static func setIniMark(_ value: String?, _ windowsPath: String) {
+        var all = (UserDefaults.standard.dictionary(forKey: iniKey) as? [String: String]) ?? [:]
+        all[windowsPath.lowercased()] = value
+        UserDefaults.standard.set(all, forKey: iniKey)
     }
 
     private static var marks: [String: String] {
